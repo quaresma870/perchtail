@@ -1,3 +1,4 @@
+import { memberPath } from './tab-key'
 import type { BrowseEntry } from './types'
 
 /** Builds the download URL for a tree entry, or null if the entry can't be
@@ -17,7 +18,7 @@ export function downloadHref(
   if (!entry.is_dir) {
     const params = new URLSearchParams({ path: archiveRoot ?? entry.path })
     if (archiveRoot !== null) {
-      params.set('member', entry.path.slice(archiveRoot.length + 1))
+      params.set('member', memberPath(entry.path, archiveRoot))
     }
     return `/sources/${sourceId}/download?${params.toString()}`
   }
