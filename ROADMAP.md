@@ -31,16 +31,23 @@ they come before any connector or UI work, not after.
 - [x] Auth models: `Role`, `RoleGrant`, `User`, `SSOProviderConfig`, `AuditLog`
 - [x] Built together, not staged — auth touches every endpoint written after
 
-### M2 — RBAC & local auth
-- [ ] Grant-resolution logic (`auth/rbac.py`) implementing the pseudocode in
+### M2 — RBAC & local auth ✅
+- [x] Grant-resolution logic (`auth/rbac.py`) implementing the pseudocode in
       CLAUDE.md, including the `is_system` short-circuit
-- [ ] FastAPI permission dependency wrapping grant resolution
-- [ ] `LocalPasswordProvider` (argon2id hashing, forced password change on
+- [x] FastAPI permission dependency wrapping grant resolution
+- [x] `LocalPasswordProvider` (argon2id hashing, forced password change on
       first login for admin-created accounts)
-- [ ] Unit tests for grant resolution — this is one of the two pieces of logic
+- [x] Unit tests for grant resolution — this is one of the two pieces of logic
       in the project that must be correct before anything is built on top
-- [ ] `AuditLog` writes wired into login + role/grant changes, each also
+- [x] `AuditLog` writes wired into login + role/grant changes, each also
       emitting a structured INFO log line
+
+  Note: `api/auth.py` — the actual HTTP login endpoint and session/token
+  issuance (cookie vs JWT) — isn't built yet and isn't part of this
+  milestone's scope; CLAUDE.md doesn't pin down the mechanism.
+  `require_capability()` takes `get_current_user` as a parameter rather than
+  hardcoding one, so this can be wired in later without touching rbac.py.
+  Needs its own decision once API endpoints start getting built.
 
 ### M3 — Rule engine
 - [ ] `rules.py`: glob (default) + regex (`re:` prefix) pattern matching

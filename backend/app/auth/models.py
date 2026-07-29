@@ -78,6 +78,9 @@ class User(SQLModel, table=True):
     auth_provider: AuthProviderType = AuthProviderType.local
     external_id: str | None = None
     last_login_at: datetime | None = None
+    # Set on admin-created local accounts (see CLAUDE.md's Security notes);
+    # cleared once the user picks their own password.
+    must_change_password: bool = False
 
     role: Role = Relationship(back_populates="users")
 

@@ -11,6 +11,8 @@ extend-exclude = ["backend/migrations/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# B008: FastAPI's Depends()-in-defaults is the idiomatic DI pattern, not a bug.
+ignore = ["B008"]
 
 [tool.pytest.ini_options]
 pythonpath = ["backend"]
