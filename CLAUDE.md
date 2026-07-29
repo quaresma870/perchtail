@@ -90,12 +90,21 @@ concern, independent of the always-fresh rule above).
 ## Data model (v1)
 
 - **Customer** — id, name (e.g. Vodacom Tanzania, Fidelidade, GermanCloud). Every
-  customer-owned source belongs to exactly one customer — this is the unit RBAC
-  grants scope to. Not used by system sources (see "Built-in log viewer" below).
+  customer-owned source belongs to exactly one customer — this is the top-level
+  unit RBAC grants scope to. Not used by system sources (see "Built-in log viewer"
+  below).
+- **Folder** — id, name, customer_id (FK — a folder always belongs to exactly one
+  customer; folders don't span customers), parent_folder_id (FK to Folder,
+  nullable — null means a top-level folder directly under the customer). Purely
+  organizational: nests arbitrarily deep to group sources (and other folders)
+  for both browsing and RBAC scoping (see "Access control" below). Optional — a
+  source can sit directly under its customer with no folder, for simple setups
+  that don't need grouping.
 - **Source** — id, name, customer_id (FK, nullable — null for system sources),
-  protocol (`ssh` | `smb` | `winrm` | `local`), host, port, credential_ref
-  (encrypted, nullable — not needed for `local`), base_path, enabled,
-  schedule_cron, is_system (bool, default false)
+  folder_id (FK to Folder, nullable — null means directly under the customer,
+  no folder), protocol (`ssh` | `smb` | `winrm` | `local`), host, port,
+  credential_ref (encrypted, nullable — not needed for `local`), base_path,
+  enabled, schedule_cron, is_system (bool, default false)
 - **Rule** — id, source_id, order, type (`include` | `exclude`), pattern,
   pattern_kind (`glob` | `regex`), notes
 
@@ -160,8 +169,19 @@ would need manual re-granting across every affected role. Instead:
   rules / run now).
 - A customer-level grant applies **dynamically** to every source under that customer,
   including ones added later — this is the entire point of grouping.
+- **Folders** (see "Data model" above) let a grant target a narrower group than
+  "the whole customer" without falling all the way back to per-source rows — group
+  a customer's sources into an arbitrarily nested tree (e.g. by environment or
+  application) and grant a role access to one branch of it. A folder-level grant
+  applies dynamically to every source and sub-folder beneath it, same as a
+  customer-level grant does today, just at a narrower scope.
 - Per-source rows in the permission tree exist only for **exceptions** — an override
-  that differs from the customer's default for one specific source.
+  that differs from the customer's (or folder's) default for one specific source.
+- Deliberately out of scope: permission scoping *within* a single source's own
+  directory tree (different capabilities for different sub-paths of the same
+  source). Folders group sources, not paths inside one; Rules already control
+  content visibility uniformly for whoever can access a source, and that's
+  sufficient.
 
 **Roles are single, not multiple, per user.** One `role_id` on the `User` row. Since a
 role is the *entire* definition of someone's access with no composition across roles,
@@ -172,14 +192,27 @@ a grant tree from scratch each time. Also give the source-access tree in the rol
 editor a **search/filter box** — with dozens of customer groups, scrolling to find one
 gets tedious fast; default everything collapsed.
 
-**Grant resolution logic** (pseudocode):
+**Grant resolution logic** (pseudocode) — most specific scope wins: a source-level
+grant beats a folder-level grant, which beats a (possibly deeper) parent folder's
+grant, which beats the customer-level grant:
 ```
 if source.is_system: return user.role.is_super_admin  # no grant can reach a system source
 if user.role.is_super_admin: allow everything
+
 grant = RoleGrant.find(role=user.role, scope_type="source", scope_id=source.id)
-if not grant: grant = RoleGrant.find(role=user.role, scope_type="customer", scope_id=source.customer_id)
-if not grant: deny
-return requested_capability in grant.capabilities
+if grant: return requested_capability in grant.capabilities
+
+folder_id = source.folder_id
+while folder_id is not None:
+    grant = RoleGrant.find(role=user.role, scope_type="folder", scope_id=folder_id)
+    if grant: return requested_capability in grant.capabilities
+    folder_id = Folder.get(folder_id).parent_folder_id
+
+if source.customer_id is not None:
+    grant = RoleGrant.find(role=user.role, scope_type="customer", scope_id=source.customer_id)
+    if grant: return requested_capability in grant.capabilities
+
+return False
 ```
 
 **Sign-in supports local accounts and SSO only** — no other auth methods. Build behind
@@ -202,8 +235,8 @@ AuthProvider (interface)
 **Data model additions for this section:**
 - **Role** — id, name, is_builtin, is_super_admin, global_capabilities (manage_users,
   manage_roles, manage_sso, create_source)
-- **RoleGrant** — id, role_id, scope_type (`customer` | `source`), scope_id,
-  capabilities (`view`, `download`, `manage_rules`, `run_now`)
+- **RoleGrant** — id, role_id, scope_type (`customer` | `folder` | `source`),
+  scope_id, capabilities (`view`, `download`, `manage_rules`, `run_now`)
 - **User** — id, username/email, password_hash (nullable for SSO-only accounts),
   role_id (FK, single), active, auth_provider, external_id, last_login_at
 - **SSOProviderConfig** — id, protocol (`oidc` | `saml`), name, config
@@ -311,14 +344,18 @@ A few things worth doing deliberately once phase 1 is real, not just present:
 
 - **Admin**: Sources list (status, protocol, last run, rule count, run-now action),
   per-source rule editor — both a row-based UI and a raw-text/gitignore-style paste
-  mode for power users — and run history with errors.
+  mode for power users — and run history with errors. Source create/edit gets an
+  optional folder picker (the admin-organizational `Folder`, not to be confused
+  with the remote directory tree browsed in the Viewer below); folder management
+  (create/rename/move/delete) is its own small admin surface.
 - **Viewer**: lazy-loaded folder tree (fetch a folder's children live, only on
   expand — never eagerly list an entire remote tree upfront, which would be slow
   over SSH/SMB for deep hierarchies) + CodeMirror-based pane with tabs, in-file search,
   and download (single file or a zipped folder), all fetched fresh per the rules
   above.
-- **Roles**: role list, editor with global-capability toggles + customer/source
-  access tree (search/filter box, collapsed by default), duplicate-role action.
+- **Roles**: role list, editor with global-capability toggles + customer/folder/
+  source access tree (search/filter box, collapsed by default), duplicate-role
+  action.
 - **Users**: list with active/inactive status, create user, reset password,
   deactivate/delete, assigned role.
 - **SSO settings**: configure the active OIDC or SAML provider (client id/secret
