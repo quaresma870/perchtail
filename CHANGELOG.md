@@ -37,5 +37,14 @@ release ships (0.x releases may include breaking changes between minors).
   as APScheduler jobs), `archives.py` (`.zip`/`.tar.gz` as virtual folders,
   transparent `.gz` decompression), and `api/archive.py`
   (browse/open/close/download, gated by the M2 permission dependency and
-  independently by the rule engine on every specific path). See
-  [ROADMAP.md](ROADMAP.md) for what's next.
+  independently by the rule engine on every specific path).
+- Design doc for nested folders to group sources under a customer (M4.5) —
+  no code yet, see ROADMAP.md.
+- Remaining connectors (M5): `collectors/smb.py` (`smbprotocol`),
+  `collectors/winrm.py` (`pywinrm`, base64-through-PowerShell for file
+  content since WinRM has no native bulk transfer), and `collectors/
+  local.py` (reads directly off disk). `api/archive.py` now skips the
+  scratch store entirely for local, plain files — served straight from
+  their real path — while still using it for a local `.gz` or archive
+  member, since decompressing/extracting produces new derived bytes that
+  have to live somewhere. See [ROADMAP.md](ROADMAP.md) for what's next.

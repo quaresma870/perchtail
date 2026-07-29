@@ -91,6 +91,19 @@ def _make_source(session, *, customer=None) -> Source:
     return source
 
 
+def _make_local_source(session, base_path) -> Source:
+    source = Source(
+        name="local-logs",
+        protocol=Protocol.local,
+        host="localhost",
+        base_path=str(base_path),
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+    return source
+
+
 def _make_user(session, app, *, is_super_admin: bool) -> User:
     role = Role(name=f"role-{is_super_admin}", is_super_admin=is_super_admin)
     session.add(role)
@@ -291,3 +304,30 @@ def test_download_requires_download_capability_not_just_view(app_client, session
 
     response = client.get(f"/sources/{source.id}/download", params={"path": "app.log"})
     assert response.status_code == 403
+
+
+def test_open_local_plain_file_skips_scratch_entirely(app_client, session, scratch_store, tmp_path):
+    app, client = app_client
+    (tmp_path / "app.log").write_text("hello world")
+    source = _make_local_source(session, tmp_path)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+
+    response = client.get(f"/sources/{source.id}/open", params={"path": "app.log"})
+    assert response.status_code == 200
+    assert response.content == b"hello world"
+    assert "x-scratch-key" not in response.headers
+    assert len(scratch_store._entries) == 0
+
+
+def test_open_local_gz_file_still_uses_scratch(app_client, session, scratch_store, tmp_path):
+    app, client = app_client
+    (tmp_path / "app.log.gz").write_bytes(gzip.compress(b"hello world"))
+    source = _make_local_source(session, tmp_path)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log.gz")
+
+    response = client.get(f"/sources/{source.id}/open", params={"path": "app.log.gz"})
+    assert response.status_code == 200
+    assert response.content == b"hello world"
+    assert "x-scratch-key" in response.headers

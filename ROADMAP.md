@@ -116,13 +116,37 @@ they come before any connector or UI work, not after.
   one, and Rules already control content visibility uniformly for whoever can
   access a source, which is sufficient for now.
 
-### M5 — Remaining connectors
+### M5 — Remaining connectors ✅
 - See [docs/source-setup.md](docs/source-setup.md) for the SMB/WinRM-side
   prerequisites (scoped share + ACLs, JEA-constrained WinRM account) these
   connectors assume.
-- [ ] `collectors/smb.py` (`smbprotocol` or `impacket`)
-- [ ] `collectors/winrm.py` (`pywinrm`)
-- [ ] `collectors/local.py` — no scratch needed, reads directly off disk
+- [x] `collectors/smb.py` (`smbprotocol`)
+- [x] `collectors/winrm.py` (`pywinrm`)
+- [x] `collectors/local.py` — no scratch needed, reads directly off disk
+
+  Notes on decisions made building this:
+  - Added `collectors/base.py` with a shared `DirEntry` dataclass (was
+    duplicated per connector since M4) and a `local_copy(source, path)`
+    context manager on every connector — remote protocols fetch into a
+    temp file and yield that; `local.py` just yields the real path
+    directly, no copy. `api/archive.py`'s archive-listing and
+    gzip/archive-member extraction now use this uniformly instead of each
+    hand-rolling a `tempfile.TemporaryDirectory()`.
+  - `api/archive.py`'s `open`/`download` now skip the scratch store
+    entirely for local, plain files (served straight from `resolve_path()`
+    — no `X-Scratch-Key` header, nothing to `/close`), matching CLAUDE.md's
+    "no ephemeral scratch needed" for local sources literally. A local
+    `.gz` or archive member still goes through scratch, since decompressing
+    or extracting produces new derived bytes that have to live somewhere.
+  - WinRM has no native bulk file-transfer primitive, so `fetch_file` reads
+    via `[IO.File]::ReadAllBytes` + base64 through PowerShell — fine for
+    log files, not efficient for very large ones. CLAUDE.md documents
+    WinRM as the SMB fallback, not the primary path, so this is an
+    accepted tradeoff, not an oversight.
+  - `smbclient`'s (from `smbprotocol`) high-level `smbclient` module API
+    is used instead of raw SMB2 primitives — much closer to `os`/`pathlib`
+    semantics (`scandir`, `open_file`), same reasoning as choosing
+    `paramiko`'s SFTP layer over raw SSH channels for M4.
 
 ### M6 — Built-in log viewer (dogfooding)
 - [ ] System source seeded on first startup, pointed at `LOG_DIR`,

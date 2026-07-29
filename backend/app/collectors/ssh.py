@@ -1,22 +1,18 @@
 import io
 import posixpath
 import stat as stat_module
-from dataclasses import dataclass
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import paramiko
 
+from app.collectors.base import DirEntry
 from app.crypto import decrypt_credential
 from app.models import Rule, Source
 from app.rules import is_visible
 
-
-@dataclass(frozen=True)
-class DirEntry:
-    name: str
-    path: str
-    is_dir: bool
-    size: int
+__all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 
 
 def _connect(source: Source) -> paramiko.SSHClient:
@@ -95,3 +91,14 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
             sftp.close()
     finally:
         client.close()
+
+
+@contextmanager
+def local_copy(source: Source, relative_path: str):
+    """Yields a local filesystem path with `relative_path`'s content, for
+    callers (api/archive.py) that need to run zipfile/tarfile/gzip against
+    it — remote protocols have no choice but to fetch a copy first."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "fetched"
+        fetch_file(source, relative_path, path)
+        yield path
