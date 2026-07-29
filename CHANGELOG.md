@@ -17,5 +17,14 @@ release ships (0.x releases may include breaking changes between minors).
   `RoleGrant`, `User`, `SSOProviderConfig`, `AuditLog`, plus an
   `app/crypto.py` helper (Fernet, keyed by `CREDENTIAL_ENCRYPTION_KEY`) so
   `Source.credential_ref` and `SSOProviderConfig.config` have a real path to
-  encryption-at-rest from day one. See [ROADMAP.md](ROADMAP.md) for what's
+  encryption-at-rest from day one.
+- RBAC & local auth (M2): grant-resolution logic and a FastAPI permission
+  dependency (`auth/rbac.py`), `LocalPasswordProvider` (argon2id, forced
+  password change on admin-created accounts), and `AuditLog` writes wired
+  into login and role/grant creation, each paired with a structured INFO log
+  line.
+- `api/auth.py`: login/logout/me/change-password endpoints backed by
+  server-side sessions (hashed opaque token in an httpOnly, SameSite=strict
+  cookie, stored in a new `AuthSession` table) rather than a stateless JWT,
+  so revoking access is immediate. See [ROADMAP.md](ROADMAP.md) for what's
   next.

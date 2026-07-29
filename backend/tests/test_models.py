@@ -1,6 +1,3 @@
-import pytest
-from app import models
-from app.auth import models as auth_models
 from app.auth.models import (
     AuditLog,
     AuthProviderType,
@@ -12,17 +9,6 @@ from app.auth.models import (
     User,
 )
 from app.models import Customer, PatternKind, Protocol, Rule, RuleType, Source
-from sqlmodel import Session, SQLModel, create_engine
-
-assert models and auth_models  # keep both modules imported so tables register
-
-
-@pytest.fixture()
-def session():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
 
 
 def test_customer_source_rule_relationships(session):

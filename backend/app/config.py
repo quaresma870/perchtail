@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     log_retention_days: int = 30
     database_url: str = "sqlite:///./data/perchtail.db"
     credential_encryption_key: str = "changeme"
+    session_ttl_hours: int = 12
+    # Cookie's Secure flag — disable only for local HTTP development; a
+    # browser silently drops Secure cookies over plain HTTP.
+    session_cookie_secure: bool = True
 
 
 @lru_cache

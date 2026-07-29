@@ -31,16 +31,24 @@ they come before any connector or UI work, not after.
 - [x] Auth models: `Role`, `RoleGrant`, `User`, `SSOProviderConfig`, `AuditLog`
 - [x] Built together, not staged — auth touches every endpoint written after
 
-### M2 — RBAC & local auth
-- [ ] Grant-resolution logic (`auth/rbac.py`) implementing the pseudocode in
+### M2 — RBAC & local auth ✅
+- [x] Grant-resolution logic (`auth/rbac.py`) implementing the pseudocode in
       CLAUDE.md, including the `is_system` short-circuit
-- [ ] FastAPI permission dependency wrapping grant resolution
-- [ ] `LocalPasswordProvider` (argon2id hashing, forced password change on
+- [x] FastAPI permission dependency wrapping grant resolution
+- [x] `LocalPasswordProvider` (argon2id hashing, forced password change on
       first login for admin-created accounts)
-- [ ] Unit tests for grant resolution — this is one of the two pieces of logic
+- [x] Unit tests for grant resolution — this is one of the two pieces of logic
       in the project that must be correct before anything is built on top
-- [ ] `AuditLog` writes wired into login + role/grant changes, each also
+- [x] `AuditLog` writes wired into login + role/grant changes, each also
       emitting a structured INFO log line
+- [x] `api/auth.py`: HTTP login/logout/me/change-password endpoints and
+      session issuance. Went with server-side sessions (opaque token in an
+      httpOnly cookie, hashed and stored in SQLite via a new `AuthSession`
+      table) rather than a stateless JWT — this tool holds production
+      credentials, so being able to revoke a session immediately (logout, or
+      deactivating a user) mattered more than avoiding a DB lookup per
+      request. `get_current_active_user` blocks every other endpoint until
+      an admin-created account's forced password change is done.
 
 ### M3 — Rule engine
 - [ ] `rules.py`: glob (default) + regex (`re:` prefix) pattern matching

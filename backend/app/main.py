@@ -5,6 +5,7 @@ import structlog
 from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.api.auth import router as auth_router
 from app.db import init_db
 from app.logging_config import configure_logging, get_logger
 
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="PerchTail", lifespan=lifespan)
 app.add_middleware(RequestIDMiddleware)
+app.include_router(auth_router)
 
 
 @app.get("/healthz")
