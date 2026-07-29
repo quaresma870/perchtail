@@ -289,7 +289,7 @@
     margin: 0 0 0.4rem;
     color: var(--text);
   }
-  form {
+  form.card {
     display: flex;
     flex-direction: column;
     gap: 0.9rem;

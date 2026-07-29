@@ -11,6 +11,12 @@
 [![Status](https://img.shields.io/badge/status-v0.1.0%20%28phase%201%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
+**Contents:** [Status](#status) · [What it is](#what-it-is) ·
+[Why not just use X](#why-not-just-use-x) ·
+[Feature comparison](#feature-comparison) · [Screenshots](#screenshots) ·
+[Quick start](#quick-start) · [Documentation](#documentation) ·
+[License](#license)
+
 ## Status
 
 🟢 **v0.1.0 — Phase 1 (MVP) complete.** Agentless SSH/SFTP, SMB, and WinRM
@@ -65,10 +71,26 @@ nothing sitting around afterward for someone to leak or for disk to fill up with
 This table reflects the design as of this writing and each project evolves —
 verify anything that matters to your decision against current docs.
 
+## Screenshots
+
+Sources, grouped by customer, with a protocol badge and connection status per row:
+
+![Sources list, showing SSH/SMB/WinRM sources grouped under two customers with protocol badges and status](docs/images/screenshot-sources.png)
+
+The viewer: a lazy-loaded folder tree feeding a CodeMirror pane, with `[error]`/`[warn]`
+tokens colored and error lines tinted:
+
+![Viewer open on an app.log file, showing colored log-level tokens and a highlighted error line](docs/images/screenshot-viewer.png)
+
+A role's access grants — most-specific-scope-wins, resolved from customer down to a
+single source:
+
+![Role editor showing toggle switches for global capabilities and a table of customer/source access grants](docs/images/screenshot-role-editor.png)
+
 ## Quick start
 
 ```bash
-git clone https://github.com/<your-org>/perchtail.git
+git clone https://github.com/quaresma870/perchtail.git
 cd perchtail
 cp .env.example .env
 ```
