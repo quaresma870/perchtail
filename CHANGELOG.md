@@ -8,6 +8,25 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Added
+- README: real screenshots (Sources, Viewer, Role editor) under `docs/images/`,
+  a short table of contents, and a fixed `git clone` command (was still the
+  `<your-org>` placeholder). CONTRIBUTING.md gets the same clone-URL fix plus
+  frontend dev setup (`npm install`/`npm run dev`/`npm run check`/`npm test`),
+  which had been missing entirely even though the frontend has been a core
+  part of the stack since M7.
+
+### Fixed
+- `RoleEditor.svelte`'s bare `form { flex-direction: column }` rule (meant for
+  the role-details form) also matched the page's second `<form>` — the
+  "add grant" row — flipping its flex main axis from row to column. Combined
+  with `.add-grant select { flex: 0 0 160px }` (a width in the intended row
+  layout), the flipped axis turned that into a *height*, rendering both scope
+  dropdowns as ~160px-tall boxes instead of a normal single-line row. Found
+  while capturing README screenshots. Scoped the rule to `form.card` (the
+  role-details form's actual class) so it can't leak onto other forms in the
+  same component.
+
 ## [0.1.0] - 2026-07-29
 
 Phase 1 (MVP) complete: agentless live browsing over SSH/SFTP, SMB, and WinRM;

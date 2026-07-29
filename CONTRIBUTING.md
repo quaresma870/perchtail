@@ -11,12 +11,24 @@ need a conversation before a PR, not after.
 
 ## Development setup
 
+Backend (FastAPI):
+
 ```bash
-git clone https://github.com/<your-org>/perchtail.git
+git clone https://github.com/quaresma870/perchtail.git
 cd perchtail/backend
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt --break-system-packages
+pip install -r requirements-dev.txt
 pytest
+```
+
+Frontend (Vite + Svelte), in a separate terminal from the repo root:
+
+```bash
+cd frontend
+npm install
+npm run dev      # dev server, proxies API calls to a backend on :8000
+npm run check    # svelte-check
+npm test         # vitest
 ```
 
 See [CLAUDE.md](CLAUDE.md) for the full architecture and repo layout — it's kept
