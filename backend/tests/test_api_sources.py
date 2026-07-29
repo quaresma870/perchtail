@@ -354,6 +354,7 @@ def test_agent_connected_defaults_false_for_non_agent_source(session, admin_clie
     ).json()
     assert created["agent_connected"] is False
     assert created["agent_last_seen_at"] is None
+    assert created["has_agent_token"] is False
 
 
 def test_regenerate_agent_token_returns_plaintext_once(session, admin_client):
@@ -369,6 +370,7 @@ def test_regenerate_agent_token_returns_plaintext_once(session, admin_client):
         },
     ).json()
     assert created["agent_connected"] is False
+    assert created["has_agent_token"] is False
 
     response = admin_client.post(f"/sources/{created['id']}/agent-token")
     assert response.status_code == 200
@@ -377,6 +379,9 @@ def test_regenerate_agent_token_returns_plaintext_once(session, admin_client):
 
     source = session.get(Source, created["id"])
     assert source.agent_token_hash is not None
+
+    refreshed = admin_client.get(f"/sources/{created['id']}").json()
+    assert refreshed["has_agent_token"] is True
     assert source.agent_token_hash != token
 
 

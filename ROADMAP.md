@@ -345,12 +345,34 @@ they come before any connector or UI work, not after.
 - [x] Backend agent-link infrastructure: `Protocol.agent`, `AgentRegistry`,
       the agent's WebSocket endpoint, and the `agent` connector
 - [ ] Go push-agent (single static binary, cross-compiled) for sources not
-      reachable inbound
-- [ ] Frontend: agent source UI (enrollment-token generation, connection
+      reachable inbound (in review — see the Go push-agent binary PR)
+- [x] Frontend: agent source UI (enrollment-token generation, connection
       status)
 - [ ] `SAMLProvider` (`python3-saml`) — **only if** a real need shows up; see
       the open decision in CLAUDE.md (OIDC already covers Azure AD/Entra ID,
       Okta, Google Workspace, Keycloak/Authentik)
+
+### Notes on decisions made — frontend agent source UI
+
+- **`SourceEditor.svelte`'s `agent` protocol hides Port and the SSH/SMB/WinRM
+  credential fieldset** in favor of an "Agent enrollment" section — there's
+  no host to reach or password to store, only an enrollment token. Host and
+  Base path stay as free-text fields for the admin's own documentation
+  (which physical host, which directory it's supposed to be watching), even
+  though `collectors/agent.py` never actually reads `Source.base_path` for
+  this protocol — the real root is enforced by the agent's own
+  `PERCHTAIL_BASE_PATH` config, not by anything this app sends it.
+- **`has_agent_token` added to `SourcePublic`**, mirroring the existing
+  `has_credential` field — needed so the UI can label the button
+  "Generate token" vs. "Regenerate token" without the backend ever
+  re-exposing the token itself after its one-time display.
+- **Sources.svelte shows agent-protocol sources' live status
+  (`agent_connected`/`agent_last_seen_at`) instead of the manual "check"
+  button** the other protocols use — a `/check` call against an
+  agent-protocol source can only succeed while an agent happens to be
+  connected anyway (it just calls the same `list_directory`), so the
+  already-live registry state the source list returns is a strictly better
+  answer than a manual, one-shot check would be.
 
 ### Notes on decisions made — backend agent-link infrastructure
 

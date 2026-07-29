@@ -1,4 +1,4 @@
-export type Protocol = 'ssh' | 'smb' | 'winrm' | 'local'
+export type Protocol = 'ssh' | 'smb' | 'winrm' | 'local' | 'agent'
 export type RuleType = 'include' | 'exclude'
 export type PatternKind = 'glob' | 'regex'
 export type ScopeType = 'customer' | 'folder' | 'source'
@@ -40,6 +40,9 @@ export interface Source {
   is_system: boolean
   rule_count: number
   has_credential: boolean
+  has_agent_token: boolean
+  agent_connected: boolean
+  agent_last_seen_at: string | null
 }
 
 export interface Rule {
@@ -86,6 +89,10 @@ export interface BrowseEntry {
 export interface ConnectionCheckResult {
   ok: boolean
   detail: string
+}
+
+export interface AgentTokenResult {
+  token: string
 }
 
 export interface SSOProvider {

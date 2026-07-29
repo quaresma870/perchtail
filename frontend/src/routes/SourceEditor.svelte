@@ -3,7 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import RuleEditor from '../lib/components/RuleEditor.svelte'
-  import type { Customer, Folder, Protocol, Source } from '../lib/types'
+  import type { AgentTokenResult, Customer, Folder, Protocol, Source } from '../lib/types'
 
   export let params: { id?: string } = {}
 
@@ -28,6 +28,10 @@
   let username = ''
   let password = ''
   let privateKey = ''
+
+  let agentToken = ''
+  let generatingToken = false
+  let tokenError = ''
 
   async function loadCustomers() {
     customers = await api.get<Customer[]>('/customers')
@@ -67,7 +71,7 @@
   })
 
   function buildCredential(): Record<string, string> | null {
-    if (protocol === 'local') return null
+    if (protocol === 'local' || protocol === 'agent') return null
     const cred: Record<string, string> = {}
     if (username) cred.username = username
     if (protocol === 'ssh' && privateKey) cred.private_key = privateKey
@@ -110,6 +114,21 @@
       error = err instanceof ApiError ? err.detail : 'Failed to save source'
     } finally {
       saving = false
+    }
+  }
+
+  async function generateAgentToken() {
+    if (sourceId === null) return
+    tokenError = ''
+    generatingToken = true
+    try {
+      const result = await api.post<AgentTokenResult>(`/sources/${sourceId}/agent-token`)
+      agentToken = result.token
+      if (source) source = { ...source, has_agent_token: true }
+    } catch (err) {
+      tokenError = err instanceof ApiError ? err.detail : 'Failed to generate token'
+    } finally {
+      generatingToken = false
     }
   }
 </script>
@@ -161,23 +180,38 @@
           <option value="smb">SMB</option>
           <option value="winrm">WinRM</option>
           <option value="local">Local disk</option>
+          <option value="agent">Agent (push)</option>
         </select>
       </label>
 
       <div class="row">
         <label class="grow">
           Host
-          <input class="input" bind:value={host} required />
+          <input
+            class="input"
+            bind:value={host}
+            required
+            placeholder={protocol === 'agent' ? 'friendly name for the agent host' : undefined}
+          />
         </label>
-        <label class="narrow">
-          Port
-          <input class="input" type="number" bind:value={port} placeholder="default" />
-        </label>
+        {#if protocol !== 'agent'}
+          <label class="narrow">
+            Port
+            <input class="input" type="number" bind:value={port} placeholder="default" />
+          </label>
+        {/if}
       </div>
 
       <label>
         Base path
-        <input class="input" bind:value={basePath} required placeholder="/var/log/appname" />
+        <input
+          class="input"
+          bind:value={basePath}
+          required
+          placeholder={protocol === 'agent'
+            ? 'documented for reference — the agent enforces its own root'
+            : '/var/log/appname'}
+        />
       </label>
 
       <label class="checkbox">
@@ -185,7 +219,37 @@
         Enabled
       </label>
 
-      {#if protocol !== 'local'}
+      {#if protocol === 'agent'}
+        <fieldset>
+          <legend>Agent enrollment</legend>
+          {#if isNew}
+            <p class="hint">Save the source first, then generate an enrollment token for the agent.</p>
+          {:else}
+            <p class="hint">
+              Set <code>PERCHTAIL_AGENT_TOKEN</code> on the agent to the token below — it's shown
+              only once. Generating a new token invalidates the previous one.
+            </p>
+            {#if tokenError}
+              <p class="error">{tokenError}</p>
+            {/if}
+            <button
+              type="button"
+              class="btn btn-ghost"
+              on:click={generateAgentToken}
+              disabled={generatingToken}
+            >
+              {generatingToken
+                ? 'Generating…'
+                : source?.has_agent_token
+                  ? 'Regenerate token'
+                  : 'Generate token'}
+            </button>
+            {#if agentToken}
+              <code class="token-box">{agentToken}</code>
+            {/if}
+          {/if}
+        </fieldset>
+      {:else if protocol !== 'local'}
         <fieldset>
           <legend>Credential {isNew ? '' : '(leave blank to keep current)'}</legend>
           <label>
@@ -280,6 +344,17 @@
     font-size: 0.8rem;
     color: var(--text-faint);
     padding: 0 0.3rem;
+  }
+  .token-box {
+    display: block;
+    padding: 0.6rem 0.75rem;
+    background: var(--bg-elevated-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    word-break: break-all;
   }
   button[type='submit'] {
     align-self: flex-start;
