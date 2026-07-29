@@ -121,12 +121,33 @@ for it — this account only ever needs network (SMB) logon.
 
 ### 2. Scope the share
 
-Share only the specific folder tree PerchTail needs — never `C$`, never a
-whole drive:
+Share only the specific folder tree PerchTail needs — this applies
+regardless of which drive the logs happen to live on. Logs sitting under
+`C:\ProgramData\...`, `C:\inetpub\logs\...`, or another system-drive path
+are completely normal; that's not a reason to reach for the built-in `C$`
+admin share (see below for why). Instead, create an ordinary custom share
+pointed at the exact folder, wherever it is:
 
 ```powershell
-New-SmbShare -Name "AppLogs" -Path "D:\Logs\AppName" -ReadAccess "DOMAIN\svc-perchtail"
+New-SmbShare -Name "AppLogs" -Path "C:\ProgramData\AppName\Logs" -ReadAccess "DOMAIN\svc-perchtail"
 ```
+
+**Avoid the built-in `C$` (or any `<drive>$`) admin share.** It's not that
+logs can't live on `C:` — it's that `C$` shares the entire drive, and by
+default Windows only lets members of the local **Administrators** group
+connect to it at all (a non-admin account gets denied even with correct
+NTFS permissions on the target folder, due to UAC remote restrictions on
+local accounts). So using `C$` doesn't just widen scope to the whole drive,
+it also forces `svc-perchtail` to become a local admin to connect —
+defeating the point of a dedicated least-privilege account. A folder-scoped
+custom share avoids both problems at once, no matter which drive it's on.
+
+If logs are genuinely scattered across many unpredictable paths on a host
+and a single custom share can't cover them, prefer adding a
+[WinRM + JEA source](#winrm-windows-fallback-when-smb-isnt-open) for that
+host instead of falling back to `C$` — JEA can constrain the account to
+read-only cmdlets scoped to exactly the paths needed without ever requiring
+local admin rights.
 
 ### 3. Match the NTFS ACL to the share
 
@@ -134,7 +155,7 @@ Share permissions and NTFS permissions are evaluated independently on
 Windows — set both to read-only for this account on the same folder:
 
 ```powershell
-icacls "D:\Logs\AppName" /grant "DOMAIN\svc-perchtail:(OI)(CI)RX"
+icacls "C:\ProgramData\AppName\Logs" /grant "DOMAIN\svc-perchtail:(OI)(CI)RX"
 ```
 
 ### 4. Protocol version and auth
