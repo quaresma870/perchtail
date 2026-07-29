@@ -6,9 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [Semantic Versioning](https://semver.org/) once a first
 release ships (0.x releases may include breaking changes between minors).
 
-## [Unreleased]
-
-## [0.1.1] - 2026-07-29
+## [0.1.1] - 2026-07-30
 
 Phase 1b (SSO) complete: OIDC single sign-on alongside local auth, with
 auto-provisioned no-access accounts for first-time SSO logins and an SSO
