@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [Semantic Versioning](https://semver.org/) once a first
 release ships (0.x releases may include breaking changes between minors).
 
+## [Unreleased]
+
+### Added
+- Phase 2 (push-agent): `agent/`, a standalone Go binary for sources that
+  can't be reached inbound over SSH/SMB/WinRM. It dials out to the server
+  and holds a persistent WebSocket connection open (`gorilla/websocket`),
+  authenticated with the bearer enrollment token issued by the backend;
+  the server then relays live `list`/`fetch` commands down that connection
+  on demand — nothing is proactively synced. Cross-compiles for
+  linux/amd64, linux/arm64, and windows/amd64; a dedicated CI job builds,
+  vets, tests, and cross-compiles it on every push.
+
 ## [0.1.1] - 2026-07-30
 
 Phase 1b (SSO) complete: OIDC single sign-on alongside local auth, with
