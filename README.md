@@ -8,7 +8,7 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.1.0%20%28phase%201%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-phase%201b%20%28SSO%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -19,12 +19,15 @@
 
 ## Status
 
-🟢 **v0.1.0 — Phase 1 (MVP) complete.** Agentless SSH/SFTP, SMB, and WinRM
-browsing, ephemeral fetch (nothing mirrored), rule-scoped RBAC, and the full
-admin/viewer UI all work end-to-end. Still pre-1.0: no SSO yet (local
-accounts only — see [ROADMAP.md](ROADMAP.md)'s Phase 1b), and it hasn't seen
-production traffic beyond the maintainer's own use. See
-[CHANGELOG.md](CHANGELOG.md) for what's actually shipped versus planned.
+🟢 **Phase 1 (MVP) + Phase 1b (SSO) complete.** Agentless SSH/SFTP, SMB, and
+WinRM browsing, ephemeral fetch (nothing mirrored), rule-scoped RBAC, the
+full admin/viewer UI, and OIDC single sign-on (local accounts still work
+alongside it — see [ROADMAP.md](ROADMAP.md)) all work end-to-end. Still
+pre-1.0: SAML isn't built (OIDC covers Azure AD/Entra ID, Okta, Google
+Workspace, Keycloak/Authentik, so it's only getting built if a real need
+shows up), there's no full-text search yet, and it hasn't seen production
+traffic beyond the maintainer's own use. See [CHANGELOG.md](CHANGELOG.md)
+for what's actually shipped versus planned.
 
 ## What it is
 
@@ -64,7 +67,7 @@ nothing sitting around afterward for someone to leak or for disk to fill up with
 | Live view, nothing stored | ✅ | ❌ ingests a copy | ❌ ingests a copy | ❌ mirrors to disk | ❌ ingests a copy |
 | Agentless Linux + Windows | ✅ SSH/SFTP, SMB, WinRM | needs Beats/NXLog agents | needs an agent | rclone remotes | needs Promtail agent |
 | Customer/environment-scoped RBAC | ✅ built in | limited / enterprise | role-based, not scoped this way | ❌ | limited |
-| SSO (OIDC/SAML) | 🚧 roadmap | enterprise tier | ✅ | ❌ | via Grafana |
+| SSO | ✅ OIDC (SAML 🚧 if needed) | enterprise tier | ✅ | ❌ | via Grafana |
 | Code-editor-style viewer | ✅ CodeMirror | search UI, not a file viewer | search UI | depends which browser | Grafana Explore |
 | Setup | single docker-compose | multi-service | multi-service | multiple tools glued together | multi-service |
 
