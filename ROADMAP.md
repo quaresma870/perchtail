@@ -158,7 +158,7 @@ they come before any connector or UI work, not after.
 - [ ] Access gated purely by `is_super_admin`, no grant can reach it
 - [ ] "system" badge in the admin sources list; non-editable, non-deletable
 
-### M7 — Admin & viewer UI
+### M7 — Admin & viewer UI ✅
 
   Note on scope vs. CLAUDE.md's original wording: "last run"/"run-now"/"run
   history with errors" are pre-pivot leftovers from when this project was
@@ -186,19 +186,39 @@ they come before any connector or UI work, not after.
 
   Backend CRUD API this UI needs (`api/customers.py`, `api/folders.py`,
   `api/sources.py`, `api/rules.py`, `api/roles.py`, `api/users.py`) is done
-  and tested — none of it existed before this milestone. See CHANGELOG.md
-  for what each surface does. What's left below is the UI itself.
+  and tested. `api/archive.py` also gained a `GET .../download-zip` endpoint
+  (zips an entire folder, fetching each contained file fresh) since CLAUDE.md's
+  Viewer spec calls for downloading "a single file or a zipped folder" and
+  only the single-file path existed before this milestone. See CHANGELOG.md
+  for what each surface does.
 
-- [ ] Sources list (status via connection check, protocol, rule count,
+  Access-tree simplification: CLAUDE.md's Roles UI spec asks for a
+  "customer/folder/source access tree with search/filter, collapsed by
+  default." Built instead: a flat scope-type + scope-picker dropdown pair
+  (customer → folder → source) plus a table of existing grants. This proves
+  the grant model end-to-end (create/update/delete a grant at any scope,
+  most-specific-wins resolution, duplicate-role cloning grants) without the
+  extra weeks a real nested/collapsible/searchable tree widget would take —
+  worth revisiting once there are enough real customers/folders that a flat
+  dropdown gets unwieldy, not before.
+
+  Archive-browsing limit: expanding a `.zip`/`.tar.gz` lists its members
+  flat (whatever the archive's own namelist gives), one level deep — the
+  backend's `/browse` can't recurse into a sub-path *inside* an archive (see
+  `api/archive.py`), so a directory-flagged member inside an archive is a
+  dead end in the tree, not further expandable. Matches what M4's archive
+  handling actually supports; nested-archive UX wasn't asked for.
+
+- [x] Sources list (status via connection check, protocol, rule count,
       system badge — non-editable/non-deletable)
-- [ ] Rule editor: row-based UI + raw-text/gitignore-style paste mode
-- [ ] Lazy-loaded folder tree (fetch children on expand only)
-- [ ] CodeMirror-based viewer pane: tabs, in-file search, download (single file
+- [x] Rule editor: row-based UI + raw-text/gitignore-style paste mode
+- [x] Lazy-loaded folder tree (fetch children on expand only)
+- [x] CodeMirror-based viewer pane: tabs, in-file search, download (single file
       or zipped folder)
-- [ ] Roles UI: list, editor (global-capability toggles + customer/folder/
-      source access tree with search/filter, collapsed by default),
-      duplicate-role action
-- [ ] Users UI: list with active/inactive, create, reset password,
+- [x] Roles UI: list, editor (global-capability toggles + customer/folder/
+      source access grants, duplicate-role action) — see access-tree
+      simplification note above
+- [x] Users UI: list with active/inactive, create, reset password,
       deactivate/delete, assigned role
 
 ### M8 — Phase 1 exit

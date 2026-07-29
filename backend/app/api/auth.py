@@ -2,7 +2,7 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session
 
-from app.auth.models import User
+from app.auth.models import GlobalCapability, User
 from app.auth.providers.local import LocalPasswordProvider, change_password, verify_password
 from app.auth.sessions import create_session, delete_session, get_user_by_token
 from app.config import get_settings
@@ -31,6 +31,23 @@ class UserPublic(BaseModel):
     role_id: int
     active: bool
     must_change_password: bool
+    # Denormalized from the user's role so the frontend can gate nav/UI
+    # (e.g. show the Roles/Users admin pages) without a second round-trip or
+    # needing manage_roles just to read its own role's shape.
+    is_super_admin: bool
+    global_capabilities: list[GlobalCapability]
+
+    @classmethod
+    def from_user(cls, user: User) -> "UserPublic":
+        return cls(
+            id=user.id,
+            username=user.username,
+            role_id=user.role_id,
+            active=user.active,
+            must_change_password=user.must_change_password,
+            is_super_admin=user.role.is_super_admin,
+            global_capabilities=user.role.global_capabilities,
+        )
 
 
 def get_current_user(
@@ -77,7 +94,7 @@ def login(payload: LoginRequest, response: Response, session: Session = Depends(
 
     _, token = create_session(session, user)
     _set_session_cookie(response, token)
-    return user
+    return UserPublic.from_user(user)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -93,7 +110,7 @@ def logout(
 
 @router.get("/me", response_model=UserPublic)
 def me(user: User = Depends(get_current_user)):
-    return user
+    return UserPublic.from_user(user)
 
 
 @router.post("/change-password", response_model=UserPublic)
@@ -109,4 +126,4 @@ def change_password_endpoint(
 
     change_password(session, user, payload.new_password)
     session.refresh(user)
-    return user
+    return UserPublic.from_user(user)

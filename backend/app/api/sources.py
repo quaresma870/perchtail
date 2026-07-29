@@ -133,6 +133,14 @@ def list_sources(
     return [_to_public(session, s) for s in sources]
 
 
+@router.get("/{source_id}", response_model=SourcePublic)
+def get_source(
+    source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
+    session: Session = Depends(get_session),
+):
+    return _to_public(session, source)
+
+
 @router.post("", response_model=SourcePublic, status_code=status.HTTP_201_CREATED)
 def create_source(
     payload: SourceCreate,

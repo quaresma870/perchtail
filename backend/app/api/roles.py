@@ -13,6 +13,20 @@ router = APIRouter(prefix="/roles", tags=["roles"])
 require_manage = require_global_capability(GlobalCapability.manage_roles, get_current_active_user)
 
 
+def require_read(user: User = Depends(get_current_active_user)) -> User:
+    # Listing roles/reading one is also needed by the users admin surface
+    # (to populate the role picker when assigning a role to a user), so
+    # manage_users is accepted here too — only create/update/delete/grants
+    # below require manage_roles specifically.
+    if (
+        user.role.is_super_admin
+        or GlobalCapability.manage_roles in user.role.global_capabilities
+        or GlobalCapability.manage_users in user.role.global_capabilities
+    ):
+        return user
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted")
+
+
 class RolePublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -84,8 +98,20 @@ def _validate_scope_exists(session: Session, *, scope_type: ScopeType, scope_id:
 
 
 @router.get("", response_model=list[RolePublic])
-def list_roles(user: User = Depends(require_manage), session: Session = Depends(get_session)):
+def list_roles(user: User = Depends(require_read), session: Session = Depends(get_session)):
     return session.exec(select(Role)).all()
+
+
+@router.get("/{role_id}", response_model=RolePublic)
+def get_role(
+    role_id: int,
+    user: User = Depends(require_read),
+    session: Session = Depends(get_session),
+):
+    role = session.get(Role, role_id)
+    if role is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    return role
 
 
 @router.post("", response_model=RolePublic, status_code=status.HTTP_201_CREATED)

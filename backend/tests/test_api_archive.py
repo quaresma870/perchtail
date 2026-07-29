@@ -331,3 +331,70 @@ def test_open_local_gz_file_still_uses_scratch(app_client, session, scratch_stor
     assert response.status_code == 200
     assert response.content == b"hello world"
     assert "x-scratch-key" in response.headers
+
+
+def test_download_zip_bundles_only_rule_visible_files(app_client, session, tmp_path):
+    app, client = app_client
+    (tmp_path / "app.log").write_text("hello")
+    (tmp_path / "secret.txt").write_text("nope")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "deep.log").write_text("deep")
+
+    source = _make_local_source(session, tmp_path)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*.log")
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+    assert response.status_code == 200
+    assert response.headers["content-disposition"].startswith("attachment")
+
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        names = set(zf.namelist())
+        assert names == {"app.log", "nested/deep.log"}
+        assert zf.read("app.log") == b"hello"
+        assert zf.read("nested/deep.log") == b"deep"
+
+
+def test_download_zip_denied_without_download_capability(app_client, session, tmp_path):
+    app, client = app_client
+    (tmp_path / "app.log").write_text("hello")
+    customer = Customer(name="Acme")
+    session.add(customer)
+    session.commit()
+    session.refresh(customer)
+    source = _make_local_source(session, tmp_path)
+    source.customer_id = customer.id
+    session.add(source)
+    session.commit()
+
+    user = _make_user(session, app, is_super_admin=False)
+    session.add(
+        RoleGrant(
+            role_id=user.role_id,
+            scope_type=ScopeType.customer,
+            scope_id=customer.id,
+            capabilities=[Capability.view],
+        )
+    )
+    session.commit()
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+    assert response.status_code == 403
+
+
+def test_download_zip_of_subfolder_uses_relative_arcnames(app_client, session, tmp_path):
+    app, client = app_client
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "deep.log").write_text("deep")
+    (tmp_path / "app.log").write_text("top-level, excluded from this request")
+
+    source = _make_local_source(session, tmp_path)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*.log")
+
+    response = client.get(f"/sources/{source.id}/download-zip", params={"path": "nested"})
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert zf.namelist() == ["deep.log"]

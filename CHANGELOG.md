@@ -66,5 +66,20 @@ release ships (0.x releases may include breaking changes between minors).
   (deactivate is a soft delete, per CLAUDE.md's Security notes). Customer/
   folder management is treated as an admin surface gated by the
   `create_source` global capability rather than per-scope grants, per
-  CLAUDE.md's "its own small admin surface" wording. See
-  [ROADMAP.md](ROADMAP.md) for what's next.
+  CLAUDE.md's "its own small admin surface" wording. `api/archive.py` also
+  gains `GET .../download-zip` (zips an entire folder, fetching each
+  contained file fresh) so the Viewer can offer "download a zipped folder,"
+  not just a single file. `auth/me` (and login/change-password) now also
+  returns `is_super_admin`/`global_capabilities` so the frontend can gate
+  nav without a second round-trip.
+- Admin & viewer UI (M7, part 2): a Vite + Svelte + TypeScript SPA under
+  `frontend/` — the frontend stack CLAUDE.md never named (see ROADMAP.md's
+  M7 notes for why Svelte). Login/change-password, a sources list with
+  inline connection-check and a create/edit form, a rule editor (row-based
+  + gitignore-style raw-text paste mode, toggled per source), a lazy-loaded
+  folder tree (children fetched only on expand, one level of `.zip`/
+  `.tar.gz` expansion) feeding a CodeMirror 6 tabbed viewer pane (in-file
+  search via CodeMirror's built-in search panel, single-file and
+  zipped-folder download), and Roles/Users admin pages (grant CRUD,
+  duplicate-role, reset-password, deactivate). CI gains a `frontend` job
+  (`svelte-check` + `vite build`) alongside the existing backend job.

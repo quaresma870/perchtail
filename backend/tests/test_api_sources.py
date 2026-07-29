@@ -229,6 +229,38 @@ def test_update_source_and_rotate_credential(session, admin_client):
     assert response.json()["has_credential"] is True
 
 
+def test_get_single_source(session, admin_client):
+    customer = _make_customer(session)
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "app01",
+            "customer_id": customer.id,
+            "protocol": "ssh",
+            "host": "app01",
+            "base_path": "/var/log",
+        },
+    ).json()
+
+    response = admin_client.get(f"/sources/{created['id']}")
+    assert response.status_code == 200
+    assert response.json()["name"] == "app01"
+
+
+def test_get_single_source_denied_without_grant(session, client_for):
+    customer = _make_customer(session)
+    source = Source(
+        name="app01", customer_id=customer.id, protocol=Protocol.ssh, host="h", base_path="/var/log"
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    user = _make_user(session)
+    response = client_for(user).get(f"/sources/{source.id}")
+    assert response.status_code == 403
+
+
 def test_delete_source(session, admin_client):
     customer = _make_customer(session)
     created = admin_client.post(

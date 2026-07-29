@@ -54,10 +54,30 @@ def test_manage_roles_capability_can_create_role(session, manage_roles_client):
     assert response.json()["is_super_admin"] is False
 
 
+def test_get_single_role(session, admin_client):
+    created = admin_client.post("/roles", json={"name": "Tier 2"}).json()
+    response = admin_client.get(f"/roles/{created['id']}")
+    assert response.status_code == 200
+    assert response.json()["name"] == "Tier 2"
+
+
+def test_get_single_role_not_found(session, admin_client):
+    response = admin_client.get("/roles/999999")
+    assert response.status_code == 404
+
+
 def test_plain_user_cannot_manage_roles(session, client_for):
     user = _make_user(session)
     client = client_for(user)
     assert client.get("/roles").status_code == 403
+
+
+def test_manage_users_capability_can_list_roles_but_not_write(session, client_for):
+    user = _make_user(session, global_capabilities=[GlobalCapability.manage_users])
+    client = client_for(user)
+
+    assert client.get("/roles").status_code == 200
+    assert client.post("/roles", json={"name": "X"}).status_code == 403
 
 
 def test_non_super_admin_cannot_create_super_admin_role(session, manage_roles_client):

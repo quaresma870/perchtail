@@ -1,4 +1,7 @@
 import hashlib
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -219,3 +222,61 @@ def download_file(
     served_path, filename, key = _resolve_content(source, path, member, rules)
     background = BackgroundTask(get_scratch_store().release, key) if key else None
     return FileResponse(served_path, filename=filename, background=background)
+
+
+def _zip_directory(
+    connector,
+    source: Source,
+    rules: list[Rule],
+    request_root: str,
+    current_dir: str,
+    zf: zipfile.ZipFile,
+    tmp_dir: Path,
+) -> None:
+    """Recursively fetches every rule-visible file under `request_root`
+    straight into the zip, one fresh fetch per file — same always-fresh
+    rule as every other read in this project, just batched into one archive
+    for convenience. Nested .zip/.tar.gz members are included as raw files
+    rather than expanded — expanding archives-within-a-bulk-zip isn't worth
+    the complexity for what CLAUDE.md asks for here (download a folder).
+    `current_dir` walks deeper on each recursive call; arcnames stay
+    relative to the original `request_root` throughout."""
+    for entry in connector.list_directory(source, rules, current_dir):
+        if entry.is_dir:
+            _zip_directory(connector, source, rules, request_root, entry.path, zf, tmp_dir)
+            continue
+        if not is_visible(entry.path, rules):
+            continue
+        arcname = entry.path[len(request_root) + 1 :] if request_root else entry.path
+        with tempfile.NamedTemporaryFile(dir=tmp_dir, delete=False) as tmp_file:
+            destination = Path(tmp_file.name)
+        connector.fetch_file(source, entry.path, destination)
+        zf.write(destination, arcname=arcname)
+        destination.unlink()
+
+
+@router.get("/download-zip")
+def download_folder_zip(
+    path: str = "",
+    source: Source = Depends(require_capability(Capability.download, get_current_active_user)),
+    session: Session = Depends(get_session),
+) -> FileResponse:
+    """Zips an entire folder for download (CLAUDE.md's Viewer section:
+    download "single file or a zipped folder"), fetching each contained
+    file fresh — no different from any other read here, just batched."""
+    _require_safe_path(path)
+    rules = _rules_for(session, source.id)
+    connector = _connector(source)
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="perchtail-zip-"))
+    zip_path = tmp_dir / "download.zip"
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            _zip_directory(connector, source, rules, path, path, zf, tmp_dir)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    folder_name = path.rsplit("/", 1)[-1] if path else source.name
+    background = BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True)
+    return FileResponse(zip_path, filename=f"{folder_name}.zip", background=background)
