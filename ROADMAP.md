@@ -41,13 +41,14 @@ they come before any connector or UI work, not after.
       in the project that must be correct before anything is built on top
 - [x] `AuditLog` writes wired into login + role/grant changes, each also
       emitting a structured INFO log line
-
-  Note: `api/auth.py` — the actual HTTP login endpoint and session/token
-  issuance (cookie vs JWT) — isn't built yet and isn't part of this
-  milestone's scope; CLAUDE.md doesn't pin down the mechanism.
-  `require_capability()` takes `get_current_user` as a parameter rather than
-  hardcoding one, so this can be wired in later without touching rbac.py.
-  Needs its own decision once API endpoints start getting built.
+- [x] `api/auth.py`: HTTP login/logout/me/change-password endpoints and
+      session issuance. Went with server-side sessions (opaque token in an
+      httpOnly cookie, hashed and stored in SQLite via a new `AuthSession`
+      table) rather than a stateless JWT — this tool holds production
+      credentials, so being able to revoke a session immediately (logout, or
+      deactivating a user) mattered more than avoiding a DB lookup per
+      request. `get_current_active_user` blocks every other endpoint until
+      an admin-created account's forced password change is done.
 
 ### M3 — Rule engine
 - [ ] `rules.py`: glob (default) + regex (`re:` prefix) pattern matching

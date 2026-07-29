@@ -1,5 +1,3 @@
-from datetime import UTC, datetime
-
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from sqlmodel import Session, select
@@ -7,6 +5,7 @@ from sqlmodel import Session, select
 from app.audit import record_audit_event
 from app.auth.models import AuthProviderType, User
 from app.logging_config import get_logger
+from app.timeutils import utcnow
 
 logger = get_logger(__name__)
 _hasher = PasswordHasher()
@@ -14,6 +13,16 @@ _hasher = PasswordHasher()
 
 def hash_password(password: str) -> str:
     return _hasher.hash(password)
+
+
+def verify_password(user: User, password: str) -> bool:
+    if user.password_hash is None:
+        return False
+    try:
+        _hasher.verify(user.password_hash, password)
+    except VerifyMismatchError:
+        return False
+    return True
 
 
 def create_local_user(
@@ -66,18 +75,16 @@ class LocalPasswordProvider:
 
     def authenticate(self, session: Session, username: str, password: str) -> User | None:
         user = session.exec(select(User).where(User.username == username)).first()
-        if user is None or user.password_hash is None or not user.active:
+        if user is None or not user.active:
             return None
 
-        try:
-            _hasher.verify(user.password_hash, password)
-        except VerifyMismatchError:
+        if not verify_password(user, password):
             return None
 
         if _hasher.check_needs_rehash(user.password_hash):
             user.password_hash = _hasher.hash(password)
 
-        user.last_login_at = datetime.now(UTC)
+        user.last_login_at = utcnow()
         session.add(user)
 
         record_audit_event(

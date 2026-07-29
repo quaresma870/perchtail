@@ -1,8 +1,10 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, Relationship, SQLModel
+
+from app.timeutils import utcnow
 
 
 class ScopeType(StrEnum):
@@ -33,10 +35,6 @@ class AuthProviderType(StrEnum):
 class SSOProtocol(StrEnum):
     oidc = "oidc"
     saml = "saml"
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 class Role(SQLModel, table=True):
@@ -94,11 +92,26 @@ class SSOProviderConfig(SQLModel, table=True):
     enabled: bool = False
 
 
+class AuthSession(SQLModel, table=True):
+    """Server-side session backing the login cookie. Only the SHA-256 hash of
+    the token is stored — same rationale as password hashing — so a DB leak
+    doesn't directly hand out valid sessions. Chosen over a stateless JWT so
+    deactivating a user or logging out actually revokes access immediately,
+    without a separate revocation list."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    token_hash: str = Field(unique=True, index=True)
+    user_id: int = Field(foreign_key="user.id")
+    created_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime
+    last_seen_at: datetime | None = None
+
+
 class AuditLog(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     user_id: int | None = Field(default=None, foreign_key="user.id")
     action: str
     target_type: str | None = None
     target_id: int | None = None
-    timestamp: datetime = Field(default_factory=_utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     event_metadata: dict | None = Field(default=None, sa_column=Column("metadata", JSON))

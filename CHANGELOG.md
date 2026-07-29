@@ -22,4 +22,9 @@ release ships (0.x releases may include breaking changes between minors).
   dependency (`auth/rbac.py`), `LocalPasswordProvider` (argon2id, forced
   password change on admin-created accounts), and `AuditLog` writes wired
   into login and role/grant creation, each paired with a structured INFO log
-  line. See [ROADMAP.md](ROADMAP.md) for what's next.
+  line.
+- `api/auth.py`: login/logout/me/change-password endpoints backed by
+  server-side sessions (hashed opaque token in an httpOnly, SameSite=strict
+  cookie, stored in a new `AuthSession` table) rather than a stateless JWT,
+  so revoking access is immediate. See [ROADMAP.md](ROADMAP.md) for what's
+  next.
