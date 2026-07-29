@@ -86,5 +86,29 @@ release ships (0.x releases may include breaking changes between minors).
   search via CodeMirror's built-in search panel, single-file and
   zipped-folder download), and Roles/Users admin pages (grant CRUD,
   duplicate-role, reset-password, deactivate). CI gains a `frontend` job
-  (`svelte-check` + `vite build`) alongside the existing backend job. See
-  [ROADMAP.md](ROADMAP.md) for what's next.
+  (`svelte-check` + `vite build`) alongside the existing backend job.
+- Phase 1 exit (M8): multi-stage `Dockerfile` (Node stage builds the SPA,
+  copied into the Python runtime image), `docker-entrypoint.sh` (runs
+  `alembic upgrade head` before `uvicorn`), and `app.main` mounts the built
+  frontend as static files at `/` — works unmodified with the frontend's
+  hash-based routing, since the browser only ever requests `/`.
+  `app.bootstrap.seed_initial_super_admin` creates a break-glass super-admin
+  with a randomly generated, once-logged password on first startup (a fresh
+  deployment previously had no way to create its first user at all).
+  README's Quick start is now real, tested steps rather than a placeholder.
+
+### Fixed
+- Archive member listing/opening didn't check the rule chain against the
+  specific member requested — browsing a `.zip`/`.tar.gz` listed every
+  member unconditionally, and `/open`/`/download` didn't re-check a
+  requested `member` against the rules at all, so a rule scoped to show
+  only the archive itself leaked its full contents. Both paths now check
+  `is_visible` on the member's combined virtual path.
+- `is_safe_relative_path` only split on `/`, so a backslash (`..\\`) path
+  traversal segment passed straight through — a real, exploitable gap for
+  SMB/WinRM sources specifically, since those connectors join a relative
+  path onto a Windows `base_path` with backslashes. Now splits on both
+  `/` and `\\`, and rejects a bare `:` to rule out Windows drive-letter
+  absolute paths.
+
+See [ROADMAP.md](ROADMAP.md) for what's next (Phase 1b: SSO).

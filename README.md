@@ -4,13 +4,16 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-early%20development-orange.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.1.0%20%28phase%201%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 ## Status
 
-🚧 **Early development.** PerchTail isn't released yet — this repo currently holds
-the design and a working plan. Watch/star to follow progress; see
+🟢 **v0.1.0 — Phase 1 (MVP) complete.** Agentless SSH/SFTP, SMB, and WinRM
+browsing, ephemeral fetch (nothing mirrored), rule-scoped RBAC, and the full
+admin/viewer UI all work end-to-end. Still pre-1.0: no SSO yet (local
+accounts only — see [ROADMAP.md](ROADMAP.md)'s Phase 1b), and it hasn't seen
+production traffic beyond the maintainer's own use. See
 [CHANGELOG.md](CHANGELOG.md) for what's actually shipped versus planned.
 
 ## What it is
@@ -63,15 +66,41 @@ verify anything that matters to your decision against current docs.
 ```bash
 git clone https://github.com/<your-org>/perchtail.git
 cd perchtail
-cp .env.example .env   # set LOG_RETENTION_DAYS, credential encryption key, etc.
+cp .env.example .env
+```
+
+Edit `.env` and set a real `CREDENTIAL_ENCRYPTION_KEY` — this encrypts SSH/SMB/
+WinRM credentials at rest, so don't ship the placeholder:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Then bring it up:
+
+```bash
 docker compose up -d
 ```
 
-Then open `http://localhost:8080`, sign in with the seeded local super-admin
-account, and add your first source.
+On first startup (only when the database has zero users), PerchTail creates a
+break-glass super-admin account with a randomly generated password and prints
+it once to the container logs — grab it before it scrolls away:
 
-*(Quick start will be filled in with real steps once phase 1 ships — see
-[CLAUDE.md](CLAUDE.md) for the build plan.)*
+```bash
+docker compose logs perchtail | grep initial_super_admin
+```
+
+Open `http://localhost:8080`, sign in with that username/password (`admin` by
+default — override with `INITIAL_ADMIN_USERNAME` in `.env` before first
+startup), and you'll be forced to set your own password immediately. From
+there: **Sources → New source** to point PerchTail at a server (see
+[docs/source-setup.md](docs/source-setup.md) for what the source side needs
+configured first), attach a rule so something is actually visible (a source
+with zero rules shows nothing, by design), and open **Viewer** to browse it.
+
+State (the SQLite database, rotated application logs, and the ephemeral
+scratch cache) lives in the `perchtail-data` Docker volume, so it survives
+`docker compose down`/`up` — only `docker compose down -v` discards it.
 
 ## Documentation
 

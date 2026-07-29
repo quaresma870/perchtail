@@ -235,13 +235,55 @@ they come before any connector or UI work, not after.
 - [x] Users UI: list with active/inactive, create, reset password,
       deactivate/delete, assigned role
 
-### M8 — Phase 1 exit
-- [ ] docker-compose deployment documented and tested end-to-end
-- [ ] README "Quick start" filled in with real steps (replacing the current
+### M8 — Phase 1 exit ✅
+- [x] docker-compose deployment documented and tested end-to-end
+- [x] README "Quick start" filled in with real steps (replacing the current
       placeholder)
-- [ ] Security pass on credential storage (encryption at rest) and archive
+- [x] Security pass on credential storage (encryption at rest) and archive
       endpoints (path traversal)
-- [ ] Tag `v0.1.0`
+- [x] Tag `v0.1.0`
+
+  Notes on decisions made building this:
+  - **No way to create the first user.** Every prior milestone assumed a
+    `User` already existed, but nothing ever seeded one — a fresh deployment
+    had zero users and zero way to log in. Added
+    `bootstrap.seed_initial_super_admin`: a no-op once any user exists,
+    otherwise creates a built-in super-admin role and a user with a randomly
+    generated password (never read from config), logged once at WARNING —
+    same pattern as the admin-driven reset-password endpoint, not a
+    long-lived secret sitting in `.env`.
+  - **Frontend serving.** CLAUDE.md's packaging section says "Docker +
+    docker-compose... sit comfortably behind an nginx reverse proxy," which
+    reads as PerchTail being one thing behind someone else's existing proxy,
+    not shipping its own. So: a multi-stage Dockerfile builds the SPA and
+    the FastAPI app mounts the built `dist/` as static files at `/` (mounted
+    last, after every API router, so it can't shadow a route). This works
+    unmodified with the frontend's hash-based routing — the browser only
+    ever requests `/`, so no catch-all/rewrite rule is needed for
+    client-side routes.
+  - **Two real security bugs found and fixed during the pass, not just
+    reviewed:**
+    1. Browsing into a `.zip`/`.tar.gz` listed every member unconditionally,
+       and `/open`/`/download` didn't check a requested member against the
+       rule chain at all — a rule scoped to show only the archive itself
+       would leak everything packed inside it, and a client calling
+       `/open` directly with an arbitrary `member` bypassed the browse
+       listing's filtering entirely. Fixed: both paths now check
+       `is_visible` on the member's combined virtual path
+       (`{archive_path}/{member_name}`), same convention already used
+       elsewhere.
+    2. `is_safe_relative_path` only split on `/`, so a `..\\`-style
+       (backslash) traversal segment passed straight through — and
+       `collectors/smb.py`/`collectors/winrm.py` join a relative path onto a
+       Windows `base_path` with backslashes, so this was a real,
+       exploitable gap for SMB/WinRM sources specifically (SSH/local were
+       incidentally safe since POSIX doesn't treat backslash as a
+       separator). Fixed: splits on both `/` and `\\`, and also rejects a
+       bare `:` to rule out Windows drive-letter absolute paths.
+  - **Known limitation, not fixed here:** `CREDENTIAL_ENCRYPTION_KEY` is a
+    single static key with no rotation story — rotating it requires
+    re-entering every source's credentials. Acceptable for v1 (see Open
+    decisions below); revisit if this becomes a real operational pain point.
 
 ## Phase 1b — SSO
 
@@ -276,6 +318,8 @@ than deciding speculatively now:
 - Whether SAML is needed at all
 - Full-text search's content source, given nothing persists
 - Whether the built-in log viewer filters DEBUG-level files by default
+- `CREDENTIAL_ENCRYPTION_KEY` rotation story (currently: none — rotating it
+  means re-entering every source's credentials)
 
 ## Community, once Phase 1 is real
 

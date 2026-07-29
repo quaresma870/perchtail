@@ -1,6 +1,7 @@
 services:
   perchtail:
     build: .
+    restart: unless-stopped
     ports:
       - "8080:8000"
     env_file:
