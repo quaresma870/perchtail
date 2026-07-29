@@ -1,5 +1,10 @@
+import secrets
+
 from sqlmodel import Session, select
 
+from app.auth.models import User
+from app.auth.providers.local import create_local_user
+from app.auth.rbac import create_role
 from app.config import get_settings
 from app.logging_config import get_logger
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
@@ -7,6 +12,7 @@ from app.models import PatternKind, Protocol, Rule, RuleType, Source
 logger = get_logger(__name__)
 
 SYSTEM_SOURCE_NAME = "PerchTail application logs"
+SUPER_ADMIN_ROLE_NAME = "Super Admin"
 
 
 def seed_system_log_source(session: Session) -> Source:
@@ -53,3 +59,42 @@ def seed_system_log_source(session: Session) -> Source:
 
     logger.info("system_source.seeded", source_id=source.id, log_dir=settings.log_dir)
     return source
+
+
+def seed_initial_super_admin(session: Session) -> User | None:
+    """A fresh deployment has zero users and no way to log in — CLAUDE.md's
+    LocalPasswordProvider is "the break-glass super-admin account," but
+    something has to create the first one. No-op once any user exists (this
+    is strictly a first-run bootstrap, not something that should ever touch
+    an existing deployment). Generates a random password rather than
+    reading one from config — same reasoning as the admin-driven
+    reset-password endpoint (api/users.py): a temporary credential logged
+    once and forced to change beats a long-lived secret sitting in a .env
+    file. Logged at WARNING so it isn't lost in routine INFO noise."""
+    if session.exec(select(User)).first() is not None:
+        return None
+
+    settings = get_settings()
+    role = create_role(
+        session,
+        actor_user_id=None,
+        name=SUPER_ADMIN_ROLE_NAME,
+        is_builtin=True,
+        is_super_admin=True,
+    )
+    temporary_password = secrets.token_urlsafe(16)
+    user = create_local_user(
+        session,
+        actor_user_id=None,
+        username=settings.initial_admin_username,
+        password=temporary_password,
+        role_id=role.id,
+    )
+
+    logger.warning(
+        "initial_super_admin.seeded",
+        username=user.username,
+        temporary_password=temporary_password,
+        note="Log in and change this password immediately — it will not be shown again.",
+    )
+    return user

@@ -67,7 +67,15 @@ def is_safe_relative_path(path: str) -> bool:
     endpoints" as explicit security scope. The rule engine denying a
     traversal attempt (most patterns wouldn't match `../../etc/passwd`) is
     not a substitute for this: a permissive rule could coincidentally match
-    it, so this must be checked independently of rule outcome."""
-    if path.startswith("/"):
+    it, so this must be checked independently of rule outcome.
+
+    Splits on both `/` and `\\`, not just `/`: collectors/smb.py and
+    collectors/winrm.py join a relative path onto a Windows `base_path`
+    with backslashes, so a `..\\` segment has to be caught here just as
+    reliably as a POSIX `../` one — splitting on `/` alone would let
+    `..\\..\\windows\\system32` straight through unblocked, since it
+    contains no forward slash at all. Also rejects a bare `:` to rule out
+    Windows drive-letter absolute paths (`C:\\...`)."""
+    if path.startswith("/") or path.startswith("\\") or ":" in path:
         return False
-    return ".." not in path.split("/")
+    return ".." not in re.split(r"[\\/]", path)

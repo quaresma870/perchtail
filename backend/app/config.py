@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     log_retention_days: int = 30
     database_url: str = "sqlite:///./data/perchtail.db"
     credential_encryption_key: str = "changeme"
+    # Username for the auto-seeded break-glass super-admin (see
+    # app/bootstrap.py's seed_initial_super_admin) — only used on a fresh
+    # deployment with zero users; its password is randomly generated and
+    # logged once, never read from config.
+    initial_admin_username: str = "admin"
     session_ttl_hours: int = 12
     # Cookie's Secure flag — disable only for local HTTP development; a
     # browser silently drops Secure cookies over plain HTTP.

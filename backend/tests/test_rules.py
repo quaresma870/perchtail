@@ -111,3 +111,16 @@ def test_is_safe_relative_path_rejects_traversal():
 
 def test_is_safe_relative_path_rejects_absolute_paths():
     assert is_safe_relative_path("/etc/passwd") is False
+
+
+def test_is_safe_relative_path_rejects_backslash_traversal():
+    # collectors/smb.py and collectors/winrm.py join a relative path onto a
+    # Windows base_path with backslashes — splitting only on "/" would miss
+    # this entirely, since the string contains no forward slash at all.
+    assert is_safe_relative_path("..\\..\\windows\\system32\\config\\SAM") is False
+    assert is_safe_relative_path("logs\\..\\..\\secret") is False
+    assert is_safe_relative_path("\\windows\\system32") is False
+
+
+def test_is_safe_relative_path_rejects_drive_letter_absolute_paths():
+    assert is_safe_relative_path("C:\\Windows\\System32") is False

@@ -1,6 +1,12 @@
 from app.auth.models import Capability, Role, User
+from app.auth.providers.local import verify_password
 from app.auth.rbac import resolve_capability
-from app.bootstrap import SYSTEM_SOURCE_NAME, seed_system_log_source
+from app.bootstrap import (
+    SUPER_ADMIN_ROLE_NAME,
+    SYSTEM_SOURCE_NAME,
+    seed_initial_super_admin,
+    seed_system_log_source,
+)
 from app.models import Rule, Source
 from sqlmodel import select
 
@@ -58,3 +64,51 @@ def test_system_source_stays_super_admin_only_after_seeding(session):
 
     assert resolve_capability(session, regular_user, source, Capability.view) is False
     assert resolve_capability(session, admin_user, source, Capability.view) is True
+
+
+def test_seed_initial_super_admin_creates_user_on_empty_db(session):
+    user = seed_initial_super_admin(session)
+
+    assert user is not None
+    assert user.username == "admin"
+    assert user.must_change_password is True
+
+    role = session.get(Role, user.role_id)
+    assert role.name == SUPER_ADMIN_ROLE_NAME
+    assert role.is_super_admin is True
+    assert role.is_builtin is True
+
+
+def test_seed_initial_super_admin_password_is_usable(session):
+    from unittest.mock import patch
+
+    with patch("app.bootstrap.secrets.token_urlsafe", return_value="fixed-temp-password"):
+        user = seed_initial_super_admin(session)
+
+    assert verify_password(user, "fixed-temp-password") is True
+
+
+def test_seed_initial_super_admin_is_noop_once_any_user_exists(session):
+    role = Role(name="Some Role")
+    session.add(role)
+    session.commit()
+    session.refresh(role)
+    session.add(User(username="someone@example.com", role_id=role.id))
+    session.commit()
+
+    result = seed_initial_super_admin(session)
+
+    assert result is None
+    assert len(session.exec(select(User)).all()) == 1
+
+
+def test_seed_initial_super_admin_respects_custom_username(session, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("INITIAL_ADMIN_USERNAME", "root")
+    get_settings.cache_clear()
+
+    user = seed_initial_super_admin(session)
+    assert user.username == "root"
+
+    get_settings.cache_clear()

@@ -90,6 +90,13 @@ def _materialize(
     if member is not None:
         if not is_archive(filename):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="not an archive")
+        # The archive's own path passing is_visible above is not enough — a
+        # rule can scope down to specific members inside it (matched via the
+        # combined virtual path, same convention /browse uses), and a client
+        # calling /open or /download directly bypasses whatever the browse
+        # listing filtered out, so this has to be checked again here.
+        if not is_visible(f"{path}/{member}", rules):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         with connector.local_copy(source, path) as archive_local:
             extract_member(archive_local, filename, member, destination)
         return member.rsplit("/", 1)[-1]
@@ -128,6 +135,11 @@ def browse(
                 is_archive=False,
             )
             for member in members
+            # Same rule as regular directory listing (collectors/*.list_directory):
+            # directories are always shown so the tree stays navigable, only
+            # files are subject to the rule chain. Without this, a rule scoped
+            # to show just the archive itself would leak every file inside it.
+            if member.is_dir or is_visible(f"{path}/{member.name}", rules)
         ]
 
     entries = connector.list_directory(source, rules, path)
@@ -203,6 +215,10 @@ def close_file(
     payload: CloseRequest,
     source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
 ) -> None:
+    # The scratch key is a hash, not a filesystem path, so an unsafe path
+    # here can't actually escape anywhere — checked anyway for consistency
+    # with every other endpoint that takes a client-supplied path.
+    _require_safe_path(payload.path)
     store = get_scratch_store()
     key = _scratch_key(source.id, payload.path, payload.member)
     store.release(key)

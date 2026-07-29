@@ -189,7 +189,7 @@ def test_browse_expands_zip_archive_members(app_client, session, fake_sftp):
     app, client = app_client
     source = _make_source(session)
     _make_user(session, app, is_super_admin=True)
-    _add_rule(session, source, 0, RuleType.include, "**/*.zip")
+    _add_rule(session, source, 0, RuleType.include, "**/*")
 
     fake_sftp.files["/var/log/appname/logs.zip"] = _zip_bytes({"app.log": "hello"})
 
@@ -241,7 +241,7 @@ def test_open_extracts_archive_member(app_client, session, fake_sftp, scratch_st
     app, client = app_client
     source = _make_source(session)
     _make_user(session, app, is_super_admin=True)
-    _add_rule(session, source, 0, RuleType.include, "**/*.zip")
+    _add_rule(session, source, 0, RuleType.include, "**/*")
     fake_sftp.files["/var/log/appname/logs.zip"] = _zip_bytes({"app.log": "hello from zip"})
 
     response = client.get(
@@ -249,6 +249,44 @@ def test_open_extracts_archive_member(app_client, session, fake_sftp, scratch_st
     )
     assert response.status_code == 200
     assert response.content == b"hello from zip"
+
+
+def test_browse_archive_filters_members_not_matched_by_rules(app_client, session, fake_sftp):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    # Visible: the archive itself, and *.log members inside it. Not visible:
+    # secret.txt inside it — a rule scoped to the archive shouldn't leak
+    # everything packed inside it.
+    _add_rule(session, source, 0, RuleType.include, "**/*.zip")
+    _add_rule(session, source, 1, RuleType.include, "**/*.log")
+    fake_sftp.files["/var/log/appname/logs.zip"] = _zip_bytes(
+        {"app.log": "hello", "secret.txt": "nope"}
+    )
+
+    response = client.get(f"/sources/{source.id}/browse", params={"path": "logs.zip"})
+    assert response.status_code == 200
+    names = {e["name"] for e in response.json()}
+    assert names == {"app.log"}
+
+
+def test_open_archive_member_denied_when_rules_dont_cover_it(app_client, session, fake_sftp):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    # Only the archive itself is rule-visible — its contents are not, so a
+    # direct /open call for a member must be denied even though it's a real
+    # entry inside a real, reachable archive (bypassing the browse listing
+    # filter isn't a way around the rule engine).
+    _add_rule(session, source, 0, RuleType.include, "**/*.zip")
+    fake_sftp.files["/var/log/appname/logs.zip"] = _zip_bytes(
+        {"app.log": "hello", "secret.txt": "nope"}
+    )
+
+    response = client.get(
+        f"/sources/{source.id}/open", params={"path": "logs.zip", "member": "secret.txt"}
+    )
+    assert response.status_code == 404
 
 
 def test_close_releases_the_scratch_entry(app_client, session, fake_sftp, scratch_store):

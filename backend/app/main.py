@@ -1,9 +1,11 @@
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import structlog
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -15,7 +17,7 @@ from app.api.roles import router as roles_router
 from app.api.rules import router as rules_router
 from app.api.sources import router as sources_router
 from app.api.users import router as users_router
-from app.bootstrap import seed_system_log_source
+from app.bootstrap import seed_initial_super_admin, seed_system_log_source
 from app.config import get_settings
 from app.db import engine, init_db
 from app.logging_config import configure_logging, get_logger
@@ -41,6 +43,7 @@ async def lifespan(app: FastAPI):
     init_db()
     with Session(engine) as session:
         seed_system_log_source(session)
+        seed_initial_super_admin(session)
 
     settings = get_settings()
     store = get_scratch_store()
@@ -76,3 +79,14 @@ app.include_router(users_router)
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+# Serves the built frontend SPA (see Dockerfile's node build stage) at "/".
+# Mounted last so it never shadows an API route above, and works unmodified
+# with the frontend's hash-based routing (svelte-spa-router): the browser
+# always requests "/" regardless of which view is active, so a plain static
+# mount is enough — no catch-all/rewrite needed for client-side routes.
+# Absent entirely in local dev when nobody has run `npm run build`.
+_frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if _frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")
