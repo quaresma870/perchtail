@@ -3,18 +3,27 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser } from '../lib/auth'
-  import type { Customer, Folder, GlobalCapability, Role, RoleGrant, Source, Capability, ScopeType } from '../lib/types'
+  import type {
+    Customer,
+    Folder,
+    GlobalCapability,
+    Role,
+    RoleGrant,
+    Source,
+    Capability,
+    ScopeType,
+  } from '../lib/types'
 
   export let params: { id?: string } = {}
 
   const isNew = !params.id
   const roleId = params.id ? Number(params.id) : null
 
-  const ALL_GLOBAL_CAPS: GlobalCapability[] = [
-    'manage_users',
-    'manage_roles',
-    'manage_sso',
-    'create_source',
+  const ALL_GLOBAL_CAPS: { key: GlobalCapability; label: string }[] = [
+    { key: 'create_source', label: 'Create new sources' },
+    { key: 'manage_users', label: 'Manage users' },
+    { key: 'manage_roles', label: 'Manage roles' },
+    { key: 'manage_sso', label: 'Manage SSO settings' },
   ]
   const ALL_CAPS: Capability[] = ['view', 'download', 'manage_rules', 'run_now']
 
@@ -136,50 +145,58 @@
 
 <div class="page">
   <div class="header">
-    <h1>{isNew ? 'New role' : `Edit ${name}`}</h1>
-    <button class="link" on:click={() => push('/roles')}>← back to roles</button>
+    <h1>{isNew ? 'New role' : `Role: ${name}`}</h1>
+    <button class="btn btn-ghost" on:click={() => push('/roles')}>← back to roles</button>
   </div>
 
   {#if loading}
-    <p>Loading…</p>
+    <p class="hint">Loading…</p>
   {:else}
     {#if error}
       <p class="error">{error}</p>
     {/if}
 
-    <form on:submit|preventDefault={handleSubmit}>
+    <form class="card" on:submit|preventDefault={handleSubmit}>
       <label>
         Name
-        <input bind:value={name} required />
+        <input class="input" bind:value={name} required />
       </label>
 
-      <label class="checkbox">
-        <input type="checkbox" bind:checked={isSuperAdmin} disabled={!canEditSuperAdmin} />
-        Super-admin (bypasses all grants, reaches system sources)
-      </label>
+      <div class="switch-row">
+        <label class="switch">
+          <input type="checkbox" bind:checked={isSuperAdmin} disabled={!canEditSuperAdmin} />
+          <span class="switch-track"></span>
+        </label>
+        <span>Super-admin (bypasses all grants, reaches system sources)</span>
+      </div>
       {#if !canEditSuperAdmin}
-        <p class="hint">Only a super-admin can grant or revoke this flag.</p>
+        <p class="hint indent">Only a super-admin can grant or revoke this flag.</p>
       {/if}
 
       <fieldset>
         <legend>Global capabilities</legend>
         {#each ALL_GLOBAL_CAPS as cap}
-          <label class="checkbox">
-            <input
-              type="checkbox"
-              checked={globalCaps.has(cap)}
-              on:change={() => (globalCaps = toggle(globalCaps, cap))}
-            />
-            {cap}
-          </label>
+          <div class="switch-row">
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={globalCaps.has(cap.key)}
+                on:change={() => (globalCaps = toggle(globalCaps, cap.key))}
+              />
+              <span class="switch-track"></span>
+            </label>
+            <span>{cap.label}</span>
+          </div>
         {/each}
       </fieldset>
 
-      <button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+      <button class="btn btn-primary" type="submit" disabled={saving}>
+        {saving ? 'Saving…' : 'Save'}
+      </button>
     </form>
 
     {#if !isNew}
-      <div class="grants">
+      <div class="grants card">
         <h2>Access grants</h2>
         <p class="hint">
           Most specific scope wins: a source grant beats a folder grant, which beats a (possibly
@@ -197,9 +214,14 @@
           <tbody>
             {#each grants as grant (grant.id)}
               <tr>
-                <td>{grant.scope_type}</td>
-                <td>{scopeLabel(grant)}</td>
-                <td>{grant.capabilities.join(', ') || '—'}</td>
+                <td><span class="badge badge-muted scope-badge">{grant.scope_type}</span></td>
+                <td class="target">{scopeLabel(grant)}</td>
+                <td class="cap-list">
+                  {#each grant.capabilities as cap}
+                    <span class="badge badge-accent">{cap}</span>
+                  {/each}
+                  {#if grant.capabilities.length === 0}—{/if}
+                </td>
                 <td>
                   <button class="link danger" on:click={() => removeGrant(grant)}>remove</button>
                 </td>
@@ -214,12 +236,12 @@
         </table>
 
         <form class="add-grant" on:submit|preventDefault={addGrant}>
-          <select bind:value={newScopeType} on:change={() => (newScopeId = null)}>
+          <select class="input" bind:value={newScopeType} on:change={() => (newScopeId = null)}>
             <option value="customer">customer</option>
             <option value="folder">folder</option>
             <option value="source">source</option>
           </select>
-          <select bind:value={newScopeId}>
+          <select class="input" bind:value={newScopeId}>
             <option value={null}>— pick —</option>
             {#each scopeOptions() as opt (opt.id)}
               <option value={opt.id}>{opt.label}</option>
@@ -227,7 +249,7 @@
           </select>
           <div class="cap-checks">
             {#each ALL_CAPS as cap}
-              <label class="checkbox small">
+              <label class="chip" class:chip-active={newCaps.has(cap)}>
                 <input
                   type="checkbox"
                   checked={newCaps.has(cap)}
@@ -237,7 +259,7 @@
               </label>
             {/each}
           </div>
-          <button type="submit">Add grant</button>
+          <button class="btn btn-primary" type="submit">Add grant</button>
         </form>
       </div>
     {/if}
@@ -246,8 +268,8 @@
 
 <style>
   .page {
-    padding: 1.5rem;
-    max-width: 720px;
+    padding: 1.75rem 2rem;
+    max-width: 760px;
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
@@ -258,117 +280,152 @@
     align-items: center;
   }
   h1 {
-    font-size: 1.3rem;
+    font-size: 1.4rem;
     margin: 0;
+    color: var(--text);
   }
   h2 {
     font-size: 1rem;
-    margin: 0 0 0.5rem;
-  }
-  button.link {
-    border: none;
-    background: none;
-    color: #2f6fed;
-    cursor: pointer;
-    font-size: 0.85rem;
+    margin: 0 0 0.4rem;
+    color: var(--text);
   }
   form {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
-    background: #fff;
-    padding: 1.25rem;
-    border-radius: 6px;
+    gap: 0.9rem;
+    padding: 1.5rem;
   }
   label {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 0.35rem;
     font-size: 0.85rem;
-    color: #444;
+    color: var(--text-muted);
   }
-  label.checkbox {
+  .switch-row {
     flex-direction: row;
     align-items: center;
-    gap: 0.5rem;
-  }
-  label.checkbox.small {
-    font-size: 0.78rem;
-  }
-  input,
-  select {
-    padding: 0.45rem;
-    border: 1px solid #ccc;
-    border-radius: 4px;
+    gap: 0.7rem;
+    color: var(--text);
+    font-size: 0.88rem;
   }
   fieldset {
-    border: 1px solid #ddd;
-    border-radius: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: 0.65rem;
+    padding: 0.9rem;
   }
   legend {
     font-size: 0.8rem;
-    color: #666;
+    color: var(--text-faint);
+    padding: 0 0.3rem;
   }
   button[type='submit'] {
     align-self: flex-start;
-    padding: 0.5rem 1.1rem;
-    border: none;
-    border-radius: 4px;
-    background: #2f6fed;
-    color: #fff;
-    font-weight: 600;
+    padding: 0.6rem 1.2rem;
   }
   .grants {
-    background: #fff;
-    padding: 1.25rem;
-    border-radius: 6px;
+    padding: 1.5rem;
   }
   table {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 0.75rem;
+    margin: 0.75rem 0;
   }
   th,
   td {
     text-align: left;
-    padding: 0.4rem 0.5rem;
+    padding: 0.5rem 0.6rem;
     font-size: 0.85rem;
-    border-bottom: 1px solid #eee;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  th {
+    color: var(--text-faint);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+  }
+  .target {
+    color: var(--text);
+    font-weight: 500;
+  }
+  .scope-badge {
+    text-transform: capitalize;
+  }
+  .cap-list {
+    display: flex;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+  }
+  .badge-accent {
+    background: var(--accent-soft);
+    color: var(--accent-hover);
+  }
+  .badge-muted {
+    background: var(--muted-badge-bg);
+    color: var(--muted-badge-text);
   }
   .add-grant {
     display: flex;
     gap: 0.6rem;
-    align-items: flex-start;
+    align-items: center;
     flex-wrap: wrap;
-    background: none;
-    padding: 0;
   }
   .add-grant select {
     flex: 0 0 160px;
   }
   .cap-checks {
     display: flex;
-    gap: 0.6rem;
+    gap: 0.4rem;
     flex-wrap: wrap;
   }
-  button.link.danger {
-    color: #c0392b;
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.25rem 0.65rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .chip input {
+    accent-color: var(--accent);
+  }
+  .chip-active {
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+    color: var(--accent-hover);
+  }
+  button.link {
     border: none;
     background: none;
+    color: var(--accent-hover);
     cursor: pointer;
+    font-size: 0.85rem;
+    padding: 0;
+  }
+  button.link.danger {
+    color: var(--danger);
   }
   .empty {
     text-align: center;
-    color: #888;
+    color: var(--text-faint);
+    padding: 1.5rem 0;
   }
   .hint {
     font-size: 0.78rem;
-    color: #777;
+    color: var(--text-faint);
+    margin: 0;
+  }
+  .hint.indent {
+    margin-left: 2.7rem;
   }
   .error {
-    color: #c0392b;
+    color: var(--danger);
   }
 </style>

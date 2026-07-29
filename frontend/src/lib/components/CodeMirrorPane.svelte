@@ -2,29 +2,32 @@
   import { onMount, onDestroy } from 'svelte'
   import { EditorView, basicSetup } from 'codemirror'
   import { EditorState } from '@codemirror/state'
+  import { darkTheme, logLevelHighlighting } from '../codemirror-theme'
 
   export let content = ''
 
   let host: HTMLDivElement
   let view: EditorView | null = null
 
+  function extensions() {
+    return [
+      basicSetup,
+      darkTheme,
+      logLevelHighlighting,
+      EditorView.editable.of(false),
+      EditorState.readOnly.of(true),
+    ]
+  }
+
   onMount(() => {
     view = new EditorView({
-      state: EditorState.create({
-        doc: content,
-        extensions: [basicSetup, EditorView.editable.of(false), EditorState.readOnly.of(true)],
-      }),
+      state: EditorState.create({ doc: content, extensions: extensions() }),
       parent: host,
     })
   })
 
   $: if (view && content !== view.state.doc.toString()) {
-    view.setState(
-      EditorState.create({
-        doc: content,
-        extensions: [basicSetup, EditorView.editable.of(false), EditorState.readOnly.of(true)],
-      }),
-    )
+    view.setState(EditorState.create({ doc: content, extensions: extensions() }))
   }
 
   onDestroy(() => {

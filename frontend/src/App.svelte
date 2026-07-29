@@ -41,6 +41,8 @@
     push('/change-password')
   }
 
+  const isActive = (prefix: string) => $currentHash === prefix || $currentHash.startsWith(prefix + '/')
+
   async function handleLogout() {
     await logout()
     push('/login')
@@ -50,18 +52,21 @@
 <main>
   {#if $authChecked && $currentUser && $currentHash !== '/login'}
     <nav>
-      <div class="brand">PerchTail</div>
-      <a href="#/viewer">Viewer</a>
-      <a href="#/sources">Sources</a>
+      <div class="brand">
+        <img src="/favicon.svg" alt="" width="26" height="26" />
+        <span>PerchTail</span>
+      </div>
+      <a href="#/viewer" class:active={isActive('/viewer')}>Viewer</a>
+      <a href="#/sources" class:active={isActive('/sources')}>Sources</a>
       {#if hasCapability($currentUser, 'manage_roles')}
-        <a href="#/roles">Roles</a>
+        <a href="#/roles" class:active={isActive('/roles')}>Roles</a>
       {/if}
       {#if hasCapability($currentUser, 'manage_users')}
-        <a href="#/users">Users</a>
+        <a href="#/users" class:active={isActive('/users')}>Users</a>
       {/if}
       <span class="spacer"></span>
       <span class="username">{$currentUser.username}</span>
-      <button on:click={handleLogout}>Log out</button>
+      <button class="btn btn-ghost" on:click={handleLogout}>Log out</button>
     </nav>
   {/if}
 
@@ -73,12 +78,6 @@
 </main>
 
 <style>
-  :global(body) {
-    margin: 0;
-    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    background: #f5f6f8;
-    color: #1a1a1a;
-  }
   main {
     display: flex;
     flex-direction: column;
@@ -87,37 +86,46 @@
   nav {
     display: flex;
     align-items: center;
-    gap: 1.25rem;
-    padding: 0.6rem 1.25rem;
-    background: #1f2430;
-    color: #eee;
-  }
-  nav a {
-    color: #cfd6e4;
-    text-decoration: none;
-    font-size: 0.9rem;
-  }
-  nav a:hover {
-    color: #fff;
+    gap: 1.5rem;
+    padding: 0.65rem 1.5rem;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border-soft);
   }
   .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     font-weight: 700;
+    font-size: 1.02rem;
     margin-right: 0.5rem;
+    color: var(--text);
+  }
+  nav a {
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 0.88rem;
+    font-weight: 500;
+    padding: 0.3rem 0;
+    border-bottom: 2px solid transparent;
+  }
+  nav a:hover {
+    color: var(--text);
+  }
+  nav a.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
   }
   .spacer {
     flex: 1;
   }
   .username {
-    font-size: 0.85rem;
-    color: #9aa4b8;
+    font-size: 0.82rem;
+    color: var(--text-faint);
   }
   .content {
     flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 0;
-  }
-  button {
-    cursor: pointer;
   }
 </style>

@@ -53,5 +53,8 @@ jobs:
       - name: Type check (svelte-check)
         run: npx svelte-check --tsconfig ./tsconfig.app.json
 
+      - name: Unit tests (vitest)
+        run: npm test
+
       - name: Build
         run: npm run build

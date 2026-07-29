@@ -117,26 +117,26 @@
 <div class="page">
   <div class="header">
     <h1>{isNew ? 'New source' : `Edit ${name}`}</h1>
-    <button class="link" on:click={() => push('/sources')}>← back to sources</button>
+    <button class="btn btn-ghost" on:click={() => push('/sources')}>← back to sources</button>
   </div>
 
   {#if loading}
-    <p>Loading…</p>
+    <p class="hint">Loading…</p>
   {:else}
     {#if error}
       <p class="error">{error}</p>
     {/if}
 
-    <form on:submit|preventDefault={handleSubmit}>
+    <form class="card" on:submit|preventDefault={handleSubmit}>
       <label>
         Name
-        <input bind:value={name} required />
+        <input class="input" bind:value={name} required />
       </label>
 
       <div class="row">
         <label>
           Customer
-          <select bind:value={customerId}>
+          <select class="input" bind:value={customerId}>
             <option value={null}>— none (top-level) —</option>
             {#each customers as customer (customer.id)}
               <option value={customer.id}>{customer.name}</option>
@@ -145,7 +145,7 @@
         </label>
         <label>
           Folder
-          <select bind:value={folderId} disabled={customerId === null}>
+          <select class="input" bind:value={folderId} disabled={customerId === null}>
             <option value={null}>— none —</option>
             {#each folders as folder (folder.id)}
               <option value={folder.id}>{folder.name}</option>
@@ -156,7 +156,7 @@
 
       <label>
         Protocol
-        <select bind:value={protocol} disabled={!isNew}>
+        <select class="input" bind:value={protocol} disabled={!isNew}>
           <option value="ssh">SSH / SFTP</option>
           <option value="smb">SMB</option>
           <option value="winrm">WinRM</option>
@@ -167,17 +167,17 @@
       <div class="row">
         <label class="grow">
           Host
-          <input bind:value={host} required />
+          <input class="input" bind:value={host} required />
         </label>
         <label class="narrow">
           Port
-          <input type="number" bind:value={port} placeholder="default" />
+          <input class="input" type="number" bind:value={port} placeholder="default" />
         </label>
       </div>
 
       <label>
         Base path
-        <input bind:value={basePath} required placeholder="/var/log/appname" />
+        <input class="input" bind:value={basePath} required placeholder="/var/log/appname" />
       </label>
 
       <label class="checkbox">
@@ -190,22 +190,24 @@
           <legend>Credential {isNew ? '' : '(leave blank to keep current)'}</legend>
           <label>
             Username
-            <input bind:value={username} autocomplete="off" />
+            <input class="input" bind:value={username} autocomplete="off" />
           </label>
           {#if protocol === 'ssh'}
             <label>
               Private key (leave blank to use password instead)
-              <textarea rows="4" bind:value={privateKey}></textarea>
+              <textarea class="input" rows="4" bind:value={privateKey}></textarea>
             </label>
           {/if}
           <label>
             Password
-            <input type="password" bind:value={password} autocomplete="new-password" />
+            <input class="input" type="password" bind:value={password} autocomplete="new-password" />
           </label>
         </fieldset>
       {/if}
 
-      <button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+      <button class="btn btn-primary" type="submit" disabled={saving}>
+        {saving ? 'Saving…' : 'Save'}
+      </button>
     </form>
 
     {#if !isNew && sourceId !== null}
@@ -216,7 +218,7 @@
 
 <style>
   .page {
-    padding: 1.5rem;
+    padding: 1.75rem 2rem;
     max-width: 640px;
     display: flex;
     flex-direction: column;
@@ -228,42 +230,33 @@
     align-items: center;
   }
   h1 {
-    font-size: 1.3rem;
+    font-size: 1.4rem;
     margin: 0;
-  }
-  button.link {
-    border: none;
-    background: none;
-    color: #2f6fed;
-    cursor: pointer;
-    font-size: 0.85rem;
+    color: var(--text);
   }
   form {
     display: flex;
     flex-direction: column;
-    gap: 0.85rem;
-    background: #fff;
-    padding: 1.25rem;
-    border-radius: 6px;
+    gap: 0.9rem;
+    padding: 1.5rem;
   }
   label {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 0.35rem;
     font-size: 0.85rem;
-    color: #444;
+    color: var(--text-muted);
   }
   label.checkbox {
     flex-direction: row;
     align-items: center;
     gap: 0.5rem;
+    color: var(--text);
   }
   input,
   select,
   textarea {
-    padding: 0.45rem;
-    border: 1px solid #ccc;
-    border-radius: 4px;
+    width: 100%;
   }
   .row {
     display: flex;
@@ -276,27 +269,26 @@
     flex: 0 0 110px;
   }
   fieldset {
-    border: 1px solid #ddd;
-    border-radius: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: 0.7rem;
+    padding: 0.9rem;
   }
   legend {
     font-size: 0.8rem;
-    color: #666;
+    color: var(--text-faint);
     padding: 0 0.3rem;
   }
   button[type='submit'] {
     align-self: flex-start;
-    padding: 0.5rem 1.1rem;
-    border: none;
-    border-radius: 4px;
-    background: #2f6fed;
-    color: #fff;
-    font-weight: 600;
+    padding: 0.6rem 1.2rem;
   }
   .error {
-    color: #c0392b;
+    color: var(--danger);
+  }
+  .hint {
+    color: var(--text-faint);
   }
 </style>
