@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte'
   import { api, ApiError } from '../api'
-  import { tabKey } from '../tab-key'
+  import { tabKey, memberPath } from '../tab-key'
   import { downloadHref } from '../download-href'
   import type { BrowseEntry } from '../types'
 
@@ -32,7 +32,7 @@
 
   $: ownKey =
     archiveRoot !== null
-      ? tabKey(archiveRoot, entry.path.slice(archiveRoot.length + 1))
+      ? tabKey(archiveRoot, memberPath(entry.path, archiveRoot))
       : tabKey(entry.path, null)
   $: isActive = !entry.is_dir && activeKey === ownKey
 
@@ -57,7 +57,7 @@
       expanded = !expanded
     } else if (!entry.is_dir) {
       if (archiveRoot !== null) {
-        const member = entry.path.slice(archiveRoot.length + 1)
+        const member = memberPath(entry.path, archiveRoot)
         dispatch('open', { path: archiveRoot, member, name: entry.name })
       } else {
         dispatch('open', { path: entry.path, member: null, name: entry.name })
