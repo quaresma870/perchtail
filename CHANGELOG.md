@@ -50,5 +50,9 @@ release ships (0.x releases may include breaking changes between minors).
   (self-referential, nested under a `Customer`) and `RoleGrant.scope_type`
   gains `folder`, generalizing the existing source-beats-customer grant
   resolution to N levels — source → folder chain (nearest first) →
-  customer, most specific wins. See [ROADMAP.md](ROADMAP.md) for what's
-  next.
+  customer, most specific wins.
+- Built-in log viewer (M6): `app/bootstrap.py` seeds a system source on
+  first startup pointed at `LOG_DIR`, so the app's own rotated logs are
+  browsable through the exact same live-browsing path as customer sources
+  — gated purely by `is_super_admin` (already enforced since M2). See
+  [ROADMAP.md](ROADMAP.md) for what's next.
