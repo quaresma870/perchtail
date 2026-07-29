@@ -344,10 +344,10 @@ they come before any connector or UI work, not after.
 
 - [x] Backend agent-link infrastructure: `Protocol.agent`, `AgentRegistry`,
       the agent's WebSocket endpoint, and the `agent` connector
-- [ ] Go push-agent (single static binary, cross-compiled) for sources not
+- [x] Go push-agent (single static binary, cross-compiled) for sources not
       reachable inbound
 - [ ] Frontend: agent source UI (enrollment-token generation, connection
-      status)
+      status) (in review — see the frontend agent source UI PR)
 - [ ] `SAMLProvider` (`python3-saml`) — **only if** a real need shows up; see
       the open decision in CLAUDE.md (OIDC already covers Azure AD/Entra ID,
       Okta, Google Workspace, Keycloak/Authentik)
@@ -397,6 +397,39 @@ they come before any connector or UI work, not after.
   admin UI), updated on every successful handshake — the actual "is it
   connected right now" answer always comes from `AgentRegistry.is_connected`,
   never from this column, so it can't drift out of sync with reality.
+
+### Notes on decisions made — Go push-agent binary
+
+- **`agent/` is its own Go module** (`agent/go.mod`), not folded into the
+  Python backend's structure — CLAUDE.md's suggested repo layout already
+  calls this out as a phase-2 concern with its own tree. Internal packages
+  live under `agent/internal/agent` so `main.go` stays a thin
+  config-load-and-run wrapper, same separation `backend/app/main.py` keeps
+  from the rest of the backend.
+- **`gorilla/websocket`** for the client side of the persistent connection —
+  the de facto standard Go WebSocket client, pairs with the plain
+  Starlette/FastAPI WebSocket server the backend already uses (see the
+  backend agent-link infrastructure notes above), no protocol translation
+  needed on either end.
+- **The wire protocol is a flat JSON envelope** (`{"type", "id", "path"}` in,
+  `{"type", "id", ...}` or `{"type": "..._error", "id", "error"}` out) that
+  mirrors `agent_registry.py`/`collectors/agent.py` exactly — a `list`
+  command returns `{"name", "is_dir", "size"}` entries, a `fetch` command
+  returns base64-encoded content (`content_b64`), matching the existing
+  `collectors/winrm.py` convention for wire-transferring file bytes.
+- **`IsSafeRelativePath` re-implements `rules.is_safe_relative_path`
+  independently in Go**, rather than trusting the backend's own validation —
+  the agent is the last line of defense against a `..`/absolute-path/
+  drive-letter payload actually reaching its local filesystem, so it can't
+  rely solely on a check made on the other end of the wire.
+- **Reconnect with exponential backoff** (1s → 30s cap) rather than a fixed
+  retry interval or giving up — an agent is meant to run unattended for long
+  periods on a host that may itself restart or lose connectivity
+  intermittently.
+- **No file-system watching, no local queue, no persistence of any kind.**
+  The agent answers exactly the command it's given and nothing else —
+  reinforcing, on the agent's own side, the same always-fresh design the
+  backend enforces on its side.
 
 ## Phase 3
 
