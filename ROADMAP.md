@@ -69,6 +69,29 @@ they come before any connector or UI work, not after.
 - [ ] Permission dependency applied to every archive endpoint from the start
 - [ ] Tests mock the SSH client — no real remote host in CI
 
+### M4.5 — Nested folders for source organization
+- [ ] `Folder` model: self-referential (`parent_folder_id`), belongs to a
+      `Customer`; a `Source` can optionally sit inside one (`Source.folder_id`,
+      nullable — null means directly under the customer, no folder)
+- [ ] `RoleGrant.scope_type` gains `folder`; grant resolution walks
+      source → folder chain (innermost to outermost) → customer, most specific
+      grant wins — generalizes the existing source-beats-customer logic to N
+      levels instead of 2 (see CLAUDE.md's updated grant-resolution pseudocode)
+- [ ] Migration for the new table + `Source.folder_id` column
+- [ ] Unit tests: a grant on a mid-level folder applies to sources several
+      levels deeper; a source-level grant still beats a folder-level one; a
+      folder-level grant still beats the customer-level one
+- [ ] Note for M7: role editor's access tree becomes customer/folder/.../
+      source; source create/edit gets an optional folder picker; folder
+      management (create/rename/move/delete) is its own small admin surface —
+      not built here, just flagged so M7 doesn't miss it
+
+  Deliberately out of scope: permission scoping *within* a single source's own
+  directory tree (different capabilities for different sub-paths of the same
+  source). Considered and declined — Folders group sources, not paths inside
+  one, and Rules already control content visibility uniformly for whoever can
+  access a source, which is sufficient for now.
+
 ### M5 — Remaining connectors
 - See [docs/source-setup.md](docs/source-setup.md) for the SMB/WinRM-side
   prerequisites (scoped share + ACLs, JEA-constrained WinRM account) these
