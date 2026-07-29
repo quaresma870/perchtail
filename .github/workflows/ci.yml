@@ -58,3 +58,42 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: agent/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Format check (gofmt)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Test
+        run: go test ./... -v
+
+      - name: Cross-compile
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o dist/perchtail-agent-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -o dist/perchtail-agent-linux-arm64 .
+          GOOS=windows GOARCH=amd64 go build -o dist/perchtail-agent-windows-amd64.exe .
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: perchtail-agent-binaries
+          path: agent/dist/

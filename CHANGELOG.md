@@ -22,6 +22,14 @@ release ships (0.x releases may include breaking changes between minors).
   in-memory and bridges FastAPI's synchronous connector calls to the async
   WebSocket via `asyncio.run_coroutine_threadsafe`. `SourcePublic` now
   reports `agent_connected`/`agent_last_seen_at` for agent-protocol sources.
+- Phase 2 (push-agent): `agent/`, a standalone Go binary for sources that
+  can't be reached inbound over SSH/SMB/WinRM. It dials out to the server
+  and holds a persistent WebSocket connection open (`gorilla/websocket`),
+  authenticated with the bearer enrollment token issued by the backend;
+  the server then relays live `list`/`fetch` commands down that connection
+  on demand — nothing is proactively synced. Cross-compiles for
+  linux/amd64, linux/arm64, and windows/amd64; a dedicated CI job builds,
+  vets, tests, and cross-compiles it on every push.
 - Phase 2 (push-agent) frontend: `SourceEditor.svelte` gains an `agent`
   protocol option — no host/credential fields, instead a one-time
   enrollment-token generator ("Generate token" / "Regenerate token", with
