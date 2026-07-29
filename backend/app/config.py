@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     # deployment with zero users; its password is randomly generated and
     # logged once, never read from config.
     initial_admin_username: str = "admin"
+    # The externally-reachable URL this deployment is served at — used to
+    # build the OIDC redirect_uri registered with the IdP. Deriving this from
+    # the incoming request instead would mean trusting X-Forwarded-* headers
+    # from whatever sits in front of this app (see CLAUDE.md's "sit behind an
+    # nginx reverse proxy" packaging note); an explicit setting sidesteps that
+    # trust question entirely. Must match what's registered as the redirect
+    # URI in the IdP's client configuration.
+    public_base_url: str = "http://localhost:8080"
     session_ttl_hours: int = 12
     # Cookie's Secure flag — disable only for local HTTP development; a
     # browser silently drops Secure cookies over plain HTTP.

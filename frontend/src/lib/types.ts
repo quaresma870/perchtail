@@ -87,3 +87,18 @@ export interface ConnectionCheckResult {
   ok: boolean
   detail: string
 }
+
+export interface SSOProvider {
+  id: number
+  protocol: 'oidc'
+  name: string
+  enabled: boolean
+  issuer: string
+  client_id: string
+  scopes: string
+}
+
+export interface SSOStatus {
+  enabled: boolean
+  name: string | null
+}
