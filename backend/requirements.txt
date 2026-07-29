@@ -11,3 +11,4 @@ paramiko>=3.4
 apscheduler>=3.10
 smbprotocol>=1.10
 pywinrm>=0.4
+joserfc>=1.0

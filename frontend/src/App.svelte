@@ -11,6 +11,7 @@
   import Roles from './routes/Roles.svelte'
   import RoleEditor from './routes/RoleEditor.svelte'
   import Users from './routes/Users.svelte'
+  import SsoSettings from './routes/SsoSettings.svelte'
 
   const routes = {
     '/login': Login,
@@ -24,6 +25,7 @@
     '/roles/new': RoleEditor,
     '/roles/:id': RoleEditor,
     '/users': Users,
+    '/sso': SsoSettings,
   }
 
   onMount(async () => {
@@ -63,6 +65,9 @@
       {/if}
       {#if hasCapability($currentUser, 'manage_users')}
         <a href="#/users" class:active={isActive('/users')}>Users</a>
+      {/if}
+      {#if hasCapability($currentUser, 'manage_sso')}
+        <a href="#/sso" class:active={isActive('/sso')}>SSO</a>
       {/if}
       <span class="spacer"></span>
       <span class="username">{$currentUser.username}</span>

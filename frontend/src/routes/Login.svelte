@@ -1,12 +1,22 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { login } from '../lib/auth'
-  import { ApiError } from '../lib/api'
+  import { api, ApiError } from '../lib/api'
+  import type { SSOStatus } from '../lib/types'
 
   let username = ''
   let password = ''
   let error = ''
   let submitting = false
+  let sso: SSOStatus = { enabled: false, name: null }
+
+  onMount(async () => {
+    if (window.location.hash.includes('sso_error=1')) {
+      error = 'SSO sign-in failed — please try again or use your local account.'
+    }
+    sso = await api.get<SSOStatus>('/auth/sso/status').catch(() => ({ enabled: false, name: null }))
+  })
 
   async function handleSubmit() {
     error = ''
@@ -48,6 +58,13 @@
     <button class="btn btn-primary" type="submit" disabled={submitting}>
       {submitting ? 'Signing in…' : 'Sign in'}
     </button>
+
+    {#if sso.enabled}
+      <div class="divider"><span>or</span></div>
+      <a class="btn btn-ghost sso-btn" href="/auth/sso/login">
+        Sign in with {sso.name}
+      </a>
+    {/if}
   </form>
 </div>
 
@@ -97,5 +114,25 @@
     color: var(--danger);
     font-size: 0.85rem;
     margin: 0;
+  }
+  .divider {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    color: var(--text-faint);
+    font-size: 0.78rem;
+    margin: 0.2rem 0;
+  }
+  .divider::before,
+  .divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border-soft);
+  }
+  .sso-btn {
+    text-align: center;
+    text-decoration: none;
+    padding: 0.65rem;
   }
 </style>

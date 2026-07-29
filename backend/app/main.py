@@ -16,8 +16,9 @@ from app.api.folders import router as folders_router
 from app.api.roles import router as roles_router
 from app.api.rules import router as rules_router
 from app.api.sources import router as sources_router
+from app.api.sso import router as sso_router
 from app.api.users import router as users_router
-from app.bootstrap import seed_initial_super_admin, seed_system_log_source
+from app.bootstrap import seed_initial_super_admin, seed_no_access_role, seed_system_log_source
 from app.config import get_settings
 from app.db import engine, init_db
 from app.logging_config import configure_logging, get_logger
@@ -44,6 +45,7 @@ async def lifespan(app: FastAPI):
     with Session(engine) as session:
         seed_system_log_source(session)
         seed_initial_super_admin(session)
+        seed_no_access_role(session)
 
     settings = get_settings()
     store = get_scratch_store()
@@ -74,6 +76,7 @@ app.include_router(sources_router)
 app.include_router(rules_router)
 app.include_router(roles_router)
 app.include_router(users_router)
+app.include_router(sso_router)
 
 
 @app.get("/healthz")

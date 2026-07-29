@@ -22,8 +22,12 @@ def encrypt_secret(plaintext: str) -> str:
     return _fernet().encrypt(plaintext.encode("utf-8")).decode("utf-8")
 
 
-def decrypt_secret(ciphertext: str) -> str:
-    return _fernet().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+def decrypt_secret(ciphertext: str, *, ttl: int | None = None) -> str:
+    """`ttl` (seconds) rejects a token older than that, using the creation
+    timestamp Fernet already embeds in every token — used for the OIDC
+    login flow's short-lived state param rather than a server-side state
+    table (`app/auth/providers/oidc.py`)."""
+    return _fernet().decrypt(ciphertext.encode("utf-8"), ttl=ttl).decode("utf-8")
 
 
 def encrypt_credential(data: dict) -> str:

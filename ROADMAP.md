@@ -285,13 +285,60 @@ they come before any connector or UI work, not after.
     re-entering every source's credentials. Acceptable for v1 (see Open
     decisions below); revisit if this becomes a real operational pain point.
 
-## Phase 1b — SSO
+## Phase 1b — SSO ✅
 
-- [ ] `OIDCProvider` (`authlib`) behind the existing `AuthProvider` interface
-- [ ] SSO settings admin page: configure active provider, test-connection
+- [x] `OIDCProvider` behind the existing `AuthProvider` interface — see
+      "Notes on decisions made" below for why this uses `joserfc` directly
+      rather than `authlib`'s own (now-deprecated) JOSE module
+- [x] SSO settings admin page: configure active provider, test-connection
       action
-- [ ] Auto-provision SSO users with the no-access default role
-- [ ] Local break-glass account confirmed to keep working alongside SSO
+- [x] Auto-provision SSO users with the no-access default role
+- [x] Local break-glass account confirmed to keep working alongside SSO
+
+### Notes on decisions made
+
+- **`joserfc` instead of `authlib`'s `authlib.jose`.** CLAUDE.md named
+  authlib for JOSE/JWT handling; as of authlib 1.7, its own maintainers
+  deprecated `authlib.jose` in favor of `joserfc` ("compatible before version
+  2.0.0"). Using the actively-maintained module directly, rather than a
+  deprecated shim, better serves the actual intent (a solid, maintained JWT
+  toolkit) than a literal reading of the library name.
+- **Plain `httpx` calls instead of `authlib`'s `OAuth2Client`** for the
+  authorization-code exchange. The three-step flow (build authorize URL →
+  exchange code → fetch/verify ID token) is a handful of HTTP calls; keeping
+  each as its own small, named function (`fetch_discovery_document`,
+  `exchange_code_for_tokens`, `fetch_jwks`) means tests can monkeypatch each
+  step directly, the same "mock the client, don't hit a real remote"
+  convention the SSH/SMB/WinRM connector tests already use — routing
+  everything through `OAuth2Client` would mean faking that client's
+  internals instead.
+- **Stateless `state` param instead of a server-side state table.** The
+  OIDC `state`/nonce is Fernet-encrypted (via the same `app.crypto` helper
+  Source credentials already use) rather than stored in a new DB table —
+  Fernet tokens already embed a creation timestamp, which doubles as the
+  expiry check (10 minutes). One fewer table, same CSRF protection.
+- **ID token signature verification against the IdP's live JWKS** (not just
+  trusting the userinfo endpoint) — `verify_id_token` checks the RS256
+  signature, `iss`, `aud`, `exp`, and `nonce` claims before anything derived
+  from the token is trusted. This and the OIDC callback's state/nonce
+  handling are the two places in this milestone where "must be correct
+  before anything else is built on top of it" applies most.
+- **No account linking.** An SSO login is matched purely by
+  `(auth_provider=oidc, external_id=sub)`; a username collision with an
+  existing local account raises rather than silently linking. Deliberately
+  out of scope for v1 — CLAUDE.md doesn't ask for it, and account linking
+  is its own security-sensitive decision (which side's identity wins?)
+  better made when a real need for it shows up.
+- **`PUBLIC_BASE_URL` setting instead of deriving the redirect_uri from the
+  incoming request.** The alternative means trusting `X-Forwarded-*`
+  headers from whatever reverse proxy sits in front of the app (see
+  CLAUDE.md's packaging note) — an explicit setting sidesteps that trust
+  question, at the cost of one more thing to configure.
+- **One enabled provider at a time, enforced server-side** (409 on trying
+  to enable a second), matching CLAUDE.md's "one OIDC/SAML provider
+  configured at a time for v1" — this is the thing the login flow actually
+  depends on (unambiguously picking "the" active provider), so it's a real
+  constraint, not just documentation.
 
 ## Phase 2
 
