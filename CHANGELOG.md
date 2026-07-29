@@ -9,6 +9,30 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Added
+- Phase 1b (SSO): `OIDCProvider` (`app/auth/providers/oidc.py`) — the second
+  `AuthProvider` alongside `LocalPasswordProvider`, covering the OIDC
+  authorization-code flow (discovery, code exchange, ID-token signature
+  verification against the IdP's live JWKS, and `iss`/`aud`/`exp`/`nonce`
+  claim checks). Admin CRUD for `SSOProviderConfig` at `/sso/...` (gated by
+  `manage_sso`), with a test-connection action mirroring sources' `/check`
+  endpoint; `GET /auth/sso/status`, `GET /auth/sso/login`, and
+  `GET /auth/sso/callback` drive the actual sign-in flow, using a
+  Fernet-encrypted, self-contained `state` param rather than a server-side
+  state table. A first-time SSO sign-in auto-provisions a user with a new
+  builtin "No Access" role (`app.bootstrap.seed_no_access_role`) — an admin
+  assigns the real role afterward, per CLAUDE.md. Local login is unaffected
+  and keeps working alongside an enabled provider. Frontend: an SSO
+  settings admin page (gated by `manage_sso`, nav-linked) to configure the
+  provider and test its connection, and a "Sign in with {name}" button on
+  the Login page when one is enabled.
+- More unit tests: backend `app/audit.py` (`record_audit_event`'s field
+  defaults and its documented "doesn't commit" contract) and
+  `app/timeutils.py` (`utcnow`'s naive-datetime guarantee) were the only two
+  app modules without a dedicated test file — both now have one. Frontend:
+  extracted `memberPath` (the archive-member-path slicing logic that had been
+  duplicated inline in `FolderTree.svelte` twice, plus once more inside
+  `download-href.ts`) into `lib/tab-key.ts`, with tests, so the three call
+  sites can't silently drift apart.
 - README: real screenshots (Sources, Viewer, Role editor) under `docs/images/`,
   a short table of contents, and a fixed `git clone` command (was still the
   `<your-org>` placeholder). CONTRIBUTING.md gets the same clone-URL fix plus

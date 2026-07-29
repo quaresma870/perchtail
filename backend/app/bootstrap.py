@@ -2,7 +2,7 @@ import secrets
 
 from sqlmodel import Session, select
 
-from app.auth.models import User
+from app.auth.models import Role, User
 from app.auth.providers.local import create_local_user
 from app.auth.rbac import create_role
 from app.config import get_settings
@@ -13,6 +13,7 @@ logger = get_logger(__name__)
 
 SYSTEM_SOURCE_NAME = "PerchTail application logs"
 SUPER_ADMIN_ROLE_NAME = "Super Admin"
+NO_ACCESS_ROLE_NAME = "No Access"
 
 
 def seed_system_log_source(session: Session) -> Source:
@@ -98,3 +99,22 @@ def seed_initial_super_admin(session: Session) -> User | None:
         note="Log in and change this password immediately — it will not be shown again.",
     )
     return user
+
+
+def seed_no_access_role(session: Session) -> Role:
+    """The role SSO auto-provisioning assigns a brand-new user per CLAUDE.md's
+    Access control section ("SSO login auto-provisions a user with the
+    no-access default role; an admin assigns the real role afterward") — zero
+    global capabilities and (implicitly, since nothing ever grants it any)
+    zero source access. Idempotent, like the other bootstrap seeds."""
+    existing = session.exec(select(Role).where(Role.name == NO_ACCESS_ROLE_NAME)).first()
+    if existing is not None:
+        return existing
+
+    return create_role(
+        session,
+        actor_user_id=None,
+        name=NO_ACCESS_ROLE_NAME,
+        is_builtin=True,
+        is_super_admin=False,
+    )
