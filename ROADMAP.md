@@ -342,11 +342,61 @@ they come before any connector or UI work, not after.
 
 ## Phase 2
 
+- [x] Backend agent-link infrastructure: `Protocol.agent`, `AgentRegistry`,
+      the agent's WebSocket endpoint, and the `agent` connector
 - [ ] Go push-agent (single static binary, cross-compiled) for sources not
       reachable inbound
+- [ ] Frontend: agent source UI (enrollment-token generation, connection
+      status)
 - [ ] `SAMLProvider` (`python3-saml`) — **only if** a real need shows up; see
       the open decision in CLAUDE.md (OIDC already covers Azure AD/Entra ID,
       Okta, Google Workspace, Keycloak/Authentik)
+
+### Notes on decisions made — backend agent-link infrastructure
+
+- **The agent dials out; the backend still drives every command live.**
+  CLAUDE.md frames the push-agent purely as a reachability fix ("this is
+  about network reachability, not about the always-fresh rule above, which
+  still applies"), not license for a proactive mirror/sync design. So the
+  agent opens a persistent WebSocket to the connector and then just waits —
+  the connector sends `list`/`fetch` commands down that connection on
+  demand, exactly when a user browses or opens a file, and the agent reads
+  its local disk and replies. Nothing is pushed ahead of time; an agent-mode
+  source is exactly as "always-fresh" as an SSH or SMB one, just reached
+  over a connection the far end initiated instead of one this app dials
+  directly.
+- **WebSocket over HTTP long-polling or gRPC** for that persistent
+  connection — asked the user to weigh in on transport and got no response,
+  so made the call directly: plain `FastAPI`/Starlette WebSocket support
+  needs no extra dependency, cross-compiles trivially from Go
+  (`gorilla/websocket` or `nhooyr.io/websocket`), and a single long-lived
+  duplex connection is a more natural fit for "server pushes a command,
+  agent pushes back a result" than polling or a heavier RPC framework would
+  be for what is, at bottom, a two-message-type protocol.
+- **`AgentRegistry` bridges FastAPI's sync path operations to the one
+  async WebSocket.** Every existing connector (`collectors/ssh.py` etc.) is
+  plain sync code, run in FastAPI's thread pool; the agent's connection,
+  like any WebSocket, only exists on the main asyncio event loop.
+  `agent_registry.py`'s `send_command_sync` bridges the two via
+  `asyncio.run_coroutine_threadsafe` (schedule the send+await onto the
+  bound loop) plus a blocking `Future.result(timeout=...)` on the calling
+  thread — so `collectors/agent.py`'s `list_directory`/`fetch_file` read as
+  plain synchronous calls, same shape as every other connector, with the
+  cross-thread bridging fully contained in one module.
+- **In-memory registry, not a DB table**, for which sources currently have
+  a live connection — same reasoning as `scratch.py`'s `ScratchStore`: a
+  live connection is inherently per-process and can't survive a restart, so
+  persisting it would just be a stale value waiting to be read.
+- **Enrollment token is bearer-auth over the WebSocket handshake**, hashed
+  with SHA-256 before storage (`Source.agent_token_hash`) — same pattern as
+  `auth/sessions.py`'s session tokens. `POST /sources/{id}/agent-token`
+  returns the plaintext exactly once, at generation time, mirroring the
+  existing admin reset-password UX; regenerating invalidates whatever token
+  the agent's config file was using.
+- **`Source.agent_last_seen_at`** is informational only (surfaced in the
+  admin UI), updated on every successful handshake — the actual "is it
+  connected right now" answer always comes from `AgentRegistry.is_connected`,
+  never from this column, so it can't drift out of sync with reality.
 
 ## Phase 3
 

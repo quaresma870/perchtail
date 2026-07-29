@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.agent_registry import get_agent_registry
+from app.api.agent_ws import router as agent_ws_router
 from app.api.archive import router as archive_router
 from app.api.auth import router as auth_router
 from app.api.customers import router as customers_router
@@ -42,6 +45,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    get_agent_registry().bind_loop(asyncio.get_running_loop())
     with Session(engine) as session:
         seed_system_log_source(session)
         seed_initial_super_admin(session)
@@ -77,6 +81,7 @@ app.include_router(rules_router)
 app.include_router(roles_router)
 app.include_router(users_router)
 app.include_router(sso_router)
+app.include_router(agent_ws_router)
 
 
 @app.get("/healthz")
