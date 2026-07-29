@@ -54,5 +54,37 @@ release ships (0.x releases may include breaking changes between minors).
 - Built-in log viewer (M6): `app/bootstrap.py` seeds a system source on
   first startup pointed at `LOG_DIR`, so the app's own rotated logs are
   browsable through the exact same live-browsing path as customer sources
-  — gated purely by `is_super_admin` (already enforced since M2). See
+  — gated purely by `is_super_admin` (already enforced since M2).
+- Admin CRUD API (M7, part 1): `api/customers.py`, `api/folders.py`,
+  `api/sources.py`, `api/rules.py`, `api/roles.py`, `api/users.py` — the
+  full backend surface the admin/viewer UI needs. Sources gain a
+  `POST /sources/{id}/check` on-demand connection check, replacing the
+  pre-pivot "run-now"/"run history" wording in CLAUDE.md's original Web UI
+  section (there's no `Run` model and nothing runs on a schedule anymore —
+  see ROADMAP.md's M7 notes). Rules gain a gitignore-style raw-text
+  paste-mode endpoint (`PUT .../rules/raw`, leading `!` negates a line) in
+  addition to the row-based CRUD + reorder. Roles gain a duplicate-role
+  action (clones grants too) and grant CRUD, with a privilege-escalation
+  guard: only an existing super-admin can create or edit a super-admin
+  role. Users gain admin-driven create/update/reset-password/deactivate
+  (deactivate is a soft delete, per CLAUDE.md's Security notes). Customer/
+  folder management is treated as an admin surface gated by the
+  `create_source` global capability rather than per-scope grants, per
+  CLAUDE.md's "its own small admin surface" wording. `api/archive.py` also
+  gains `GET .../download-zip` (zips an entire folder, fetching each
+  contained file fresh) so the Viewer can offer "download a zipped folder,"
+  not just a single file. `auth/me` (and login/change-password) now also
+  returns `is_super_admin`/`global_capabilities` so the frontend can gate
+  nav without a second round-trip.
+- Admin & viewer UI (M7, part 2): a Vite + Svelte + TypeScript SPA under
+  `frontend/` — the frontend stack CLAUDE.md never named (see ROADMAP.md's
+  M7 notes for why Svelte). Login/change-password, a sources list with
+  inline connection-check and a create/edit form, a rule editor (row-based
+  + gitignore-style raw-text paste mode, toggled per source), a lazy-loaded
+  folder tree (children fetched only on expand, one level of `.zip`/
+  `.tar.gz` expansion) feeding a CodeMirror 6 tabbed viewer pane (in-file
+  search via CodeMirror's built-in search panel, single-file and
+  zipped-folder download), and Roles/Users admin pages (grant CRUD,
+  duplicate-role, reset-password, deactivate). CI gains a `frontend` job
+  (`svelte-check` + `vite build`) alongside the existing backend job. See
   [ROADMAP.md](ROADMAP.md) for what's next.

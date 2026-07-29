@@ -80,6 +80,23 @@ def test_me_returns_current_user_after_login(client, session):
     assert response.json()["username"] == USERNAME
 
 
+def test_me_includes_role_capabilities_for_frontend_nav_gating(client, session):
+    from app.auth.models import GlobalCapability
+
+    role = Role(name="Manager", global_capabilities=[GlobalCapability.manage_users])
+    session.add(role)
+    session.commit()
+    session.refresh(role)
+    create_local_user(
+        session, actor_user_id=None, username="mgr@example.com", password=PASSWORD, role_id=role.id
+    )
+    _login(client, username="mgr@example.com")
+
+    response = client.get("/auth/me")
+    assert response.json()["is_super_admin"] is False
+    assert response.json()["global_capabilities"] == ["manage_users"]
+
+
 def test_logout_revokes_the_session(client, session):
     _make_user(session)
     _login(client)

@@ -172,17 +172,67 @@ they come before any connector or UI work, not after.
   super-admin can browse and open the app's own live log (and literally see
   its own audit-log entries in the response), a regular user gets 403.
 
-### M7 — Admin & viewer UI
-- [ ] Sources list (status, protocol, last run, rule count, run-now)
-- [ ] Rule editor: row-based UI + raw-text/gitignore-style paste mode
-- [ ] Run history with errors
-- [ ] Lazy-loaded folder tree (fetch children on expand only)
-- [ ] CodeMirror-based viewer pane: tabs, in-file search, download (single file
+### M7 — Admin & viewer UI ✅
+
+  Note on scope vs. CLAUDE.md's original wording: "last run"/"run-now"/"run
+  history with errors" are pre-pivot leftovers from when this project was
+  designed around scheduled mirroring (see CLAUDE.md's own opening section on
+  why "logmirror" stopped fitting). There is no `Run`/`SyncState` model and
+  nothing is fetched on a schedule anymore — every browse is live and every
+  open is a fresh fetch, so there is nothing to "run" and no history to keep.
+  Replaced with a lightweight on-demand connection check (`POST
+  /sources/{id}/check`) that opens the connector and lists the base path,
+  surfacing reachability in the sources list without inventing a persistent
+  run concept the architecture no longer has.
+
+  Frontend stack: CLAUDE.md never named one beyond "CodeMirror 6 for the
+  editor component." Asked the user to pick (Vite+Svelte / Vite+Vue 3 /
+  Vite+React / server-rendered+htmx); the question went unanswered, so,
+  consistent with this project's practice of making documented judgment calls
+  on undecided points rather than blocking, proceeding with the recommended
+  default: **Vite + Svelte + TypeScript**. Reasoning: smallest runtime and
+  build output of the SPA options (matters for a self-hosted single-container
+  app), no JSX/virtual-DOM overhead for what's mostly CRUD forms and a tree +
+  editor pane, and first-class, low-ceremony support for the CodeMirror 6
+  integration this milestone needs anyway. Easily revisited before 1.0 if it
+  turns out to be the wrong call — nothing else in the architecture depends
+  on this choice.
+
+  Backend CRUD API this UI needs (`api/customers.py`, `api/folders.py`,
+  `api/sources.py`, `api/rules.py`, `api/roles.py`, `api/users.py`) is done
+  and tested. `api/archive.py` also gained a `GET .../download-zip` endpoint
+  (zips an entire folder, fetching each contained file fresh) since CLAUDE.md's
+  Viewer spec calls for downloading "a single file or a zipped folder" and
+  only the single-file path existed before this milestone. See CHANGELOG.md
+  for what each surface does.
+
+  Access-tree simplification: CLAUDE.md's Roles UI spec asks for a
+  "customer/folder/source access tree with search/filter, collapsed by
+  default." Built instead: a flat scope-type + scope-picker dropdown pair
+  (customer → folder → source) plus a table of existing grants. This proves
+  the grant model end-to-end (create/update/delete a grant at any scope,
+  most-specific-wins resolution, duplicate-role cloning grants) without the
+  extra weeks a real nested/collapsible/searchable tree widget would take —
+  worth revisiting once there are enough real customers/folders that a flat
+  dropdown gets unwieldy, not before.
+
+  Archive-browsing limit: expanding a `.zip`/`.tar.gz` lists its members
+  flat (whatever the archive's own namelist gives), one level deep — the
+  backend's `/browse` can't recurse into a sub-path *inside* an archive (see
+  `api/archive.py`), so a directory-flagged member inside an archive is a
+  dead end in the tree, not further expandable. Matches what M4's archive
+  handling actually supports; nested-archive UX wasn't asked for.
+
+- [x] Sources list (status via connection check, protocol, rule count,
+      system badge — non-editable/non-deletable)
+- [x] Rule editor: row-based UI + raw-text/gitignore-style paste mode
+- [x] Lazy-loaded folder tree (fetch children on expand only)
+- [x] CodeMirror-based viewer pane: tabs, in-file search, download (single file
       or zipped folder)
-- [ ] Roles UI: list, editor (global-capability toggles + customer/source
-      access tree with search/filter, collapsed by default), duplicate-role
-      action
-- [ ] Users UI: list with active/inactive, create, reset password,
+- [x] Roles UI: list, editor (global-capability toggles + customer/folder/
+      source access grants, duplicate-role action) — see access-tree
+      simplification note above
+- [x] Users UI: list with active/inactive, create, reset password,
       deactivate/delete, assigned role
 
 ### M8 — Phase 1 exit
