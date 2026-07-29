@@ -56,18 +56,42 @@ they come before any connector or UI work, not after.
 - [x] Zero rules → matches nothing (explicit opt-in)
 - [x] Unit tests covering ordering, glob/regex mix, and the empty-ruleset case
 
-### M4 — First connector: SSH/SFTP + ephemeral scratch
+### M4 — First connector: SSH/SFTP + ephemeral scratch ✅
 - See [docs/source-setup.md](docs/source-setup.md) for the SSH/SFTP-side
   prerequisites (dedicated account, chroot jail, ACLs) this connector assumes.
-- [ ] `collectors/ssh.py` via `paramiko`: live directory listing filtered
+- [x] `collectors/ssh.py` via `paramiko`: live directory listing filtered
       through the rule engine, fetch-on-open
-- [ ] `scratch.py`: per-session scratch store, refcounted purge, idle-sweep
+- [x] `scratch.py`: per-session scratch store, refcounted purge, idle-sweep
       backstop, size-guard eviction (zero-ref oldest first)
-- [ ] `.gz` transparent decompression; `.zip`/`.tar.gz` as virtual folders
+- [x] `.gz` transparent decompression; `.zip`/`.tar.gz` as virtual folders
       (`zipfile`/`tarfile`) with the same fresh-fetch/purge rules applied to
       extracted members
-- [ ] Permission dependency applied to every archive endpoint from the start
-- [ ] Tests mock the SSH client — no real remote host in CI
+- [x] Permission dependency applied to every archive endpoint from the start
+- [x] Tests mock the SSH client — no real remote host in CI
+
+  Notes on decisions made building this:
+  - `Source.credential_ref` decrypts to a JSON blob (`{"username":...,
+    "private_key" or "password":...}`), not a bare secret — CLAUDE.md's data
+    model didn't spell out how SSH auth fields map onto one encrypted
+    string field. Added `app.crypto.encrypt_credential`/`decrypt_credential`
+    for this.
+  - Directories are always listed (never filtered by the rule engine) so
+    the tree stays navigable toward deeper matches like `**/*.log`; only
+    files are subject to the rule chain. An exclude rule targeting a
+    directory still hides everything under it (its files fail the rule
+    check) even though the directory itself may still appear, possibly
+    empty — a UX wrinkle, not a security gap.
+  - `api/archive.py`'s `open`/`download` take `path` and an optional
+    `member` (for archive contents) as separate query params rather than
+    a combined virtual path string, to avoid ambiguous prefix-parsing for
+    nested archives. Only one level of archive nesting is supported.
+  - Added a hard path-traversal guard (`rules.is_safe_relative_path`)
+    independent of the rule engine's own verdict — a permissive rule could
+    coincidentally match a `../..` payload, so this can't be the only
+    defense (CLAUDE.md's security scope explicitly calls this out).
+  - SSH host-key verification uses trust-on-first-use (`AutoAddPolicy`);
+    sources are admin-configured, not arbitrary input, so this is an
+    acceptable default for now, not a hardened one.
 
 ### M5 — Remaining connectors
 - See [docs/source-setup.md](docs/source-setup.md) for the SMB/WinRM-side
