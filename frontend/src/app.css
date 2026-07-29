@@ -33,6 +33,8 @@
   --protocol-winrm-text: #f2a95c;
   --protocol-local-bg: #1c3327;
   --protocol-local-text: #6fcf9a;
+  --protocol-agent-bg: #33241c;
+  --protocol-agent-text: #f2946a;
 
   --radius: 8px;
   --radius-sm: 5px;

@@ -16,10 +16,13 @@
     smb: 'SMB',
     winrm: 'WinRM',
     local: 'Local',
+    agent: 'Agent',
   }
 
   const customerName = (id: number | null) =>
     id === null ? null : (customers.find((c) => c.id === id)?.name ?? `#${id}`)
+
+  const formatLastSeen = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : null)
 
   function checkResultOk(id: number): boolean | null {
     const result = checkResults[id]
@@ -118,7 +121,17 @@
                 <span class="badge protocol-{source.protocol}">{PROTOCOL_LABEL[source.protocol]}</span>
               </td>
               <td>
-                {#if checkResults[source.id] === 'checking'}
+                {#if source.protocol === 'agent'}
+                  {#if source.agent_connected}
+                    <span class="status status-ok">✓ connected</span>
+                  {:else if formatLastSeen(source.agent_last_seen_at)}
+                    <span class="status status-fail" title="Not connected right now"
+                      >✕ last seen {formatLastSeen(source.agent_last_seen_at)}</span
+                    >
+                  {:else}
+                    <span class="status status-pending">never connected</span>
+                  {/if}
+                {:else if checkResults[source.id] === 'checking'}
                   <span class="status status-pending">checking…</span>
                 {:else if checkResultOk(source.id) !== null}
                   {#if checkResultOk(source.id)}
@@ -238,6 +251,10 @@
   .protocol-local {
     background: var(--protocol-local-bg);
     color: var(--protocol-local-text);
+  }
+  .protocol-agent {
+    background: var(--protocol-agent-bg);
+    color: var(--protocol-agent-text);
   }
   .status {
     font-size: 0.82rem;

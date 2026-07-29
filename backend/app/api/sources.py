@@ -50,6 +50,7 @@ class SourcePublic(BaseModel):
     is_system: bool
     rule_count: int
     has_credential: bool
+    has_agent_token: bool
     agent_connected: bool
     agent_last_seen_at: datetime | None
 
@@ -99,6 +100,7 @@ def _to_public(session: Session, source: Source) -> SourcePublic:
         is_system=source.is_system,
         rule_count=rule_count,
         has_credential=source.credential_ref is not None,
+        has_agent_token=source.agent_token_hash is not None,
         agent_connected=(
             source.protocol == Protocol.agent and get_agent_registry().is_connected(source.id)
         ),

@@ -30,6 +30,13 @@ release ships (0.x releases may include breaking changes between minors).
   on demand — nothing is proactively synced. Cross-compiles for
   linux/amd64, linux/arm64, and windows/amd64; a dedicated CI job builds,
   vets, tests, and cross-compiles it on every push.
+- Phase 2 (push-agent) frontend: `SourceEditor.svelte` gains an `agent`
+  protocol option — no host/credential fields, instead a one-time
+  enrollment-token generator ("Generate token" / "Regenerate token", with
+  `has_agent_token` newly reported by `SourcePublic`) for pasting into the
+  agent's `PERCHTAIL_AGENT_TOKEN` config. `Sources.svelte` shows agent
+  sources' live connection state (connected / never connected / last seen)
+  instead of the manual reachability check the other protocols use.
 
 ## [0.1.1] - 2026-07-30
 
