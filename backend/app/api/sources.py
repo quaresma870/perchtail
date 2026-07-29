@@ -1,11 +1,17 @@
+import hashlib
+import secrets
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
+from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, User
 from app.auth.rbac import require_capability, require_global_capability, visible_source_ids
+from app.collectors import agent as agent_collector
 from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
 from app.collectors import ssh as ssh_collector
@@ -25,6 +31,7 @@ _CONNECTORS = {
     Protocol.smb: smb_collector,
     Protocol.winrm: winrm_collector,
     Protocol.local: local_collector,
+    Protocol.agent: agent_collector,
 }
 
 
@@ -43,6 +50,8 @@ class SourcePublic(BaseModel):
     is_system: bool
     rule_count: int
     has_credential: bool
+    agent_connected: bool
+    agent_last_seen_at: datetime | None
 
 
 class SourceCreate(BaseModel):
@@ -90,6 +99,10 @@ def _to_public(session: Session, source: Source) -> SourcePublic:
         is_system=source.is_system,
         rule_count=rule_count,
         has_credential=source.credential_ref is not None,
+        agent_connected=(
+            source.protocol == Protocol.agent and get_agent_registry().is_connected(source.id)
+        ),
+        agent_last_seen_at=source.agent_last_seen_at,
     )
 
 
@@ -263,3 +276,42 @@ def check_connection(
         return ConnectionCheckResult(ok=False, detail=str(exc))
 
     return ConnectionCheckResult(ok=True, detail="Connected")
+
+
+class AgentTokenResult(BaseModel):
+    token: str
+
+
+@router.post("/{source_id}/agent-token", response_model=AgentTokenResult)
+def regenerate_agent_token(
+    source_id: int,
+    user: User = Depends(require_manage),
+    session: Session = Depends(get_session),
+):
+    """Issues a fresh enrollment token for an agent-protocol source (see
+    Protocol.agent's docstring in app/models.py). Only the hash is stored —
+    same pattern as auth/sessions.py's session tokens — so the plaintext is
+    returned here once and never again; regenerating invalidates whatever
+    token the agent config was using before, same UX as an admin resetting a
+    user's password."""
+    source = session.get(Source, source_id)
+    if source is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    if source.protocol != Protocol.agent:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only agent-protocol sources have an enrollment token",
+        )
+
+    token = secrets.token_urlsafe(32)
+    source.agent_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    session.add(source)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="source.agent_token_regenerate",
+        target_type="source",
+        target_id=source.id,
+    )
+    session.commit()
+    return AgentTokenResult(token=token)
