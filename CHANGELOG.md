@@ -51,6 +51,10 @@ release ships (0.x releases may include breaking changes between minors).
   gains `folder`, generalizing the existing source-beats-customer grant
   resolution to N levels — source → folder chain (nearest first) →
   customer, most specific wins.
+- Built-in log viewer (M6): `app/bootstrap.py` seeds a system source on
+  first startup pointed at `LOG_DIR`, so the app's own rotated logs are
+  browsable through the exact same live-browsing path as customer sources
+  — gated purely by `is_super_admin` (already enforced since M2).
 - Admin CRUD API (M7, part 1): `api/customers.py`, `api/folders.py`,
   `api/sources.py`, `api/rules.py`, `api/roles.py`, `api/users.py` — the
   full backend surface the admin/viewer UI needs. Sources gain a
@@ -82,4 +86,5 @@ release ships (0.x releases may include breaking changes between minors).
   search via CodeMirror's built-in search panel, single-file and
   zipped-folder download), and Roles/Users admin pages (grant CRUD,
   duplicate-role, reset-password, deactivate). CI gains a `frontend` job
-  (`svelte-check` + `vite build`) alongside the existing backend job.
+  (`svelte-check` + `vite build`) alongside the existing backend job. See
+  [ROADMAP.md](ROADMAP.md) for what's next.

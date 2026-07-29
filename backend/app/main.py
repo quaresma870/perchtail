@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import structlog
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, Request
+from sqlmodel import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.archive import router as archive_router
@@ -14,8 +15,9 @@ from app.api.roles import router as roles_router
 from app.api.rules import router as rules_router
 from app.api.sources import router as sources_router
 from app.api.users import router as users_router
+from app.bootstrap import seed_system_log_source
 from app.config import get_settings
-from app.db import init_db
+from app.db import engine, init_db
 from app.logging_config import configure_logging, get_logger
 from app.scratch import get_scratch_store
 
@@ -37,6 +39,9 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    with Session(engine) as session:
+        seed_system_log_source(session)
+
     settings = get_settings()
     store = get_scratch_store()
     scheduler.add_job(

@@ -152,11 +152,25 @@ they come before any connector or UI work, not after.
     semantics (`scandir`, `open_file`), same reasoning as choosing
     `paramiko`'s SFTP layer over raw SSH channels for M4.
 
-### M6 — Built-in log viewer (dogfooding)
-- [ ] System source seeded on first startup, pointed at `LOG_DIR`,
+### M6 — Built-in log viewer (dogfooding) ✅
+- [x] System source seeded on first startup, pointed at `LOG_DIR`,
       `is_system = true`, `customer_id = null`
-- [ ] Access gated purely by `is_super_admin`, no grant can reach it
+- [x] Access gated purely by `is_super_admin`, no grant can reach it
+      (already true structurally since M2 — `resolve_capability`'s
+      `is_system` short-circuit — this milestone was really about seeding)
 - [ ] "system" badge in the admin sources list; non-editable, non-deletable
+      — UI concern, deferred to M7 (no source CRUD API/UI exists yet at all,
+      for any source, so "non-editable" isn't meaningfully testable before
+      M7 builds source CRUD in the first place)
+
+  Note: seeded with one broad include rule (`**/*`) rather than zero rules —
+  zero rules would make the viewer show nothing at all (rules.py's explicit
+  opt-in default). `LOG_DIR` is a dedicated directory that should only ever
+  contain this app's own rotated logs, and the source is already
+  super-admin-only, so a broad rule here doesn't weaken the security model.
+  Verified live end-to-end: seeding is idempotent across restarts, a
+  super-admin can browse and open the app's own live log (and literally see
+  its own audit-log entries in the response), a regular user gets 403.
 
 ### M7 — Admin & viewer UI ✅
 
