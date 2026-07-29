@@ -95,9 +95,12 @@
   onMount(load)
 </script>
 
-<div class="rule-editor">
+<div class="rule-editor card">
   <div class="toolbar">
-    <h3>Rules</h3>
+    <div>
+      <h3>Rules</h3>
+      <p class="hint">Evaluated in order, last match wins.</p>
+    </div>
     {#if !readOnly}
       <div class="mode-toggle">
         <button class:active={mode === 'rows'} on:click={() => (mode = 'rows')}>Rows</button>
@@ -115,82 +118,83 @@
   {/if}
 
   {#if loading}
-    <p>Loading…</p>
+    <p class="hint">Loading…</p>
   {:else if mode === 'rows'}
-    <table>
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>Type</th>
-          <th>Pattern</th>
-          <th>Notes</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each rules as rule, index (rule.id)}
-          <tr>
-            <td class="order">
-              {#if !readOnly}
-                <button class="tiny" disabled={index === 0} on:click={() => move(index, -1)}
-                  >▲</button
-                >
-                <button class="tiny" disabled={index === rules.length - 1} on:click={() => move(index, 1)}
-                  >▼</button
-                >
-              {/if}
-            </td>
-            <td>
-              <select disabled={readOnly} bind:value={rule.type} on:change={() => updateRule(rule)}>
-                <option value="include">include</option>
-                <option value="exclude">exclude</option>
-              </select>
-            </td>
-            <td>
-              <input
-                disabled={readOnly}
-                value={rule.pattern_kind === 'regex' ? `re:${rule.pattern}` : rule.pattern}
-                on:change={(e) => {
-                  const raw = (e.target as HTMLInputElement).value
-                  if (raw.startsWith('re:')) {
-                    rule.pattern = raw.slice(3)
-                    rule.pattern_kind = 'regex'
-                  } else {
-                    rule.pattern = raw
-                    rule.pattern_kind = 'glob'
-                  }
-                  updateRule(rule)
-                }}
-              />
-            </td>
-            <td>
-              <input disabled={readOnly} bind:value={rule.notes} on:change={() => updateRule(rule)} />
-            </td>
-            <td>
-              {#if !readOnly}
-                <button class="link danger" on:click={() => deleteRule(rule)}>delete</button>
-              {/if}
-            </td>
-          </tr>
-        {/each}
-        {#if rules.length === 0}
-          <tr>
-            <td colspan="5" class="empty">
-              No rules yet — nothing is visible on this source until one is added.
-            </td>
-          </tr>
-        {/if}
-      </tbody>
-    </table>
+    <div class="rule-rows">
+      {#each rules as rule, index (rule.id)}
+        <div class="rule-row">
+          <span class="order-num">{index + 1}</span>
+          {#if !readOnly}
+            <div class="order-btns">
+              <button class="tiny" disabled={index === 0} on:click={() => move(index, -1)}>▲</button>
+              <button
+                class="tiny"
+                disabled={index === rules.length - 1}
+                on:click={() => move(index, 1)}>▼</button
+              >
+            </div>
+          {/if}
+          <select
+            class="type-select"
+            class:include={rule.type === 'include'}
+            class:exclude={rule.type === 'exclude'}
+            disabled={readOnly}
+            bind:value={rule.type}
+            on:change={() => updateRule(rule)}
+          >
+            <option value="include">include</option>
+            <option value="exclude">exclude</option>
+          </select>
+          <input
+            class="input pattern-input mono"
+            disabled={readOnly}
+            value={rule.pattern_kind === 'regex' ? `re:${rule.pattern}` : rule.pattern}
+            on:change={(e) => {
+              const raw = (e.target as HTMLInputElement).value
+              if (raw.startsWith('re:')) {
+                rule.pattern = raw.slice(3)
+                rule.pattern_kind = 'regex'
+              } else {
+                rule.pattern = raw
+                rule.pattern_kind = 'glob'
+              }
+              updateRule(rule)
+            }}
+          />
+          <input
+            class="input notes-input"
+            placeholder="notes"
+            disabled={readOnly}
+            bind:value={rule.notes}
+            on:change={() => updateRule(rule)}
+          />
+          {#if !readOnly}
+            <button class="link danger" on:click={() => deleteRule(rule)}>delete</button>
+          {/if}
+        </div>
+      {/each}
+      {#if rules.length === 0}
+        <p class="empty">No rules yet — nothing is visible on this source until one is added.</p>
+      {/if}
+    </div>
 
     {#if !readOnly}
       <form class="add-row" on:submit|preventDefault={addRule}>
-        <select bind:value={newType}>
+        <select
+          class="input type-select"
+          class:include={newType === 'include'}
+          class:exclude={newType === 'exclude'}
+          bind:value={newType}
+        >
           <option value="include">include</option>
           <option value="exclude">exclude</option>
         </select>
-        <input placeholder="**/*.log or re:^access.*\.log$" bind:value={newPattern} />
-        <button type="submit">Add rule</button>
+        <input
+          class="input mono"
+          placeholder="**/*.log or re:^access.*\.log$"
+          bind:value={newPattern}
+        />
+        <button class="btn btn-primary" type="submit">Add rule</button>
       </form>
     {/if}
   {:else}
@@ -199,107 +203,154 @@
       <code>!</code> to exclude, <code>re:</code> to use regex. Blank lines and
       <code>#</code> comments are ignored.
     </p>
-    <textarea rows="10" bind:value={rawText} disabled={readOnly}></textarea>
+    <textarea class="input mono" rows="10" bind:value={rawText} disabled={readOnly}></textarea>
     {#if !readOnly}
-      <button on:click={applyRaw}>Apply</button>
+      <button class="btn btn-primary" on:click={applyRaw}>Apply</button>
     {/if}
   {/if}
 </div>
 
 <style>
   .rule-editor {
-    background: #fff;
-    border-radius: 6px;
-    padding: 1rem 1.25rem;
+    padding: 1.25rem 1.5rem;
+    margin-top: 0;
   }
   .toolbar {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
   }
   h3 {
     margin: 0;
     font-size: 1rem;
+    color: var(--text);
+  }
+  .mode-toggle {
+    display: flex;
+    gap: 0.3rem;
   }
   .mode-toggle button {
-    border: 1px solid #ccc;
-    background: #f5f5f5;
-    padding: 0.25rem 0.6rem;
-    font-size: 0.8rem;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated-2);
+    color: var(--text-muted);
+    padding: 0.3rem 0.7rem;
+    font-size: 0.78rem;
     cursor: pointer;
+    border-radius: var(--radius-sm);
   }
   .mode-toggle button.active {
-    background: #2f6fed;
+    background: var(--accent);
     color: #fff;
-    border-color: #2f6fed;
+    border-color: var(--accent);
   }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 0.75rem;
+  .rule-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 1rem;
   }
-  th,
-  td {
-    text-align: left;
-    padding: 0.35rem 0.5rem;
-    font-size: 0.85rem;
-    border-bottom: 1px solid #eee;
+  .rule-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    background: var(--bg);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    padding: 0.45rem 0.6rem;
   }
-  input,
-  select {
-    width: 100%;
-    padding: 0.3rem;
-    border: 1px solid #ccc;
-    border-radius: 3px;
+  .order-num {
+    color: var(--text-faint);
+    font-size: 0.78rem;
+    width: 1.2rem;
+    text-align: right;
   }
-  .order {
-    white-space: nowrap;
+  .order-btns {
+    display: flex;
+    flex-direction: column;
   }
   button.tiny {
     border: none;
     background: none;
+    color: var(--text-faint);
     cursor: pointer;
     padding: 0 0.2rem;
+    font-size: 0.6rem;
+    line-height: 1.1;
+  }
+  button.tiny:hover:not(:disabled) {
+    color: var(--text);
+  }
+  button.tiny:disabled {
+    opacity: 0.3;
+    cursor: default;
+  }
+  .type-select {
+    flex: 0 0 auto;
+    width: auto;
+    padding: 0.2rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    border: 1px solid transparent;
+  }
+  .type-select.include {
+    background: var(--success-soft);
+    color: var(--success);
+  }
+  .type-select.exclude {
+    background: var(--danger-soft);
+    color: var(--danger);
+  }
+  .pattern-input {
+    flex: 1;
+    min-width: 0;
+  }
+  .notes-input {
+    flex: 0 0 140px;
   }
   button.link {
     border: none;
     background: none;
-    color: #2f6fed;
+    color: var(--accent-hover);
     cursor: pointer;
     padding: 0;
+    font-size: 0.8rem;
+    white-space: nowrap;
   }
   button.link.danger {
-    color: #c0392b;
+    color: var(--danger);
   }
   .add-row {
     display: flex;
     gap: 0.5rem;
-    margin-top: 0.75rem;
+    margin-top: 0.9rem;
   }
-  .add-row select {
-    flex: 0 0 110px;
+  .add-row .type-select {
+    flex: 0 0 auto;
+  }
+  .add-row input {
+    flex: 1;
   }
   .add-row button {
     flex: 0 0 auto;
-    padding: 0.4rem 0.8rem;
   }
   textarea {
     width: 100%;
-    font-family: ui-monospace, Consolas, monospace;
     font-size: 0.85rem;
-    padding: 0.5rem;
-    border: 1px solid #ccc;
-    border-radius: 4px;
+    resize: vertical;
   }
   .hint {
-    font-size: 0.8rem;
-    color: #666;
+    font-size: 0.78rem;
+    color: var(--text-faint);
+    margin: 0.2rem 0 0;
   }
   .empty {
     text-align: center;
-    color: #888;
+    color: var(--text-faint);
+    padding: 1.5rem 0;
+    margin: 0;
   }
   .error {
-    color: #c0392b;
+    color: var(--danger);
   }
 </style>

@@ -1,4 +1,8 @@
-# PerchTail
+<p align="center">
+  <img src="frontend/public/favicon.svg" alt="PerchTail logo" width="96" height="96">
+</p>
+
+<h1 align="center">PerchTail</h1>
 
 > Live, rule-scoped log browsing across Linux and Windows servers — no agents,
 > nothing mirrored, nothing left behind.

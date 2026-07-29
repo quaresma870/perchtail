@@ -23,20 +23,31 @@
 </script>
 
 <div class="login-page">
-  <form on:submit|preventDefault={handleSubmit}>
-    <h1>PerchTail</h1>
+  <form class="card" on:submit|preventDefault={handleSubmit}>
+    <div class="brand">
+      <img src="/favicon.svg" alt="" width="40" height="40" />
+      <h1>PerchTail</h1>
+    </div>
     <label>
       Username
-      <input type="text" bind:value={username} autocomplete="username" required />
+      <input class="input" type="text" bind:value={username} autocomplete="username" required />
     </label>
     <label>
       Password
-      <input type="password" bind:value={password} autocomplete="current-password" required />
+      <input
+        class="input"
+        type="password"
+        bind:value={password}
+        autocomplete="current-password"
+        required
+      />
     </label>
     {#if error}
       <p class="error">{error}</p>
     {/if}
-    <button type="submit" disabled={submitting}>{submitting ? 'Signing in…' : 'Sign in'}</button>
+    <button class="btn btn-primary" type="submit" disabled={submitting}>
+      {submitting ? 'Signing in…' : 'Sign in'}
+    </button>
   </form>
 </div>
 
@@ -46,49 +57,44 @@
     align-items: center;
     justify-content: center;
     min-height: 100vh;
-    background: #1f2430;
+    background: var(--bg);
+    background-image: radial-gradient(circle at 50% 0%, #1b1f30 0%, var(--bg) 60%);
   }
   form {
-    background: #fff;
-    padding: 2rem 2.25rem;
-    border-radius: 8px;
-    width: 320px;
+    padding: 2.25rem 2.25rem;
+    width: 340px;
     display: flex;
     flex-direction: column;
-    gap: 0.9rem;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    gap: 1rem;
+  }
+  .brand {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.25rem;
   }
   h1 {
-    margin: 0 0 0.5rem;
-    font-size: 1.4rem;
-    text-align: center;
+    margin: 0;
+    font-size: 1.3rem;
+    color: var(--text);
   }
   label {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 0.35rem;
     font-size: 0.85rem;
-    color: #444;
+    color: var(--text-muted);
   }
   input {
-    padding: 0.5rem;
-    border: 1px solid #ccc;
-    border-radius: 4px;
+    width: 100%;
   }
   button {
-    margin-top: 0.5rem;
-    padding: 0.6rem;
-    border: none;
-    border-radius: 4px;
-    background: #2f6fed;
-    color: #fff;
-    font-weight: 600;
-  }
-  button:disabled {
-    opacity: 0.6;
+    margin-top: 0.4rem;
+    padding: 0.65rem;
   }
   .error {
-    color: #c0392b;
+    color: var(--danger);
     font-size: 0.85rem;
     margin: 0;
   }

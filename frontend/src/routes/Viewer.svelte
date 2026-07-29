@@ -123,16 +123,16 @@
   <div class="picker page">
     <h1>Choose a source to browse</h1>
     {#if loading}
-      <p>Loading…</p>
+      <p class="hint">Loading…</p>
     {:else if error}
       <p class="error">{error}</p>
     {:else}
       <ul>
         {#each sources as s (s.id)}
           <li>
-            <button on:click={() => push(`/viewer/${s.id}`)}>
+            <button class="card" on:click={() => push(`/viewer/${s.id}`)}>
               {s.name}
-              {#if s.is_system}<span class="badge">system</span>{/if}
+              {#if s.is_system}<span class="badge badge-accent">system</span>{/if}
             </button>
           </li>
         {/each}
@@ -153,7 +153,7 @@
       {:else}
         <div class="tree-body">
           {#each rootEntries as entry (entry.path)}
-            <FolderTree {sourceId} {entry} on:open={handleOpen} />
+            <FolderTree {sourceId} {entry} {activeKey} on:open={handleOpen} />
           {/each}
           {#if rootEntries.length === 0}
             <p class="hint">Nothing visible here — check the source's rules.</p>
@@ -166,7 +166,13 @@
       <div class="tabs">
         {#each tabs as tab (tab.key)}
           <div class="tab" class:active={tab.key === activeKey}>
-            <button class="tab-label" on:click={() => (activeKey = tab.key)}>{tab.name}</button>
+            <button class="tab-label" on:click={() => (activeKey = tab.key)}>
+              <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z" />
+                <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+              </svg>
+              {tab.name}
+            </button>
             <button class="close" on:click={() => closeTab(tab)} aria-label={`Close ${tab.name}`}
               >×</button
             >
@@ -175,13 +181,18 @@
       </div>
       {#if activeTab}
         <div class="pane-toolbar">
-          <span class="hint">Ctrl/Cmd+F to search in file</span>
+          <span class="hint">⌕ Ctrl/Cmd+F to search in file</span>
           <a
             class="link"
             href={`/sources/${sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
             target="_blank"
             rel="noreferrer"
           >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 3v12" />
+              <path d="m6 11 6 6 6-6" />
+              <path d="M5 21h14" />
+            </svg>
             Download
           </a>
         </div>
@@ -195,29 +206,28 @@
 
 <style>
   .page {
-    padding: 1.5rem;
+    padding: 1.75rem 2rem;
   }
   .picker ul {
     list-style: none;
     padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-width: 480px;
   }
   .picker button {
     border: none;
-    background: #fff;
-    padding: 0.6rem 1rem;
+    padding: 0.75rem 1rem;
     width: 100%;
     text-align: left;
-    border-radius: 4px;
-    margin-bottom: 0.4rem;
     cursor: pointer;
+    color: var(--text);
+    font-size: 0.92rem;
   }
-  .badge {
-    margin-left: 0.5rem;
-    font-size: 0.7rem;
-    background: #2f6fed;
-    color: #fff;
-    padding: 0.05rem 0.4rem;
-    border-radius: 3px;
+  .picker button:hover {
+    border-color: var(--accent-border);
   }
   .viewer {
     flex: 1;
@@ -227,33 +237,41 @@
   .tree {
     width: 280px;
     flex: 0 0 280px;
-    border-right: 1px solid #ddd;
-    background: #fafbfc;
+    border-right: 1px solid var(--border-soft);
+    background: var(--bg-elevated);
     display: flex;
     flex-direction: column;
     min-height: 0;
   }
   .tree-header {
-    padding: 0.6rem 0.75rem;
-    border-bottom: 1px solid #eee;
+    padding: 0.7rem 0.9rem;
+    border-bottom: 1px solid var(--border-soft);
     display: flex;
     flex-direction: column;
-    gap: 0.2rem;
+    gap: 0.25rem;
     font-size: 0.85rem;
+  }
+  .tree-header strong {
+    color: var(--text);
   }
   .tree-body {
     flex: 1;
     overflow: auto;
-    padding: 0.3rem 0;
+    padding: 0.4rem 0;
   }
-  button.link {
+  button.link,
+  a.link {
     border: none;
     background: none;
-    color: #2f6fed;
+    color: var(--accent-hover);
     cursor: pointer;
     padding: 0;
     font-size: 0.8rem;
     text-align: left;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
   }
   .editor-area {
     flex: 1;
@@ -261,73 +279,87 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
+    background: var(--bg);
   }
   .tabs {
     display: flex;
-    background: #e9ebef;
-    border-bottom: 1px solid #ccc;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border-soft);
     overflow-x: auto;
   }
   .tab {
     display: flex;
     align-items: center;
     gap: 0.3rem;
-    border-right: 1px solid #d5d7dc;
+    border-right: 1px solid var(--border-soft);
     white-space: nowrap;
   }
   .tab.active {
-    background: #fff;
+    background: var(--bg);
   }
   .tab-label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
     border: none;
     background: none;
-    padding: 0.45rem 0 0.45rem 0.8rem;
+    padding: 0.5rem 0 0.5rem 0.9rem;
     font-size: 0.8rem;
     cursor: pointer;
+    color: var(--text-muted);
+  }
+  .tab.active .tab-label {
+    color: var(--text);
+  }
+  .file-icon {
+    width: 13px;
+    height: 13px;
+    flex: 0 0 auto;
+    color: var(--text-faint);
   }
   .tab .close {
     border: none;
     background: none;
-    padding: 0.45rem 0.8rem 0.45rem 0;
-    font-size: 0.8rem;
+    padding: 0.5rem 0.9rem 0.5rem 0;
+    font-size: 0.85rem;
     cursor: pointer;
-    color: #999;
+    color: var(--text-faint);
   }
   .tab .close:hover {
-    color: #c0392b;
+    color: var(--danger);
   }
   .pane-toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.35rem 0.75rem;
-    background: #fff;
-    border-bottom: 1px solid #eee;
+    padding: 0.4rem 0.9rem;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border-soft);
     font-size: 0.78rem;
   }
   .pane-toolbar .hint {
     padding: 0;
-    color: #999;
+    color: var(--text-faint);
   }
-  .pane-toolbar .link {
-    color: #2f6fed;
-    text-decoration: none;
+  .pane-toolbar .link svg {
+    width: 13px;
+    height: 13px;
   }
   .empty-state {
     flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #999;
+    color: var(--text-faint);
     font-size: 0.9rem;
   }
   .hint {
-    padding: 0.5rem 0.75rem;
+    padding: 0.5rem 0.9rem;
     font-size: 0.8rem;
-    color: #888;
+    color: var(--text-faint);
   }
   .error {
-    color: #c0392b;
-    padding: 0.5rem 0.75rem;
+    color: var(--danger);
+    padding: 0.5rem 0.9rem;
   }
 </style>

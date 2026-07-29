@@ -45,99 +45,121 @@
 <div class="page">
   <div class="header">
     <h1>Roles</h1>
-    <button on:click={() => push('/roles/new')}>New role</button>
+    <button class="btn btn-primary" on:click={() => push('/roles/new')}>+ New role</button>
   </div>
 
   {#if loading}
-    <p>Loading…</p>
+    <p class="hint">Loading…</p>
   {:else if error}
     <p class="error">{error}</p>
   {:else}
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Global capabilities</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each roles as role (role.id)}
+    <div class="card">
+      <table>
+        <thead>
           <tr>
-            <td>
-              {role.name}
-              {#if role.is_super_admin}<span class="badge">super-admin</span>{/if}
-              {#if role.is_builtin}<span class="badge muted">built-in</span>{/if}
-            </td>
-            <td>{role.global_capabilities.join(', ') || '—'}</td>
-            <td class="actions">
-              <button class="link" on:click={() => push(`/roles/${role.id}`)}>edit</button>
-              <button class="link" on:click={() => duplicate(role)}>duplicate</button>
-              {#if !role.is_builtin}
-                <button class="link danger" on:click={() => remove(role)}>delete</button>
-              {/if}
-            </td>
+            <th>Name</th>
+            <th>Global capabilities</th>
+            <th></th>
           </tr>
-        {/each}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {#each roles as role (role.id)}
+            <tr>
+              <td>
+                <span class="role-name">{role.name}</span>
+                {#if role.is_super_admin}<span class="badge badge-accent">super-admin</span>{/if}
+                {#if role.is_builtin}<span class="badge badge-muted">built-in</span>{/if}
+              </td>
+              <td class="caps">{role.global_capabilities.join(', ') || '—'}</td>
+              <td class="actions">
+                <button class="link" on:click={() => push(`/roles/${role.id}`)}>edit</button>
+                <button class="link" on:click={() => duplicate(role)}>duplicate</button>
+                {#if !role.is_builtin}
+                  <button class="link danger" on:click={() => remove(role)}>delete</button>
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
   {/if}
 </div>
 
 <style>
   .page {
-    padding: 1.5rem;
+    padding: 1.75rem 2rem;
   }
   .header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1rem;
+    margin-bottom: 1.25rem;
   }
   h1 {
-    font-size: 1.3rem;
+    font-size: 1.4rem;
     margin: 0;
+    color: var(--text);
   }
   table {
     width: 100%;
     border-collapse: collapse;
-    background: #fff;
-    border-radius: 6px;
   }
   th,
   td {
     text-align: left;
-    padding: 0.55rem 0.75rem;
-    border-bottom: 1px solid #eee;
-    font-size: 0.9rem;
+    padding: 0.75rem 1rem;
+    font-size: 0.88rem;
   }
   th {
-    background: #f0f1f4;
+    color: var(--text-faint);
+    font-weight: 600;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--border);
   }
-  .badge {
-    margin-left: 0.4rem;
-    font-size: 0.7rem;
-    background: #2f6fed;
-    color: #fff;
-    padding: 0.05rem 0.4rem;
-    border-radius: 3px;
+  tbody tr {
+    border-bottom: 1px solid var(--border-soft);
   }
-  .badge.muted {
-    background: #999;
+  tbody tr:last-child {
+    border-bottom: none;
+  }
+  tbody tr:hover {
+    background: var(--bg-hover);
+  }
+  .role-name {
+    font-weight: 600;
+    color: var(--text);
+    margin-right: 0.4rem;
+  }
+  .badge-accent {
+    background: var(--accent-soft);
+    color: var(--accent-hover);
+  }
+  .badge-muted {
+    background: var(--muted-badge-bg);
+    color: var(--muted-badge-text);
+  }
+  .caps {
+    color: var(--text-muted);
   }
   button.link {
     border: none;
     background: none;
-    color: #2f6fed;
+    color: var(--accent-hover);
     cursor: pointer;
     margin-right: 0.6rem;
     font-size: 0.85rem;
     padding: 0;
   }
   button.link.danger {
-    color: #c0392b;
+    color: var(--danger);
   }
   .error {
-    color: #c0392b;
+    color: var(--danger);
+  }
+  .hint {
+    color: var(--text-faint);
   }
 </style>

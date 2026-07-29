@@ -1,22 +1,230 @@
+:root {
+  --bg: #0e1016;
+  --bg-elevated: #171a24;
+  --bg-elevated-2: #1e2230;
+  --bg-hover: #232838;
+  --border: #262b3d;
+  --border-soft: #1c2030;
+
+  --text: #e7e9f3;
+  --text-muted: #9099b0;
+  --text-faint: #5f6780;
+
+  --accent: #6366f1;
+  --accent-hover: #7880f5;
+  --accent-text: #eef0ff;
+  --accent-soft: rgba(99, 102, 241, 0.16);
+  --accent-border: rgba(99, 102, 241, 0.4);
+
+  --success: #34d399;
+  --success-soft: rgba(52, 211, 153, 0.14);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.14);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.14);
+  --muted-badge-bg: #2a2f42;
+  --muted-badge-text: #9099b0;
+
+  --protocol-ssh-bg: #1c2b45;
+  --protocol-ssh-text: #7cb0f2;
+  --protocol-smb-bg: #2f2545;
+  --protocol-smb-text: #c9a3f5;
+  --protocol-winrm-bg: #3c2a17;
+  --protocol-winrm-text: #f2a95c;
+  --protocol-local-bg: #1c3327;
+  --protocol-local-text: #6fcf9a;
+
+  --radius: 8px;
+  --radius-sm: 5px;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  color-scheme: dark;
+}
+
 * {
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  font: 15px/1.45 system-ui, 'Segoe UI', Roboto, sans-serif;
+  font: 14px/1.5 var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
 }
 
 button {
   font: inherit;
+  color: inherit;
 }
 
 input,
 select,
 textarea {
   font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--accent-hover);
+}
+
+code,
+.mono {
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+/* Scrollbars, dark-theme friendly */
+* {
+  scrollbar-color: #333850 transparent;
+  scrollbar-width: thin;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #333850;
+  border-radius: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 #app {
   min-height: 100vh;
+}
+
+/* Shared badge/pill primitives, usable from any component via :global() */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+.btn-ghost:hover {
+  border-color: var(--accent-border);
+  color: var(--text);
+}
+
+.card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+}
+
+.input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 0.5rem 0.6rem;
+}
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* iOS-style toggle switch, built on a real checkbox for accessibility/forms —
+   wrap: <label class="switch"><input type="checkbox" .../><span class="switch-track"></span></label> */
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  width: 34px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.switch-track {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  transition: background 0.15s ease;
+}
+.switch-track::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease;
+}
+.switch input:checked + .switch-track {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+.switch input:checked + .switch-track::before {
+  background: var(--accent);
+  transform: translateX(14px);
+}
+.switch input:disabled + .switch-track {
+  opacity: 0.5;
+  cursor: default;
 }

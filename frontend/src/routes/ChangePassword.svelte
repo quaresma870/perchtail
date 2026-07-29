@@ -28,21 +28,23 @@
 </script>
 
 <div class="page">
-  <form on:submit|preventDefault={handleSubmit}>
+  <form class="card" on:submit|preventDefault={handleSubmit}>
     <h1>Set a new password</h1>
     <p class="hint">Your account was created by an admin — pick your own password to continue.</p>
     <label>
       Current (temporary) password
-      <input type="password" bind:value={currentPassword} required />
+      <input class="input" type="password" bind:value={currentPassword} required />
     </label>
     <label>
       New password
-      <input type="password" bind:value={newPassword} minlength="8" required />
+      <input class="input" type="password" bind:value={newPassword} minlength="8" required />
     </label>
     {#if error}
       <p class="error">{error}</p>
     {/if}
-    <button type="submit" disabled={submitting}>{submitting ? 'Saving…' : 'Save'}</button>
+    <button class="btn btn-primary" type="submit" disabled={submitting}>
+      {submitting ? 'Saving…' : 'Save'}
+    </button>
   </form>
 </div>
 
@@ -52,50 +54,39 @@
     align-items: center;
     justify-content: center;
     min-height: 100vh;
-    background: #1f2430;
+    background: var(--bg);
+    background-image: radial-gradient(circle at 50% 0%, #1b1f30 0%, var(--bg) 60%);
   }
   form {
-    background: #fff;
     padding: 2rem 2.25rem;
-    border-radius: 8px;
     width: 340px;
     display: flex;
     flex-direction: column;
-    gap: 0.9rem;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    gap: 1rem;
   }
   h1 {
     margin: 0;
     font-size: 1.2rem;
+    color: var(--text);
   }
   .hint {
     margin: 0;
     font-size: 0.85rem;
-    color: #666;
+    color: var(--text-muted);
   }
   label {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 0.35rem;
     font-size: 0.85rem;
-    color: #444;
-  }
-  input {
-    padding: 0.5rem;
-    border: 1px solid #ccc;
-    border-radius: 4px;
+    color: var(--text-muted);
   }
   button {
-    margin-top: 0.5rem;
-    padding: 0.6rem;
-    border: none;
-    border-radius: 4px;
-    background: #2f6fed;
-    color: #fff;
-    font-weight: 600;
+    margin-top: 0.4rem;
+    padding: 0.65rem;
   }
   .error {
-    color: #c0392b;
+    color: var(--danger);
     font-size: 0.85rem;
     margin: 0;
   }
