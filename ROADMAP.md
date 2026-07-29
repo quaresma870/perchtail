@@ -50,11 +50,11 @@ they come before any connector or UI work, not after.
       request. `get_current_active_user` blocks every other endpoint until
       an admin-created account's forced password change is done.
 
-### M3 — Rule engine
-- [ ] `rules.py`: glob (default) + regex (`re:` prefix) pattern matching
-- [ ] Last-match-wins precedence, evaluated in rule order
-- [ ] Zero rules → matches nothing (explicit opt-in)
-- [ ] Unit tests covering ordering, glob/regex mix, and the empty-ruleset case
+### M3 — Rule engine ✅
+- [x] `rules.py`: glob (default) + regex (`re:` prefix) pattern matching
+- [x] Last-match-wins precedence, evaluated in rule order
+- [x] Zero rules → matches nothing (explicit opt-in)
+- [x] Unit tests covering ordering, glob/regex mix, and the empty-ruleset case
 
 ### M4 — First connector: SSH/SFTP + ephemeral scratch
 - See [docs/source-setup.md](docs/source-setup.md) for the SSH/SFTP-side

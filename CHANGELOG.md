@@ -26,5 +26,9 @@ release ships (0.x releases may include breaking changes between minors).
 - `api/auth.py`: login/logout/me/change-password endpoints backed by
   server-side sessions (hashed opaque token in an httpOnly, SameSite=strict
   cookie, stored in a new `AuthSession` table) rather than a stateless JWT,
-  so revoking access is immediate. See [ROADMAP.md](ROADMAP.md) for what's
+  so revoking access is immediate.
+- Rule engine (M3): `rules.py` implements CLAUDE.md's matching semantics —
+  glob (default, path-separator-aware `**`/`*`/`?`, not stdlib fnmatch) or
+  regex (`re:` prefix) patterns, last-match-wins evaluated by rule order,
+  and zero rules matching nothing. See [ROADMAP.md](ROADMAP.md) for what's
   next.
