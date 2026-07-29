@@ -49,6 +49,8 @@ they come before any connector or UI work, not after.
 - [ ] Unit tests covering ordering, glob/regex mix, and the empty-ruleset case
 
 ### M4 — First connector: SSH/SFTP + ephemeral scratch
+- See [docs/source-setup.md](docs/source-setup.md) for the SSH/SFTP-side
+  prerequisites (dedicated account, chroot jail, ACLs) this connector assumes.
 - [ ] `collectors/ssh.py` via `paramiko`: live directory listing filtered
       through the rule engine, fetch-on-open
 - [ ] `scratch.py`: per-session scratch store, refcounted purge, idle-sweep
@@ -60,6 +62,9 @@ they come before any connector or UI work, not after.
 - [ ] Tests mock the SSH client — no real remote host in CI
 
 ### M5 — Remaining connectors
+- See [docs/source-setup.md](docs/source-setup.md) for the SMB/WinRM-side
+  prerequisites (scoped share + ACLs, JEA-constrained WinRM account) these
+  connectors assume.
 - [ ] `collectors/smb.py` (`smbprotocol` or `impacket`)
 - [ ] `collectors/winrm.py` (`pywinrm`)
 - [ ] `collectors/local.py` — no scratch needed, reads directly off disk

@@ -77,6 +77,8 @@ account, and add your first source.
 
 - [CLAUDE.md](CLAUDE.md) — full design/architecture reference and build plan
 - [ROADMAP.md](ROADMAP.md) — phased milestones and what's next
+- [docs/source-setup.md](docs/source-setup.md) — how to prepare a Linux or
+  Windows server so PerchTail can reach it over SSH/SFTP, SMB, or WinRM
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
   submit changes
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability
