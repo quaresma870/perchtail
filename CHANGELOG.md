@@ -9,6 +9,19 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Added
+- Phase 2 (push-agent) backend infrastructure: a new `agent` protocol for
+  sources that can't be reached inbound over SSH/SMB/WinRM. The agent
+  (a future Go binary — see ROADMAP.md) dials out and holds a persistent
+  WebSocket open at `/agent/connect`, authenticated with a bearer
+  enrollment token (`POST /sources/{id}/agent-token`, hashed at rest,
+  returned in plaintext once); the backend then relays live `list`/`fetch`
+  commands down that connection on demand, exactly as it would call any
+  other connector directly — nothing is proactively synced or mirrored, so
+  the always-fresh, nothing-persisted rule holds for agent-mode sources too.
+  `AgentRegistry` (`app/agent_registry.py`) tracks live connections
+  in-memory and bridges FastAPI's synchronous connector calls to the async
+  WebSocket via `asyncio.run_coroutine_threadsafe`. `SourcePublic` now
+  reports `agent_connected`/`agent_last_seen_at` for agent-protocol sources.
 - Phase 2 (push-agent): `agent/`, a standalone Go binary for sources that
   can't be reached inbound over SSH/SMB/WinRM. It dials out to the server
   and holds a persistent WebSocket connection open (`gorilla/websocket`),

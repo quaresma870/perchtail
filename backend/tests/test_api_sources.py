@@ -1,4 +1,5 @@
 import pytest
+from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.api.sources import router as sources_router
 from app.auth.models import Capability, Role, RoleGrant, ScopeType, User
@@ -337,3 +338,103 @@ def test_rule_count_reflects_existing_rules(session, admin_client):
 
     response = admin_client.get("/sources")
     assert response.json()[0]["rule_count"] == 1
+
+
+def test_agent_connected_defaults_false_for_non_agent_source(session, admin_client):
+    customer = _make_customer(session)
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "app01",
+            "customer_id": customer.id,
+            "protocol": "ssh",
+            "host": "app01",
+            "base_path": "/var/log",
+        },
+    ).json()
+    assert created["agent_connected"] is False
+    assert created["agent_last_seen_at"] is None
+
+
+def test_regenerate_agent_token_returns_plaintext_once(session, admin_client):
+    customer = _make_customer(session)
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "agent01",
+            "customer_id": customer.id,
+            "protocol": "agent",
+            "host": "agent01",
+            "base_path": "/var/log/app",
+        },
+    ).json()
+    assert created["agent_connected"] is False
+
+    response = admin_client.post(f"/sources/{created['id']}/agent-token")
+    assert response.status_code == 200
+    token = response.json()["token"]
+    assert token
+
+    source = session.get(Source, created["id"])
+    assert source.agent_token_hash is not None
+    assert source.agent_token_hash != token
+
+
+def test_regenerate_agent_token_rejects_non_agent_protocol(session, admin_client):
+    customer = _make_customer(session)
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "app01",
+            "customer_id": customer.id,
+            "protocol": "ssh",
+            "host": "app01",
+            "base_path": "/var/log",
+        },
+    ).json()
+
+    response = admin_client.post(f"/sources/{created['id']}/agent-token")
+    assert response.status_code == 400
+
+
+def test_regenerate_agent_token_requires_manage_capability(session, client_for):
+    customer = _make_customer(session, "for-plain-user")
+    source = Source(
+        name="agent01",
+        customer_id=customer.id,
+        protocol=Protocol.agent,
+        host="agent01",
+        base_path="/var/log/app",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    user = _make_user(session)
+    response = client_for(user).post(f"/sources/{source.id}/agent-token")
+    assert response.status_code == 403
+
+
+def test_agent_connected_reflects_registry_state(session, admin_client):
+    customer = _make_customer(session)
+    source = Source(
+        name="agent01",
+        customer_id=customer.id,
+        protocol=Protocol.agent,
+        host="agent01",
+        base_path="/var/log/app",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    registry = get_agent_registry()
+    registry.register(source.id, object())
+    try:
+        response = admin_client.get(f"/sources/{source.id}")
+        assert response.json()["agent_connected"] is True
+    finally:
+        registry.unregister(source.id)
+
+    response = admin_client.get(f"/sources/{source.id}")
+    assert response.json()["agent_connected"] is False

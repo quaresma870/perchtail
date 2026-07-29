@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import StrEnum
 from typing import Optional
 
@@ -9,6 +10,14 @@ class Protocol(StrEnum):
     smb = "smb"
     winrm = "winrm"
     local = "local"
+    # Phase 2: for sources not reachable inbound. The Go push-agent dials
+    # *out* to this app (solving the firewall/NAT problem) and holds that
+    # connection open; the connector then sends live list/fetch commands
+    # down it on demand — see collectors/agent.py and app/agent_registry.py.
+    # Deliberately not a proactive sync: CLAUDE.md's always-fresh,
+    # nothing-persisted rule still applies here, just relayed through the
+    # agent's connection instead of a direct SSH/SMB/WinRM dial.
+    agent = "agent"
 
 
 class RuleType(StrEnum):
@@ -67,6 +76,16 @@ class Source(SQLModel, table=True):
     enabled: bool = True
     schedule_cron: str | None = None
     is_system: bool = False
+    # Push-agent (protocol=agent) enrollment: only the SHA-256 hash of the
+    # enrollment token is stored (same rationale as password/session-token
+    # hashing) — the plaintext is shown exactly once, when generated, via
+    # POST /sources/{id}/agent-token. Null for every other protocol.
+    agent_token_hash: str | None = None
+    # Updated whenever the agent's connection is established or sends a
+    # response — purely informational for the admin UI ("last seen"); live
+    # connection state itself lives in app.agent_registry, not the DB, since
+    # it's inherently per-process and shouldn't survive a restart.
+    agent_last_seen_at: datetime | None = None
 
     customer: Customer | None = Relationship(back_populates="sources")
     folder: Folder | None = Relationship(back_populates="sources")
