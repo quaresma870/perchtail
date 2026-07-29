@@ -1,5 +1,4 @@
 import hashlib
-import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -18,7 +17,10 @@ from app.archives import (
 )
 from app.auth.models import Capability
 from app.auth.rbac import require_capability
+from app.collectors import local as local_collector
+from app.collectors import smb as smb_collector
 from app.collectors import ssh as ssh_collector
+from app.collectors import winrm as winrm_collector
 from app.db import get_session
 from app.models import Protocol, Rule, Source
 from app.rules import is_safe_relative_path, is_visible
@@ -26,7 +28,12 @@ from app.scratch import get_scratch_store
 
 router = APIRouter(prefix="/sources/{source_id}", tags=["archive"])
 
-_CONNECTORS = {Protocol.ssh: ssh_collector}
+_CONNECTORS = {
+    Protocol.ssh: ssh_collector,
+    Protocol.smb: smb_collector,
+    Protocol.winrm: winrm_collector,
+    Protocol.local: local_collector,
+}
 
 
 class BrowseEntry(BaseModel):
@@ -80,16 +87,12 @@ def _materialize(
     if member is not None:
         if not is_archive(filename):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="not an archive")
-        with tempfile.TemporaryDirectory() as tmp:
-            archive_local = Path(tmp) / "archive"
-            connector.fetch_file(source, path, archive_local)
+        with connector.local_copy(source, path) as archive_local:
             extract_member(archive_local, filename, member, destination)
         return member.rsplit("/", 1)[-1]
 
     if is_transparent_gzip(filename):
-        with tempfile.TemporaryDirectory() as tmp:
-            raw_local = Path(tmp) / "raw"
-            connector.fetch_file(source, path, raw_local)
+        with connector.local_copy(source, path) as raw_local:
             decompress_gzip(raw_local, destination)
         return filename[: -len(".gz")]
 
@@ -111,9 +114,7 @@ def browse(
     if path and is_archive(filename):
         if not is_visible(path, rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
-        with tempfile.TemporaryDirectory() as tmp:
-            archive_local = Path(tmp) / "archive"
-            connector.fetch_file(source, path, archive_local)
+        with connector.local_copy(source, path) as archive_local:
             members = list_members(archive_local, filename)
         return [
             BrowseEntry(
@@ -139,6 +140,39 @@ def browse(
     ]
 
 
+def _resolve_content(
+    source: Source, path: str, member: str | None, rules: list[Rule]
+) -> tuple[Path, str, str | None]:
+    """Returns (path_to_serve, filename, scratch_key). scratch_key is None
+    when nothing was fetched/copied — currently only a local, plain file
+    (not an archive member, not transparent-gzip), served straight from its
+    real path with no ephemeral scratch involved at all (CLAUDE.md's Built-
+    in log viewer note: "a file already on the same machine ... is
+    inherently zero-latency and always fresh"). Everything else (remote
+    protocols always; local .gz/archive-member, since those produce derived
+    bytes that must live somewhere) goes through the scratch store."""
+    if not is_visible(path, rules):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+    filename = path.rsplit("/", 1)[-1]
+    needs_scratch = (
+        source.protocol != Protocol.local or member is not None or is_transparent_gzip(filename)
+    )
+
+    if not needs_scratch:
+        return local_collector.resolve_path(source, path), filename, None
+
+    store = get_scratch_store()
+    key = _scratch_key(source.id, path, member)
+    destination = store.acquire(key)
+    try:
+        served_filename = _materialize(source, path, member, rules, destination)
+    except Exception:
+        store.release(key)
+        raise
+    return destination, served_filename, key
+
+
 @router.get("/open")
 def open_file(
     path: str,
@@ -147,20 +181,13 @@ def open_file(
     session: Session = Depends(get_session),
 ) -> FileResponse:
     """Fetches into scratch and holds it (refcounted) until a matching
-    /close call — for a persistent viewer session, not a one-shot
-    download."""
+    /close call — for a persistent viewer session, not a one-shot download.
+    (Local plain files skip scratch entirely — see _resolve_content.)"""
     _require_safe_path(path)
     rules = _rules_for(session, source.id)
-
-    store = get_scratch_store()
-    key = _scratch_key(source.id, path, member)
-    destination = store.acquire(key)
-    try:
-        filename = _materialize(source, path, member, rules, destination)
-    except Exception:
-        store.release(key)
-        raise
-    return FileResponse(destination, filename=filename, headers={"X-Scratch-Key": key})
+    served_path, filename, key = _resolve_content(source, path, member, rules)
+    headers = {"X-Scratch-Key": key} if key else {}
+    return FileResponse(served_path, filename=filename, headers=headers)
 
 
 class CloseRequest(BaseModel):
@@ -189,17 +216,6 @@ def download_file(
     no persistent session, so no /close call is needed afterward."""
     _require_safe_path(path)
     rules = _rules_for(session, source.id)
-
-    store = get_scratch_store()
-    key = _scratch_key(source.id, path, member)
-    destination = store.acquire(key)
-    try:
-        filename = _materialize(source, path, member, rules, destination)
-    except Exception:
-        store.release(key)
-        raise
-    return FileResponse(
-        destination,
-        filename=filename,
-        background=BackgroundTask(store.release, key),
-    )
+    served_path, filename, key = _resolve_content(source, path, member, rules)
+    background = BackgroundTask(get_scratch_store().release, key) if key else None
+    return FileResponse(served_path, filename=filename, background=background)
