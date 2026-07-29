@@ -4,6 +4,7 @@
   import { api, ApiError } from '../lib/api'
   import FolderTree from '../lib/components/FolderTree.svelte'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
+  import { tabKey } from '../lib/tab-key'
   import type { BrowseEntry, Source } from '../lib/types'
 
   export let params: { sourceId?: string } = {}
@@ -28,10 +29,6 @@
   let tabs: Tab[] = []
   let activeKey: string | null = null
   $: activeTab = tabs.find((t) => t.key === activeKey) ?? null
-
-  function tabKey(path: string, member: string | null) {
-    return `${path}::${member ?? ''}`
-  }
 
   async function loadSourcePicker() {
     loading = true

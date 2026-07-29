@@ -53,9 +53,9 @@ export const darkTheme = EditorView.theme(
   { dark: true },
 )
 
-const LEVEL_TOKEN = /\[(info|warn|warning|error|fatal|debug|trace)\]/gi
+export const LEVEL_TOKEN = /\[(info|warn|warning|error|fatal|debug|trace)\]/gi
 
-const LEVEL_CLASS: Record<string, string> = {
+export const LEVEL_CLASS: Record<string, string> = {
   info: 'cm-level-info',
   warn: 'cm-level-warn',
   warning: 'cm-level-warn',
@@ -65,9 +65,15 @@ const LEVEL_CLASS: Record<string, string> = {
   trace: 'cm-level-debug',
 }
 
+/** Pure lookup extracted so the token→class mapping is unit-testable
+ * without spinning up a CodeMirror view. */
+export function classForLevelToken(rawLevel: string): string {
+  return LEVEL_CLASS[rawLevel.toLowerCase()]
+}
+
 const tokenDecorator = new MatchDecorator({
   regexp: LEVEL_TOKEN,
-  decoration: (match) => Decoration.mark({ class: LEVEL_CLASS[match[1].toLowerCase()] }),
+  decoration: (match) => Decoration.mark({ class: classForLevelToken(match[1]) }),
 })
 
 /** Lightweight, viewport-scoped log-level highlighting — colors `[info]`/
@@ -89,7 +95,11 @@ const logLevelTokens = ViewPlugin.fromClass(
   { decorations: (v) => v.decorations },
 )
 
-const ERROR_LINE = /\b(error|fatal)\b/i
+export const ERROR_LINE = /\b(error|fatal)\b/i
+
+export function isErrorLine(text: string): boolean {
+  return ERROR_LINE.test(text)
+}
 
 function buildLineDecorations(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>()
@@ -97,7 +107,7 @@ function buildLineDecorations(view: EditorView): DecorationSet {
     let pos = from
     while (pos <= to) {
       const line = view.state.doc.lineAt(pos)
-      if (ERROR_LINE.test(line.text)) {
+      if (isErrorLine(line.text)) {
         builder.add(line.from, line.from, Decoration.line({ class: 'cm-line-error' }))
       }
       pos = line.to + 1

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../api'
+  import { parsePatternInput, rulesToRawText } from '../rule-format'
   import type { Rule, RuleType } from '../types'
 
   export let sourceId: number
@@ -26,13 +27,8 @@
     }
   }
 
-  function toRawLine(rule: Rule): string {
-    const pattern = rule.pattern_kind === 'regex' ? `re:${rule.pattern}` : rule.pattern
-    return rule.type === 'exclude' ? `!${pattern}` : pattern
-  }
-
   function enterRawMode() {
-    rawText = rules.map(toRawLine).join('\n')
+    rawText = rulesToRawText(rules)
     mode = 'raw'
   }
 
@@ -150,14 +146,9 @@
             disabled={readOnly}
             value={rule.pattern_kind === 'regex' ? `re:${rule.pattern}` : rule.pattern}
             on:change={(e) => {
-              const raw = (e.target as HTMLInputElement).value
-              if (raw.startsWith('re:')) {
-                rule.pattern = raw.slice(3)
-                rule.pattern_kind = 'regex'
-              } else {
-                rule.pattern = raw
-                rule.pattern_kind = 'glob'
-              }
+              const parsed = parsePatternInput((e.target as HTMLInputElement).value)
+              rule.pattern = parsed.pattern
+              rule.pattern_kind = parsed.pattern_kind
               updateRule(rule)
             }}
           />

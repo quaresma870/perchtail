@@ -1,6 +1,8 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte'
   import { api, ApiError } from '../api'
+  import { tabKey } from '../tab-key'
+  import { downloadHref } from '../download-href'
   import type { BrowseEntry } from '../types'
 
   export let sourceId: number
@@ -28,22 +30,13 @@
 
   const canExpand = (entry.is_dir || entry.is_archive) && archiveRoot === null
 
-  $: ownKey = archiveRoot !== null ? `${archiveRoot}::${entry.path.slice(archiveRoot.length + 1)}` : `${entry.path}::`
+  $: ownKey =
+    archiveRoot !== null
+      ? tabKey(archiveRoot, entry.path.slice(archiveRoot.length + 1))
+      : tabKey(entry.path, null)
   $: isActive = !entry.is_dir && activeKey === ownKey
 
-  function downloadHref(): string | null {
-    if (entry.is_dir && !entry.is_archive && archiveRoot === null) {
-      return `/sources/${sourceId}/download-zip?path=${encodeURIComponent(entry.path)}`
-    }
-    if (!entry.is_dir) {
-      const params = new URLSearchParams({ path: archiveRoot ?? entry.path })
-      if (archiveRoot !== null) {
-        params.set('member', entry.path.slice(archiveRoot.length + 1))
-      }
-      return `/sources/${sourceId}/download?${params.toString()}`
-    }
-    return null
-  }
+  $: ownDownloadHref = downloadHref(sourceId, entry, archiveRoot)
 
   async function toggle() {
     if (canExpand) {
@@ -109,8 +102,8 @@
       </span>
       <span class="name">{entry.name}</span>
     </button>
-    {#if downloadHref()}
-      <a class="download" href={downloadHref()} target="_blank" rel="noreferrer" title="Download">
+    {#if ownDownloadHref}
+      <a class="download" href={ownDownloadHref} target="_blank" rel="noreferrer" title="Download">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M12 3v12" />
           <path d="m6 11 6 6 6-6" />

@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 
 const backendTarget = 'http://127.0.0.1:8000'
@@ -23,5 +23,8 @@ export default defineConfig({
     proxy: Object.fromEntries(
       apiPrefixes.map((prefix) => [prefix, { target: backendTarget, changeOrigin: true }]),
     ),
+  },
+  test: {
+    environment: 'jsdom',
   },
 })

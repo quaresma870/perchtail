@@ -1,30 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#585fee"/>
-      <stop offset="1" stop-color="#312e81"/>
-    </linearGradient>
-  </defs>
-  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#bg)"/>
-
-  <!-- tail (bold forked shape) -->
-  <path d="M 17 32 L 3 15 L 15 32 L 3 49 Z" fill="#eef2ff"/>
-
-  <!-- dorsal spikes -->
-  <path d="M 24 19 L 22 9 L 29 18 Z" fill="#eef2ff"/>
-  <path d="M 33 17 L 33 7 L 39 17 Z" fill="#eef2ff"/>
-
-  <!-- body -->
-  <path d="M 15 32
-           C 15 22, 25 15, 36 15
-           C 47 15, 53 22, 53 32
-           C 53 42, 47 49, 36 49
-           C 25 49, 15 42, 15 32 Z" fill="#eef2ff"/>
-
-  <!-- belly shading -->
-  <path d="M 19 39 C 25 45, 40 46, 48 37 C 42 47, 25 48, 19 39 Z" fill="#c7d2fe"/>
-
-  <!-- eye -->
-  <circle cx="43" cy="27" r="4.6" fill="#1e1b4b"/>
-  <circle cx="44.4" cy="25.6" r="1.5" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <rect width="120" height="120" rx="26" fill="#E32636"/>
+  <path d="M46,60 C57,40 78,34 92,40 C101,44 106,51 108,60 C106,69 101,76 92,80 C78,86 57,80 46,60 Z" fill="#fff"/>
+  <g fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M45,45 L30,60 L45,75"/>
+    <path d="M26,45 L16,60 L26,75" opacity="0.5"/>
+  </g>
+  <circle cx="92" cy="52" r="4.2" fill="#E32636"/>
 </svg>

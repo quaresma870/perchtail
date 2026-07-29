@@ -98,12 +98,26 @@ release ships (0.x releases may include breaking changes between minors).
   README's Quick start is now real, tested steps rather than a placeholder.
 - Visual redesign and logo: a dark theme (CSS custom properties in
   `app.css` — background/border/text/accent tokens, per-protocol and
-  per-status badge colors) applied across every page, plus a new fish/perch
-  mark (`frontend/public/favicon.svg`) per CLAUDE.md's mascot note — used as
-  the favicon, the nav-bar brand, and the README header. The Viewer's
-  CodeMirror pane gains a matching dark theme and lightweight log-level
-  highlighting (`[info]`/`[warn]`/`[error]` tokens colored, error lines
-  tinted) so a log reads the same way `grep -i error` would highlight it.
+  per-status badge colors) applied across every page, plus a fish/perch mark
+  (`frontend/public/favicon.svg`) per CLAUDE.md's mascot note — used as the
+  favicon, the nav-bar brand, and the README header. The full brand asset
+  pack (icon at multiple raster sizes, mark-only light/dark variants, and an
+  icon+wordmark lockup) lives under `frontend/public/brand/` for later
+  branding work. The Viewer's CodeMirror pane gains a matching dark theme
+  and lightweight log-level highlighting (`[info]`/`[warn]`/`[error]` tokens
+  colored, error lines tinted) so a log reads the same way `grep -i error`
+  would highlight it.
+- Frontend unit testing (`vitest`, added alongside this redesign): pulled
+  the non-CSS logic that redesign touched or introduced out into small,
+  pure, testable modules — `lib/codemirror-theme.ts`'s log-level token/line
+  detection, `lib/tab-key.ts` (the tab/tree-highlight key format shared
+  between Viewer and FolderTree, previously duplicated inline in both),
+  `lib/download-href.ts` (FolderTree's per-entry download-URL branching),
+  and `lib/rule-format.ts` (RuleEditor's raw-text line rendering/parsing) —
+  plus tests for the existing `lib/api.ts` request wrapper, `lib/auth.ts`'s
+  capability check and login/logout/session-refresh flows, and `lib/hash.ts`'s
+  hashchange-driven route store. CI's `frontend` job runs `npm test` before
+  the build step.
 
 ### Fixed
 - Archive member listing/opening didn't check the rule chain against the
