@@ -8,6 +8,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.archive import router as archive_router
 from app.api.auth import router as auth_router
+from app.api.customers import router as customers_router
+from app.api.folders import router as folders_router
+from app.api.roles import router as roles_router
+from app.api.rules import router as rules_router
+from app.api.sources import router as sources_router
+from app.api.users import router as users_router
 from app.config import get_settings
 from app.db import init_db
 from app.logging_config import configure_logging, get_logger
@@ -54,6 +60,12 @@ app = FastAPI(title="PerchTail", lifespan=lifespan)
 app.add_middleware(RequestIDMiddleware)
 app.include_router(auth_router)
 app.include_router(archive_router)
+app.include_router(customers_router)
+app.include_router(folders_router)
+app.include_router(sources_router)
+app.include_router(rules_router)
+app.include_router(roles_router)
+app.include_router(users_router)
 
 
 @app.get("/healthz")

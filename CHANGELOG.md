@@ -50,5 +50,21 @@ release ships (0.x releases may include breaking changes between minors).
   (self-referential, nested under a `Customer`) and `RoleGrant.scope_type`
   gains `folder`, generalizing the existing source-beats-customer grant
   resolution to N levels — source → folder chain (nearest first) →
-  customer, most specific wins. See [ROADMAP.md](ROADMAP.md) for what's
-  next.
+  customer, most specific wins.
+- Admin CRUD API (M7, part 1): `api/customers.py`, `api/folders.py`,
+  `api/sources.py`, `api/rules.py`, `api/roles.py`, `api/users.py` — the
+  full backend surface the admin/viewer UI needs. Sources gain a
+  `POST /sources/{id}/check` on-demand connection check, replacing the
+  pre-pivot "run-now"/"run history" wording in CLAUDE.md's original Web UI
+  section (there's no `Run` model and nothing runs on a schedule anymore —
+  see ROADMAP.md's M7 notes). Rules gain a gitignore-style raw-text
+  paste-mode endpoint (`PUT .../rules/raw`, leading `!` negates a line) in
+  addition to the row-based CRUD + reorder. Roles gain a duplicate-role
+  action (clones grants too) and grant CRUD, with a privilege-escalation
+  guard: only an existing super-admin can create or edit a super-admin
+  role. Users gain admin-driven create/update/reset-password/deactivate
+  (deactivate is a soft delete, per CLAUDE.md's Security notes). Customer/
+  folder management is treated as an admin surface gated by the
+  `create_source` global capability rather than per-scope grants, per
+  CLAUDE.md's "its own small admin surface" wording. See
+  [ROADMAP.md](ROADMAP.md) for what's next.

@@ -159,15 +159,45 @@ they come before any connector or UI work, not after.
 - [ ] "system" badge in the admin sources list; non-editable, non-deletable
 
 ### M7 — Admin & viewer UI
-- [ ] Sources list (status, protocol, last run, rule count, run-now)
+
+  Note on scope vs. CLAUDE.md's original wording: "last run"/"run-now"/"run
+  history with errors" are pre-pivot leftovers from when this project was
+  designed around scheduled mirroring (see CLAUDE.md's own opening section on
+  why "logmirror" stopped fitting). There is no `Run`/`SyncState` model and
+  nothing is fetched on a schedule anymore — every browse is live and every
+  open is a fresh fetch, so there is nothing to "run" and no history to keep.
+  Replaced with a lightweight on-demand connection check (`POST
+  /sources/{id}/check`) that opens the connector and lists the base path,
+  surfacing reachability in the sources list without inventing a persistent
+  run concept the architecture no longer has.
+
+  Frontend stack: CLAUDE.md never named one beyond "CodeMirror 6 for the
+  editor component." Asked the user to pick (Vite+Svelte / Vite+Vue 3 /
+  Vite+React / server-rendered+htmx); the question went unanswered, so,
+  consistent with this project's practice of making documented judgment calls
+  on undecided points rather than blocking, proceeding with the recommended
+  default: **Vite + Svelte + TypeScript**. Reasoning: smallest runtime and
+  build output of the SPA options (matters for a self-hosted single-container
+  app), no JSX/virtual-DOM overhead for what's mostly CRUD forms and a tree +
+  editor pane, and first-class, low-ceremony support for the CodeMirror 6
+  integration this milestone needs anyway. Easily revisited before 1.0 if it
+  turns out to be the wrong call — nothing else in the architecture depends
+  on this choice.
+
+  Backend CRUD API this UI needs (`api/customers.py`, `api/folders.py`,
+  `api/sources.py`, `api/rules.py`, `api/roles.py`, `api/users.py`) is done
+  and tested — none of it existed before this milestone. See CHANGELOG.md
+  for what each surface does. What's left below is the UI itself.
+
+- [ ] Sources list (status via connection check, protocol, rule count,
+      system badge — non-editable/non-deletable)
 - [ ] Rule editor: row-based UI + raw-text/gitignore-style paste mode
-- [ ] Run history with errors
 - [ ] Lazy-loaded folder tree (fetch children on expand only)
 - [ ] CodeMirror-based viewer pane: tabs, in-file search, download (single file
       or zipped folder)
-- [ ] Roles UI: list, editor (global-capability toggles + customer/source
-      access tree with search/filter, collapsed by default), duplicate-role
-      action
+- [ ] Roles UI: list, editor (global-capability toggles + customer/folder/
+      source access tree with search/filter, collapsed by default),
+      duplicate-role action
 - [ ] Users UI: list with active/inactive, create, reset password,
       deactivate/delete, assigned role
 
