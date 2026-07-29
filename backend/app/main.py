@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="PerchTail", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="PerchTail", version="0.1.1", lifespan=lifespan)
 app.add_middleware(RequestIDMiddleware)
 app.include_router(auth_router)
 app.include_router(archive_router)
