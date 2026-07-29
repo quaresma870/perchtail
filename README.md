@@ -8,7 +8,7 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-phase%201b%20%28SSO%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.1.1%20%28phase%201b%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -19,7 +19,7 @@
 
 ## Status
 
-🟢 **Phase 1 (MVP) + Phase 1b (SSO) complete.** Agentless SSH/SFTP, SMB, and
+🟢 **v0.1.1 — Phase 1 (MVP) + Phase 1b (SSO) complete.** Agentless SSH/SFTP, SMB, and
 WinRM browsing, ephemeral fetch (nothing mirrored), rule-scoped RBAC, the
 full admin/viewer UI, and OIDC single sign-on (local accounts still work
 alongside it — see [ROADMAP.md](ROADMAP.md)) all work end-to-end. Still
