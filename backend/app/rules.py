@@ -58,3 +58,16 @@ def is_visible(path: str, rules: list[Rule]) -> bool:
         if _rule_matches(path, rule):
             verdict = rule.type == RuleType.include
     return verdict
+
+
+def is_safe_relative_path(path: str) -> bool:
+    """Rejects path traversal (`..` segments) and absolute paths before a
+    client-supplied path ever reaches a rule check or a connector — CLAUDE.md
+    flags "path traversal or injection via ... the archive browse/download
+    endpoints" as explicit security scope. The rule engine denying a
+    traversal attempt (most patterns wouldn't match `../../etc/passwd`) is
+    not a substitute for this: a permissive rule could coincidentally match
+    it, so this must be checked independently of rule outcome."""
+    if path.startswith("/"):
+        return False
+    return ".." not in path.split("/")

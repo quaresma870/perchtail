@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     # browser silently drops Secure cookies over plain HTTP.
     session_cookie_secure: bool = True
 
+    scratch_dir: str = "./data/scratch"
+    scratch_max_gb: float = 5.0
+    # Backstop for crashed/disconnected clients that never send a close
+    # signal — deletes anything untouched past this, regardless of refcount.
+    scratch_idle_seconds: int = 300
+    scratch_sweep_interval_seconds: int = 60
+
 
 @lru_cache
 def get_settings() -> Settings:

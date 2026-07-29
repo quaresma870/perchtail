@@ -30,5 +30,12 @@ release ships (0.x releases may include breaking changes between minors).
 - Rule engine (M3): `rules.py` implements CLAUDE.md's matching semantics —
   glob (default, path-separator-aware `**`/`*`/`?`, not stdlib fnmatch) or
   regex (`re:` prefix) patterns, last-match-wins evaluated by rule order,
-  and zero rules matching nothing. See [ROADMAP.md](ROADMAP.md) for what's
-  next.
+  and zero rules matching nothing.
+- SSH/SFTP connector and ephemeral scratch (M4): `collectors/ssh.py`
+  (paramiko-based live listing and fetch-on-open), `scratch.py`
+  (refcounted purge, idle-sweep backstop, size-guard eviction, both wired
+  as APScheduler jobs), `archives.py` (`.zip`/`.tar.gz` as virtual folders,
+  transparent `.gz` decompression), and `api/archive.py`
+  (browse/open/close/download, gated by the M2 permission dependency and
+  independently by the rule engine on every specific path). See
+  [ROADMAP.md](ROADMAP.md) for what's next.

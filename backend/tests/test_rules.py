@@ -1,5 +1,5 @@
 from app.models import PatternKind, Rule, RuleType
-from app.rules import is_visible, parse_pattern
+from app.rules import is_safe_relative_path, is_visible, parse_pattern
 
 
 def _rule(order: int, type_: RuleType, pattern: str, kind: PatternKind = PatternKind.glob) -> Rule:
@@ -96,3 +96,18 @@ def test_parse_pattern_strips_re_prefix():
     pattern, kind = parse_pattern(r"re:var/log/app-\d+\.log")
     assert pattern == r"var/log/app-\d+\.log"
     assert kind == PatternKind.regex
+
+
+def test_is_safe_relative_path_accepts_normal_paths():
+    assert is_safe_relative_path("") is True
+    assert is_safe_relative_path("var/log/app.log") is True
+
+
+def test_is_safe_relative_path_rejects_traversal():
+    assert is_safe_relative_path("../etc/passwd") is False
+    assert is_safe_relative_path("var/../../etc/passwd") is False
+    assert is_safe_relative_path("..") is False
+
+
+def test_is_safe_relative_path_rejects_absolute_paths():
+    assert is_safe_relative_path("/etc/passwd") is False

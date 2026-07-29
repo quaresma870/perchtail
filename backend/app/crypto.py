@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 from functools import lru_cache
 
 from cryptography.fernet import Fernet
@@ -23,3 +24,14 @@ def encrypt_secret(plaintext: str) -> str:
 
 def decrypt_secret(ciphertext: str) -> str:
     return _fernet().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+
+
+def encrypt_credential(data: dict) -> str:
+    """Source.credential_ref holds an encrypted JSON blob rather than a bare
+    secret, since each protocol needs different fields (SSH: username +
+    private_key or password; SMB/WinRM: username + password)."""
+    return encrypt_secret(json.dumps(data))
+
+
+def decrypt_credential(ciphertext: str) -> dict:
+    return json.loads(decrypt_secret(ciphertext))
