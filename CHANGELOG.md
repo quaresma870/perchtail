@@ -8,6 +8,12 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-29
+
+Phase 1b (SSO) complete: OIDC single sign-on alongside local auth, with
+auto-provisioned no-access accounts for first-time SSO logins and an SSO
+settings admin page.
+
 ### Added
 - Phase 1b (SSO): `OIDCProvider` (`app/auth/providers/oidc.py`) — the second
   `AuthProvider` alongside `LocalPasswordProvider`, covering the OIDC
