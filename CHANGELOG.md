@@ -38,8 +38,6 @@ release ships (0.x releases may include breaking changes between minors).
   transparent `.gz` decompression), and `api/archive.py`
   (browse/open/close/download, gated by the M2 permission dependency and
   independently by the rule engine on every specific path).
-- Design doc for nested folders to group sources under a customer (M4.5) —
-  no code yet, see ROADMAP.md.
 - Remaining connectors (M5): `collectors/smb.py` (`smbprotocol`),
   `collectors/winrm.py` (`pywinrm`, base64-through-PowerShell for file
   content since WinRM has no native bulk transfer), and `collectors/
@@ -47,4 +45,10 @@ release ships (0.x releases may include breaking changes between minors).
   scratch store entirely for local, plain files — served straight from
   their real path — while still using it for a local `.gz` or archive
   member, since decompressing/extracting produces new derived bytes that
-  have to live somewhere. See [ROADMAP.md](ROADMAP.md) for what's next.
+  have to live somewhere.
+- Nested folders for source organization (M4.5): a `Folder` model
+  (self-referential, nested under a `Customer`) and `RoleGrant.scope_type`
+  gains `folder`, generalizing the existing source-beats-customer grant
+  resolution to N levels — source → folder chain (nearest first) →
+  customer, most specific wins. See [ROADMAP.md](ROADMAP.md) for what's
+  next.

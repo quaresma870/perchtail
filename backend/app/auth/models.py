@@ -9,6 +9,7 @@ from app.timeutils import utcnow
 
 class ScopeType(StrEnum):
     customer = "customer"
+    folder = "folder"
     source = "source"
 
 
