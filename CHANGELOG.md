@@ -8,6 +8,13 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-29
+
+Phase 1 (MVP) complete: agentless live browsing over SSH/SFTP, SMB, and WinRM;
+ephemeral fetch (nothing mirrored); rule-scoped RBAC (customers, folders,
+roles, grants, local auth, audit log); the built-in log viewer; and the full
+admin/viewer UI (Vite + Svelte), packaged as a single Docker image.
+
 ### Added
 - Project scaffold (M0): FastAPI app under `backend/`, `structlog` JSON logging
   with request-id middleware and gzip-rotated daily log files, SQLite +
