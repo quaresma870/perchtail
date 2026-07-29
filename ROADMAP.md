@@ -26,10 +26,10 @@ they come before any connector or UI work, not after.
 - [x] `docker-compose.yml` + `Dockerfile` skeleton (even before there's much to
       run, so packaging isn't a phase-1-exit surprise)
 
-### M1 — Data model
-- [ ] Core models: `Customer`, `Source`, `Rule`
-- [ ] Auth models: `Role`, `RoleGrant`, `User`, `SSOProviderConfig`, `AuditLog`
-- [ ] Built together, not staged — auth touches every endpoint written after
+### M1 — Data model ✅
+- [x] Core models: `Customer`, `Source`, `Rule`
+- [x] Auth models: `Role`, `RoleGrant`, `User`, `SSOProviderConfig`, `AuditLog`
+- [x] Built together, not staged — auth touches every endpoint written after
 
 ### M2 — RBAC & local auth
 - [ ] Grant-resolution logic (`auth/rbac.py`) implementing the pseudocode in

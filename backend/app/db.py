@@ -2,6 +2,8 @@ from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine
 
+from app import models  # noqa: F401  registers tables on SQLModel.metadata
+from app.auth import models as auth_models  # noqa: F401  registers tables on SQLModel.metadata
 from app.config import get_settings
 
 settings = get_settings()

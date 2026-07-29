@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     log_dir: str = "./data/logs"
     log_retention_days: int = 30
     database_url: str = "sqlite:///./data/perchtail.db"
+    credential_encryption_key: str = "changeme"
 
 
 @lru_cache

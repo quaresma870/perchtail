@@ -12,5 +12,10 @@ release ships (0.x releases may include breaking changes between minors).
 - Project scaffold (M0): FastAPI app under `backend/`, `structlog` JSON logging
   with request-id middleware and gzip-rotated daily log files, SQLite +
   SQLModel wired up with Alembic migrations, `ruff`/`black`/`pytest` tooling,
-  CI workflow, and a `docker-compose`/`Dockerfile` skeleton. See
-  [ROADMAP.md](ROADMAP.md) for what's next.
+  CI workflow, and a `docker-compose`/`Dockerfile` skeleton.
+- Data model (M1): `Customer`, `Source`, `Rule`, and the auth models `Role`,
+  `RoleGrant`, `User`, `SSOProviderConfig`, `AuditLog`, plus an
+  `app/crypto.py` helper (Fernet, keyed by `CREDENTIAL_ENCRYPTION_KEY`) so
+  `Source.credential_ref` and `SSOProviderConfig.config` have a real path to
+  encryption-at-rest from day one. See [ROADMAP.md](ROADMAP.md) for what's
+  next.
