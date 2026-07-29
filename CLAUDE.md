@@ -46,7 +46,7 @@ for disk to fill up with.
 Linux sources (SSH/SFTP)  ─┐
                            ├─▶ Connector service ─▶ Ephemeral scratch ─▶ Web UI ─▶ browser
 Windows sources (SMB/WinRM)┘     (rule engine,        (fetch-on-open,       (admin config
-                                   protocol clients)    purge-on-close)       + Monaco-based
+                                   protocol clients)    purge-on-close)       + CodeMirror-based
                                                                               viewer/download)
 ```
 
@@ -68,9 +68,17 @@ concern, independent of the always-fresh rule above).
   idle-sweep (see below), not for any proactive collection since nothing is
   pulled on a schedule anymore.
 - **Database**: SQLite. Single file, zero config, ships trivially in the Docker image.
-- **Frontend**: embed Monaco Editor (MIT-licensed, same engine as VS Code) directly
-  into the app's own viewer pages — don't run a separate code-server container.
-  Syntax highlighting, tabs, in-file search/regex, all for free.
+- **Frontend**: embed CodeMirror 6 (MIT-licensed) directly into the app's own
+  viewer pages — don't run a separate code-server container. Chosen over Monaco
+  specifically because this is a log *viewer*, not a code IDE: CodeMirror reads
+  as a plain text editor by default (no autocomplete widgets, code lens, or
+  other IDE chrome to strip out), is lighter weight, and its virtualized
+  rendering handles large rotated log files better than Monaco's, which starts
+  degrading well before the sizes these logs actually reach. Syntax
+  highlighting, tabs, in-file search/regex all still available, just requiring
+  a bit more manual setup than Monaco's batteries-included languages — a
+  worthwhile trade for a read-only log viewer that doesn't need language
+  intelligence.
 - **Future push-agent**: Go. Single static binary, cross-compiles for Windows and
   Linux from one codebase, tiny footprint — same reasoning as Filebeat/Promtail.
 - **Packaging**: Docker + docker-compose. Should sit comfortably behind an nginx
@@ -286,7 +294,7 @@ A few things worth doing deliberately once phase 1 is real, not just present:
   credentials by design, and a visible, serious vulnerability disclosure policy
   is a real trust signal for that audience, not boilerplate.
 - **Screenshots/demo GIF in the README** once the viewer exists — a "show, don't
-  tell" of the Monaco-based viewer and the role/permission tree is worth more
+  tell" of the CodeMirror-based viewer and the role/permission tree is worth more
   than another paragraph of description.
 - **Submit to `awesome-selfhosted` and similar curated lists** once there's a
   working release — this is how a lot of self-hosted tooling actually gets
@@ -306,7 +314,7 @@ A few things worth doing deliberately once phase 1 is real, not just present:
   mode for power users — and run history with errors.
 - **Viewer**: lazy-loaded folder tree (fetch a folder's children live, only on
   expand — never eagerly list an entire remote tree upfront, which would be slow
-  over SSH/SMB for deep hierarchies) + Monaco-based pane with tabs, in-file search,
+  over SSH/SMB for deep hierarchies) + CodeMirror-based pane with tabs, in-file search,
   and download (single file or a zipped folder), all fetched fresh per the rules
   above.
 - **Roles**: role list, editor with global-capability toggles + customer/source
@@ -323,7 +331,7 @@ A few things worth doing deliberately once phase 1 is real, not just present:
    RBAC (customers, roles, grants, local auth, audit log); structured application
    logging (levels, rotation, retention) from the first commit, not bolted on
    later; built-in super-admin-only log viewer via the `local` protocol; admin
-   CRUD for sources/rules; Monaco-based viewer; docker-compose deployment.
+   CRUD for sources/rules; CodeMirror-based viewer; docker-compose deployment.
 2. **Phase 1b** — SSO (OIDC first, via the abstracted provider interface).
 3. **Phase 2** — Go push-agent for sources that can't be reached inbound; SAML
    provider added behind the same interface if actually needed.
@@ -373,7 +381,7 @@ perchtail/
         auth.py
     tests/
   frontend/
-    (admin pages + Monaco-embedded viewer)
+    (admin pages + CodeMirror-embedded viewer)
   agent/                  # phase 2 — Go push-agent
   docker-compose.yml
   Dockerfile

@@ -9,5 +9,8 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Added
-- Nothing released yet — see [CLAUDE.md](CLAUDE.md) for the phase 1 build plan
-  currently in progress.
+- Project scaffold (M0): FastAPI app under `backend/`, `structlog` JSON logging
+  with request-id middleware and gzip-rotated daily log files, SQLite +
+  SQLModel wired up with Alembic migrations, `ruff`/`black`/`pytest` tooling,
+  CI workflow, and a `docker-compose`/`Dockerfile` skeleton. See
+  [ROADMAP.md](ROADMAP.md) for what's next.

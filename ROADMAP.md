@@ -15,15 +15,15 @@ Order matters: auth/RBAC and the rule engine are load-bearing for everything
 built after them (per CLAUDE.md, "First things to do in a new session"), so
 they come before any connector or UI work, not after.
 
-### M0 — Project scaffold
-- [ ] `backend/` FastAPI project structure matching the "Suggested repo
+### M0 — Project scaffold ✅
+- [x] `backend/` FastAPI project structure matching the "Suggested repo
       structure" in CLAUDE.md
-- [ ] `structlog` logging setup (`logging_config.py`): JSON output, `request_id`
+- [x] `structlog` logging setup (`logging_config.py`): JSON output, `request_id`
       middleware, level thresholds, `TimedRotatingFileHandler` + gzip rotator,
       `LOG_RETENTION_DAYS` env var (default 30)
-- [ ] SQLite + SQLModel/SQLAlchemy wired up, migrations tooling chosen (Alembic)
-- [ ] `ruff` + `black` + `pytest` configured; CI workflow running them on PRs
-- [ ] `docker-compose.yml` + `Dockerfile` skeleton (even before there's much to
+- [x] SQLite + SQLModel/SQLAlchemy wired up, migrations tooling chosen (Alembic)
+- [x] `ruff` + `black` + `pytest` configured; CI workflow running them on PRs
+- [x] `docker-compose.yml` + `Dockerfile` skeleton (even before there's much to
       run, so packaging isn't a phase-1-exit surprise)
 
 ### M1 — Data model
@@ -75,7 +75,7 @@ they come before any connector or UI work, not after.
 - [ ] Rule editor: row-based UI + raw-text/gitignore-style paste mode
 - [ ] Run history with errors
 - [ ] Lazy-loaded folder tree (fetch children on expand only)
-- [ ] Monaco-based viewer pane: tabs, in-file search, download (single file
+- [ ] CodeMirror-based viewer pane: tabs, in-file search, download (single file
       or zipped folder)
 - [ ] Roles UI: list, editor (global-capability toggles + customer/source
       access tree with search/filter, collapsed by default), duplicate-role

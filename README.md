@@ -51,7 +51,7 @@ nothing sitting around afterward for someone to leak or for disk to fill up with
 | Agentless Linux + Windows | ✅ SSH/SFTP, SMB, WinRM | needs Beats/NXLog agents | needs an agent | rclone remotes | needs Promtail agent |
 | Customer/environment-scoped RBAC | ✅ built in | limited / enterprise | role-based, not scoped this way | ❌ | limited |
 | SSO (OIDC/SAML) | 🚧 roadmap | enterprise tier | ✅ | ❌ | via Grafana |
-| Code-editor-style viewer | ✅ Monaco | search UI, not a file viewer | search UI | depends which browser | Grafana Explore |
+| Code-editor-style viewer | ✅ CodeMirror | search UI, not a file viewer | search UI | depends which browser | Grafana Explore |
 | Setup | single docker-compose | multi-service | multi-service | multiple tools glued together | multi-service |
 
 This table reflects the design as of this writing and each project evolves —
