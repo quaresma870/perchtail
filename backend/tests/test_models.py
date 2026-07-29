@@ -8,7 +8,7 @@ from app.auth.models import (
     ScopeType,
     User,
 )
-from app.models import Customer, PatternKind, Protocol, Rule, RuleType, Source
+from app.models import Customer, Folder, PatternKind, Protocol, Rule, RuleType, Source
 
 
 def test_customer_source_rule_relationships(session):
@@ -102,6 +102,52 @@ def test_user_role_relationship(session):
     assert user.role_id == role.id
     assert user.active is True
     assert user.password_hash is None
+
+
+def test_folder_nests_arbitrarily_deep_and_groups_sources(session):
+    customer = Customer(name="Vodacom Tanzania")
+    session.add(customer)
+    session.commit()
+    session.refresh(customer)
+
+    root = Folder(name="Production", customer_id=customer.id)
+    session.add(root)
+    session.commit()
+    session.refresh(root)
+
+    child = Folder(name="App Servers", customer_id=customer.id, parent_folder_id=root.id)
+    session.add(child)
+    session.commit()
+    session.refresh(child)
+
+    source = Source(
+        name="app01",
+        customer_id=customer.id,
+        folder_id=child.id,
+        protocol=Protocol.ssh,
+        host="app01.example.com",
+        base_path="/var/log/appname",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+    session.refresh(root)
+    session.refresh(child)
+
+    assert child.parent_folder == root
+    assert root.child_folders == [child]
+    assert child.sources == [source]
+    assert source.folder == child
+
+
+def test_source_folder_id_defaults_to_none():
+    source = Source(
+        name="app01",
+        protocol=Protocol.ssh,
+        host="app01.example.com",
+        base_path="/var/log/appname",
+    )
+    assert source.folder_id is None
 
 
 def test_audit_log_metadata_column_roundtrip(session):

@@ -6,42 +6,56 @@ from sqlmodel import Session, select
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, Role, RoleGrant, ScopeType, User
 from app.db import get_session
-from app.models import Source
+from app.models import Folder, Source
+
+
+def _find_grant(session: Session, *, role_id: int, scope_type: ScopeType, scope_id: int):
+    return session.exec(
+        select(RoleGrant).where(
+            RoleGrant.role_id == role_id,
+            RoleGrant.scope_type == scope_type,
+            RoleGrant.scope_id == scope_id,
+        )
+    ).first()
 
 
 def resolve_capability(
     session: Session, user: User, source: Source, capability: Capability
 ) -> bool:
     """Grant-resolution logic per CLAUDE.md's "Access control (RBAC + SSO)"
-    section: no grant can reach a system source short of super-admin; a
-    source-scoped grant beats a customer-scoped one; otherwise deny."""
+    section: no grant can reach a system source short of super-admin; the
+    most specific scope wins — a source-scoped grant beats a folder-scoped
+    one, which beats a (possibly deeper) parent folder's, which beats the
+    customer-scoped one; otherwise deny."""
     if source.is_system:
         return user.role.is_super_admin
 
     if user.role.is_super_admin:
         return True
 
-    grant = session.exec(
-        select(RoleGrant).where(
-            RoleGrant.role_id == user.role_id,
-            RoleGrant.scope_type == ScopeType.source,
-            RoleGrant.scope_id == source.id,
+    role_id = user.role_id
+
+    grant = _find_grant(session, role_id=role_id, scope_type=ScopeType.source, scope_id=source.id)
+    if grant is not None:
+        return capability in grant.capabilities
+
+    folder_id = source.folder_id
+    while folder_id is not None:
+        grant = _find_grant(
+            session, role_id=role_id, scope_type=ScopeType.folder, scope_id=folder_id
         )
-    ).first()
+        if grant is not None:
+            return capability in grant.capabilities
+        folder_id = session.get(Folder, folder_id).parent_folder_id
 
-    if grant is None and source.customer_id is not None:
-        grant = session.exec(
-            select(RoleGrant).where(
-                RoleGrant.role_id == user.role_id,
-                RoleGrant.scope_type == ScopeType.customer,
-                RoleGrant.scope_id == source.customer_id,
-            )
-        ).first()
+    if source.customer_id is not None:
+        grant = _find_grant(
+            session, role_id=role_id, scope_type=ScopeType.customer, scope_id=source.customer_id
+        )
+        if grant is not None:
+            return capability in grant.capabilities
 
-    if grant is None:
-        return False
-
-    return capability in grant.capabilities
+    return False
 
 
 def require_capability(capability: Capability, get_current_user: Callable[..., User]):
