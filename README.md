@@ -8,7 +8,7 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.1.1%20%28phase%201b%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.1.1%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -19,15 +19,18 @@
 
 ## Status
 
-🟢 **v0.1.1 — Phase 1 (MVP) + Phase 1b (SSO) complete.** Agentless SSH/SFTP, SMB, and
-WinRM browsing, ephemeral fetch (nothing mirrored), rule-scoped RBAC, the
-full admin/viewer UI, and OIDC single sign-on (local accounts still work
-alongside it — see [ROADMAP.md](ROADMAP.md)) all work end-to-end. Still
-pre-1.0: SAML isn't built (OIDC covers Azure AD/Entra ID, Okta, Google
-Workspace, Keycloak/Authentik, so it's only getting built if a real need
-shows up), there's no full-text search yet, and it hasn't seen production
-traffic beyond the maintainer's own use. See [CHANGELOG.md](CHANGELOG.md)
-for what's actually shipped versus planned.
+🟢 **Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and Phase 3's
+full-text search are all complete** (see [ROADMAP.md](ROADMAP.md) for the
+full phase breakdown). Agentless SSH/SFTP, SMB, and WinRM browsing, a Go
+push-agent for hosts that can't be reached inbound, ephemeral fetch
+(nothing mirrored), rule-scoped RBAC, OIDC single sign-on (local accounts
+still work alongside it), and opt-in full-text search over indexed
+sources all work end-to-end. Still pre-1.0: SAML isn't built (OIDC covers
+Azure AD/Entra ID, Okta, Google Workspace, Keycloak/Authentik, so it's
+only getting built if a real need shows up), alerting and IdP
+group-claim-to-role auto-mapping aren't built yet, and it hasn't seen
+production traffic beyond the maintainer's own use. See
+[CHANGELOG.md](CHANGELOG.md) for what's actually shipped versus planned.
 
 ## What it is
 
@@ -122,10 +125,11 @@ docker compose logs perchtail | grep initial_super_admin
 Open `http://localhost:8080`, sign in with that username/password (`admin` by
 default — override with `INITIAL_ADMIN_USERNAME` in `.env` before first
 startup), and you'll be forced to set your own password immediately. From
-there: **Sources → New source** to point PerchTail at a server (see
-[docs/source-setup.md](docs/source-setup.md) for what the source side needs
-configured first), attach a rule so something is actually visible (a source
-with zero rules shows nothing, by design), and open **Viewer** to browse it.
+there: **Settings → Sources → + Add source** to point PerchTail at a server
+(see [docs/source-setup.md](docs/source-setup.md) for what the source side
+needs configured first), attach a rule so something is actually visible (a
+source with zero rules shows nothing, by design), and open **Viewer** to
+browse it.
 
 State (the SQLite database, rotated application logs, and the ephemeral
 scratch cache) lives in the `perchtail-data` Docker volume, so it survives
