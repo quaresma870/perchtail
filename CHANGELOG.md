@@ -61,6 +61,11 @@ release ships (0.x releases may include breaking changes between minors).
   changed — Sources stays visible to any authenticated user, Roles/Users/SSO
   stay gated behind their existing `manage_roles`/`manage_users`/`manage_sso`
   checks, same as before.
+- README: status section now reflects Phase 2 (push-agent) and Phase 3
+  (full-text search) as complete, not just Phase 1/1b; the three
+  `docs/images/` screenshots (Sources, Viewer, Role editor) are
+  regenerated against the new Settings nav; the Quick start walkthrough's
+  "Sources → New source" now reads "Settings → Sources → + Add source".
 
 ### Fixed
 - `vite.config.ts`'s dev-proxy prefix list was missing `/sso`, so the SSO
