@@ -1,7 +1,7 @@
 <script lang="ts">
   import Router, { push } from 'svelte-spa-router'
   import { onMount } from 'svelte'
-  import { authChecked, currentUser, logout, refreshCurrentUser, hasCapability } from './lib/auth'
+  import { authChecked, currentUser, logout, refreshCurrentUser } from './lib/auth'
   import { currentHash } from './lib/hash'
   import Login from './routes/Login.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
@@ -9,6 +9,7 @@
   import SourceEditor from './routes/SourceEditor.svelte'
   import Viewer from './routes/Viewer.svelte'
   import Search from './routes/Search.svelte'
+  import SettingsIndex from './routes/SettingsIndex.svelte'
   import Roles from './routes/Roles.svelte'
   import RoleEditor from './routes/RoleEditor.svelte'
   import Users from './routes/Users.svelte'
@@ -17,17 +18,18 @@
   const routes = {
     '/login': Login,
     '/change-password': ChangePassword,
-    '/sources': Sources,
-    '/sources/new': SourceEditor,
-    '/sources/:id': SourceEditor,
     '/viewer': Viewer,
     '/viewer/:sourceId': Viewer,
     '/search': Search,
-    '/roles': Roles,
-    '/roles/new': RoleEditor,
-    '/roles/:id': RoleEditor,
-    '/users': Users,
-    '/sso': SsoSettings,
+    '/settings': SettingsIndex,
+    '/settings/sources': Sources,
+    '/settings/sources/new': SourceEditor,
+    '/settings/sources/:id': SourceEditor,
+    '/settings/roles': Roles,
+    '/settings/roles/new': RoleEditor,
+    '/settings/roles/:id': RoleEditor,
+    '/settings/users': Users,
+    '/settings/sso': SsoSettings,
   }
 
   onMount(async () => {
@@ -62,16 +64,7 @@
       </div>
       <a href="#/viewer" class:active={isActive('/viewer')}>Viewer</a>
       <a href="#/search" class:active={isActive('/search')}>Search</a>
-      <a href="#/sources" class:active={isActive('/sources')}>Sources</a>
-      {#if hasCapability($currentUser, 'manage_roles')}
-        <a href="#/roles" class:active={isActive('/roles')}>Roles</a>
-      {/if}
-      {#if hasCapability($currentUser, 'manage_users')}
-        <a href="#/users" class:active={isActive('/users')}>Users</a>
-      {/if}
-      {#if hasCapability($currentUser, 'manage_sso')}
-        <a href="#/sso" class:active={isActive('/sso')}>SSO</a>
-      {/if}
+      <a href="#/settings" class:active={isActive('/settings')}>Settings</a>
       <span class="spacer"></span>
       <span class="username">{$currentUser.username}</span>
       <button class="btn btn-ghost" on:click={handleLogout}>Log out</button>

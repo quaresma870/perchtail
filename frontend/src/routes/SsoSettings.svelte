@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import SettingsNav from '../lib/components/SettingsNav.svelte'
   import type { ConnectionCheckResult, SSOProvider } from '../lib/types'
 
   let provider: SSOProvider | null = null
@@ -106,13 +107,15 @@
   }
 </script>
 
+<SettingsNav />
+
 <div class="page">
   <h1>SSO settings</h1>
   <p class="hint">
     One OIDC provider can be configured at a time (Azure AD/Entra ID, Okta, Google Workspace,
     Keycloak/Authentik — anything speaking standard OIDC). Local accounts keep working
     alongside it. A first-time SSO sign-in auto-provisions a no-access account — assign it a
-    real role from the <a href="#/users">Users</a> page afterward.
+    real role from the <a href="#/settings/users">Users</a> page afterward.
   </p>
 
   {#if loading}
