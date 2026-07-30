@@ -1,6 +1,7 @@
 import pytest
 from app import models  # noqa: F401  registers tables on SQLModel.metadata
 from app.auth import models as auth_models  # noqa: F401  registers tables on SQLModel.metadata
+from app.db import ensure_search_schema
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -18,5 +19,6 @@ def session():
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
     SQLModel.metadata.create_all(engine)
+    ensure_search_schema(engine)
     with Session(engine) as session:
         yield session

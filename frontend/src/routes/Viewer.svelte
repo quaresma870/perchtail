@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte'
-  import { push } from 'svelte-spa-router'
+  import { onDestroy, onMount, tick } from 'svelte'
+  import { push, router } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import FolderTree from '../lib/components/FolderTree.svelte'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
@@ -28,6 +28,7 @@
 
   let tabs: Tab[] = []
   let activeKey: string | null = null
+  let paneRef: CodeMirrorPane | null = null
   $: activeTab = tabs.find((t) => t.key === activeKey) ?? null
 
   async function loadSourcePicker() {
@@ -55,33 +56,51 @@
     }
   }
 
-  async function handleOpen(event: CustomEvent<{ path: string; member: string | null; name: string }>) {
-    if (sourceId === null) return
-    const { path, member, name } = event.detail
+  async function openFile(path: string, member: string | null, name: string): Promise<boolean> {
+    if (sourceId === null) return false
     const key = tabKey(path, member)
     const existing = tabs.find((t) => t.key === key)
     if (existing) {
       activeKey = key
-      return
+      return true
     }
 
-    const params = new URLSearchParams({ path })
-    if (member) params.set('member', member)
+    const fetchParams = new URLSearchParams({ path })
+    if (member) fetchParams.set('member', member)
     try {
-      const response = await fetch(`/sources/${sourceId}/open?${params.toString()}`, {
+      const response = await fetch(`/sources/${sourceId}/open?${fetchParams.toString()}`, {
         credentials: 'include',
       })
       if (!response.ok) {
         error = `Failed to open ${name}`
-        return
+        return false
       }
       const content = await response.text()
       const scratchKey = response.headers.get('x-scratch-key')
       const tab: Tab = { key, path, member, name, content, scratchKey }
       tabs = [...tabs, tab]
       activeKey = key
+      return true
     } catch {
       error = `Failed to open ${name}`
+      return false
+    }
+  }
+
+  async function handleOpen(event: CustomEvent<{ path: string; member: string | null; name: string }>) {
+    const { path, member, name } = event.detail
+    await openFile(path, member, name)
+  }
+
+  // Search click-through (Search.svelte pushes here with ?path=...&line=...)
+  // — opens the file same as clicking it in the tree, then scrolls the
+  // CodeMirror pane to the matched line once its content has rendered.
+  async function openFromDeepLink(path: string, line: number | null) {
+    const name = path.split('/').pop() ?? path
+    const opened = await openFile(path, null, name)
+    if (opened && line !== null) {
+      await tick()
+      paneRef?.scrollToLine(line)
     }
   }
 
@@ -104,6 +123,12 @@
       loadSourcePicker()
     } else {
       loadTree()
+      const deepLink = new URLSearchParams(router.querystring ?? '')
+      const deepLinkPath = deepLink.get('path')
+      if (deepLinkPath) {
+        const line = deepLink.get('line')
+        openFromDeepLink(deepLinkPath, line ? Number(line) : null)
+      }
     }
   })
 
@@ -193,7 +218,7 @@
             Download
           </a>
         </div>
-        <CodeMirrorPane content={activeTab.content} />
+        <CodeMirrorPane bind:this={paneRef} content={activeTab.content} />
       {:else}
         <div class="empty-state">Select a file from the tree to view it.</div>
       {/if}

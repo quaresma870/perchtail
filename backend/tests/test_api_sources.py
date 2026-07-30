@@ -340,6 +340,26 @@ def test_rule_count_reflects_existing_rules(session, admin_client):
     assert response.json()[0]["rule_count"] == 1
 
 
+def test_search_indexing_enabled_defaults_false_and_can_be_toggled(session, admin_client):
+    customer = _make_customer(session)
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "app01",
+            "customer_id": customer.id,
+            "protocol": "local",
+            "host": "localhost",
+            "base_path": "/var/log",
+        },
+    ).json()
+    assert created["search_indexing_enabled"] is False
+
+    updated = admin_client.patch(
+        f"/sources/{created['id']}", json={"search_indexing_enabled": True}
+    ).json()
+    assert updated["search_indexing_enabled"] is True
+
+
 def test_agent_connected_defaults_false_for_non_agent_source(session, admin_client):
     customer = _make_customer(session)
     created = admin_client.post(

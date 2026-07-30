@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     scratch_idle_seconds: int = 300
     scratch_sweep_interval_seconds: int = 60
 
+    # Phase 3 full-text search (app/search_index.py) — how often the
+    # background indexer sweeps opted-in sources, and the largest single
+    # file it will read into memory to index (skips anything bigger, same
+    # spirit as the scratch size-guard: a safety valve, not a design goal).
+    search_index_interval_seconds: int = 300
+    search_index_max_file_size_mb: float = 20.0
+
 
 @lru_cache
 def get_settings() -> Settings:

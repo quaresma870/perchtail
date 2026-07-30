@@ -30,6 +30,21 @@
     view.setState(EditorState.create({ doc: content, extensions: extensions() }))
   }
 
+  // Exposed for search click-through (Search.svelte -> Viewer.svelte): jump
+  // to and select a specific line, e.g. after opening a file from a search
+  // hit. Called imperatively via bind:this rather than a reactive prop,
+  // since it only needs to fire once per open, not on every render.
+  export function scrollToLine(lineNumber: number) {
+    if (!view) return
+    const clamped = Math.min(Math.max(lineNumber, 1), view.state.doc.lines)
+    const line = view.state.doc.line(clamped)
+    view.dispatch({
+      selection: { anchor: line.from, head: line.to },
+      effects: EditorView.scrollIntoView(line.from, { y: 'center' }),
+    })
+    view.focus()
+  }
+
   onDestroy(() => {
     view?.destroy()
   })

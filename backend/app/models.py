@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Optional
 
-from sqlmodel import Field, Relationship, SQLModel
+from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
 class Protocol(StrEnum):
@@ -86,6 +86,12 @@ class Source(SQLModel, table=True):
     # connection state itself lives in app.agent_registry, not the DB, since
     # it's inherently per-process and shouldn't survive a restart.
     agent_last_seen_at: datetime | None = None
+    # Phase 3 full-text search (see app/search_index.py and ROADMAP.md):
+    # opt-in, off by default — same "explicit opt-in, not on-by-default"
+    # conservatism as the rule engine's zero-rules-matches-nothing default,
+    # since indexing stores short line-level snippets at rest, which some
+    # customers' logs may be too sensitive for even in that reduced form.
+    search_indexing_enabled: bool = False
 
     customer: Customer | None = Relationship(back_populates="sources")
     folder: Folder | None = Relationship(back_populates="sources")
@@ -105,3 +111,33 @@ class Rule(SQLModel, table=True):
     notes: str | None = None
 
     source: Source = Relationship(back_populates="rules")
+
+
+class SearchIndexState(SQLModel, table=True):
+    """Per-file bookkeeping for the Phase 3 full-text search indexer (see
+    app/search_index.py) — tracks what's already indexed for a source so a
+    sweep only re-reads files that changed. Deliberately separate from the
+    actual searchable content, which lives in the `search_index_fts` SQLite
+    FTS5 virtual table (raw SQL, not an ORM model — see
+    app.db.ensure_search_schema) rather than here, since FTS5 tables aren't
+    representable as a SQLModel/SQLAlchemy table class.
+
+    Staleness is tracked by file size alone, not size+mtime: none of the
+    connector protocols (ssh/smb/winrm/local/agent) report a file's
+    modification time today, only name/path/is_dir/size (see
+    collectors/base.py's DirEntry) — so size is the only signal available
+    across all of them uniformly. This under-detects the rare case of a
+    same-size content change, which is an accepted tradeoff for a lagging,
+    approximate secondary index over log files that are typically
+    append-only (grow) or rotated (renamed), not edited in place."""
+
+    __tablename__ = "search_index_state"
+    __table_args__ = (
+        UniqueConstraint("source_id", "file_path", name="uq_search_index_state_source_path"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_id: int = Field(foreign_key="source.id")
+    file_path: str
+    size: int
+    indexed_at: datetime

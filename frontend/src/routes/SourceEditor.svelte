@@ -25,6 +25,7 @@
   let port: number | null = null
   let basePath = ''
   let enabled = true
+  let searchIndexingEnabled = false
   let username = ''
   let password = ''
   let privateKey = ''
@@ -61,6 +62,7 @@
           port = source.port
           basePath = source.base_path
           enabled = source.enabled
+          searchIndexingEnabled = source.search_indexing_enabled
         }
       }
     } catch (err) {
@@ -94,6 +96,7 @@
           port,
           base_path: basePath,
           enabled,
+          search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
         })
         push(`/sources/${created.id}`)
@@ -106,6 +109,7 @@
           port,
           base_path: basePath,
           enabled,
+          search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
         })
         push('/sources')
@@ -218,6 +222,15 @@
         <input type="checkbox" bind:checked={enabled} />
         Enabled
       </label>
+
+      <label class="checkbox">
+        <input type="checkbox" bind:checked={searchIndexingEnabled} />
+        Include in full-text search
+      </label>
+      <p class="hint indent">
+        Off by default — stores short per-line snippets of this source's rule-visible content in a
+        local search index so it shows up under Search, refreshed periodically in the background.
+      </p>
 
       {#if protocol === 'agent'}
         <fieldset>
@@ -365,5 +378,9 @@
   }
   .hint {
     color: var(--text-faint);
+  }
+  .hint.indent {
+    margin: -0.5rem 0 0;
+    font-size: 0.78rem;
   }
 </style>

@@ -37,6 +37,20 @@ release ships (0.x releases may include breaking changes between minors).
   agent's `PERCHTAIL_AGENT_TOKEN` config. `Sources.svelte` shows agent
   sources' live connection state (connected / never connected / last seen)
   instead of the manual reachability check the other protocols use.
+- Phase 3: full-text search. A new opt-in per-source flag
+  (`Source.search_indexing_enabled`, off by default) enables a background
+  indexer (`app/search_index.py`, an APScheduler sweep) that walks a
+  source's rule-visible files and stores short per-line snippets in a
+  SQLite FTS5 index — a genuinely separate, lagging, approximate structure,
+  not a reuse of the ephemeral viewing scratch space or a departure from
+  the always-fresh live-browsing model. `GET /search?q=...` searches across
+  every source the current user can view, highlighting matches (safely
+  HTML-escaped before its `<mark>` tags are added — log content is
+  untrusted, arbitrary text). Frontend: a new Search page with a
+  query box and a ranked, clickable results list; clicking a result opens
+  the file in the Viewer and jumps straight to the matched line
+  (`CodeMirrorPane` gained a `scrollToLine` method for this). The source
+  editor gains an "Include in full-text search" toggle.
 
 ## [0.1.1] - 2026-07-30
 

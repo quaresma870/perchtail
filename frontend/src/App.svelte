@@ -8,6 +8,7 @@
   import Sources from './routes/Sources.svelte'
   import SourceEditor from './routes/SourceEditor.svelte'
   import Viewer from './routes/Viewer.svelte'
+  import Search from './routes/Search.svelte'
   import Roles from './routes/Roles.svelte'
   import RoleEditor from './routes/RoleEditor.svelte'
   import Users from './routes/Users.svelte'
@@ -21,6 +22,7 @@
     '/sources/:id': SourceEditor,
     '/viewer': Viewer,
     '/viewer/:sourceId': Viewer,
+    '/search': Search,
     '/roles': Roles,
     '/roles/new': RoleEditor,
     '/roles/:id': RoleEditor,
@@ -59,6 +61,7 @@
         <span>PerchTail</span>
       </div>
       <a href="#/viewer" class:active={isActive('/viewer')}>Viewer</a>
+      <a href="#/search" class:active={isActive('/search')}>Search</a>
       <a href="#/sources" class:active={isActive('/sources')}>Sources</a>
       {#if hasCapability($currentUser, 'manage_roles')}
         <a href="#/roles" class:active={isActive('/roles')}>Roles</a>
