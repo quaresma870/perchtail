@@ -53,6 +53,7 @@ class SourcePublic(BaseModel):
     has_agent_token: bool
     agent_connected: bool
     agent_last_seen_at: datetime | None
+    search_indexing_enabled: bool
 
 
 class SourceCreate(BaseModel):
@@ -67,6 +68,7 @@ class SourceCreate(BaseModel):
     # Per-protocol JSON blob (SSH: username + private_key|password; SMB/WinRM:
     # username + password); omitted entirely for `local`, which needs none.
     credential: dict | None = None
+    search_indexing_enabled: bool = False
 
 
 class SourceUpdate(BaseModel):
@@ -78,6 +80,7 @@ class SourceUpdate(BaseModel):
     base_path: str | None = None
     enabled: bool | None = None
     credential: dict | None = None
+    search_indexing_enabled: bool | None = None
 
 
 class ConnectionCheckResult(BaseModel):
@@ -105,6 +108,7 @@ def _to_public(session: Session, source: Source) -> SourcePublic:
             source.protocol == Protocol.agent and get_agent_registry().is_connected(source.id)
         ),
         agent_last_seen_at=source.agent_last_seen_at,
+        search_indexing_enabled=source.search_indexing_enabled,
     )
 
 
@@ -174,6 +178,7 @@ def create_source(
         base_path=payload.base_path,
         enabled=payload.enabled,
         credential_ref=encrypt_credential(payload.credential) if payload.credential else None,
+        search_indexing_enabled=payload.search_indexing_enabled,
     )
     session.add(source)
     session.flush()
@@ -222,6 +227,8 @@ def update_source(
         source.enabled = payload.enabled
     if payload.credential is not None:
         source.credential_ref = encrypt_credential(payload.credential)
+    if payload.search_indexing_enabled is not None:
+        source.search_indexing_enabled = payload.search_indexing_enabled
 
     session.add(source)
     record_audit_event(

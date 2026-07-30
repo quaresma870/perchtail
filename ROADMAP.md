@@ -455,10 +455,71 @@ they come before any connector or UI work, not after.
 
 ## Phase 3
 
-- [ ] Full-text search — needs its own indexing design since nothing persists
+- [x] Full-text search — needs its own indexing design since nothing persists
       from the viewing scratch space; design before building, per CLAUDE.md
 - [ ] Alerting
 - [ ] IdP group-claim-to-role auto-mapping
+
+### Notes on decisions made — full-text search
+
+- **A genuinely separate index, not a reuse of the viewing scratch space** —
+  exactly as CLAUDE.md flagged this would need. `app/search_index.py`'s
+  background indexer (an APScheduler job, same shape as `scratch.py`'s
+  sweeps) walks each opted-in source's rule-visible files and stores short
+  per-line snippets in a SQLite FTS5 virtual table
+  (`app.db.ensure_search_schema`). This is a deliberately lagging,
+  approximate secondary structure — the live viewer's fetch-fresh behavior
+  is completely unaffected by anything here.
+- **Opt-in per source (`Source.search_indexing_enabled`, off by default)** —
+  the design questions asked about this went unanswered, so the call was
+  made directly: indexing is the one place in this project that stores a
+  form of log content at rest, even reduced to short snippets, so it gets
+  the same conservative "explicit opt-in, not on by default" treatment the
+  rule engine already uses for visibility (a source with zero rules matches
+  nothing).
+- **Short per-line snippets stored, not full extracted text** — same
+  unanswered-question judgment call, made toward the smaller footprint:
+  one FTS5 row per non-empty line (path, line number, snippet ≤500 chars),
+  not the complete text of every indexed file. Search results show the
+  matching line with FTS5's own highlighting; opening a result still
+  re-fetches the live file for the full view, same as clicking it in the
+  tree.
+- **Staleness tracked by file size alone, not size+mtime** —
+  `SearchIndexState` per (source, file_path). None of the five connector
+  protocols report a file's modification time (`collectors/base.py`'s
+  `DirEntry` only has name/path/is_dir/size), so size is the only signal
+  available uniformly across all of them. This under-detects a same-size
+  content edit, an accepted tradeoff for log files that are typically
+  append-only (grow) or rotated (renamed), not edited in place.
+- **The user's search-box input is wrapped as one quoted FTS5 phrase**,
+  not passed through as FTS5's own query syntax — predictable, grep-like
+  substring matching beats exposing AND/OR/NOT/prefix* to a plain search
+  box, and avoids a MATCH syntax error on input like an unbalanced quote.
+- **FTS5's `snippet()` output is HTML-escaped before its `<mark>` highlight
+  tags are spliced back in** (`_escape_snippet`, using control-character
+  placeholders round-tripped through `html.escape`) — `snippet()` inserts
+  its highlight markers into the *raw* stored line with no escaping of its
+  own, and a log line is arbitrary content, so rendering it unescaped via
+  the frontend's `{@html}` would be a stored-XSS hole (a line containing
+  `<script>...</script>` would execute as-is). Caught and fixed during this
+  same pass, with a regression test.
+- **Plain files and transparent `.gz` are indexed; `.zip`/`.tar.gz`
+  containers are not** — decompressing `.gz` first (same as the viewer does
+  on open) is cheap and rotated logs spend most of their life gzipped, but
+  indexing every member of a bulk archive (how deep? every nested archive
+  too?) is a real design question of its own, left for a future pass rather
+  than answered speculatively here.
+- **Binary content is sniffed and skipped** (a null byte in the first 8KB),
+  and files over a configurable size cap (`search_index_max_file_size_mb`,
+  default 20MB) are skipped too — the indexer reads a whole file into memory
+  to index it, so both guards exist for the same reason the scratch store
+  has a size guard: a safety valve for load, not a design goal.
+- **Search UI click-through** (`Search.svelte` → `Viewer.svelte`) passes
+  the target path and line number as a query string
+  (`#/viewer/:id?path=...&line=...`); `CodeMirrorPane` gained an imperative
+  `scrollToLine()` method (called via `bind:this` after the tab opens,
+  rather than a reactive prop) so a search result opens the file and jumps
+  straight to the matched line, not just the source's root.
 
 ## Open decisions
 
@@ -468,7 +529,9 @@ than deciding speculatively now:
 - Ephemeral scratch location: plain disk vs tmpfs/ramdisk
 - Audit log retention policy
 - Whether SAML is needed at all
-- Full-text search's content source, given nothing persists
+- Whether to index `.zip`/`.tar.gz` archive members for full-text search,
+  and how deep (see the Phase 3 full-text search notes above) — deferred,
+  not needed for the initial opt-in, plain-files-and-gz version
 - Whether the built-in log viewer filters DEBUG-level files by default
 - `CREDENTIAL_ENCRYPTION_KEY` rotation story (currently: none — rotating it
   means re-entering every source's credentials)

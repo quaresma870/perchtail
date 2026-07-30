@@ -43,6 +43,7 @@ export interface Source {
   has_agent_token: boolean
   agent_connected: boolean
   agent_last_seen_at: string | null
+  search_indexing_enabled: boolean
 }
 
 export interface Rule {
@@ -108,4 +109,11 @@ export interface SSOProvider {
 export interface SSOStatus {
   enabled: boolean
   name: string | null
+}
+
+export interface SearchHit {
+  source_id: number
+  file_path: string
+  line_number: number
+  snippet_html: string
 }

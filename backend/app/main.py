@@ -18,6 +18,7 @@ from app.api.customers import router as customers_router
 from app.api.folders import router as folders_router
 from app.api.roles import router as roles_router
 from app.api.rules import router as rules_router
+from app.api.search import router as search_router
 from app.api.sources import router as sources_router
 from app.api.sso import router as sso_router
 from app.api.users import router as users_router
@@ -26,6 +27,7 @@ from app.config import get_settings
 from app.db import engine, init_db
 from app.logging_config import configure_logging, get_logger
 from app.scratch import get_scratch_store
+from app.search_index import run_indexing_sweep
 
 configure_logging()
 logger = get_logger(__name__)
@@ -64,6 +66,11 @@ async def lifespan(app: FastAPI):
         "interval",
         seconds=settings.scratch_sweep_interval_seconds,
     )
+    scheduler.add_job(
+        run_indexing_sweep,
+        "interval",
+        seconds=settings.search_index_interval_seconds,
+    )
     scheduler.start()
     logger.info("startup.complete")
     yield
@@ -82,6 +89,7 @@ app.include_router(roles_router)
 app.include_router(users_router)
 app.include_router(sso_router)
 app.include_router(agent_ws_router)
+app.include_router(search_router)
 
 
 @app.get("/healthz")
