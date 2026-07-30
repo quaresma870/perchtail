@@ -3,6 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser, hasCapability } from '../lib/auth'
+  import SettingsNav from '../lib/components/SettingsNav.svelte'
   import type { Customer, Protocol, Source } from '../lib/types'
 
   let sources: Source[] = []
@@ -76,11 +77,15 @@
   onMount(load)
 </script>
 
+<SettingsNav />
+
 <div class="page">
   <div class="header">
     <h1>Sources</h1>
     {#if hasCapability($currentUser, 'create_source')}
-      <button class="btn btn-primary" on:click={() => push('/sources/new')}>+ Add source</button>
+      <button class="btn btn-primary" on:click={() => push('/settings/sources/new')}
+        >+ Add source</button
+      >
     {/if}
   </div>
 
@@ -157,7 +162,9 @@
                   ▶
                 </button>
                 {#if !source.is_system && hasCapability($currentUser, 'create_source')}
-                  <button class="link" on:click={() => push(`/sources/${source.id}`)}>edit</button>
+                  <button class="link" on:click={() => push(`/settings/sources/${source.id}`)}
+                    >edit</button
+                  >
                   <button class="link danger" on:click={() => removeSource(source)}>delete</button>
                 {/if}
               </td>

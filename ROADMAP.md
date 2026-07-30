@@ -521,6 +521,42 @@ they come before any connector or UI work, not after.
   rather than a reactive prop) so a search result opens the file and jumps
   straight to the matched line, not just the source's root.
 
+## UI reorganization: unified Settings navigation
+
+- [x] Collapse Sources/Roles/Users/SSO into a single "Settings" top-nav entry
+      with a shared sub-nav, so the top nav reads Viewer | Search | Settings
+      instead of listing every admin surface individually
+
+### Notes on decisions made
+
+- **Sources moved into Settings wholesale**, even though it was never
+  capability-gated the way Roles/Users/SSO are — any authenticated user
+  could always reach it, mainly to check connection status/rule counts.
+  The Viewer already has its own lighter source picker for "just browse",
+  so Sources' unique remaining value is the admin actions (create/edit/
+  delete); `SettingsNav`'s "Sources" tab stays unconditionally visible
+  (matching its old unconditional nav link) so that read-only use isn't
+  lost, while the "Settings" top-nav entry itself is likewise always shown
+  rather than capability-gated, for the same reason.
+- **A shared `SettingsNav.svelte` component embedded at the top of each
+  page**, not a nested `svelte-spa-router` with a wrapping layout — the
+  simpler option given `svelte-spa-router`'s flat routing model has no
+  built-in layout/outlet concept; each settings page already renders its
+  own `<div class="page">`, so adding one shared sub-nav component above it
+  costs one import + one line per file rather than restructuring routing.
+- **Every route gained a `/settings` prefix**
+  (`/settings/sources`, `/settings/sources/:id`, `/settings/roles`, etc.);
+  a bare `/settings` renders `SettingsIndex.svelte`, which redirects
+  (via `replace`, not `push`, so it doesn't add a spurious history entry)
+  to `/settings/sources` — always reachable, so it's a safe unconditional
+  landing tab for a bookmarked or typed `/settings` URL.
+- **Found and fixed a real bug while verifying this in a browser**: `/sso`
+  was missing from `vite.config.ts`'s dev-proxy prefix list (`/search` had
+  the same gap, caught and fixed during the Phase 3 work). It only affected
+  local `npm run dev` — production serves the API and the built SPA from
+  the same FastAPI process with no path-based reverse-proxy split, so
+  `/sso` always reached its router there regardless.
+
 ## Open decisions
 
 Carried over from CLAUDE.md — revisit as the relevant phase approaches rather
