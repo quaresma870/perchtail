@@ -683,6 +683,42 @@ not commitments, and not yet placed into a specific phase:
   creating every source one-by-one through the UI becomes the bottleneck;
   an import/export path (and maybe a documented config-as-code story) is
   high-value at that scale.
+
+### Notes on decisions made — bulk source import
+
+- **Format: YAML as primary, CSV as a secondary/simple option.** YAML
+  handles the nested rule-list-per-source shape naturally; CSV works fine
+  for the common case of "many sources, same rule set" but gets awkward
+  once rules vary per row. No third (JSON) format aimed at humans — it's
+  the same tree as YAML with worse ergonomics for hand-editing.
+- **Ship a downloadable template** pre-filled with one example source (all
+  fields, comments explaining each), plus a **dry-run/preview** step that
+  validates and shows what would be created/changed before committing —
+  no import applies blind.
+- **Create-vs-update semantics**: keyed on source name within a customer;
+  re-importing the same name updates that source rather than duplicating
+  it, so the same file can be re-run idempotently as config-as-code.
+- **Credentials: split structure from secrets, two separate uploads.**
+  The structural import (protocol, host, base_path, rules, customer/folder
+  placement — no credentials) is safe to commit to a repo, paste into a
+  ticket, or hand to a teammate; it produces source shells plus an import
+  batch id. A **separate, credentials-only upload** then keys credentials
+  to those sources by name and funnels every value through the exact same
+  `encrypt_credential` (Fernet) path the manual per-source UI already
+  uses — no parallel credential-writing code path. The uploaded bytes are
+  discarded immediately after the DB write completes (scratch, not
+  storage, same as fetched log content); the endpoint is excluded from
+  request-body logging; the preview step shows presence only ("SSH key:
+  provided"), never values; `AuditLog` records a count summary ("imported
+  12 sources, 9 with credentials"), never payload. Treat the accept as
+  one-time, same discipline as temporary passwords and agent enrollment
+  tokens.
+- **Deferred, not v1**: referencing credentials by external secret-manager
+  path (e.g. `vault:secret/...`) with a pluggable resolver that fetches
+  and encrypts at import time, so no plaintext ever transits the app at
+  all. Flagged as the eventual "gold standard" if this feature sees heavy
+  use, not worth building until then.
+
 - **A lightweight, scheduled connectivity-check sweep**, distinct from the
   existing on-demand manual `/check` — writing a short history of
   reachability per source. This would double as real data behind the
