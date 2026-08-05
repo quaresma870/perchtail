@@ -62,17 +62,6 @@ release ships (0.x releases may include breaking changes between minors).
   host or protocol — the backend already supported unlimited nesting via
   `Folder.parent_folder_id`; this was a frontend-only gap.
 
-### Fixed
-- Viewer: Ctrl/Cmd+F opened the browser's own find bar instead of
-  CodeMirror's in-file search. Root cause was twofold — clicking into the
-  read-only pane never actually moved DOM focus there (it isn't
-  `contentEditable`, so a plain click doesn't focus it, and CodeMirror's
-  `basicSetup` only wires the search *keymap*, not the `search()`
-  extension the panel needs), so the keystroke had nothing to catch it
-  and fell through to the browser. Fixed by intercepting Ctrl/Cmd+F at
-  the window level in `Viewer.svelte` while a tab is open and opening
-  the panel directly via `openSearchPanel`, regardless of focus state.
-
 ### Changed
 - Frontend: Sources, Roles, Users, and SSO settings are now consolidated
   under a single "Settings" top-nav entry (previously four separate top-nav
@@ -89,6 +78,15 @@ release ships (0.x releases may include breaking changes between minors).
   "Sources → New source" now reads "Settings → Sources → + Add source".
 
 ### Fixed
+- Viewer: Ctrl/Cmd+F opened the browser's own find bar instead of
+  CodeMirror's in-file search. Root cause was twofold — clicking into the
+  read-only pane never actually moved DOM focus there (it isn't
+  `contentEditable`, so a plain click doesn't focus it, and CodeMirror's
+  `basicSetup` only wires the search *keymap*, not the `search()`
+  extension the panel needs), so the keystroke had nothing to catch it
+  and fell through to the browser. Fixed by intercepting Ctrl/Cmd+F at
+  the window level in `Viewer.svelte` while a tab is open and opening
+  the panel directly via `openSearchPanel`, regardless of focus state.
 - `vite.config.ts`'s dev-proxy prefix list was missing `/sso`, so the SSO
   settings page silently failed to load under `npm run dev` (production is
   unaffected — the API and built SPA are served from the same FastAPI
