@@ -457,8 +457,20 @@ they come before any connector or UI work, not after.
 
 - [x] Full-text search — needs its own indexing design since nothing persists
       from the viewing scratch space; design before building, per CLAUDE.md
-- [ ] Alerting
+- [ ] Full-text search: match on file path and source host/name too, not just
+      line content, case-insensitive — a source or file whose name matches
+      the query should surface even if none of its lines happen to contain
+      that text (e.g. searching "win-app-02" should find the source, not just
+      lines that literally say "win-app-02")
+- [ ] Alerting — notify on new content matching a saved search (see the
+      Alerting design notes below for the working scope decision)
 - [ ] IdP group-claim-to-role auto-mapping
+- [ ] System/operational health endpoint(s) for external monitoring
+      (Zabbix, and ideally Prometheus too) — see notes below
+- [ ] Security hardening pass — see the dedicated section below; called out
+      explicitly rather than left implicit, since this audience holds
+      production credentials and treats security posture as a first-class
+      requirement, not a nice-to-have
 
 ### Notes on decisions made — full-text search
 
@@ -556,6 +568,229 @@ they come before any connector or UI work, not after.
   local `npm run dev` — production serves the API and the built SPA from
   the same FastAPI process with no path-based reverse-proxy split, so
   `/sso` always reached its router there regardless.
+
+### Notes on decisions made — full-text search: path/host matching
+
+- **Working plan, not yet built**: make `file_path` an indexed FTS5 column
+  (it's currently `UNINDEXED`, storage-only) so a single MATCH query can hit
+  line content and file path together. FTS5's default `unicode61` tokenizer
+  already folds case for matching, so this is case-insensitive by
+  construction, same as content search already is today.
+- **Host/source-name matching is the harder half**, since neither lives
+  per-line in `search_index_fts` — a source's host is metadata on the
+  `Source` row, not something naturally indexed alongside its lines. Two
+  reasonable designs, not yet decided between:
+  1. Denormalize `host` (and the source's display name) into every FTS row
+     at index time, so one unified MATCH query and one ranked result list
+     covers content + path + host together — simplest UX, but means an
+     admin renaming a source's host doesn't reflect in search until that
+     source's files are next re-indexed (same accepted-staleness spirit as
+     the size-only change-detection already in place).
+  2. Resolve host/name matches separately (a plain case-insensitive `LIKE`
+     against `Source.host`/`Source.name`, no FTS involved) and surface them
+     as their own small "sources matching" section in the UI, distinct from
+     line-content hits — always current, no re-index lag, but a second
+     results list instead of one ranked one.
+  Leaning toward (1) for a simpler single-search-box experience, but this
+  is worth a real look before building rather than assuming.
+
+### Notes on decisions made — alerting
+
+- **Scope, as currently understood: content-match alerts, not operational
+  health alerts.** "Alerting" in CLAUDE.md's phase list is one word with no
+  further spec; read in context (immediately after full-text search in the
+  same sentence) as "save a search, get notified when new indexed content
+  matches it" — extending the Phase 3 index rather than a separate
+  system-health-alerting concern (which the new monitoring-endpoint item
+  below covers instead). Flagged here explicitly since this is a judgment
+  call on an underspecified word, not a confirmed requirement.
+- **Rides on the existing FTS5 index and indexer, no parallel structure**:
+  a new `Alert` row (owner, saved query, optional source scope, webhook
+  config, `last_checked_at`) and an `evaluate_alerts()` sweep (same
+  APScheduler shape as `run_indexing_sweep`) that only looks at files whose
+  `SearchIndexState.indexed_at` advanced since the alert's last check —
+  reusing the timestamp signal already in place rather than depending on
+  FTS5 rowid stability (rowids aren't stable across re-indexes, since a
+  changed file's rows are deleted and reinserted).
+- **Webhook-only notification channel for v1, not email** — no SMTP
+  sending exists anywhere in the project today (temporary passwords are
+  displayed once in the UI, never emailed), so email would be new
+  infrastructure; a generic JSON webhook covers Slack/Teams/PagerDuty/
+  generic consumers with zero new dependencies, matching the project's
+  minimal-infra ethos.
+- **An alert can only ever fire on sources with `search_indexing_enabled`
+  already on** — a hard consequence of riding on the FTS5 index, not a
+  separate opt-in decision to design.
+- **A webhook is a new "content leaves the system" path**, same category of
+  decision as full-text search's own opt-in indexing (CLAUDE.md's "nothing
+  sitting around afterward for someone to leak" ethos) — enabling an alert
+  is a deliberate export choice, worth calling out explicitly in the UI
+  copy when this gets built, not just in this doc.
+- **RBAC is re-checked at evaluation time, not just at alert-creation
+  time** — an alert only ever evaluates sources the owning user can
+  currently view via `visible_source_ids`, so revoking a grant silently
+  stops that alert's scope from firing again, without needing to remember
+  to also edit or delete the alert itself.
+
+### Notes on decisions made — system/operational health endpoint(s)
+
+- **A separate, richer endpoint alongside the existing plain `/healthz`**,
+  not a replacement for it — `/healthz` stays a fast, unauthenticated
+  liveness check for the Docker healthcheck/orchestrator; a new endpoint
+  (`/health/detailed` or similar) carries the structured data an external
+  monitoring system like Zabbix (or Prometheus, if that gets added too)
+  actually wants to poll and alert on.
+- **Candidate contents**: overall status (ok/degraded/error), DB
+  reachability + latency, scratch usage vs `scratch_max_gb`, count of
+  enabled sources by protocol, count of currently-connected vs configured
+  agent-protocol sources, last successful search-indexing sweep time (and
+  whether any opted-in source is overdue), whether the APScheduler jobs are
+  still actually running (next-run time not stuck in the past), app
+  version, uptime.
+- **Needs its own auth, separate from user sessions** — a monitoring
+  system can't do an interactive cookie-session login. Leaning toward a
+  single long-lived, admin-generated bearer token (hashed at rest, shown
+  once at generation) scoped only to this endpoint — the same "hash at
+  rest, plaintext shown once" pattern the agent enrollment token
+  (`Source.agent_token_hash`) and session tokens already use, rather than
+  inventing a new credential-handling convention. IP-allowlisting the
+  endpoint is a reasonable *additional* deployment-level measure (nginx
+  `allow`/`deny`) but not a substitute for real auth on the app's side.
+- **Zabbix specifically favors an HTTP agent item + JSONPath preprocessing
+  per metric** (modern Zabbix, ≥5.0) against one JSON endpoint, rather than
+  one endpoint per scalar metric — plan the response shape and document
+  the JSONPath expressions for the common items (a short `docs/
+  monitoring.md`, mirroring `docs/source-setup.md`'s per-integration style)
+  rather than requiring Zabbix-specific endpoint variants.
+- **Worth designing so a Prometheus `/metrics` endpoint is a thin second
+  wrapper over the same underlying health-check internals later**, even if
+  only the Zabbix-oriented JSON endpoint ships first — several self-hosted
+  shops standardize on Prometheus+Grafana instead of (or alongside) Zabbix.
+
+## Security hardening (pre-1.0)
+
+Called out as its own section, not folded silently into other phases —
+this project holds production credentials by design (CLAUDE.md's own
+framing), and the explicit ask is to treat security posture as a
+first-class, tracked requirement rather than an implicit assumption.
+Everything below is a candidate, not yet triaged into "must-have before
+1.0" versus "nice-to-have" — that pass still needs doing.
+
+- [ ] Login rate limiting / brute-force lockout on `/auth/login` — no
+      throttling exists today beyond argon2id's own hashing cost
+- [ ] Security response headers on every response (CSP, X-Frame-Options,
+      X-Content-Type-Options, Referrer-Policy; HSTS is a deployment-level
+      concern wherever TLS actually terminates, per CLAUDE.md's "sit behind
+      a reverse proxy" packaging note)
+- [ ] Dependency vulnerability scanning in CI, blocking or at minimum
+      reporting: `pip-audit`/`safety` (backend), `npm audit` (frontend),
+      `govulncheck` (the Go agent) — three ecosystems, three tools
+- [ ] Container image scanning (e.g. Trivy/Grype) for the published Docker
+      image, plus an SBOM published alongside releases
+- [ ] Automated dependency-update PRs (Dependabot/Renovate) across all
+      three ecosystems — keeping current, not just detecting known-bad
+- [ ] `CREDENTIAL_ENCRYPTION_KEY` rotation path — currently no documented
+      or tooled way to rotate this key without losing access to every
+      already-encrypted `Source.credential_ref`/`SSOProviderConfig.config`
+- [ ] Session management UI: list a user's own active sessions
+      (`AuthSession` already exists at the data layer) with the ability to
+      revoke one remotely — useful on its own, and a prerequisite for any
+      "someone else is logged in as me" incident response
+- [ ] Optional TOTP/MFA for local accounts — SSO already delegates this to
+      the IdP, but the local break-glass account (and any org that doesn't
+      enable SSO) has no second factor today
+- [ ] Audit log tamper-evidence (e.g. hash-chaining `AuditLog` rows) so a
+      compromised admin account can't quietly edit history without it
+      being detectable
+- [ ] CSRF review across every state-changing endpoint — confirm the
+      existing `SameSite=strict` session cookie is sufficient on its own,
+      or add explicit CSRF tokens where it isn't
+- [ ] A formal third-party security review or pentest before declaring 1.0
+      — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
+      this is about actively looking for one before external users show up
+
+## Ideas worth considering (not yet triaged into a phase)
+
+Raised while discussing what else belongs on this roadmap — real candidates,
+not commitments, and not yet placed into a specific phase:
+
+- **Bulk source import/export** (CSV or YAML) — CLAUDE.md's own framing
+  ("dozens of customers and dozens of sources each") implies a scale where
+  creating every source one-by-one through the UI becomes the bottleneck;
+  an import/export path (and maybe a documented config-as-code story) is
+  high-value at that scale.
+
+### Notes on decisions made — bulk source import
+
+- **Format: YAML as primary, CSV as a secondary/simple option.** YAML
+  handles the nested rule-list-per-source shape naturally; CSV works fine
+  for the common case of "many sources, same rule set" but gets awkward
+  once rules vary per row. No third (JSON) format aimed at humans — it's
+  the same tree as YAML with worse ergonomics for hand-editing.
+- **Ship a downloadable template** pre-filled with one example source (all
+  fields, comments explaining each), plus a **dry-run/preview** step that
+  validates and shows what would be created/changed before committing —
+  no import applies blind.
+- **Create-vs-update semantics**: keyed on source name within a customer;
+  re-importing the same name updates that source rather than duplicating
+  it, so the same file can be re-run idempotently as config-as-code.
+- **Credentials: split structure from secrets, two separate uploads.**
+  The structural import (protocol, host, base_path, rules, customer/folder
+  placement — no credentials) is safe to commit to a repo, paste into a
+  ticket, or hand to a teammate; it produces source shells plus an import
+  batch id. A **separate, credentials-only upload** then keys credentials
+  to those sources by name and funnels every value through the exact same
+  `encrypt_credential` (Fernet) path the manual per-source UI already
+  uses — no parallel credential-writing code path. The uploaded bytes are
+  discarded immediately after the DB write completes (scratch, not
+  storage, same as fetched log content); the endpoint is excluded from
+  request-body logging; the preview step shows presence only ("SSH key:
+  provided"), never values; `AuditLog` records a count summary ("imported
+  12 sources, 9 with credentials"), never payload. Treat the accept as
+  one-time, same discipline as temporary passwords and agent enrollment
+  tokens.
+- **The gold-standard option: external secret-manager references, not
+  inline values.** Deferred past v1, but worth designing properly since
+  it's the strongest answer to "bulk-import credentials without them ever
+  being typed/pasted into a file a human handles." Row-level credential
+  fields become a reference string instead of a value — e.g.
+  `secretref:kv/data/<customer-slug>/<source-name>#ssh_key` — resolved
+  through a new `SecretResolver` interface, mirroring how `AuthProvider`
+  already abstracts local vs. OIDC vs. SAML in this codebase (concrete
+  implementations: Vault KV first, since it's the common self-hosted
+  choice for this audience; cloud secret managers later if requested).
+  Two tiers, increasing in how much this actually removes from PerchTail's
+  own at-rest footprint:
+  - **Tier 1 — resolve-at-import.** The resolver fetches the referenced
+    value once, at import time, then feeds it straight into the existing
+    `encrypt_credential` (Fernet) path — same storage model as today,
+    the only change is that no human ever handles the raw secret; the
+    import file only ever contains references, safe to commit/share like
+    the structural file.
+  - **Tier 2 — resolve-at-use (live passthrough), the actual gold
+    standard.** PerchTail stores only the reference, never a Fernet blob,
+    for that source; the relevant connector (ssh/smb/winrm) resolves the
+    live value from the external secret manager at connection time and
+    discards it immediately after, same as everything else in the
+    always-fresh model. This shrinks PerchTail's own stored-secret
+    surface to effectively nothing for sources onboarded this way — the
+    one thing still stored is PerchTail's own credential to reach the
+    secret manager, which is a single shared secret rather than one per
+    source, a much smaller blast radius if it were ever compromised.
+    Heavier to build (needs the secret manager reachable at connection
+    time, not just import time, and its own connection-failure handling
+    distinct from a source being unreachable) — worth it only once this
+    audience is actually asking for it.
+
+- **A lightweight, scheduled connectivity-check sweep**, distinct from the
+  existing on-demand manual `/check` — writing a short history of
+  reachability per source. This would double as real data behind the
+  monitoring-endpoint item above ("which sources have been flaky in the
+  last 24h"), not just a point-in-time poke.
+- **API-first admin tooling** (a thin CLI, or simply excellent API docs)
+  for scripting source/rule management — the same target audience
+  (support/DevOps engineers managing many customers) is likely to want
+  GitOps-style, scripted control over sources/rules at some point.
 
 ## Open decisions
 
