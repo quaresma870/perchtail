@@ -34,6 +34,31 @@
   let generatingToken = false
   let tokenError = ''
 
+  // Folders are purely organizational (name + optional parent — never a
+  // host or protocol of their own); nesting is unlimited via
+  // parent_folder_id. Both customers and folders can be created inline
+  // here rather than forcing a detour through a separate admin page that
+  // doesn't exist yet.
+  const NEW_OPTION = '__new__'
+  let showNewCustomerForm = false
+  let newCustomerName = ''
+  let creatingCustomer = false
+  let customerCreateError = ''
+
+  let showNewFolderForm = false
+  let newFolderName = ''
+  let newFolderParentId: number | null = null
+  let creatingFolder = false
+  let folderCreateError = ''
+
+  // Native <select> elements track their own displayed value on user
+  // interaction; a one-way `value={...}` prop only re-syncs it when the
+  // bound expression actually changes, which it doesn't here when "+
+  // Create new..." is picked (customerId/folderId are deliberately left
+  // alone) — so the DOM is reset by hand instead, right after it happens.
+  let customerSelectEl: HTMLSelectElement
+  let folderSelectEl: HTMLSelectElement
+
   async function loadCustomers() {
     customers = await api.get<Customer[]>('/customers')
   }
@@ -47,6 +72,94 @@
   }
 
   $: customerId, loadFolders()
+  $: customerId, (showNewFolderForm = false)
+
+  // Folders come back flat; nest them depth-first so the select can show
+  // hierarchy (indentation) for arbitrarily deep trees.
+  function folderOptions(all: Folder[]): { folder: Folder; depth: number }[] {
+    const byParent = new Map<number | null, Folder[]>()
+    for (const f of all) {
+      const key = f.parent_folder_id
+      if (!byParent.has(key)) byParent.set(key, [])
+      byParent.get(key)!.push(f)
+    }
+    for (const list of byParent.values()) list.sort((a, b) => a.name.localeCompare(b.name))
+
+    const result: { folder: Folder; depth: number }[] = []
+    function walk(parentId: number | null, depth: number) {
+      for (const f of byParent.get(parentId) ?? []) {
+        result.push({ folder: f, depth })
+        walk(f.id, depth + 1)
+      }
+    }
+    walk(null, 0)
+    return result
+  }
+
+  $: nestedFolders = folderOptions(folders)
+
+  function handleCustomerSelectChange(event: Event) {
+    const value = (event.target as HTMLSelectElement).value
+    if (value === NEW_OPTION) {
+      showNewCustomerForm = true
+      if (customerSelectEl) customerSelectEl.value = customerId === null ? '' : String(customerId)
+      return
+    }
+    showNewCustomerForm = false
+    customerId = value === '' ? null : Number(value)
+  }
+
+  async function createCustomer() {
+    const name = newCustomerName.trim()
+    if (!name) return
+    creatingCustomer = true
+    customerCreateError = ''
+    try {
+      const created = await api.post<Customer>('/customers', { name })
+      customers = [...customers, created].sort((a, b) => a.name.localeCompare(b.name))
+      customerId = created.id
+      newCustomerName = ''
+      showNewCustomerForm = false
+    } catch (err) {
+      customerCreateError = err instanceof ApiError ? err.detail : 'Failed to create customer'
+    } finally {
+      creatingCustomer = false
+    }
+  }
+
+  function handleFolderSelectChange(event: Event) {
+    const value = (event.target as HTMLSelectElement).value
+    if (value === NEW_OPTION) {
+      newFolderParentId = folderId
+      showNewFolderForm = true
+      if (folderSelectEl) folderSelectEl.value = folderId === null ? '' : String(folderId)
+      return
+    }
+    showNewFolderForm = false
+    folderId = value === '' ? null : Number(value)
+  }
+
+  async function createFolder() {
+    const name = newFolderName.trim()
+    if (!name || customerId === null) return
+    creatingFolder = true
+    folderCreateError = ''
+    try {
+      const created = await api.post<Folder>('/folders', {
+        name,
+        customer_id: customerId,
+        parent_folder_id: newFolderParentId,
+      })
+      folders = [...folders, created]
+      folderId = created.id
+      newFolderName = ''
+      showNewFolderForm = false
+    } catch (err) {
+      folderCreateError = err instanceof ApiError ? err.detail : 'Failed to create folder'
+    } finally {
+      creatingFolder = false
+    }
+  }
 
   onMount(async () => {
     try {
@@ -159,23 +272,108 @@
       <div class="row">
         <label>
           Customer
-          <select class="input" bind:value={customerId}>
-            <option value={null}>— none (top-level) —</option>
+          <select
+            class="input"
+            bind:this={customerSelectEl}
+            value={customerId ?? ''}
+            on:change={handleCustomerSelectChange}
+          >
+            <option value="">— none (top-level) —</option>
             {#each customers as customer (customer.id)}
               <option value={customer.id}>{customer.name}</option>
             {/each}
+            <option value={NEW_OPTION}>+ Create new customer…</option>
           </select>
         </label>
         <label>
           Folder
-          <select class="input" bind:value={folderId} disabled={customerId === null}>
-            <option value={null}>— none —</option>
-            {#each folders as folder (folder.id)}
-              <option value={folder.id}>{folder.name}</option>
+          <select
+            class="input"
+            bind:this={folderSelectEl}
+            value={folderId ?? ''}
+            on:change={handleFolderSelectChange}
+            disabled={customerId === null}
+          >
+            <option value="">— none —</option>
+            {#each nestedFolders as { folder, depth } (folder.id)}
+              <option value={folder.id}>{'—'.repeat(depth)}{depth > 0 ? ' ' : ''}{folder.name}</option>
             {/each}
+            <option value={NEW_OPTION}>+ Create new folder…</option>
           </select>
         </label>
       </div>
+
+      {#if showNewCustomerForm}
+        <div class="inline-create">
+          <input
+            class="input"
+            placeholder="New customer name"
+            bind:value={newCustomerName}
+            on:keydown={(e) => e.key === 'Enter' && (e.preventDefault(), createCustomer())}
+          />
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={createCustomer}
+            disabled={creatingCustomer || !newCustomerName.trim()}
+          >
+            {creatingCustomer ? 'Creating…' : 'Create'}
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={() => {
+              showNewCustomerForm = false
+              newCustomerName = ''
+              customerCreateError = ''
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+        {#if customerCreateError}<p class="error indent">{customerCreateError}</p>{/if}
+      {/if}
+
+      {#if showNewFolderForm}
+        <div class="inline-create">
+          <input
+            class="input"
+            placeholder="New folder name"
+            bind:value={newFolderName}
+            on:keydown={(e) => e.key === 'Enter' && (e.preventDefault(), createFolder())}
+          />
+          <select class="input" bind:value={newFolderParentId}>
+            <option value={null}>— top-level (no parent folder) —</option>
+            {#each nestedFolders as { folder, depth } (folder.id)}
+              <option value={folder.id}>{'—'.repeat(depth)}{depth > 0 ? ' ' : ''}{folder.name}</option>
+            {/each}
+          </select>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={createFolder}
+            disabled={creatingFolder || !newFolderName.trim()}
+          >
+            {creatingFolder ? 'Creating…' : 'Create'}
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={() => {
+              showNewFolderForm = false
+              newFolderName = ''
+              folderCreateError = ''
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+        <p class="hint indent">
+          Folders are purely organizational — a nested group of sources, not a host of their own.
+          Nest as deep as you like.
+        </p>
+        {#if folderCreateError}<p class="error indent">{folderCreateError}</p>{/if}
+      {/if}
 
       <label>
         Protocol
@@ -345,6 +543,16 @@
   .row .narrow {
     flex: 0 0 110px;
   }
+  .inline-create {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: -0.4rem;
+  }
+  .inline-create .input {
+    width: auto;
+    flex: 1;
+  }
   fieldset {
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -379,7 +587,8 @@
   .hint {
     color: var(--text-faint);
   }
-  .hint.indent {
+  .hint.indent,
+  .error.indent {
     margin: -0.5rem 0 0;
     font-size: 0.78rem;
   }
