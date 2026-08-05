@@ -667,6 +667,92 @@ they come before any connector or UI work, not after.
   only the Zabbix-oriented JSON endpoint ships first — several self-hosted
   shops standardize on Prometheus+Grafana instead of (or alongside) Zabbix.
 
+## Connections home redesign
+
+Inspired by Apache Guacamole's dashboard-style landing page — kept in
+PerchTail's existing theme/design system, no visual-language changes.
+
+- [ ] Viewer home page (`#/viewer` with no source selected) becomes a
+      two-column layout: recent connections on the left, all connections
+      on the right — replacing the current flat single list of source cards
+- [ ] Folder-tree navigation for browsing sources by customer/folder —
+      doesn't exist today. `Folder` is fully modeled and RBAC-scoped
+      (unlimited nesting via `parent_folder_id`), but nothing in the
+      frontend renders that tree; `Sources.svelte` and the Viewer picker
+      both list sources flat.
+- [ ] Dedicated folder/host management admin page (create/rename/move/
+      delete folders, move sources between them) — CLAUDE.md flags this as
+      its own admin surface and it was never built; only inline folder
+      creation from the source editor exists today
+
+### Notes on decisions made — connections home redesign
+
+- **"Recent connections" needs new tracking, not just a reorder.**
+  `archive.py`'s browse/open/download endpoints don't write to `AuditLog`
+  at all today, so there's no existing per-user recency signal to sort by.
+  Plan: log `source.open`/`file.download` to `AuditLog` (not raw directory
+  browsing — too high-volume to be a meaningful "connection" event) and
+  query the current user's own recent entries for this list, reusing the
+  existing audit infrastructure rather than a bespoke recency table.
+- **Recent connections and the full audit log viewer (below) share a data
+  source but are two separate features, per explicit direction.** This
+  redesign only needs to *write* the new `source.open`/`file.download`
+  events and read back the current user's own recent ones — it does not
+  include general-purpose audit filtering/viewing, which is scoped on its
+  own below.
+- **Folder-tree navigation can load eagerly**, unlike the remote-directory
+  `FolderTree.svelte` (which lazy-loads per expand specifically because
+  SSH/SMB/WinRM listing has real latency) — the customer/folder org tree
+  is local SQLite data at the scale CLAUDE.md describes (dozens of
+  customers, dozens of folders), so eager fetch-and-render is simpler and
+  fine.
+
+## Full audit log viewer (admin-only)
+
+Flagged as its own feature, separate from the connections home redesign
+above, even though it will share the same `AuditLog` writes that redesign
+work adds. `AuditLog` has been write-only since Phase 1 — every write site
+(login, source/rule/role/customer/folder CRUD) already exists, but there's
+still no read endpoint and no admin page, even though CLAUDE.md's
+"Application logging" section always specced it as "a durable, queryable
+record ... read via an admin UI page."
+
+- [ ] `GET /audit` endpoint: paginated, filterable by action/type, user,
+      target type, and date range
+- [ ] Gated by a dedicated capability (e.g. `view_audit_log`), admin-only
+      per explicit direction — not opened up via the existing customer/
+      folder/source grant tree, since audit visibility is a global concern,
+      not scoped to what a role can browse
+- [ ] Frontend: new "Audit Log" page under Settings
+  - [ ] Filter controls for action/type (multi-select against the known
+        action namespace: `login`, `source.*`, `rule.*`, `role.*`,
+        `user.*`, `customer.*`, `folder.*`, `sso.*`, plus the new
+        `source.open`/`file.download` from the redesign work)
+  - [ ] A retention control — admin-configurable from the frontend, not
+        just an env var
+- [ ] Backend retention enforcement: a scheduled purge job (APScheduler,
+      same shape as the scratch idle-sweep and search-index sweep) driven
+      by that configurable setting
+
+### Notes on decisions made — full audit log viewer
+
+- **Retention becomes a real decision here, not a deferred one.** This
+  roadmap's own "Open decisions" list has carried "Audit log retention
+  policy — keep forever, or expire after N months?" as unresolved since
+  Phase 1. Explicit direction: make it admin-configurable from the
+  frontend rather than picking a number now — the UI needs a setting
+  (e.g., days), not just a filter on the display.
+- **This is a second, independent retention knob from `LOG_RETENTION_DAYS`.**
+  That setting governs the rotated structured *application* log files
+  (`logging_config.py`, gzip + `TimedRotatingFileHandler`); `AuditLog` is a
+  separate SQLite table with its own lifecycle, so its retention setting
+  needs its own storage and its own purge job — the two shouldn't be
+  conflated just because they sound similar.
+- **Type/action filtering is a first-class frontend requirement, not just
+  a nice-to-have** — per explicit direction, the audit page's parameters
+  need to let an admin narrow by what kind of action happened, not just
+  scroll a flat chronological feed.
+
 ## Security hardening (pre-1.0)
 
 Called out as its own section, not folded silently into other phases —
@@ -798,7 +884,9 @@ Carried over from CLAUDE.md — revisit as the relevant phase approaches rather
 than deciding speculatively now:
 - Raw-text rule paste mode UX
 - Ephemeral scratch location: plain disk vs tmpfs/ramdisk
-- Audit log retention policy
+- Audit log retention *number* (the mechanism is decided — admin-configurable
+  from the frontend, its own purge job — see "Full audit log viewer" above;
+  what default/range to offer is still open)
 - Whether SAML is needed at all
 - Whether to index `.zip`/`.tar.gz` archive members for full-text search,
   and how deep (see the Phase 3 full-text search notes above) — deferred,
