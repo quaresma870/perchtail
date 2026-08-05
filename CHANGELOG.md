@@ -91,6 +91,14 @@ settings admin page.
   part of the stack since M7.
 
 ### Fixed
+- `backend/requirements.txt` was missing `httpx`, which
+  `app/auth/providers/oidc.py` imports unconditionally at module level
+  (via `app/api/auth.py` → `app/main.py`) regardless of whether SSO is
+  configured. It was only listed in `requirements-dev.txt`, so tests never
+  caught it — a container built from `requirements.txt` alone (the
+  production Docker image) crashed on every boot with
+  `ModuleNotFoundError: No module named 'httpx'` right after migrations
+  ran. Moved `httpx` into `requirements.txt` as a real runtime dependency.
 - `RoleEditor.svelte`'s bare `form { flex-direction: column }` rule (meant for
   the role-details form) also matched the page's second `<form>` — the
   "add grant" row — flipping its flex main axis from row to column. Combined
