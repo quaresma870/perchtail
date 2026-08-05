@@ -713,11 +713,38 @@ not commitments, and not yet placed into a specific phase:
   12 sources, 9 with credentials"), never payload. Treat the accept as
   one-time, same discipline as temporary passwords and agent enrollment
   tokens.
-- **Deferred, not v1**: referencing credentials by external secret-manager
-  path (e.g. `vault:secret/...`) with a pluggable resolver that fetches
-  and encrypts at import time, so no plaintext ever transits the app at
-  all. Flagged as the eventual "gold standard" if this feature sees heavy
-  use, not worth building until then.
+- **The gold-standard option: external secret-manager references, not
+  inline values.** Deferred past v1, but worth designing properly since
+  it's the strongest answer to "bulk-import credentials without them ever
+  being typed/pasted into a file a human handles." Row-level credential
+  fields become a reference string instead of a value — e.g.
+  `secretref:kv/data/<customer-slug>/<source-name>#ssh_key` — resolved
+  through a new `SecretResolver` interface, mirroring how `AuthProvider`
+  already abstracts local vs. OIDC vs. SAML in this codebase (concrete
+  implementations: Vault KV first, since it's the common self-hosted
+  choice for this audience; cloud secret managers later if requested).
+  Two tiers, increasing in how much this actually removes from PerchTail's
+  own at-rest footprint:
+  - **Tier 1 — resolve-at-import.** The resolver fetches the referenced
+    value once, at import time, then feeds it straight into the existing
+    `encrypt_credential` (Fernet) path — same storage model as today,
+    the only change is that no human ever handles the raw secret; the
+    import file only ever contains references, safe to commit/share like
+    the structural file.
+  - **Tier 2 — resolve-at-use (live passthrough), the actual gold
+    standard.** PerchTail stores only the reference, never a Fernet blob,
+    for that source; the relevant connector (ssh/smb/winrm) resolves the
+    live value from the external secret manager at connection time and
+    discards it immediately after, same as everything else in the
+    always-fresh model. This shrinks PerchTail's own stored-secret
+    surface to effectively nothing for sources onboarded this way — the
+    one thing still stored is PerchTail's own credential to reach the
+    secret manager, which is a single shared secret rather than one per
+    source, a much smaller blast radius if it were ever compromised.
+    Heavier to build (needs the secret manager reachable at connection
+    time, not just import time, and its own connection-failure handling
+    distinct from a source being unreachable) — worth it only once this
+    audience is actually asking for it.
 
 - **A lightweight, scheduled connectivity-check sweep**, distinct from the
   existing on-demand manual `/check` — writing a short history of
