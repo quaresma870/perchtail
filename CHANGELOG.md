@@ -51,6 +51,27 @@ release ships (0.x releases may include breaking changes between minors).
   the file in the Viewer and jumps straight to the matched line
   (`CodeMirrorPane` gained a `scrollToLine` method for this). The source
   editor gains an "Include in full-text search" toggle.
+- Source editor: the Customer and Folder pickers gain an inline "+ Create
+  new…" option, so a new customer or folder no longer needs a detour
+  through an admin page that doesn't exist yet — pick it, type a name, and
+  it's created (`POST /customers` / `POST /folders`) and selected in
+  place. The Folder picker shows the existing nested tree indented by
+  depth, and a new folder defaults its parent to whatever folder was
+  already selected, so nesting one inside another is a single click.
+  Folders remain purely organizational — name + optional parent, never a
+  host or protocol — the backend already supported unlimited nesting via
+  `Folder.parent_folder_id`; this was a frontend-only gap.
+
+### Fixed
+- Viewer: Ctrl/Cmd+F opened the browser's own find bar instead of
+  CodeMirror's in-file search. Root cause was twofold — clicking into the
+  read-only pane never actually moved DOM focus there (it isn't
+  `contentEditable`, so a plain click doesn't focus it, and CodeMirror's
+  `basicSetup` only wires the search *keymap*, not the `search()`
+  extension the panel needs), so the keystroke had nothing to catch it
+  and fell through to the browser. Fixed by intercepting Ctrl/Cmd+F at
+  the window level in `Viewer.svelte` while a tab is open and opening
+  the panel directly via `openSearchPanel`, regardless of focus state.
 
 ## [0.1.1] - 2026-07-30
 

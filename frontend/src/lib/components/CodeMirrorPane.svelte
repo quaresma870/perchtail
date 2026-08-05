@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte'
   import { EditorView, basicSetup } from 'codemirror'
   import { EditorState } from '@codemirror/state'
+  import { search, openSearchPanel } from '@codemirror/search'
   import { darkTheme, logLevelHighlighting } from '../codemirror-theme'
 
   export let content = ''
@@ -12,6 +13,9 @@
   function extensions() {
     return [
       basicSetup,
+      // basicSetup only wires the search *keymap* (Mod-f etc.), not this
+      // extension itself — without it the panel has no state to open into.
+      search(),
       darkTheme,
       logLevelHighlighting,
       EditorView.editable.of(false),
@@ -43,6 +47,18 @@
       effects: EditorView.scrollIntoView(line.from, { y: 'center' }),
     })
     view.focus()
+  }
+
+  // Called from a page-level Ctrl/Cmd+F handler (Viewer.svelte) rather than
+  // relying on the browser reaching CodeMirror's own searchKeymap: clicking
+  // into .cm-content doesn't reliably focus it (it's not contentEditable,
+  // since the pane is read-only), so a plain browser keydown on Mod-F often
+  // never reaches the editor at all and falls through to the browser's own
+  // find bar instead. Calling this directly sidesteps that regardless of
+  // where focus currently is.
+  export function openSearch() {
+    if (!view) return
+    openSearchPanel(view)
   }
 
   onDestroy(() => {

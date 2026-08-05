@@ -118,6 +118,18 @@
     }
   }
 
+  // Ctrl/Cmd+F is meant to search the open file via CodeMirror's own search
+  // panel, not the browser's find bar — but a plain keydown on the editor
+  // DOM isn't reliable (see CodeMirrorPane's openSearch doc comment), so
+  // it's intercepted here at the window level instead, while a tab is open.
+  function handleKeydown(event: KeyboardEvent) {
+    if (!activeTab) return
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+      event.preventDefault()
+      paneRef?.openSearch()
+    }
+  }
+
   onMount(() => {
     if (sourceId === null) {
       loadSourcePicker()
@@ -130,9 +142,11 @@
         openFromDeepLink(deepLinkPath, line ? Number(line) : null)
       }
     }
+    window.addEventListener('keydown', handleKeydown)
   })
 
   onDestroy(() => {
+    window.removeEventListener('keydown', handleKeydown)
     for (const tab of tabs) {
       if (tab.scratchKey && sourceId !== null) {
         api.post(`/sources/${sourceId}/close`, { path: tab.path, member: tab.member }).catch(() => {})
