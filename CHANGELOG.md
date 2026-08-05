@@ -73,6 +73,28 @@ release ships (0.x releases may include breaking changes between minors).
   the window level in `Viewer.svelte` while a tab is open and opening
   the panel directly via `openSearchPanel`, regardless of focus state.
 
+### Changed
+- Frontend: Sources, Roles, Users, and SSO settings are now consolidated
+  under a single "Settings" top-nav entry (previously four separate top-nav
+  links), with a shared sub-nav across all four pages. Routes gained a
+  `/settings` prefix (e.g. `/settings/sources`, `/settings/roles/:id`); a
+  bare `/settings` redirects to `/settings/sources`. No capability gating
+  changed — Sources stays visible to any authenticated user, Roles/Users/SSO
+  stay gated behind their existing `manage_roles`/`manage_users`/`manage_sso`
+  checks, same as before.
+- README: status section now reflects Phase 2 (push-agent) and Phase 3
+  (full-text search) as complete, not just Phase 1/1b; the three
+  `docs/images/` screenshots (Sources, Viewer, Role editor) are
+  regenerated against the new Settings nav; the Quick start walkthrough's
+  "Sources → New source" now reads "Settings → Sources → + Add source".
+
+### Fixed
+- `vite.config.ts`'s dev-proxy prefix list was missing `/sso`, so the SSO
+  settings page silently failed to load under `npm run dev` (production is
+  unaffected — the API and built SPA are served from the same FastAPI
+  process there, with no path-based proxy split). Found while verifying the
+  Settings reorganization in a real browser.
+
 ## [0.1.1] - 2026-07-30
 
 Phase 1b (SSO) complete: OIDC single sign-on alongside local auth, with

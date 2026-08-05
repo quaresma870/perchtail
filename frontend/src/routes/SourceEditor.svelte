@@ -3,6 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import RuleEditor from '../lib/components/RuleEditor.svelte'
+  import SettingsNav from '../lib/components/SettingsNav.svelte'
   import type { AgentTokenResult, Customer, Folder, Protocol, Source } from '../lib/types'
 
   export let params: { id?: string } = {}
@@ -212,7 +213,7 @@
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
         })
-        push(`/sources/${created.id}`)
+        push(`/settings/sources/${created.id}`)
       } else {
         await api.patch(`/sources/${sourceId}`, {
           name,
@@ -225,7 +226,7 @@
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
         })
-        push('/sources')
+        push('/settings/sources')
       }
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to save source'
@@ -250,10 +251,14 @@
   }
 </script>
 
+<SettingsNav />
+
 <div class="page">
   <div class="header">
     <h1>{isNew ? 'New source' : `Edit ${name}`}</h1>
-    <button class="btn btn-ghost" on:click={() => push('/sources')}>← back to sources</button>
+    <button class="btn btn-ghost" on:click={() => push('/settings/sources')}
+      >← back to sources</button
+    >
   </div>
 
   {#if loading}
