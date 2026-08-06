@@ -728,22 +728,45 @@ line-level highlighting and Ctrl+F search already hold to.
       feature for this audience. `@codemirror/merge` (the official
       CodeMirror 6 diff/merge extension, not yet installed) is the
       natural fit given the project is already all-in on CodeMirror.
-- [ ] **More severity indicators + jump-to-next-problem navigation.**
-      Today's `logLevelHighlighting` only tints bracketed `[error]`/
-      `[fatal]` tokens and only line-tints on the bare words "error"/
-      "fatal" (`codemirror-theme.ts`'s `LEVEL_TOKEN`/`ERROR_LINE`) — no
-      "jump to next one" command exists, and coverage is narrow (no
-      `warn`/`warning` line-tint, no `critical`/`severe`/`panic`/
-      `exception`/`traceback`-style markers common across other
-      ecosystems' log formats). Two tiers:
-      1. Broaden the built-in pattern set and add a next/previous-problem
-         step command (conceptually like an IDE's "next diagnostic"),
-         stepping through everything at warn-or-worse severity — the
-         existing color-coding still shows which severity each stop is.
-      2. Later, and only if the built-in set proves too narrow in
-         practice: user-configurable custom indicator patterns, glob/regex
-         the same way the `Rule` engine already works, rather than a
-         second, differently-shaped pattern mechanism.
+- [ ] **Severity indicators become admin-configurable, with a dedicated
+      Settings section, plus jump-to-next-problem navigation.** Today's
+      `logLevelHighlighting` only tints bracketed `[error]`/`[fatal]`
+      tokens and only line-tints on the bare words "error"/"fatal"
+      (`codemirror-theme.ts`'s `LEVEL_TOKEN`/`ERROR_LINE`) — hardcoded, no
+      `warn`/`warning` line-tint, nothing for `critical`/`severe`/`panic`/
+      `exception`/`traceback`-style markers other ecosystems use, and no
+      "jump to next one" command. Per explicit direction, this becomes a
+      real settings surface rather than a bigger hardcoded list:
+      - [ ] New backend model, `SeverityPattern` (level, pattern,
+            pattern_kind [glob|regex, `re:` prefix — same convention as
+            `Rule`], enabled), seeded with sensible defaults covering the
+            common markers above so it isn't empty on first boot
+      - [ ] `GET`/`POST`/`PATCH`/`DELETE` endpoints for admin CRUD on the
+            pattern set, plus a `GET` the Viewer itself calls to fetch the
+            active, enabled set to highlight against
+      - [ ] New "Settings → Severity Indicators" section: one row per
+            level with an enable/disable toggle and its associated
+            pattern list ("values to consider" as that severity) —
+            row-based editor, mirroring `RuleEditor.svelte`'s existing UX
+            (and its raw-text/gitignore-style paste mode) for consistency
+            rather than inventing a new editing pattern
+      - [ ] `CodeMirrorPane`/`codemirror-theme.ts` fetch and highlight
+            against this configured set instead of the hardcoded regexes
+      - [ ] Next/previous-problem step command (conceptually like an IDE's
+            "next diagnostic"), stepping through everything at warn-or-worse
+            — needs its own decision on whether the "jump" threshold is a
+            fixed severity floor or itself configurable per level
+            (a separate "included in jump navigation" flag alongside each
+            level's enabled/patterns, not reusing "enabled" for both
+            meanings)
+      - Gating: reuse the `manage_system_settings` capability from the
+        connections-home redesign work rather than adding a new one, same
+        "deployment-wide, not RBAC-scoped" reasoning as the Search toggle
+      - Open decision, not yet settled: global-only for v1 (one pattern
+        set for every source) versus allowing per-source overrides later
+        — different sources can have very different log formats, but
+        starting global keeps this from ballooning into Rule-engine-level
+        complexity before there's evidence it's needed
 - [ ] **Line-wrap toggle.** Log lines are often very long (embedded JSON,
       long messages); a simple wrap/no-wrap switch
       (`EditorView.lineWrapping`) is cheap and directly useful.
