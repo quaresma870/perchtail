@@ -667,6 +667,95 @@ they come before any connector or UI work, not after.
   only the Zabbix-oriented JSON endpoint ships first — several self-hosted
   shops standardize on Prometheus+Grafana instead of (or alongside) Zabbix.
 
+## Viewer: find in document
+
+A Notepad++-style "Find All in Current Document" results panel — a list of
+every match in the currently open file (line number + snippet), click to
+jump — alongside, not instead of, the existing Ctrl+F inline highlight and
+next/previous navigation (`@codemirror/search`, see the earlier Ctrl+F fix
+in CHANGELOG.md).
+
+- [ ] Results panel component listing every match with line number + a
+      short snippet of surrounding text, most-natural-order (top to
+      bottom of the document)
+- [ ] Click a result to jump to it — reuses `CodeMirrorPane`'s existing
+      `scrollToLine`-style jump, same mechanism the cross-file Search
+      page's results list already uses today
+- [ ] Existing inline Ctrl+F panel (highlight + next/previous) stays as
+      is — this is an addition, not a replacement
+- [ ] Some entry point to open the new panel (e.g. a "Find All" button
+      inside the existing search panel, or its own shortcut) — exact UX
+      still to be decided when this is built
+
+### Notes on decisions made — find in document
+
+- **No new dependency needed.** Neither CodeMirror's own search package
+  nor any other editor library (Monaco, Ace) ships a results-list panel
+  like this out of the box — Notepad++, VS Code, etc. all build it as
+  custom UI on top of their editor's basic search primitives, same as
+  we'd be doing. `@codemirror/search`'s `getSearchCursor` (or a plain
+  regex scan over `view.state.doc`, mapping offsets to line numbers via
+  `doc.lineAt`) is enough to collect every match; the panel itself is a
+  new Svelte component.
+- **Coexists with the current inline search, doesn't replace it** — per
+  explicit direction. Two complementary tools: quick highlight-and-step-
+  through for a single term, versus "show me everywhere this appears at
+  once" for scanning a large log.
+
+## Viewer: toward an advanced editor (not yet triaged into a phase)
+
+Raised while discussing the find-in-document work — further steps toward
+a fuller, Notepad++-like editing experience. None of this is committed;
+listed here to track the idea, with one item flagged as a real
+architectural fork rather than a routine feature.
+
+- [ ] **Per-file-type syntax highlighting.** Currently only log-level
+      tokens are colored (`codemirror-theme.ts`'s `logLevelHighlighting`);
+      there's no language-aware highlighting for e.g. `.json`, `.xml`,
+      `.js` config/log files. `@codemirror/lang-javascript`,
+      `@codemirror/lang-json`, and `@codemirror/lang-xml` are already
+      installed dependencies but currently unused anywhere in the
+      codebase — likely added in anticipation of this and never wired
+      up. `@codemirror/language-data` (not yet installed) adds broader
+      extension-based auto-detection beyond those three. Purely additive,
+      read-only, no conflict with anything in CLAUDE.md.
+- [ ] **Compare files (diff view).** Read-only side-by-side or unified
+      diff between two open files or two versions of the same rotated
+      log (`app.log` vs `app.log.1`, etc.) — a genuinely useful forensic
+      feature for this audience and, like syntax highlighting, entirely
+      compatible with the read-only model. `@codemirror/merge` (the
+      official CodeMirror 6 diff/merge extension, not yet installed) is
+      the natural fit given the project is already all-in on CodeMirror.
+- [ ] **Editing and saving changes back to the source.** Requested
+      explicitly, but flagged here rather than treated as a routine
+      checkbox: this directly contradicts CLAUDE.md's core, repeated
+      design principle — *"this tool only ever reads from sources, never
+      writes to them"* / *"Never delete, modify, or write anything back
+      to a source. Read-only, always."* — stated in the Architecture,
+      Live browsing, and Security notes sections, not an incidental
+      detail. Needs an explicit decision before any implementation, not
+      just a design pass:
+      - a new write path per connector (ssh/smb/winrm/local/agent) —
+        several of these (see `docs/source-setup.md`) are set up with
+        read-only service accounts/ACLs/chroot jails specifically
+        *because* this tool was never supposed to write; that
+        infrastructure assumption would need revisiting per source, not
+        just in this app
+      - a new `edit` capability, distinct from `view`/`download`
+      - almost certainly a **source-level opt-in, default off** — most of
+        this tool's target sources are live production logs where an
+        accidental or malicious write is a real incident, not a
+        convenience feature gone slightly wrong
+      - mandatory audit logging of every write (this is exactly the kind
+        of event the planned audit log viewer exists for)
+      - the same path-traversal and rule-visibility rigor the read path
+        already enforces, applied symmetrically to writes
+      - worth an explicit product conversation about whether "edit and
+        save" is actually needed, versus whether the read-only
+        power-user features above (find-in-document, syntax highlight,
+        diff) cover the real want without reopening the tool's core
+        safety premise
+
 ## Security hardening (pre-1.0)
 
 Called out as its own section, not folded silently into other phases —
