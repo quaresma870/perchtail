@@ -4,6 +4,7 @@
   import { api, ApiError } from '../lib/api'
   import RuleEditor from '../lib/components/RuleEditor.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SeverityPatternEditor from '../lib/components/SeverityPatternEditor.svelte'
   import type { AgentTokenResult, Customer, Folder, Protocol, Source } from '../lib/types'
 
   export let params: { id?: string } = {}
@@ -492,6 +493,15 @@
 
     {#if !isNew && sourceId !== null}
       <RuleEditor {sourceId} readOnly={source?.is_system ?? false} />
+      <p class="hint override-hint">
+        Adding a pattern below overrides the global severity indicators (Settings → Severity
+        indicators) for this source specifically — its own set replaces the global one entirely
+        rather than adding to it. Leave empty to keep using the global defaults.
+      </p>
+      <SeverityPatternEditor
+        baseUrl={`/sources/${sourceId}/severity-patterns`}
+        readOnly={source?.is_system ?? false}
+      />
     {/if}
   {/if}
 </div>
@@ -596,5 +606,9 @@
   .error.indent {
     margin: -0.5rem 0 0;
     font-size: 0.78rem;
+  }
+  .override-hint {
+    font-size: 0.78rem;
+    margin: 0;
   }
 </style>

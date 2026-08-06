@@ -30,6 +30,13 @@ class PatternKind(StrEnum):
     regex = "regex"
 
 
+class SeverityLevel(StrEnum):
+    error = "error"
+    warning = "warning"
+    info = "info"
+    debug = "debug"
+
+
 class Customer(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(unique=True, index=True)
@@ -111,6 +118,40 @@ class Rule(SQLModel, table=True):
     notes: str | None = None
 
     source: Source = Relationship(back_populates="rules")
+
+
+class SeverityPattern(SQLModel, table=True):
+    """Admin-configurable line-highlighting rule for the Viewer (see
+    CLAUDE.md's CodeMirror choice and ROADMAP.md's "Viewer: toward an
+    advanced editor" section) — display-only, never affects what's
+    readable/fetchable the way `Rule` does. Matching itself runs client-side
+    (see frontend/src/lib/severity-highlighting.ts); this table is pure
+    config storage + CRUD.
+
+    `source_id` null means a global default pattern; set means a
+    per-source override. A source's own patterns fully replace the global
+    set when it has any at all (not merged with it) — same "override, not
+    merge" simplicity as choosing not to invent new fallback rules, see the
+    effective-set resolution in app/api/severity_patterns.py."""
+
+    __tablename__ = "severity_pattern"
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_id: int | None = Field(default=None, foreign_key="source.id")
+    level: SeverityLevel
+    pattern: str
+    pattern_kind: PatternKind = PatternKind.glob
+    enabled: bool = True
+    # Whether a match also tints the whole line, not just the matched
+    # substring -- traditionally wanted for error/fatal-style markers, not
+    # for a routine info/debug token.
+    highlight_line: bool = False
+    # Separate from `enabled`: whether this pattern's matches are included
+    # when stepping through "next problem" navigation. A pattern can be
+    # visually highlighted without cluttering that step-through, or vice
+    # versa -- deliberately not reusing `enabled` for both meanings (see
+    # ROADMAP.md's open-decision note on this).
+    include_in_navigation: bool = True
 
 
 class SearchIndexState(SQLModel, table=True):

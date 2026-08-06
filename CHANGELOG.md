@@ -83,6 +83,28 @@ release ships (0.x releases may include breaking changes between minors).
   redirects away from the `/search` route itself, not just the link. Built
   generically enough that the planned audit-log viewer's own toggle
   (ROADMAP.md) can reuse the same mechanism once that page exists.
+- Viewer: admin-configurable severity indicators, both globally and
+  per-source, replacing the old hardcoded `[error]`/`[warn]`-token and
+  bare-word regexes. A new `SeverityPattern` model (level, pattern,
+  glob/regex + `re:` prefix convention same as `Rule`, enabled,
+  highlight-line, include-in-navigation, nullable `source_id`) backs
+  `GET`/`POST`/`PATCH`/`DELETE /severity-patterns` (global set, gated by
+  `manage_system_settings`) and the same under
+  `/sources/{id}/severity-patterns` (per-source override, gated by
+  `manage_rules`), plus `GET /sources/{id}/severity-patterns/effective`
+  the Viewer reads — a source's own patterns win outright when it has any,
+  else the global default set, same "most specific wins" shape as grant
+  resolution. Seeded with sensible defaults on first startup (error/
+  fatal/critical/panic/exception/traceback, warn, info, debug). New
+  "Settings → Severity Indicators" page for the global set and a matching
+  section on the source editor for per-source overrides, both row-based.
+  The Viewer gained "‹ problem" / "problem ›" toolbar buttons that step
+  through lines matching a navigation-eligible pattern (configurable per
+  pattern, not a fixed severity floor), wrapping at either end. Matching
+  logic lives client-side (`lib/severity-highlighting.ts`, pure and
+  unit-tested); `codemirror-theme.ts` now builds its highlighting
+  `ViewPlugin`s from whatever pattern set is effective instead of a fixed
+  regex.
 
 ### Changed
 - Frontend: Sources, Roles, Users, and SSO settings are now consolidated

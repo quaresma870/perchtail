@@ -3,9 +3,12 @@
   import { EditorView, basicSetup } from 'codemirror'
   import { EditorState } from '@codemirror/state'
   import { search, openSearchPanel } from '@codemirror/search'
-  import { darkTheme, logLevelHighlighting } from '../codemirror-theme'
+  import { darkTheme, severityHighlighting } from '../codemirror-theme'
+  import { findProblemLines, nextProblemLine, previousProblemLine } from '../severity-highlighting'
+  import type { SeverityPattern } from '../types'
 
   export let content = ''
+  export let severityPatterns: SeverityPattern[] = []
 
   let host: HTMLDivElement
   let view: EditorView | null = null
@@ -17,10 +20,25 @@
       // extension itself — without it the panel has no state to open into.
       search(),
       darkTheme,
-      logLevelHighlighting,
+      severityHighlighting(severityPatterns),
       EditorView.editable.of(false),
       EditorState.readOnly.of(true),
     ]
+  }
+
+  let appliedContent: string | null = null
+  let appliedPatterns: SeverityPattern[] | null = null
+
+  // Rebuilds the editor state whenever either the open file's content or
+  // the effective severity-pattern set changes -- the two can change
+  // independently (e.g. the pattern set finishes loading after the file is
+  // already open), so both are tracked rather than only reacting to content.
+  function syncView() {
+    if (!view) return
+    if (content === appliedContent && severityPatterns === appliedPatterns) return
+    view.setState(EditorState.create({ doc: content, extensions: extensions() }))
+    appliedContent = content
+    appliedPatterns = severityPatterns
   }
 
   onMount(() => {
@@ -28,11 +46,11 @@
       state: EditorState.create({ doc: content, extensions: extensions() }),
       parent: host,
     })
+    appliedContent = content
+    appliedPatterns = severityPatterns
   })
 
-  $: if (view && content !== view.state.doc.toString()) {
-    view.setState(EditorState.create({ doc: content, extensions: extensions() }))
-  }
+  $: content, severityPatterns, syncView()
 
   // Exposed for search click-through (Search.svelte -> Viewer.svelte): jump
   // to and select a specific line, e.g. after opening a file from a search
@@ -59,6 +77,26 @@
   export function openSearch() {
     if (!view) return
     openSearchPanel(view)
+  }
+
+  // "Next/previous problem" step command (ROADMAP.md's severity-indicators
+  // navigation item): steps through lines matching a navigation-eligible
+  // severity pattern, wrapping around at either end. Uses the cursor's
+  // current line as the starting point, same as an IDE's "next diagnostic".
+  function jumpToProblem(step: typeof nextProblemLine | typeof previousProblemLine) {
+    if (!view) return
+    const problemLines = findProblemLines(view.state.doc.toString(), severityPatterns)
+    const currentLine = view.state.doc.lineAt(view.state.selection.main.head).number
+    const target = step(problemLines, currentLine)
+    if (target !== null) scrollToLine(target)
+  }
+
+  export function jumpToNextProblem() {
+    jumpToProblem(nextProblemLine)
+  }
+
+  export function jumpToPreviousProblem() {
+    jumpToProblem(previousProblemLine)
   }
 
   onDestroy(() => {
