@@ -3,6 +3,7 @@
   import { onMount } from 'svelte'
   import { authChecked, currentUser, logout, refreshCurrentUser } from './lib/auth'
   import { currentHash } from './lib/hash'
+  import { refreshSystemSettings, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
   import Sources from './routes/Sources.svelte'
@@ -14,6 +15,7 @@
   import RoleEditor from './routes/RoleEditor.svelte'
   import Users from './routes/Users.svelte'
   import SsoSettings from './routes/SsoSettings.svelte'
+  import SystemSettings from './routes/SystemSettings.svelte'
 
   const routes = {
     '/login': Login,
@@ -30,10 +32,12 @@
     '/settings/roles/:id': RoleEditor,
     '/settings/users': Users,
     '/settings/sso': SsoSettings,
+    '/settings/system': SystemSettings,
   }
 
   onMount(async () => {
     await refreshCurrentUser()
+    await refreshSystemSettings()
   })
 
   $: if ($authChecked && !$currentUser && $currentHash !== '/login') {
@@ -45,6 +49,17 @@
     $currentHash !== '/change-password'
   ) {
     push('/change-password')
+  }
+  // The Search view can be turned off deployment-wide (Settings -> System);
+  // guard the route itself, not just the nav link, so it's actually off for
+  // a bookmarked/typed URL too, not merely unlinked.
+  $: if (
+    $authChecked &&
+    $currentUser &&
+    !$systemSettings.search_view_enabled &&
+    $currentHash.startsWith('/search')
+  ) {
+    push('/viewer')
   }
 
   const isActive = (prefix: string) => $currentHash === prefix || $currentHash.startsWith(prefix + '/')
@@ -63,7 +78,9 @@
         <span>PerchTail</span>
       </div>
       <a href="#/viewer" class:active={isActive('/viewer')}>Viewer</a>
-      <a href="#/search" class:active={isActive('/search')}>Search</a>
+      {#if $systemSettings.search_view_enabled}
+        <a href="#/search" class:active={isActive('/search')}>Search</a>
+      {/if}
       <a href="#/settings" class:active={isActive('/settings')}>Settings</a>
       <span class="spacer"></span>
       <span class="username">{$currentUser.username}</span>

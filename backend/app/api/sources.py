@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
-from app.auth.models import Capability, GlobalCapability, User
+from app.auth.models import AuditLog, Capability, GlobalCapability, User
 from app.auth.rbac import require_capability, require_global_capability, visible_source_ids
 from app.collectors import agent as agent_collector
 from app.collectors import local as local_collector
@@ -41,7 +41,9 @@ class SourcePublic(BaseModel):
     id: int
     name: str
     customer_id: int | None
+    customer_name: str | None
     folder_id: int | None
+    folder_name: str | None
     protocol: Protocol
     host: str
     port: int | None
@@ -94,7 +96,9 @@ def _to_public(session: Session, source: Source) -> SourcePublic:
         id=source.id,
         name=source.name,
         customer_id=source.customer_id,
+        customer_name=source.customer.name if source.customer else None,
         folder_id=source.folder_id,
+        folder_name=source.folder.name if source.folder else None,
         protocol=source.protocol,
         host=source.host,
         port=source.port,
@@ -150,6 +154,55 @@ def list_sources(
         query = query.order_by(Source.id)
     sources = session.exec(query).all()
     return [_to_public(session, s) for s in sources]
+
+
+@router.get("/recent", response_model=list[SourcePublic])
+def list_recent_sources(
+    limit: int = 8,
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    """Sources this user has opened recently (browsed to the root of),
+    most-recent-first and deduped to one entry per source -- powers the
+    connections home page's "Recent" column (see archive.py's browse(),
+    which is what records the underlying `source.open` AuditLog events).
+    Re-checks current visibility so a revoked grant can't leak a source
+    through here even if it was opened before the grant was pulled. Must be
+    registered before GET /{source_id} so "recent" isn't swallowed as a
+    source_id path param.
+    """
+    visible = visible_source_ids(session, user)
+    if visible is not None and not visible:
+        return []
+
+    # A generous but bounded window, not the user's whole history -- same
+    # "safety valve, not a design goal" spirit as the scratch size guard.
+    events = session.exec(
+        select(AuditLog)
+        .where(AuditLog.user_id == user.id, AuditLog.action == "source.open")
+        .order_by(AuditLog.timestamp.desc())
+        .limit(max(limit * 20, 100))
+    ).all()
+
+    ordered_ids: list[int] = []
+    seen: set[int] = set()
+    for event in events:
+        source_id = event.target_id
+        if source_id is None or source_id in seen:
+            continue
+        if visible is not None and source_id not in visible:
+            continue
+        seen.add(source_id)
+        ordered_ids.append(source_id)
+        if len(ordered_ids) >= limit:
+            break
+
+    if not ordered_ids:
+        return []
+    sources_by_id = {
+        s.id: s for s in session.exec(select(Source).where(Source.id.in_(ordered_ids))).all()
+    }
+    return [_to_public(session, sources_by_id[sid]) for sid in ordered_ids if sid in sources_by_id]
 
 
 @router.get("/{source_id}", response_model=SourcePublic)

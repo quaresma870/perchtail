@@ -25,12 +25,16 @@ full phase breakdown). Agentless SSH/SFTP, SMB, and WinRM browsing, a Go
 push-agent for hosts that can't be reached inbound, ephemeral fetch
 (nothing mirrored), rule-scoped RBAC, OIDC single sign-on (local accounts
 still work alongside it), and opt-in full-text search over indexed
-sources all work end-to-end. Still pre-1.0: SAML isn't built (OIDC covers
+sources all work end-to-end. The Viewer's home page is a two-column
+"recent connections / all connections" dashboard with a search box
+(folder/customer/host), and deployment-wide feature toggles now live
+under Settings → System. Still pre-1.0: SAML isn't built (OIDC covers
 Azure AD/Entra ID, Okta, Google Workspace, Keycloak/Authentik, so it's
-only getting built if a real need shows up), alerting and IdP
-group-claim-to-role auto-mapping aren't built yet, and it hasn't seen
-production traffic beyond the maintainer's own use. See
-[CHANGELOG.md](CHANGELOG.md) for what's actually shipped versus planned.
+only getting built if a real need shows up), alerting, IdP
+group-claim-to-role auto-mapping, and the admin-only audit log viewer
+aren't built yet, and it hasn't seen production traffic beyond the
+maintainer's own use. See [CHANGELOG.md](CHANGELOG.md) for what's
+actually shipped versus planned.
 
 ## What it is
 
