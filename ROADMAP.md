@@ -705,9 +705,13 @@ in CHANGELOG.md).
 ## Viewer: toward an advanced editor (not yet triaged into a phase)
 
 Raised while discussing the find-in-document work — further steps toward
-a fuller, Notepad++-like editing experience. None of this is committed;
-listed here to track the idea, with one item flagged as a real
-architectural fork rather than a routine feature.
+a fuller, Notepad++-like *viewing* experience. Explicitly **not** going
+there: editing or saving changes back to a source. Raised and considered,
+but dropped deliberately — it would contradict CLAUDE.md's core "read-only,
+always" principle for no strong enough reason, and every item below stays
+entirely display-only: none of it ever mutates the file being viewed or
+writes anything back to the source, the same guarantee the existing
+line-level highlighting and Ctrl+F search already hold to.
 
 - [ ] **Per-file-type syntax highlighting.** Currently only log-level
       tokens are colored (`codemirror-theme.ts`'s `logLevelHighlighting`);
@@ -717,44 +721,48 @@ architectural fork rather than a routine feature.
       installed dependencies but currently unused anywhere in the
       codebase — likely added in anticipation of this and never wired
       up. `@codemirror/language-data` (not yet installed) adds broader
-      extension-based auto-detection beyond those three. Purely additive,
-      read-only, no conflict with anything in CLAUDE.md.
+      extension-based auto-detection beyond those three.
 - [ ] **Compare files (diff view).** Read-only side-by-side or unified
       diff between two open files or two versions of the same rotated
       log (`app.log` vs `app.log.1`, etc.) — a genuinely useful forensic
-      feature for this audience and, like syntax highlighting, entirely
-      compatible with the read-only model. `@codemirror/merge` (the
-      official CodeMirror 6 diff/merge extension, not yet installed) is
-      the natural fit given the project is already all-in on CodeMirror.
-- [ ] **Editing and saving changes back to the source.** Requested
-      explicitly, but flagged here rather than treated as a routine
-      checkbox: this directly contradicts CLAUDE.md's core, repeated
-      design principle — *"this tool only ever reads from sources, never
-      writes to them"* / *"Never delete, modify, or write anything back
-      to a source. Read-only, always."* — stated in the Architecture,
-      Live browsing, and Security notes sections, not an incidental
-      detail. Needs an explicit decision before any implementation, not
-      just a design pass:
-      - a new write path per connector (ssh/smb/winrm/local/agent) —
-        several of these (see `docs/source-setup.md`) are set up with
-        read-only service accounts/ACLs/chroot jails specifically
-        *because* this tool was never supposed to write; that
-        infrastructure assumption would need revisiting per source, not
-        just in this app
-      - a new `edit` capability, distinct from `view`/`download`
-      - almost certainly a **source-level opt-in, default off** — most of
-        this tool's target sources are live production logs where an
-        accidental or malicious write is a real incident, not a
-        convenience feature gone slightly wrong
-      - mandatory audit logging of every write (this is exactly the kind
-        of event the planned audit log viewer exists for)
-      - the same path-traversal and rule-visibility rigor the read path
-        already enforces, applied symmetrically to writes
-      - worth an explicit product conversation about whether "edit and
-        save" is actually needed, versus whether the read-only
-        power-user features above (find-in-document, syntax highlight,
-        diff) cover the real want without reopening the tool's core
-        safety premise
+      feature for this audience. `@codemirror/merge` (the official
+      CodeMirror 6 diff/merge extension, not yet installed) is the
+      natural fit given the project is already all-in on CodeMirror.
+- [ ] **More severity indicators + jump-to-next-problem navigation.**
+      Today's `logLevelHighlighting` only tints bracketed `[error]`/
+      `[fatal]` tokens and only line-tints on the bare words "error"/
+      "fatal" (`codemirror-theme.ts`'s `LEVEL_TOKEN`/`ERROR_LINE`) — no
+      "jump to next one" command exists, and coverage is narrow (no
+      `warn`/`warning` line-tint, no `critical`/`severe`/`panic`/
+      `exception`/`traceback`-style markers common across other
+      ecosystems' log formats). Two tiers:
+      1. Broaden the built-in pattern set and add a next/previous-problem
+         step command (conceptually like an IDE's "next diagnostic"),
+         stepping through everything at warn-or-worse severity — the
+         existing color-coding still shows which severity each stop is.
+      2. Later, and only if the built-in set proves too narrow in
+         practice: user-configurable custom indicator patterns, glob/regex
+         the same way the `Rule` engine already works, rather than a
+         second, differently-shaped pattern mechanism.
+- [ ] **Line-wrap toggle.** Log lines are often very long (embedded JSON,
+      long messages); a simple wrap/no-wrap switch
+      (`EditorView.lineWrapping`) is cheap and directly useful.
+- [ ] **Beautify / minify for embedded JSON, XML, and (lower priority) JS.**
+      A display-only reformat of the currently-open content or a
+      selection — never touches the file on disk, purely a client-side
+      re-render, same guarantee as line-wrap. Two distinct shapes worth
+      keeping separate when this gets designed: reformatting a whole file
+      that already *is* JSON/XML (a minified config file, say) versus
+      reformatting just one embedded JSON blob inside a bigger log line
+      (structured-logging lines are common; a whole-line beautify-in-place
+      is probably the more-used case day to day). JSON needs no library
+      (`JSON.parse`/`stringify(obj, null, 2)` natively); XML has no native
+      browser formatter, so either a small zero-dependency formatter
+      function or a tiny package (e.g. `xml-formatter`) — pick when this
+      gets built, not speculatively now. JS beautify is listed but lower
+      priority: logs rarely carry embedded minified JS the way they carry
+      JSON/XML, so it's worth confirming there's a real use case before
+      building it rather than assuming parity with the other two.
 
 ## Security hardening (pre-1.0)
 
