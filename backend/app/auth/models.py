@@ -25,6 +25,11 @@ class GlobalCapability(StrEnum):
     manage_roles = "manage_roles"
     manage_sso = "manage_sso"
     create_source = "create_source"
+    # Deployment-wide feature toggles (SystemSetting) -- distinct from the
+    # other capabilities above, which all gate *managing something scoped*
+    # (users, roles, SSO config, sources). This one gates flipping a switch
+    # that changes what every user in the deployment sees.
+    manage_system_settings = "manage_system_settings"
 
 
 class AuthProviderType(StrEnum):

@@ -18,7 +18,8 @@ from app.archives import (
     is_transparent_gzip,
     list_members,
 )
-from app.auth.models import Capability
+from app.audit import record_audit_event
+from app.auth.models import Capability, User
 from app.auth.rbac import require_capability
 from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
@@ -114,9 +115,24 @@ def _materialize(
 def browse(
     source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
     path: str = "",
+    user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> list[BrowseEntry]:
     _require_safe_path(path)
+    if path == "":
+        # Root browse == "opened this source" -- the connections home page's
+        # Recent column (GET /sources/recent) reads this back. Deliberately
+        # not logged on every sub-directory expand, only the first hop into
+        # a source, to keep this proportionate to real navigation events
+        # rather than growing with every click.
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="source.open",
+            target_type="source",
+            target_id=source.id,
+        )
+        session.commit()
     rules = _rules_for(session, source.id)
     connector = _connector(source)
 
@@ -229,6 +245,7 @@ def download_file(
     path: str,
     member: str | None = None,
     source: Source = Depends(require_capability(Capability.download, get_current_active_user)),
+    user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> FileResponse:
     """One-shot: fetches, streams, and releases within the same request —
@@ -236,6 +253,18 @@ def download_file(
     _require_safe_path(path)
     rules = _rules_for(session, source.id)
     served_path, filename, key = _resolve_content(source, path, member, rules)
+    # CLAUDE.md's Application logging section names file download as one of
+    # the minimum AuditLog-worthy actions -- this was the one gap where that
+    # never actually got wired up.
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="file.download",
+        target_type="source",
+        target_id=source.id,
+        metadata={"path": path, "member": member} if member else {"path": path},
+    )
+    session.commit()
     background = BackgroundTask(get_scratch_store().release, key) if key else None
     return FileResponse(served_path, filename=filename, background=background)
 

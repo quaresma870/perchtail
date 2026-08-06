@@ -21,6 +21,7 @@ from app.api.rules import router as rules_router
 from app.api.search import router as search_router
 from app.api.sources import router as sources_router
 from app.api.sso import router as sso_router
+from app.api.system_settings import router as system_settings_router
 from app.api.users import router as users_router
 from app.bootstrap import seed_initial_super_admin, seed_no_access_role, seed_system_log_source
 from app.config import get_settings
@@ -90,6 +91,7 @@ app.include_router(users_router)
 app.include_router(sso_router)
 app.include_router(agent_ws_router)
 app.include_router(search_router)
+app.include_router(system_settings_router)
 
 
 @app.get("/healthz")

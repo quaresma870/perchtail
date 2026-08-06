@@ -3,7 +3,12 @@ export type RuleType = 'include' | 'exclude'
 export type PatternKind = 'glob' | 'regex'
 export type ScopeType = 'customer' | 'folder' | 'source'
 export type Capability = 'view' | 'download' | 'manage_rules' | 'run_now'
-export type GlobalCapability = 'manage_users' | 'manage_roles' | 'manage_sso' | 'create_source'
+export type GlobalCapability =
+  | 'manage_users'
+  | 'manage_roles'
+  | 'manage_sso'
+  | 'create_source'
+  | 'manage_system_settings'
 
 export interface CurrentUser {
   id: number
@@ -31,7 +36,9 @@ export interface Source {
   id: number
   name: string
   customer_id: number | null
+  customer_name: string | null
   folder_id: number | null
+  folder_name: string | null
   protocol: Protocol
   host: string
   port: number | null
@@ -116,4 +123,8 @@ export interface SearchHit {
   file_path: string
   line_number: number
   snippet_html: string
+}
+
+export interface SystemSettings {
+  search_view_enabled: boolean
 }

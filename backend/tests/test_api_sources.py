@@ -1,10 +1,13 @@
+from datetime import timedelta
+
 import pytest
 from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.api.sources import router as sources_router
-from app.auth.models import Capability, Role, RoleGrant, ScopeType, User
+from app.auth.models import AuditLog, Capability, Role, RoleGrant, ScopeType, User
 from app.db import get_session
 from app.models import Customer, Folder, PatternKind, Protocol, Rule, RuleType, Source
+from app.timeutils import utcnow
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -463,3 +466,168 @@ def test_agent_connected_reflects_registry_state(session, admin_client):
 
     response = admin_client.get(f"/sources/{source.id}")
     assert response.json()["agent_connected"] is False
+
+
+def test_source_public_includes_customer_and_folder_names(session, admin_client):
+    customer = _make_customer(session, "Acme Corp")
+    folder = Folder(name="Production", customer_id=customer.id)
+    session.add(folder)
+    session.commit()
+    session.refresh(folder)
+    source = Source(
+        name="app01",
+        customer_id=customer.id,
+        folder_id=folder.id,
+        protocol=Protocol.ssh,
+        host="h1",
+        base_path="/var/log",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    response = admin_client.get(f"/sources/{source.id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["customer_name"] == "Acme Corp"
+    assert body["folder_name"] == "Production"
+
+
+def test_source_public_names_are_null_without_customer_or_folder(session, admin_client):
+    source = Source(name="orphan", protocol=Protocol.local, host="localhost", base_path="/var/log")
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    response = admin_client.get(f"/sources/{source.id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["customer_name"] is None
+    assert body["folder_name"] is None
+
+
+def test_recent_sources_orders_most_recent_first_and_dedupes(session, client_for):
+    user = _make_user(session, is_super_admin=True)
+    client = client_for(user)
+    customer = _make_customer(session)
+    source_a = Source(
+        name="a", customer_id=customer.id, protocol=Protocol.ssh, host="ha", base_path="/var/log"
+    )
+    source_b = Source(
+        name="b", customer_id=customer.id, protocol=Protocol.ssh, host="hb", base_path="/var/log"
+    )
+    session.add(source_a)
+    session.add(source_b)
+    session.commit()
+    session.refresh(source_a)
+    session.refresh(source_b)
+
+    now = utcnow()
+    # a opened first, then b, then a again -- each source's *most recent*
+    # open should determine its position, and it should appear only once.
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            action="source.open",
+            target_type="source",
+            target_id=source_a.id,
+            timestamp=now - timedelta(minutes=10),
+        )
+    )
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            action="source.open",
+            target_type="source",
+            target_id=source_b.id,
+            timestamp=now - timedelta(minutes=5),
+        )
+    )
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            action="source.open",
+            target_type="source",
+            target_id=source_a.id,
+            timestamp=now,
+        )
+    )
+    session.commit()
+
+    response = client.get("/sources/recent")
+    assert response.status_code == 200
+    names = [s["name"] for s in response.json()]
+    assert names == ["a", "b"]
+
+
+def test_recent_sources_respects_limit(session, client_for):
+    user = _make_user(session, is_super_admin=True)
+    client = client_for(user)
+    customer = _make_customer(session)
+    sources = []
+    for i in range(3):
+        s = Source(
+            name=f"s{i}",
+            customer_id=customer.id,
+            protocol=Protocol.ssh,
+            host=f"h{i}",
+            base_path="/var/log",
+        )
+        session.add(s)
+        sources.append(s)
+    session.commit()
+    for s in sources:
+        session.refresh(s)
+
+    now = utcnow()
+    for i, s in enumerate(sources):
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                action="source.open",
+                target_type="source",
+                target_id=s.id,
+                timestamp=now - timedelta(minutes=i),
+            )
+        )
+    session.commit()
+
+    response = client.get("/sources/recent", params={"limit": 2})
+    assert response.status_code == 200
+    assert len(response.json()) == 2
+
+
+def test_recent_sources_excludes_source_no_longer_visible(session, client_for):
+    # A non-super-admin user who opened a source in the past, then had their
+    # grant on it revoked -- GET /sources/recent must not leak it back
+    # through history even though the AuditLog row still exists.
+    customer = _make_customer(session)
+    source = Source(
+        name="app01",
+        customer_id=customer.id,
+        protocol=Protocol.ssh,
+        host="h1",
+        base_path="/var/log",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    role = Role(name="viewer-role-recent")
+    session.add(role)
+    session.commit()
+    session.refresh(role)
+    user = User(username="viewer-recent@example.com", role_id=role.id)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    session.add(
+        AuditLog(user_id=user.id, action="source.open", target_type="source", target_id=source.id)
+    )
+    session.commit()
+
+    client = client_for(user)
+    response = client.get("/sources/recent")
+    assert response.status_code == 200
+    assert response.json() == []

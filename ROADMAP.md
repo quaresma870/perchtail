@@ -672,50 +672,71 @@ they come before any connector or UI work, not after.
 Inspired by Apache Guacamole's dashboard-style landing page — kept in
 PerchTail's existing theme/design system, no visual-language changes.
 
-- [ ] Viewer home page (`#/viewer` with no source selected) becomes a
+- [x] Viewer home page (`#/viewer` with no source selected) becomes a
       two-column layout: recent connections on the left, all connections
       on the right — replacing the current flat single list of source cards
-- [ ] Folder-tree navigation for browsing sources by customer/folder —
-      doesn't exist today. `Folder` is fully modeled and RBAC-scoped
-      (unlimited nesting via `parent_folder_id`), but nothing in the
-      frontend renders that tree; `Sources.svelte` and the Viewer picker
-      both list sources flat.
+- [x] "All connections" gets a search box matching folder, customer, or
+      host, case-insensitive (`lib/connection-filter.ts`) — not the
+      source's own display name, per spec
+- [x] `Source` list responses carry `customer_name`/`folder_name` so cards
+      can show "Customer / Folder" as subtext without a separate lookup
+- [ ] Folder-tree navigation for browsing sources by customer/folder — the
+      current "All connections" list shows customer/folder as flat subtext
+      per card (enough to search/scan), not an actual expandable tree.
+      `Folder` is fully modeled and RBAC-scoped (unlimited nesting via
+      `parent_folder_id`), but nothing in the frontend renders it as a
+      tree yet; still open.
 - [ ] Dedicated folder/host management admin page (create/rename/move/
       delete folders, move sources between them) — CLAUDE.md flags this as
       its own admin surface and it was never built; only inline folder
-      creation from the source editor exists today
+      creation from the source editor exists today (both the original gap
+      and this redesign's search box work off that same inline-create
+      flow, not a standalone page)
 
 ### Notes on decisions made — connections home redesign
 
-- **"Recent connections" needs new tracking, not just a reorder.**
-  `archive.py`'s browse/open/download endpoints don't write to `AuditLog`
-  at all today, so there's no existing per-user recency signal to sort by.
-  Plan: log `source.open`/`file.download` to `AuditLog` (not raw directory
-  browsing — too high-volume to be a meaningful "connection" event) and
-  query the current user's own recent entries for this list, reusing the
-  existing audit infrastructure rather than a bespoke recency table.
+- **"Recent connections" needed new tracking, not just a reorder — built
+  as planned.** `GET /sources/{id}/browse` (root path only, i.e. first
+  hop into a source, not every sub-directory expand) now records a
+  `source.open` `AuditLog` row; `GET /sources/recent` reads the current
+  user's own most-recent-per-source events back, re-checking live
+  visibility so a revoked grant can't leak a source through history.
+  `GET /sources/{id}/download` also now logs `file.download` — this was
+  CLAUDE.md's own stated minimum audit bar ("file download") that had
+  never actually been wired up anywhere.
 - **Recent connections and the full audit log viewer (below) share a data
-  source but are two separate features, per explicit direction.** This
-  redesign only needs to *write* the new `source.open`/`file.download`
-  events and read back the current user's own recent ones — it does not
-  include general-purpose audit filtering/viewing, which is scoped on its
-  own below.
-- **Folder-tree navigation can load eagerly**, unlike the remote-directory
-  `FolderTree.svelte` (which lazy-loads per expand specifically because
-  SSH/SMB/WinRM listing has real latency) — the customer/folder org tree
-  is local SQLite data at the scale CLAUDE.md describes (dozens of
-  customers, dozens of folders), so eager fetch-and-render is simpler and
-  fine.
+  source but stayed two separate features, per explicit direction.** This
+  redesign only writes the new events and reads back the current user's
+  own recent ones (`GET /sources/recent`) — no general-purpose audit
+  filtering/viewing endpoint, which is scoped on its own below.
+- **Deployment-wide feature toggles, needed for both this and the audit
+  viewer, got a small shared mechanism now rather than one bespoke flag
+  each.** A new `SystemSetting` key-value table + `GET`/`PATCH
+  /system-settings` (gated by a new `manage_system_settings` global
+  capability, a new "System" tab under Settings) backs a `search_view_enabled`
+  toggle — off hides the Search nav entry *and* redirects away from the
+  `/search` route itself, not just the link, so it's actually off for a
+  bookmarked/typed URL too. The audit-log toggle described below reuses
+  this same mechanism once that page exists; no dead UI was added for it
+  ahead of time.
+- **Folder-tree navigation and the standalone management page are still
+  open**, deliberately deferred out of this pass — the shipped "flat list
+  with Customer / Folder subtext + search" covers the same real need
+  (find a source by where it's organized) without the added scope of a
+  real expand/collapse tree component or drag-and-drop-style folder
+  management UI. Revisit if the flat-list-with-search approach turns out
+  not to be enough at real scale.
 
 ## Full audit log viewer (admin-only)
 
 Flagged as its own feature, separate from the connections home redesign
-above, even though it will share the same `AuditLog` writes that redesign
-work adds. `AuditLog` has been write-only since Phase 1 — every write site
-(login, source/rule/role/customer/folder CRUD) already exists, but there's
-still no read endpoint and no admin page, even though CLAUDE.md's
-"Application logging" section always specced it as "a durable, queryable
-record ... read via an admin UI page."
+above, even though it shares the same `AuditLog` writes that redesign work
+added. `AuditLog` has been write-only since Phase 1 — every write site
+(login, source/rule/role/customer/folder CRUD, and now `source.open`/
+`file.download` from the redesign work) already exists, but there's still
+no read endpoint and no admin page, even though CLAUDE.md's "Application
+logging" section always specced it as "a durable, queryable record ...
+read via an admin UI page."
 
 - [ ] `GET /audit` endpoint: paginated, filterable by action/type, user,
       target type, and date range
@@ -726,13 +747,20 @@ record ... read via an admin UI page."
 - [ ] Frontend: new "Audit Log" page under Settings
   - [ ] Filter controls for action/type (multi-select against the known
         action namespace: `login`, `source.*`, `rule.*`, `role.*`,
-        `user.*`, `customer.*`, `folder.*`, `sso.*`, plus the new
-        `source.open`/`file.download` from the redesign work)
+        `user.*`, `customer.*`, `folder.*`, `sso.*`, `source.open`,
+        `file.download`)
   - [ ] A retention control — admin-configurable from the frontend, not
         just an env var
 - [ ] Backend retention enforcement: a scheduled purge job (APScheduler,
       same shape as the scratch idle-sweep and search-index sweep) driven
       by that configurable setting
+- [ ] Deployment-wide on/off toggle for this page, reusing the
+      `SystemSetting` mechanism the connections-home redesign already
+      built for the Search view toggle (`app/system_settings.py`,
+      `GET`/`PATCH /system-settings`) — add an `audit_view_enabled` key
+      and a second row on the System settings page once this page exists;
+      not built ahead of time since a toggle with nothing to gate yet
+      would just be dead UI (see that section's notes)
 
 ### Notes on decisions made — full audit log viewer
 

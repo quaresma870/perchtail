@@ -25,6 +25,7 @@
     { key: 'manage_users', label: 'Manage users' },
     { key: 'manage_roles', label: 'Manage roles' },
     { key: 'manage_sso', label: 'Manage SSO settings' },
+    { key: 'manage_system_settings', label: 'Manage system settings (feature toggles)' },
   ]
   const ALL_CAPS: Capability[] = ['view', 'download', 'manage_rules', 'run_now']
 
