@@ -713,6 +713,16 @@ entirely display-only: none of it ever mutates the file being viewed or
 writes anything back to the source, the same guarantee the existing
 line-level highlighting and Ctrl+F search already hold to.
 
+**Interaction pattern, decided:** every toggle-able view mode below (wrap,
+show-all-characters, mark-highlighting, tail -f, compare) is a stateful
+toolbar button, not a modal or a settings-page trip — click to turn a mode
+on, click again to turn it off, per explicit direction. For anything that
+needs a second input (compare needs a second file), arming the button puts
+the pane in "pick a target" mode; the next file opened/selected from the
+tree completes the action, and clicking the button again clears it and
+returns to normal viewing. One consistent model across every feature here
+rather than a bespoke UI per feature.
+
 - [ ] **Per-file-type syntax highlighting.** Currently only log-level
       tokens are colored (`codemirror-theme.ts`'s `logLevelHighlighting`);
       there's no language-aware highlighting for e.g. `.json`, `.xml`,
@@ -722,36 +732,53 @@ line-level highlighting and Ctrl+F search already hold to.
       codebase — likely added in anticipation of this and never wired
       up. `@codemirror/language-data` (not yet installed) adds broader
       extension-based auto-detection beyond those three.
-- [ ] **Compare files (diff view).** Read-only side-by-side or unified
-      diff between two open files or two versions of the same rotated
-      log (`app.log` vs `app.log.1`, etc.) — a genuinely useful forensic
-      feature for this audience. `@codemirror/merge` (the official
-      CodeMirror 6 diff/merge extension, not yet installed) is the
-      natural fit given the project is already all-in on CodeMirror.
-- [ ] **Severity indicators become admin-configurable, with a dedicated
-      Settings section, plus jump-to-next-problem navigation.** Today's
-      `logLevelHighlighting` only tints bracketed `[error]`/`[fatal]`
-      tokens and only line-tints on the bare words "error"/"fatal"
-      (`codemirror-theme.ts`'s `LEVEL_TOKEN`/`ERROR_LINE`) — hardcoded, no
-      `warn`/`warning` line-tint, nothing for `critical`/`severe`/`panic`/
-      `exception`/`traceback`-style markers other ecosystems use, and no
-      "jump to next one" command. Per explicit direction, this becomes a
-      real settings surface rather than a bigger hardcoded list:
+- [ ] **Compare files (diff view), as a toggle button.** Arm the "Compare"
+      button, pick a second file from the tree (or another open tab), and
+      it renders a read-only side-by-side or unified diff against the
+      currently active file in place — same or different sources, same
+      "click again to clear and return to normal viewing" toolbar-toggle
+      model as the rest of this section. Also directly useful for two
+      versions of the same rotated log (`app.log` vs `app.log.1`).
+      `@codemirror/merge` (the official CodeMirror 6 diff/merge extension,
+      not yet installed) is the natural fit given the project is already
+      all-in on CodeMirror.
+- [ ] **Severity indicators become admin-configurable, both globally and
+      per-source, with a dedicated Settings section, plus jump-to-
+      next-problem navigation.** Today's `logLevelHighlighting` only
+      tints bracketed `[error]`/`[fatal]` tokens and only line-tints on
+      the bare words "error"/"fatal" (`codemirror-theme.ts`'s
+      `LEVEL_TOKEN`/`ERROR_LINE`) — hardcoded, no `warn`/`warning`
+      line-tint, nothing for `critical`/`severe`/`panic`/`exception`/
+      `traceback`-style markers other ecosystems use, and no "jump to
+      next one" command. Per explicit direction, this becomes a real,
+      two-level settings surface:
       - [ ] New backend model, `SeverityPattern` (level, pattern,
             pattern_kind [glob|regex, `re:` prefix — same convention as
-            `Rule`], enabled), seeded with sensible defaults covering the
-            common markers above so it isn't empty on first boot
+            `Rule`], enabled, `source_id` nullable — null means the
+            global default, set means a per-source override), seeded
+            with sensible global defaults covering the common markers
+            above so it isn't empty on first boot
       - [ ] `GET`/`POST`/`PATCH`/`DELETE` endpoints for admin CRUD on the
-            pattern set, plus a `GET` the Viewer itself calls to fetch the
-            active, enabled set to highlight against
-      - [ ] New "Settings → Severity Indicators" section: one row per
-            level with an enable/disable toggle and its associated
-            pattern list ("values to consider" as that severity) —
-            row-based editor, mirroring `RuleEditor.svelte`'s existing UX
-            (and its raw-text/gitignore-style paste mode) for consistency
-            rather than inventing a new editing pattern
+            pattern set (global and per-source), plus a `GET` the Viewer
+            calls to fetch the *effective* set for whatever source is
+            open — a source's own patterns where it has any, falling
+            back to the global set otherwise, same "most specific wins"
+            shape as grant resolution, just at the pattern level instead
+            of the permission level
+      - [ ] New "Settings → Severity Indicators" section for the global
+            default set: one row per level with an enable/disable toggle
+            and its associated pattern list ("values to consider" as
+            that severity) — row-based editor, mirroring
+            `RuleEditor.svelte`'s existing UX (and its raw-text/
+            gitignore-style paste mode) for consistency rather than
+            inventing a new editing pattern
+      - [ ] A new option on the source editor (`SourceEditor.svelte`,
+            alongside the existing "Include in full-text search" toggle)
+            to override severity indicators for that specific source,
+            opening the same row-based editor scoped to just that source
       - [ ] `CodeMirrorPane`/`codemirror-theme.ts` fetch and highlight
-            against this configured set instead of the hardcoded regexes
+            against this configured (effective) set instead of the
+            hardcoded regexes
       - [ ] Next/previous-problem step command (conceptually like an IDE's
             "next diagnostic"), stepping through everything at warn-or-worse
             — needs its own decision on whether the "jump" threshold is a
@@ -760,13 +787,10 @@ line-level highlighting and Ctrl+F search already hold to.
             level's enabled/patterns, not reusing "enabled" for both
             meanings)
       - Gating: reuse the `manage_system_settings` capability from the
-        connections-home redesign work rather than adding a new one, same
-        "deployment-wide, not RBAC-scoped" reasoning as the Search toggle
-      - Open decision, not yet settled: global-only for v1 (one pattern
-        set for every source) versus allowing per-source overrides later
-        — different sources can have very different log formats, but
-        starting global keeps this from ballooning into Rule-engine-level
-        complexity before there's evidence it's needed
+        connections-home redesign work for the global set, and
+        `manage_rules`-style source-scoped capability for per-source
+        overrides — consistent with how the rest of the grant model
+        already splits "deployment-wide" from "per-source" concerns
 - [ ] **Line-wrap toggle.** Log lines are often very long (embedded JSON,
       long messages); a simple wrap/no-wrap switch
       (`EditorView.lineWrapping`) is cheap and directly useful.
@@ -786,6 +810,57 @@ line-level highlighting and Ctrl+F search already hold to.
       priority: logs rarely carry embedded minified JS the way they carry
       JSON/XML, so it's worth confirming there's a real use case before
       building it rather than assuming parity with the other two.
+- [ ] **Live-follow / "tail -f" mode, as a toggle button.** The
+      architecturally biggest item here — everything else in this section
+      is fetch-once-and-render; this needs an actual live-update loop,
+      not just a UI addition. CLAUDE.md's whole model today is
+      fetch-on-open/purge-on-close with no persistent watch of anything.
+      Two candidate mechanisms, not yet chosen: (1) client-side polling —
+      periodically re-fetch and append only the new tail bytes, working
+      uniformly across every protocol but adding repeated round-trips
+      over SSH/SMB/WinRM specifically, which have real per-request
+      latency; (2) for agent-mode sources specifically, extend the
+      existing persistent WebSocket (`app/agent_registry.py`) with a
+      "watch" command so the agent pushes new lines itself instead of
+      being polled — cheaper, but only covers agent-protocol sources,
+      not SSH/SMB/WinRM/local. Needs a "stick to bottom" auto-scroll
+      toggle so incoming lines don't yank the view away from wherever the
+      user is currently reading — an easy detail to get wrong if it's
+      treated as an afterthought rather than part of the design.
+- [ ] **Reload/refresh button.** A manual re-fetch of the currently open
+      file's content in place, without closing and reopening the tab —
+      the always-fresh-fetch model already exists for a fresh *open*, this
+      is just exposing a fetch-again action for a tab that's already open.
+      Low effort: same `/open` call the tab's initial load already makes.
+- [ ] **Copy selected lines (with line numbers).** Plain-text copy via
+      the browser's own Ctrl+C already works for a CodeMirror selection;
+      the actual gap is a dedicated action that copies the selection
+      *with* its line numbers prefixed — useful for pasting a snippet
+      into a ticket or chat message with a clear line reference back to
+      the source file.
+- [ ] **"Show all characters" toggle** (Notepad++'s View → Show Symbol).
+      Reveal whitespace (spaces, tabs) and line-ending style (CRLF vs LF)
+      as visible glyphs — same `Decoration`/`MatchDecorator` mechanism
+      `logLevelHighlighting` already uses, just matching whitespace
+      instead of level tokens. Particularly relevant given this tool
+      explicitly spans Linux *and* Windows sources — spotting a
+      CRLF/LF mismatch or trailing whitespace is a real, recurring need
+      here, not a generic editor nicety.
+- [ ] **Go-to-line** (Ctrl+G). Jump straight to a specific line number —
+      small, cheap, pairs naturally with the find-in-document panel above.
+- [ ] **Bookmarks.** Mark lines while scanning a large file, jump between
+      marked lines later. Pure client-side/session state (never written
+      to the file, and doesn't need to be persisted server-side either)
+      — useful during a long forensic pass through one big log.
+- [ ] **Multi-pattern "mark" highlighting** (Notepad++'s Mark feature, not
+      to be confused with the severity-indicator work above). Persistently
+      highlight *all* occurrences of one or more ad hoc patterns at once,
+      each in its own color — e.g. mark a specific request/session ID in
+      one color and "ERROR" in another simultaneously, to visually trace
+      one transaction through a busy, multi-source log. Probably the
+      single highest-value addition in this list for the forensic-analysis
+      audience CLAUDE.md frames this tool around, on par with or above
+      tail -f, for a fraction of the implementation cost.
 
 ## Security hardening (pre-1.0)
 
