@@ -8,7 +8,7 @@
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
   import { filterConnections } from '../lib/connection-filter'
   import { tabKey } from '../lib/tab-key'
-  import type { BrowseEntry, Source } from '../lib/types'
+  import type { BrowseEntry, SeverityPattern, Source } from '../lib/types'
 
   export let params: { sourceId?: string } = {}
 
@@ -28,6 +28,7 @@
   let connectionsQuery = ''
   let source: Source | null = null
   let rootEntries: BrowseEntry[] = []
+  let severityPatterns: SeverityPattern[] = []
   let loading = true
   let error = ''
 
@@ -72,6 +73,15 @@
       error = err instanceof ApiError ? err.detail : 'Failed to load source'
     } finally {
       loading = false
+    }
+    try {
+      // Independent of the calls above -- a failure here shouldn't block
+      // browsing/opening files, it just means no highlighting.
+      severityPatterns = await api.get<SeverityPattern[]>(
+        `/sources/${sourceId}/severity-patterns/effective`,
+      )
+    } catch {
+      severityPatterns = []
     }
   }
 
@@ -276,21 +286,39 @@
               Find All
             </button>
           </div>
-          <a
-            class="link"
-            href={`/sources/${sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 3v12" />
-              <path d="m6 11 6 6 6-6" />
-              <path d="M5 21h14" />
-            </svg>
-            Download
-          </a>
+          <div class="toolbar-right">
+            {#if severityPatterns.length > 0}
+              <button
+                class="link"
+                title="Previous problem"
+                on:click={() => paneRef?.jumpToPreviousProblem()}
+              >
+                ‹ problem
+              </button>
+              <button
+                class="link"
+                title="Next problem"
+                on:click={() => paneRef?.jumpToNextProblem()}
+              >
+                problem ›
+              </button>
+            {/if}
+            <a
+              class="link"
+              href={`/sources/${sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 3v12" />
+                <path d="m6 11 6 6 6-6" />
+                <path d="M5 21h14" />
+              </svg>
+              Download
+            </a>
+          </div>
         </div>
-        <CodeMirrorPane bind:this={paneRef} content={activeTab.content} />
+        <CodeMirrorPane bind:this={paneRef} content={activeTab.content} {severityPatterns} />
         {#if findAllOpen}
           <FindInDocumentPanel
             content={activeTab.content}
@@ -507,6 +535,14 @@
   .pane-toolbar .link svg {
     width: 13px;
     height: 13px;
+  }
+  .toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .toolbar-right button.link {
+    font: inherit;
   }
   .empty-state {
     flex: 1;

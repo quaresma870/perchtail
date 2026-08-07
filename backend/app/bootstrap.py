@@ -8,6 +8,7 @@ from app.auth.rbac import create_role
 from app.config import get_settings
 from app.logging_config import get_logger
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
+from app.severity_patterns import seed_default_global_patterns
 
 logger = get_logger(__name__)
 
@@ -118,3 +119,11 @@ def seed_no_access_role(session: Session) -> Role:
         is_builtin=True,
         is_super_admin=False,
     )
+
+
+def seed_severity_patterns(session: Session) -> None:
+    """Thin wrapper kept alongside the other bootstrap seeds (called from
+    main.py's lifespan) so every first-run seed lives in one place — the
+    actual idempotent seed logic is in app.severity_patterns, next to the
+    effective-set resolution it's paired with."""
+    seed_default_global_patterns(session)

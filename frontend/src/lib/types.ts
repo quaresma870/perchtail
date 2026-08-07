@@ -2,6 +2,7 @@ export type Protocol = 'ssh' | 'smb' | 'winrm' | 'local' | 'agent'
 export type RuleType = 'include' | 'exclude'
 export type PatternKind = 'glob' | 'regex'
 export type ScopeType = 'customer' | 'folder' | 'source'
+export type SeverityLevel = 'error' | 'warning' | 'info' | 'debug'
 export type Capability = 'view' | 'download' | 'manage_rules' | 'run_now'
 export type GlobalCapability =
   | 'manage_users'
@@ -60,6 +61,17 @@ export interface Rule {
   pattern: string
   pattern_kind: PatternKind
   notes: string | null
+}
+
+export interface SeverityPattern {
+  id: number
+  source_id: number | null
+  level: SeverityLevel
+  pattern: string
+  pattern_kind: PatternKind
+  enabled: boolean
+  highlight_line: boolean
+  include_in_navigation: boolean
 }
 
 export interface Role {

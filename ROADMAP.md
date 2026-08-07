@@ -828,6 +828,122 @@ in CHANGELOG.md).
   query (e.g. a single common character) against a huge file, not a
   design goal, same spirit as the scratch store's size guard.
 
+## Viewer: toward an advanced editor (not yet triaged into a phase)
+
+Further steps toward a fuller, Notepad++-like *viewing* experience for the
+CodeMirror-based Viewer. Explicitly **not** going there: editing or saving
+changes back to a source — dropped deliberately, it would contradict
+CLAUDE.md's core "read-only, always" principle for no strong enough
+reason. Everything below stays entirely display-only: none of it ever
+mutates the file being viewed or writes anything back to the source.
+
+**Interaction pattern, decided:** every toggle-able view mode below (wrap,
+show-all-characters, mark-highlighting, tail -f, compare) is a stateful
+toolbar button, not a modal or a settings-page trip — click to turn a mode
+on, click again to turn it off. For anything that needs a second input
+(compare needs a second file), arming the button puts the pane in "pick a
+target" mode; the next file opened/selected from the tree completes the
+action, and clicking the button again clears it and returns to normal
+viewing.
+
+- [x] **Severity indicators become admin-configurable, both globally and
+      per-source, with a dedicated Settings section, plus jump-to-
+      next-problem navigation.**
+  - [x] New backend model, `SeverityPattern` (`level` [error/warning/info/
+        debug], `pattern`, `pattern_kind` [glob|regex, `re:` prefix — same
+        convention as `Rule`], `enabled`, `highlight_line`,
+        `include_in_navigation`, `source_id` nullable — null means the
+        global default, set means a per-source override), seeded with
+        sensible global defaults on first startup so it isn't empty
+        (`app/severity_patterns.py`'s `DEFAULT_GLOBAL_PATTERNS`)
+  - [x] `GET`/`POST`/`PATCH`/`DELETE` endpoints for admin CRUD on the
+        pattern set (global: `/severity-patterns`; per-source:
+        `/sources/{id}/severity-patterns`), plus `GET
+        /sources/{id}/severity-patterns/effective` the Viewer calls to
+        fetch the *effective* set for whatever source is open — a
+        source's own patterns where it has any, falling back to the
+        global set otherwise (override, not merge — same "most specific
+        wins" shape as grant resolution, just at the pattern level)
+  - [x] New "Settings → Severity Indicators" page for the global default
+        set: row-based editor (level, pattern, line-tint toggle,
+        nav-eligible toggle, enabled toggle) — raw-text/gitignore-style
+        paste mode deliberately skipped for this feature (see notes below)
+  - [x] A new section on the source editor (`SourceEditor.svelte`,
+        alongside the existing "Include in full-text search" toggle) to
+        override severity indicators for that specific source — same
+        row-based editor, scoped to just that source
+  - [x] `CodeMirrorPane`/`codemirror-theme.ts` fetch and highlight against
+        this configured (effective) set instead of hardcoded regexes —
+        matching logic lives client-side in
+        `lib/severity-highlighting.ts` (pure, unit-tested), CodeMirror
+        glue (`ViewPlugin`s/decorations) stays in `codemirror-theme.ts`
+  - [x] Next/previous-problem step command, wired to toolbar buttons in
+        the Viewer — steps through lines with a match from a
+        navigation-eligible pattern, wrapping at either end. Resolves the
+        earlier open question in favor of a **per-pattern
+        `include_in_navigation` flag**, not a fixed warn-or-worse
+        severity floor — an admin decides what counts as a "step to"
+        problem instead of it being hardcoded; the seeded defaults enable
+        it for error/warning but not info/debug (routine noise, not
+        "problems")
+  - Gating: global CRUD uses `manage_system_settings` (from the
+    connections-home redesign work); per-source overrides use
+    `manage_rules`, same as `Rule` — consistent with how the rest of the
+    grant model already splits "deployment-wide" from "per-source"
+    concerns
+- [ ] **Per-file-type syntax highlighting.** Currently only severity-pattern
+      tokens are colored; there's no language-aware highlighting for e.g.
+      `.json`, `.xml`, `.js` config/log files. `@codemirror/lang-javascript`,
+      `@codemirror/lang-json`, and `@codemirror/lang-xml` are already
+      installed dependencies but currently unused anywhere in the
+      codebase.
+- [ ] **Compare files (diff view), as a toggle button.** Arm the "Compare"
+      button, pick a second file from the tree (or another open tab), and
+      it renders a read-only diff against the currently active file in
+      place. `@codemirror/merge` (not yet installed) is the natural fit.
+- [ ] **Line-wrap toggle.** `EditorView.lineWrapping`, cheap and directly
+      useful for long log lines.
+- [ ] **Beautify / minify for embedded JSON, XML, and (lower priority) JS.**
+      Display-only reformat, never touches the file on disk.
+- [ ] **Live-follow / "tail -f" mode, as a toggle button.** The
+      architecturally biggest item here — deferred. Two candidate
+      mechanisms: client-side polling (works uniformly but adds
+      round-trips over SSH/SMB/WinRM), or extending the agent-mode
+      WebSocket with a "watch" command (cheaper, agent-only).
+- [ ] **Reload/refresh button.** A manual re-fetch of the currently open
+      file's content in place, without closing and reopening the tab.
+- [ ] **Copy selected lines (with line numbers).**
+- [ ] **"Show all characters" toggle** (whitespace/CRLF-vs-LF), relevant
+      given this tool spans both Linux and Windows sources.
+- [ ] **Go-to-line** (Ctrl+G).
+- [ ] **Bookmarks.** Pure client-side/session state.
+- [ ] **Multi-pattern "mark" highlighting** (Notepad++'s Mark feature, not
+      to be confused with severity indicators above). Persistently
+      highlight all occurrences of one or more ad hoc patterns at once,
+      each in its own color.
+
+### Notes on decisions made — severity indicators
+
+- **Rule's path-oriented glob compiler (`app/rules.py`'s `_compile_glob`)
+  is not reused for pattern matching.** It's anchored (`^...$`) and
+  segment-aware (`**/` = path segments, `*` doesn't cross `/`) — built for
+  matching file *paths*, not scanning arbitrary text within a line. A
+  "glob"-kind severity pattern is instead matched as a literal substring
+  anywhere in the line, case-insensitive; a "regex"-kind pattern uses the
+  pattern as-is, also case-insensitive. Both still reuse the same
+  `PatternKind` enum and `re:` prefix admin convention as `Rule`, purely
+  for UI/API consistency — the underlying matching semantics differ.
+- **Raw-text paste mode, deliberately skipped for this feature.** `Rule`'s
+  raw mode earns its keep because a source can have dozens of path rules;
+  severity patterns are typically a handful per level, where a row-based
+  editor is enough and a bulk-paste format would just add parsing
+  complexity (per-line level tagging) for little benefit. Revisit if real
+  usage shows otherwise.
+- **Override, not merge, for per-source patterns** — same simplicity
+  tradeoff as choosing not to invent new fallback rules: a source with any
+  patterns of its own uses only those, full stop, rather than layering on
+  top of the global set.
+
 ## Security hardening (pre-1.0)
 
 Called out as its own section, not folded silently into other phases —

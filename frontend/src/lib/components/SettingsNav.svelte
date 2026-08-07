@@ -18,6 +18,9 @@
   {/if}
   {#if hasCapability($currentUser, 'manage_system_settings')}
     <a href="#/settings/system" class:active={isActive('/settings/system')}>System</a>
+    <a href="#/settings/severity-indicators" class:active={isActive('/settings/severity-indicators')}
+      >Severity indicators</a
+    >
   {/if}
 </nav>
 
