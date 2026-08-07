@@ -9,6 +9,14 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Added
+- Viewer: a "Find All" results panel (`lib/find-in-document.ts`,
+  `FindInDocumentPanel.svelte`) alongside the existing Ctrl+F inline
+  search — lists every match in the currently open file (line number +
+  highlighted snippet), click a result to jump straight to it. Supports
+  match-case and regex modes, and caps at 5000 results (reporting
+  "truncated") as a safety valve for pathologically match-heavy queries
+  rather than a design goal. Pure client-side scan of the tab's own
+  content, no new dependency.
 - Phase 2 (push-agent) backend infrastructure: a new `agent` protocol for
   sources that can't be reached inbound over SSH/SMB/WinRM. The agent
   (a future Go binary — see ROADMAP.md) dials out and holds a persistent

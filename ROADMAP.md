@@ -781,6 +781,53 @@ read via an admin UI page."
   need to let an admin narrow by what kind of action happened, not just
   scroll a flat chronological feed.
 
+## Viewer: find in document
+
+A Notepad++-style "Find All in Current Document" results panel — a list of
+every match in the currently open file (line number + snippet), click to
+jump — alongside, not instead of, the existing Ctrl+F inline highlight and
+next/previous navigation (`@codemirror/search`, see the earlier Ctrl+F fix
+in CHANGELOG.md).
+
+- [x] Results panel component listing every match with line number + a
+      short snippet of surrounding text, most-natural-order (top to
+      bottom of the document)
+- [x] Click a result to jump to it — reuses `CodeMirrorPane`'s existing
+      `scrollToLine`-style jump, same mechanism the cross-file Search
+      page's results list already uses today
+- [x] Existing inline Ctrl+F panel (highlight + next/previous) stays as
+      is — this is an addition, not a replacement
+- [x] Entry point: a "Find All" toggle button in the pane toolbar (the
+      same stateful-toggle-button pattern used throughout the "toward an
+      advanced editor" section below) — click to open a bottom-docked
+      panel with its own query/case/regex controls, click again to close
+
+### Notes on decisions made — find in document
+
+- **No new dependency needed.** Neither CodeMirror's own search package
+  nor any other editor library (Monaco, Ace) ships a results-list panel
+  like this out of the box — Notepad++, VS Code, etc. all build it as
+  custom UI on top of their editor's basic search primitives, same as
+  we'd be doing.
+- **Built as a pure, unit-tested scan over the tab's own content string
+  (`lib/find-in-document.ts`), not `@codemirror/search`'s `getSearchCursor`
+  / `view.state.doc`.** The tab's fetched content is the same data either
+  way; scanning it directly keeps the matching logic framework-independent
+  and trivially testable without spinning up a CodeMirror view (same
+  "extract the pure function" pattern as `connection-filter.ts`/
+  `tab-key.ts`). A deliberate, separate consequence: the results panel has
+  its own query/case/regex controls, not synced with whatever's currently
+  typed into the inline Ctrl+F panel — two independent inputs rather than
+  coupling their state.
+- **Coexists with the current inline search, doesn't replace it** — per
+  explicit direction. Two complementary tools: quick highlight-and-step-
+  through for a single term, versus "show me everywhere this appears at
+  once" for scanning a large log.
+- **Capped at 5000 matches** (`maxResults`), reporting `truncated: true`
+  rather than silently stopping — a safety valve for a pathological
+  query (e.g. a single common character) against a huge file, not a
+  design goal, same spirit as the scratch store's size guard.
+
 ## Viewer: toward an advanced editor (not yet triaged into a phase)
 
 Further steps toward a fuller, Notepad++-like *viewing* experience for the
