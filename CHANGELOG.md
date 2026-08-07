@@ -69,6 +69,28 @@ release ships (0.x releases may include breaking changes between minors).
   Folders remain purely organizational — name + optional parent, never a
   host or protocol — the backend already supported unlimited nesting via
   `Folder.parent_folder_id`; this was a frontend-only gap.
+- Connections home redesign (Guacamole-inspired dashboard layout, see
+  ROADMAP.md). The Viewer's landing page (`#/viewer` with no source
+  selected) is now a two-column layout — recent connections on the left,
+  all connections on the right — replacing the previous flat list.
+  "Recent" is powered by new `source.open` `AuditLog` events (logged on
+  the first browse into a source, not every sub-directory expand) read
+  back via `GET /sources/recent`, RBAC-rechecked at read time so a
+  revoked grant can't leak a source through history. `GET /sources/{id}/download`
+  now also logs `file.download` — CLAUDE.md's own stated audit minimum
+  that had never actually been wired up. "All connections" gains a search
+  box matching folder, customer, or host, case-insensitive
+  (`lib/connection-filter.ts`, not the source's own name); `SourcePublic`
+  now reports `customer_name`/`folder_name` so cards can show this without
+  a separate lookup.
+- System settings: a new `SystemSetting` key-value table backs
+  deployment-wide feature toggles, admin-configurable from a new
+  "System" tab under Settings (`GET`/`PATCH /system-settings`, gated by a
+  new `manage_system_settings` global capability). Ships with one toggle,
+  "Search" — disabling it hides the Search nav entry for every user and
+  redirects away from the `/search` route itself, not just the link. Built
+  generically enough that the planned audit-log viewer's own toggle
+  (ROADMAP.md) can reuse the same mechanism once that page exists.
 
 ### Changed
 - Frontend: Sources, Roles, Users, and SSO settings are now consolidated

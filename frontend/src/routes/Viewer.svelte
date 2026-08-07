@@ -2,9 +2,11 @@
   import { onDestroy, onMount, tick } from 'svelte'
   import { push, router } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
+  import ConnectionCard from '../lib/components/ConnectionCard.svelte'
   import FolderTree from '../lib/components/FolderTree.svelte'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
+  import { filterConnections } from '../lib/connection-filter'
   import { tabKey } from '../lib/tab-key'
   import type { BrowseEntry, Source } from '../lib/types'
 
@@ -21,7 +23,9 @@
 
   const sourceId = params.sourceId ? Number(params.sourceId) : null
 
-  let sources: Source[] = []
+  let recentSources: Source[] = []
+  let allSources: Source[] = []
+  let connectionsQuery = ''
   let source: Source | null = null
   let rootEntries: BrowseEntry[] = []
   let loading = true
@@ -36,15 +40,25 @@
   let findAllOpen = false
   $: activeTab = tabs.find((t) => t.key === activeKey) ?? null
 
+  $: filteredAllSources = filterConnections(allSources, connectionsQuery)
+
   async function loadSourcePicker() {
     loading = true
+    error = ''
     try {
-      sources = await api.get<Source[]>('/sources')
+      allSources = await api.get<Source[]>('/sources')
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load sources'
-    } finally {
-      loading = false
     }
+    try {
+      // Kept independent of the call above -- an issue fetching recent
+      // history shouldn't block the all-connections column, which is the
+      // more essential of the two lists.
+      recentSources = await api.get<Source[]>('/sources/recent')
+    } catch {
+      recentSources = []
+    }
+    loading = false
   }
 
   async function loadTree() {
@@ -162,22 +176,52 @@
 
 {#if sourceId === null}
   <div class="picker page">
-    <h1>Choose a source to browse</h1>
     {#if loading}
       <p class="hint">Loading…</p>
     {:else if error}
       <p class="error">{error}</p>
     {:else}
-      <ul>
-        {#each sources as s (s.id)}
-          <li>
-            <button class="card" on:click={() => push(`/viewer/${s.id}`)}>
-              {s.name}
-              {#if s.is_system}<span class="badge badge-accent">system</span>{/if}
-            </button>
-          </li>
-        {/each}
-      </ul>
+      <div class="picker-columns">
+        <section class="picker-column recent">
+          <h1>Recent</h1>
+          {#if recentSources.length === 0}
+            <p class="hint">Sources you open will show up here.</p>
+          {:else}
+            <ul>
+              {#each recentSources as s (s.id)}
+                <li>
+                  <ConnectionCard source={s} on:click={() => push(`/viewer/${s.id}`)} />
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+
+        <section class="picker-column all">
+          <div class="all-header">
+            <h1>All connections</h1>
+            <input
+              class="input search-box"
+              type="search"
+              placeholder="Search by folder, customer, or host…"
+              bind:value={connectionsQuery}
+            />
+          </div>
+          {#if filteredAllSources.length === 0}
+            <p class="hint">
+              {connectionsQuery.trim() ? 'No connections match that search.' : 'No sources visible to your account.'}
+            </p>
+          {:else}
+            <ul>
+              {#each filteredAllSources as s (s.id)}
+                <li>
+                  <ConnectionCard source={s} on:click={() => push(`/viewer/${s.id}`)} />
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      </div>
     {/if}
   </div>
 {:else}
@@ -265,26 +309,64 @@
   .page {
     padding: 1.75rem 2rem;
   }
-  .picker ul {
+  .picker-columns {
+    display: flex;
+    gap: 2rem;
+    align-items: flex-start;
+  }
+  .picker-column {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    min-width: 0;
+  }
+  .picker-column.recent {
+    flex: 0 0 320px;
+  }
+  .picker-column.all {
+    flex: 1;
+    min-width: 0;
+  }
+  .picker-column h1 {
+    font-size: 1.1rem;
+    margin: 0;
+    color: var(--text);
+  }
+  .all-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .search-box {
+    width: 280px;
+    max-width: 100%;
+  }
+  .picker-column ul {
     list-style: none;
     padding: 0;
     margin: 0;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-    max-width: 480px;
   }
-  .picker button {
-    border: none;
-    padding: 0.75rem 1rem;
-    width: 100%;
-    text-align: left;
-    cursor: pointer;
-    color: var(--text);
-    font-size: 0.92rem;
+  .picker-column :global(.card) {
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
   }
-  .picker button:hover {
+  .picker-column :global(.card:hover) {
     border-color: var(--accent-border);
+  }
+  @media (max-width: 900px) {
+    .picker-columns {
+      flex-direction: column;
+    }
+    .picker-column.recent {
+      flex: 0 0 auto;
+      width: 100%;
+    }
   }
   .viewer {
     flex: 1;

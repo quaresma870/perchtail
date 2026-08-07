@@ -667,6 +667,120 @@ they come before any connector or UI work, not after.
   only the Zabbix-oriented JSON endpoint ships first — several self-hosted
   shops standardize on Prometheus+Grafana instead of (or alongside) Zabbix.
 
+## Connections home redesign
+
+Inspired by Apache Guacamole's dashboard-style landing page — kept in
+PerchTail's existing theme/design system, no visual-language changes.
+
+- [x] Viewer home page (`#/viewer` with no source selected) becomes a
+      two-column layout: recent connections on the left, all connections
+      on the right — replacing the current flat single list of source cards
+- [x] "All connections" gets a search box matching folder, customer, or
+      host, case-insensitive (`lib/connection-filter.ts`) — not the
+      source's own display name, per spec
+- [x] `Source` list responses carry `customer_name`/`folder_name` so cards
+      can show "Customer / Folder" as subtext without a separate lookup
+- [ ] Folder-tree navigation for browsing sources by customer/folder — the
+      current "All connections" list shows customer/folder as flat subtext
+      per card (enough to search/scan), not an actual expandable tree.
+      `Folder` is fully modeled and RBAC-scoped (unlimited nesting via
+      `parent_folder_id`), but nothing in the frontend renders it as a
+      tree yet; still open.
+- [ ] Dedicated folder/host management admin page (create/rename/move/
+      delete folders, move sources between them) — CLAUDE.md flags this as
+      its own admin surface and it was never built; only inline folder
+      creation from the source editor exists today (both the original gap
+      and this redesign's search box work off that same inline-create
+      flow, not a standalone page)
+
+### Notes on decisions made — connections home redesign
+
+- **"Recent connections" needed new tracking, not just a reorder — built
+  as planned.** `GET /sources/{id}/browse` (root path only, i.e. first
+  hop into a source, not every sub-directory expand) now records a
+  `source.open` `AuditLog` row; `GET /sources/recent` reads the current
+  user's own most-recent-per-source events back, re-checking live
+  visibility so a revoked grant can't leak a source through history.
+  `GET /sources/{id}/download` also now logs `file.download` — this was
+  CLAUDE.md's own stated minimum audit bar ("file download") that had
+  never actually been wired up anywhere.
+- **Recent connections and the full audit log viewer (below) share a data
+  source but stayed two separate features, per explicit direction.** This
+  redesign only writes the new events and reads back the current user's
+  own recent ones (`GET /sources/recent`) — no general-purpose audit
+  filtering/viewing endpoint, which is scoped on its own below.
+- **Deployment-wide feature toggles, needed for both this and the audit
+  viewer, got a small shared mechanism now rather than one bespoke flag
+  each.** A new `SystemSetting` key-value table + `GET`/`PATCH
+  /system-settings` (gated by a new `manage_system_settings` global
+  capability, a new "System" tab under Settings) backs a `search_view_enabled`
+  toggle — off hides the Search nav entry *and* redirects away from the
+  `/search` route itself, not just the link, so it's actually off for a
+  bookmarked/typed URL too. The audit-log toggle described below reuses
+  this same mechanism once that page exists; no dead UI was added for it
+  ahead of time.
+- **Folder-tree navigation and the standalone management page are still
+  open**, deliberately deferred out of this pass — the shipped "flat list
+  with Customer / Folder subtext + search" covers the same real need
+  (find a source by where it's organized) without the added scope of a
+  real expand/collapse tree component or drag-and-drop-style folder
+  management UI. Revisit if the flat-list-with-search approach turns out
+  not to be enough at real scale.
+
+## Full audit log viewer (admin-only)
+
+Flagged as its own feature, separate from the connections home redesign
+above, even though it shares the same `AuditLog` writes that redesign work
+added. `AuditLog` has been write-only since Phase 1 — every write site
+(login, source/rule/role/customer/folder CRUD, and now `source.open`/
+`file.download` from the redesign work) already exists, but there's still
+no read endpoint and no admin page, even though CLAUDE.md's "Application
+logging" section always specced it as "a durable, queryable record ...
+read via an admin UI page."
+
+- [ ] `GET /audit` endpoint: paginated, filterable by action/type, user,
+      target type, and date range
+- [ ] Gated by a dedicated capability (e.g. `view_audit_log`), admin-only
+      per explicit direction — not opened up via the existing customer/
+      folder/source grant tree, since audit visibility is a global concern,
+      not scoped to what a role can browse
+- [ ] Frontend: new "Audit Log" page under Settings
+  - [ ] Filter controls for action/type (multi-select against the known
+        action namespace: `login`, `source.*`, `rule.*`, `role.*`,
+        `user.*`, `customer.*`, `folder.*`, `sso.*`, `source.open`,
+        `file.download`)
+  - [ ] A retention control — admin-configurable from the frontend, not
+        just an env var
+- [ ] Backend retention enforcement: a scheduled purge job (APScheduler,
+      same shape as the scratch idle-sweep and search-index sweep) driven
+      by that configurable setting
+- [ ] Deployment-wide on/off toggle for this page, reusing the
+      `SystemSetting` mechanism the connections-home redesign already
+      built for the Search view toggle (`app/system_settings.py`,
+      `GET`/`PATCH /system-settings`) — add an `audit_view_enabled` key
+      and a second row on the System settings page once this page exists;
+      not built ahead of time since a toggle with nothing to gate yet
+      would just be dead UI (see that section's notes)
+
+### Notes on decisions made — full audit log viewer
+
+- **Retention becomes a real decision here, not a deferred one.** This
+  roadmap's own "Open decisions" list has carried "Audit log retention
+  policy — keep forever, or expire after N months?" as unresolved since
+  Phase 1. Explicit direction: make it admin-configurable from the
+  frontend rather than picking a number now — the UI needs a setting
+  (e.g., days), not just a filter on the display.
+- **This is a second, independent retention knob from `LOG_RETENTION_DAYS`.**
+  That setting governs the rotated structured *application* log files
+  (`logging_config.py`, gzip + `TimedRotatingFileHandler`); `AuditLog` is a
+  separate SQLite table with its own lifecycle, so its retention setting
+  needs its own storage and its own purge job — the two shouldn't be
+  conflated just because they sound similar.
+- **Type/action filtering is a first-class frontend requirement, not just
+  a nice-to-have** — per explicit direction, the audit page's parameters
+  need to let an admin narrow by what kind of action happened, not just
+  scroll a flat chronological feed.
+
 ## Viewer: find in document
 
 A Notepad++-style "Find All in Current Document" results panel — a list of
@@ -713,166 +827,6 @@ in CHANGELOG.md).
   rather than silently stopping — a safety valve for a pathological
   query (e.g. a single common character) against a huge file, not a
   design goal, same spirit as the scratch store's size guard.
-
-## Viewer: toward an advanced editor (not yet triaged into a phase)
-
-Raised while discussing the find-in-document work — further steps toward
-a fuller, Notepad++-like *viewing* experience. Explicitly **not** going
-there: editing or saving changes back to a source. Raised and considered,
-but dropped deliberately — it would contradict CLAUDE.md's core "read-only,
-always" principle for no strong enough reason, and every item below stays
-entirely display-only: none of it ever mutates the file being viewed or
-writes anything back to the source, the same guarantee the existing
-line-level highlighting and Ctrl+F search already hold to.
-
-**Interaction pattern, decided:** every toggle-able view mode below (wrap,
-show-all-characters, mark-highlighting, tail -f, compare) is a stateful
-toolbar button, not a modal or a settings-page trip — click to turn a mode
-on, click again to turn it off, per explicit direction. For anything that
-needs a second input (compare needs a second file), arming the button puts
-the pane in "pick a target" mode; the next file opened/selected from the
-tree completes the action, and clicking the button again clears it and
-returns to normal viewing. One consistent model across every feature here
-rather than a bespoke UI per feature.
-
-- [ ] **Per-file-type syntax highlighting.** Currently only log-level
-      tokens are colored (`codemirror-theme.ts`'s `logLevelHighlighting`);
-      there's no language-aware highlighting for e.g. `.json`, `.xml`,
-      `.js` config/log files. `@codemirror/lang-javascript`,
-      `@codemirror/lang-json`, and `@codemirror/lang-xml` are already
-      installed dependencies but currently unused anywhere in the
-      codebase — likely added in anticipation of this and never wired
-      up. `@codemirror/language-data` (not yet installed) adds broader
-      extension-based auto-detection beyond those three.
-- [ ] **Compare files (diff view), as a toggle button.** Arm the "Compare"
-      button, pick a second file from the tree (or another open tab), and
-      it renders a read-only side-by-side or unified diff against the
-      currently active file in place — same or different sources, same
-      "click again to clear and return to normal viewing" toolbar-toggle
-      model as the rest of this section. Also directly useful for two
-      versions of the same rotated log (`app.log` vs `app.log.1`).
-      `@codemirror/merge` (the official CodeMirror 6 diff/merge extension,
-      not yet installed) is the natural fit given the project is already
-      all-in on CodeMirror.
-- [ ] **Severity indicators become admin-configurable, both globally and
-      per-source, with a dedicated Settings section, plus jump-to-
-      next-problem navigation.** Today's `logLevelHighlighting` only
-      tints bracketed `[error]`/`[fatal]` tokens and only line-tints on
-      the bare words "error"/"fatal" (`codemirror-theme.ts`'s
-      `LEVEL_TOKEN`/`ERROR_LINE`) — hardcoded, no `warn`/`warning`
-      line-tint, nothing for `critical`/`severe`/`panic`/`exception`/
-      `traceback`-style markers other ecosystems use, and no "jump to
-      next one" command. Per explicit direction, this becomes a real,
-      two-level settings surface:
-      - [ ] New backend model, `SeverityPattern` (level, pattern,
-            pattern_kind [glob|regex, `re:` prefix — same convention as
-            `Rule`], enabled, `source_id` nullable — null means the
-            global default, set means a per-source override), seeded
-            with sensible global defaults covering the common markers
-            above so it isn't empty on first boot
-      - [ ] `GET`/`POST`/`PATCH`/`DELETE` endpoints for admin CRUD on the
-            pattern set (global and per-source), plus a `GET` the Viewer
-            calls to fetch the *effective* set for whatever source is
-            open — a source's own patterns where it has any, falling
-            back to the global set otherwise, same "most specific wins"
-            shape as grant resolution, just at the pattern level instead
-            of the permission level
-      - [ ] New "Settings → Severity Indicators" section for the global
-            default set: one row per level with an enable/disable toggle
-            and its associated pattern list ("values to consider" as
-            that severity) — row-based editor, mirroring
-            `RuleEditor.svelte`'s existing UX (and its raw-text/
-            gitignore-style paste mode) for consistency rather than
-            inventing a new editing pattern
-      - [ ] A new option on the source editor (`SourceEditor.svelte`,
-            alongside the existing "Include in full-text search" toggle)
-            to override severity indicators for that specific source,
-            opening the same row-based editor scoped to just that source
-      - [ ] `CodeMirrorPane`/`codemirror-theme.ts` fetch and highlight
-            against this configured (effective) set instead of the
-            hardcoded regexes
-      - [ ] Next/previous-problem step command (conceptually like an IDE's
-            "next diagnostic"), stepping through everything at warn-or-worse
-            — needs its own decision on whether the "jump" threshold is a
-            fixed severity floor or itself configurable per level
-            (a separate "included in jump navigation" flag alongside each
-            level's enabled/patterns, not reusing "enabled" for both
-            meanings)
-      - Gating: reuse the `manage_system_settings` capability from the
-        connections-home redesign work for the global set, and
-        `manage_rules`-style source-scoped capability for per-source
-        overrides — consistent with how the rest of the grant model
-        already splits "deployment-wide" from "per-source" concerns
-- [ ] **Line-wrap toggle.** Log lines are often very long (embedded JSON,
-      long messages); a simple wrap/no-wrap switch
-      (`EditorView.lineWrapping`) is cheap and directly useful.
-- [ ] **Beautify / minify for embedded JSON, XML, and (lower priority) JS.**
-      A display-only reformat of the currently-open content or a
-      selection — never touches the file on disk, purely a client-side
-      re-render, same guarantee as line-wrap. Two distinct shapes worth
-      keeping separate when this gets designed: reformatting a whole file
-      that already *is* JSON/XML (a minified config file, say) versus
-      reformatting just one embedded JSON blob inside a bigger log line
-      (structured-logging lines are common; a whole-line beautify-in-place
-      is probably the more-used case day to day). JSON needs no library
-      (`JSON.parse`/`stringify(obj, null, 2)` natively); XML has no native
-      browser formatter, so either a small zero-dependency formatter
-      function or a tiny package (e.g. `xml-formatter`) — pick when this
-      gets built, not speculatively now. JS beautify is listed but lower
-      priority: logs rarely carry embedded minified JS the way they carry
-      JSON/XML, so it's worth confirming there's a real use case before
-      building it rather than assuming parity with the other two.
-- [ ] **Live-follow / "tail -f" mode, as a toggle button.** The
-      architecturally biggest item here — everything else in this section
-      is fetch-once-and-render; this needs an actual live-update loop,
-      not just a UI addition. CLAUDE.md's whole model today is
-      fetch-on-open/purge-on-close with no persistent watch of anything.
-      Two candidate mechanisms, not yet chosen: (1) client-side polling —
-      periodically re-fetch and append only the new tail bytes, working
-      uniformly across every protocol but adding repeated round-trips
-      over SSH/SMB/WinRM specifically, which have real per-request
-      latency; (2) for agent-mode sources specifically, extend the
-      existing persistent WebSocket (`app/agent_registry.py`) with a
-      "watch" command so the agent pushes new lines itself instead of
-      being polled — cheaper, but only covers agent-protocol sources,
-      not SSH/SMB/WinRM/local. Needs a "stick to bottom" auto-scroll
-      toggle so incoming lines don't yank the view away from wherever the
-      user is currently reading — an easy detail to get wrong if it's
-      treated as an afterthought rather than part of the design.
-- [ ] **Reload/refresh button.** A manual re-fetch of the currently open
-      file's content in place, without closing and reopening the tab —
-      the always-fresh-fetch model already exists for a fresh *open*, this
-      is just exposing a fetch-again action for a tab that's already open.
-      Low effort: same `/open` call the tab's initial load already makes.
-- [ ] **Copy selected lines (with line numbers).** Plain-text copy via
-      the browser's own Ctrl+C already works for a CodeMirror selection;
-      the actual gap is a dedicated action that copies the selection
-      *with* its line numbers prefixed — useful for pasting a snippet
-      into a ticket or chat message with a clear line reference back to
-      the source file.
-- [ ] **"Show all characters" toggle** (Notepad++'s View → Show Symbol).
-      Reveal whitespace (spaces, tabs) and line-ending style (CRLF vs LF)
-      as visible glyphs — same `Decoration`/`MatchDecorator` mechanism
-      `logLevelHighlighting` already uses, just matching whitespace
-      instead of level tokens. Particularly relevant given this tool
-      explicitly spans Linux *and* Windows sources — spotting a
-      CRLF/LF mismatch or trailing whitespace is a real, recurring need
-      here, not a generic editor nicety.
-- [ ] **Go-to-line** (Ctrl+G). Jump straight to a specific line number —
-      small, cheap, pairs naturally with the find-in-document panel above.
-- [ ] **Bookmarks.** Mark lines while scanning a large file, jump between
-      marked lines later. Pure client-side/session state (never written
-      to the file, and doesn't need to be persisted server-side either)
-      — useful during a long forensic pass through one big log.
-- [ ] **Multi-pattern "mark" highlighting** (Notepad++'s Mark feature, not
-      to be confused with the severity-indicator work above). Persistently
-      highlight *all* occurrences of one or more ad hoc patterns at once,
-      each in its own color — e.g. mark a specific request/session ID in
-      one color and "ERROR" in another simultaneously, to visually trace
-      one transaction through a busy, multi-source log. Probably the
-      single highest-value addition in this list for the forensic-analysis
-      audience CLAUDE.md frames this tool around, on par with or above
-      tail -f, for a fraction of the implementation cost.
 
 ## Security hardening (pre-1.0)
 
@@ -1005,7 +959,9 @@ Carried over from CLAUDE.md — revisit as the relevant phase approaches rather
 than deciding speculatively now:
 - Raw-text rule paste mode UX
 - Ephemeral scratch location: plain disk vs tmpfs/ramdisk
-- Audit log retention policy
+- Audit log retention *number* (the mechanism is decided — admin-configurable
+  from the frontend, its own purge job — see "Full audit log viewer" above;
+  what default/range to offer is still open)
 - Whether SAML is needed at all
 - Whether to index `.zip`/`.tar.gz` archive members for full-text search,
   and how deep (see the Phase 3 full-text search notes above) — deferred,

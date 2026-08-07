@@ -16,6 +16,9 @@
   {#if hasCapability($currentUser, 'manage_sso')}
     <a href="#/settings/sso" class:active={isActive('/settings/sso')}>SSO</a>
   {/if}
+  {#if hasCapability($currentUser, 'manage_system_settings')}
+    <a href="#/settings/system" class:active={isActive('/settings/system')}>System</a>
+  {/if}
 </nav>
 
 <style>

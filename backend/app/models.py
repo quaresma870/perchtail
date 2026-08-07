@@ -141,3 +141,18 @@ class SearchIndexState(SQLModel, table=True):
     file_path: str
     size: int
     indexed_at: datetime
+
+
+class SystemSetting(SQLModel, table=True):
+    """Deployment-wide feature toggles, admin-configurable from Settings ->
+    System (see app/api/system_settings.py) rather than only via an env var
+    and a redeploy. Key-value rather than dedicated columns so a new toggle
+    (e.g. the audit log viewer, once built) slots in without its own
+    migration each time. Missing key == default, defined in code
+    (app.system_settings.DEFAULTS), not stored — so shipping a new toggle
+    doesn't require backfilling every existing deployment's rows."""
+
+    __tablename__ = "system_setting"
+
+    key: str = Field(primary_key=True)
+    value: str
