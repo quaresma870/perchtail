@@ -5,6 +5,7 @@
   import ConnectionCard from '../lib/components/ConnectionCard.svelte'
   import FolderTree from '../lib/components/FolderTree.svelte'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
+  import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
   import { filterConnections } from '../lib/connection-filter'
   import { tabKey } from '../lib/tab-key'
   import type { BrowseEntry, Source } from '../lib/types'
@@ -33,6 +34,10 @@
   let tabs: Tab[] = []
   let activeKey: string | null = null
   let paneRef: CodeMirrorPane | null = null
+  // Deliberately not reset on tab switch -- if it's open, it stays open and
+  // re-searches whatever tab becomes active against the same query, rather
+  // than forcing it closed and reopened for every file.
+  let findAllOpen = false
   $: activeTab = tabs.find((t) => t.key === activeKey) ?? null
 
   $: filteredAllSources = filterConnections(allSources, connectionsQuery)
@@ -261,7 +266,16 @@
       </div>
       {#if activeTab}
         <div class="pane-toolbar">
-          <span class="hint">⌕ Ctrl/Cmd+F to search in file</span>
+          <div class="toolbar-left">
+            <span class="hint">⌕ Ctrl/Cmd+F to search in file</span>
+            <button
+              class="btn-toggle"
+              class:active={findAllOpen}
+              on:click={() => (findAllOpen = !findAllOpen)}
+            >
+              Find All
+            </button>
+          </div>
           <a
             class="link"
             href={`/sources/${sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
@@ -277,6 +291,13 @@
           </a>
         </div>
         <CodeMirrorPane bind:this={paneRef} content={activeTab.content} />
+        {#if findAllOpen}
+          <FindInDocumentPanel
+            content={activeTab.content}
+            on:jump={(e) => paneRef?.scrollToLine(e.detail.line)}
+            on:close={() => (findAllOpen = false)}
+          />
+        {/if}
       {:else}
         <div class="empty-state">Select a file from the tree to view it.</div>
       {/if}
@@ -455,9 +476,33 @@
     border-bottom: 1px solid var(--border-soft);
     font-size: 0.78rem;
   }
+  .toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
   .pane-toolbar .hint {
     padding: 0;
     color: var(--text-faint);
+  }
+  .btn-toggle {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    border-radius: 999px;
+    padding: 0.15rem 0.65rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-toggle:hover {
+    border-color: var(--accent-border);
+    color: var(--text);
+  }
+  .btn-toggle.active {
+    background: var(--accent-soft);
+    border-color: var(--accent-border);
+    color: var(--accent-hover);
   }
   .pane-toolbar .link svg {
     width: 13px;
