@@ -386,7 +386,7 @@
       {#if activeTab}
         <div class="pane-toolbar">
           <div class="toolbar-left">
-            <span class="hint">⌕ Ctrl/Cmd+F to search, Ctrl/Cmd+G to go to line</span>
+            <span class="hint" title="Ctrl/Cmd+F to search, Ctrl/Cmd+G to go to line">⌕ Find</span>
             <button
               class="btn-toggle"
               class:active={findAllOpen}
@@ -614,6 +614,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
+    white-space: nowrap;
   }
   .editor-area {
     flex: 1;
@@ -674,6 +675,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
     padding: 0.4rem 0.9rem;
     background: var(--bg-elevated);
     border-bottom: 1px solid var(--border-soft);
@@ -682,11 +685,14 @@
   .toolbar-left {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
     gap: 0.75rem;
   }
   .pane-toolbar .hint {
     padding: 0;
     color: var(--text-faint);
+    white-space: nowrap;
   }
   .btn-toggle {
     border: 1px solid var(--border);
@@ -697,6 +703,7 @@
     font-size: 0.72rem;
     font-weight: 600;
     cursor: pointer;
+    white-space: nowrap;
   }
   .btn-toggle:hover {
     border-color: var(--accent-border);
@@ -714,6 +721,8 @@
   .toolbar-right {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
     gap: 1rem;
   }
   .toolbar-right button.link {
