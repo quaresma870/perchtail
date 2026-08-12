@@ -113,6 +113,18 @@ release ships (0.x releases may include breaking changes between minors).
   unit-tested); `codemirror-theme.ts` now builds its highlighting
   `ViewPlugin`s from whatever pattern set is effective instead of a fixed
   regex.
+- Viewer: a set of small, per-tab toolbar toggles/actions, all display-only
+  (never write anything back to the file or source) — line-wrap, "show all
+  characters" (reveals whitespace as `·`/`→` glyphs and flags CRLF line
+  endings, detected from the raw fetched content since CodeMirror's own
+  line-separator matching consumes the `\r` before it can be inspected),
+  go-to-line (Ctrl/Cmd+G, same page-level interception as the existing
+  Ctrl/Cmd+F), copy-selected-lines-with-line-numbers, a manual reload
+  button (re-fetches the open tab's content in place and releases the
+  previous scratch reference), and bookmarks (pure client-side per-tab
+  state, next/previous navigation reusing the same wrap-around stepper
+  severity "next/previous problem" navigation already used — extracted to
+  `lib/line-cycle.ts` so both share one implementation).
 
 ### Changed
 - Frontend: Sources, Roles, Users, and SSO settings are now consolidated

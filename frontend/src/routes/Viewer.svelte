@@ -19,6 +19,13 @@
     name: string
     content: string
     scratchKey: string | null
+    wrapEnabled: boolean
+    showWhitespace: boolean
+    // Pure client-side/session state (ROADMAP.md: never written to the
+    // file, never persisted server-side) -- 1-indexed line numbers, kept
+    // sorted ascending so the bookmark-nav wrap-around cycling and the
+    // CodeMirror decoration builder can both rely on that order.
+    bookmarks: number[]
   }
 
   const sourceId = params.sourceId ? Number(params.sourceId) : null
@@ -39,6 +46,11 @@
   // re-searches whatever tab becomes active against the same query, rather
   // than forcing it closed and reopened for every file.
   let findAllOpen = false
+  let goToLineOpen = false
+  let goToLineValue = ''
+  let goToLineInput: HTMLInputElement | null = null
+  let copyStatus: '' | 'copied' | 'empty' = ''
+  let copyStatusTimer: ReturnType<typeof setTimeout> | null = null
   $: activeTab = tabs.find((t) => t.key === activeKey) ?? null
 
   $: filteredAllSources = filterConnections(allSources, connectionsQuery)
@@ -106,7 +118,17 @@
       }
       const content = await response.text()
       const scratchKey = response.headers.get('x-scratch-key')
-      const tab: Tab = { key, path, member, name, content, scratchKey }
+      const tab: Tab = {
+        key,
+        path,
+        member,
+        name,
+        content,
+        scratchKey,
+        wrapEnabled: false,
+        showWhitespace: false,
+        bookmarks: [],
+      }
       tabs = [...tabs, tab]
       activeKey = key
       return true
@@ -147,15 +169,101 @@
     }
   }
 
+  function updateActiveTab(patch: Partial<Tab>) {
+    if (!activeTab) return
+    const key = activeTab.key
+    tabs = tabs.map((t) => (t.key === key ? { ...t, ...patch } : t))
+  }
+
+  function toggleWrap() {
+    if (!activeTab) return
+    updateActiveTab({ wrapEnabled: !activeTab.wrapEnabled })
+  }
+
+  function toggleShowWhitespace() {
+    if (!activeTab) return
+    updateActiveTab({ showWhitespace: !activeTab.showWhitespace })
+  }
+
+  function toggleBookmark() {
+    if (!activeTab || !paneRef) return
+    const line = paneRef.currentLine()
+    const bookmarks = activeTab.bookmarks.includes(line)
+      ? activeTab.bookmarks.filter((l) => l !== line)
+      : [...activeTab.bookmarks, line].sort((a, b) => a - b)
+    updateActiveTab({ bookmarks })
+  }
+
+  // Manual re-fetch of the currently open file's content in place, without
+  // closing and reopening the tab -- the always-fresh-fetch model already
+  // exists for a fresh *open*, this just exposes a fetch-again action for a
+  // tab that's already open. Releases the previous scratch reference after
+  // the new one lands, same "path/member, not the scratch key itself"
+  // release call closeTab already makes.
+  async function reloadActiveTab() {
+    if (!activeTab || sourceId === null) return
+    const tab = activeTab
+    const fetchParams = new URLSearchParams({ path: tab.path })
+    if (tab.member) fetchParams.set('member', tab.member)
+    try {
+      const response = await fetch(`/sources/${sourceId}/open?${fetchParams.toString()}`, {
+        credentials: 'include',
+      })
+      if (!response.ok) {
+        error = `Failed to reload ${tab.name}`
+        return
+      }
+      const content = await response.text()
+      const scratchKey = response.headers.get('x-scratch-key')
+      const oldScratchKey = tab.scratchKey
+      tabs = tabs.map((t) => (t.key === tab.key ? { ...t, content, scratchKey } : t))
+      if (oldScratchKey) {
+        api
+          .post(`/sources/${sourceId}/close`, { path: tab.path, member: tab.member })
+          .catch(() => {})
+      }
+    } catch {
+      error = `Failed to reload ${tab.name}`
+    }
+  }
+
+  async function doCopySelectedLines() {
+    if (!paneRef) return
+    const copied = await paneRef.copySelectedLines()
+    copyStatus = copied ? 'copied' : 'empty'
+    if (copyStatusTimer) clearTimeout(copyStatusTimer)
+    copyStatusTimer = setTimeout(() => (copyStatus = ''), 1500)
+  }
+
+  async function openGoToLine() {
+    goToLineOpen = true
+    goToLineValue = ''
+    await tick()
+    goToLineInput?.focus()
+  }
+
+  function submitGoToLine() {
+    const line = Number(goToLineValue)
+    if (Number.isFinite(line) && line > 0) {
+      paneRef?.scrollToLine(line)
+    }
+    goToLineOpen = false
+  }
+
   // Ctrl/Cmd+F is meant to search the open file via CodeMirror's own search
   // panel, not the browser's find bar — but a plain keydown on the editor
   // DOM isn't reliable (see CodeMirrorPane's openSearch doc comment), so
   // it's intercepted here at the window level instead, while a tab is open.
+  // Ctrl/Cmd+G (go to line) is intercepted the same way and for the same
+  // reason.
   function handleKeydown(event: KeyboardEvent) {
     if (!activeTab) return
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
       event.preventDefault()
       paneRef?.openSearch()
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'g') {
+      event.preventDefault()
+      openGoToLine()
     }
   }
 
@@ -176,6 +284,7 @@
 
   onDestroy(() => {
     window.removeEventListener('keydown', handleKeydown)
+    if (copyStatusTimer) clearTimeout(copyStatusTimer)
     for (const tab of tabs) {
       if (tab.scratchKey && sourceId !== null) {
         api.post(`/sources/${sourceId}/close`, { path: tab.path, member: tab.member }).catch(() => {})
@@ -277,7 +386,7 @@
       {#if activeTab}
         <div class="pane-toolbar">
           <div class="toolbar-left">
-            <span class="hint">⌕ Ctrl/Cmd+F to search in file</span>
+            <span class="hint" title="Ctrl/Cmd+F to search, Ctrl/Cmd+G to go to line">⌕ Find</span>
             <button
               class="btn-toggle"
               class:active={findAllOpen}
@@ -285,8 +394,67 @@
             >
               Find All
             </button>
+            <button
+              class="btn-toggle"
+              class:active={activeTab.wrapEnabled}
+              on:click={toggleWrap}
+            >
+              Wrap
+            </button>
+            <button
+              class="btn-toggle"
+              class:active={activeTab.showWhitespace}
+              on:click={toggleShowWhitespace}
+            >
+              Show chars
+            </button>
+            {#if goToLineOpen}
+              <form class="go-to-line" on:submit|preventDefault={submitGoToLine}>
+                <input
+                  class="input"
+                  type="number"
+                  min="1"
+                  placeholder="Line #"
+                  bind:value={goToLineValue}
+                  bind:this={goToLineInput}
+                  on:keydown={(e) => e.key === 'Escape' && (goToLineOpen = false)}
+                  on:blur={() => (goToLineOpen = false)}
+                />
+              </form>
+            {:else}
+              <button class="btn-toggle" on:click={openGoToLine}>Go to line</button>
+            {/if}
           </div>
           <div class="toolbar-right">
+            {#if copyStatus}
+              <span class="hint copy-status">{copyStatus === 'copied' ? 'Copied' : 'Nothing selected'}</span>
+            {/if}
+            <button class="link" title="Copy selected lines with line numbers" on:click={doCopySelectedLines}>
+              Copy lines
+            </button>
+            <button class="link" title="Reload from source" on:click={reloadActiveTab}>
+              ⟳ Reload
+            </button>
+            <button
+              class="link"
+              class:active-marker={activeTab.bookmarks.length > 0}
+              title="Toggle bookmark on current line"
+              on:click={toggleBookmark}
+            >
+              ⚑ Bookmark
+            </button>
+            {#if activeTab.bookmarks.length > 0}
+              <button
+                class="link"
+                title="Previous bookmark"
+                on:click={() => paneRef?.jumpToPreviousBookmark()}
+              >
+                ‹ mark
+              </button>
+              <button class="link" title="Next bookmark" on:click={() => paneRef?.jumpToNextBookmark()}>
+                mark ›
+              </button>
+            {/if}
             {#if severityPatterns.length > 0}
               <button
                 class="link"
@@ -318,7 +486,14 @@
             </a>
           </div>
         </div>
-        <CodeMirrorPane bind:this={paneRef} content={activeTab.content} {severityPatterns} />
+        <CodeMirrorPane
+          bind:this={paneRef}
+          content={activeTab.content}
+          {severityPatterns}
+          wrapEnabled={activeTab.wrapEnabled}
+          showWhitespace={activeTab.showWhitespace}
+          bookmarks={activeTab.bookmarks}
+        />
         {#if findAllOpen}
           <FindInDocumentPanel
             content={activeTab.content}
@@ -439,6 +614,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
+    white-space: nowrap;
   }
   .editor-area {
     flex: 1;
@@ -499,6 +675,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
     padding: 0.4rem 0.9rem;
     background: var(--bg-elevated);
     border-bottom: 1px solid var(--border-soft);
@@ -507,11 +685,14 @@
   .toolbar-left {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
     gap: 0.75rem;
   }
   .pane-toolbar .hint {
     padding: 0;
     color: var(--text-faint);
+    white-space: nowrap;
   }
   .btn-toggle {
     border: 1px solid var(--border);
@@ -522,6 +703,7 @@
     font-size: 0.72rem;
     font-weight: 600;
     cursor: pointer;
+    white-space: nowrap;
   }
   .btn-toggle:hover {
     border-color: var(--accent-border);
@@ -539,10 +721,25 @@
   .toolbar-right {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
     gap: 1rem;
   }
   .toolbar-right button.link {
     font: inherit;
+  }
+  .toolbar-right button.link.active-marker {
+    color: var(--accent-hover);
+  }
+  .copy-status {
+    padding: 0;
+    color: var(--text-faint);
+    font-style: italic;
+  }
+  .go-to-line .input {
+    width: 5.5rem;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.75rem;
   }
   .empty-state {
     flex: 1;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { darkTheme, severityHighlighting } from './codemirror-theme'
+import { bookmarkHighlighting, darkTheme, severityHighlighting, whitespaceHighlighting } from './codemirror-theme'
 
 // The actual matching logic (which pattern matches which substring, glob vs
 // regex, enabled/highlight_line handling) is pure and unit-tested
@@ -35,5 +35,23 @@ describe('severityHighlighting', () => {
         },
       ]),
     ).not.toThrow()
+  })
+})
+
+describe('whitespaceHighlighting', () => {
+  it('returns a single ViewPlugin extension', () => {
+    expect(() => whitespaceHighlighting('')).not.toThrow()
+    expect(whitespaceHighlighting('')).toBeDefined()
+  })
+
+  it('does not throw for content with mixed CRLF/LF lines and whitespace', () => {
+    expect(() => whitespaceHighlighting('a \t b\r\nc\nd\t\r\n')).not.toThrow()
+  })
+})
+
+describe('bookmarkHighlighting', () => {
+  it('does not throw for an empty or populated bookmark list', () => {
+    expect(() => bookmarkHighlighting([])).not.toThrow()
+    expect(() => bookmarkHighlighting([3, 1, 2])).not.toThrow()
   })
 })
