@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { bookmarkHighlighting, darkTheme, severityHighlighting, whitespaceHighlighting } from './codemirror-theme'
+import {
+  bookmarkHighlighting,
+  darkTheme,
+  languageExtension,
+  severityHighlighting,
+  whitespaceHighlighting,
+} from './codemirror-theme'
 
 // The actual matching logic (which pattern matches which substring, glob vs
 // regex, enabled/highlight_line handling) is pure and unit-tested
@@ -53,5 +59,17 @@ describe('bookmarkHighlighting', () => {
   it('does not throw for an empty or populated bookmark list', () => {
     expect(() => bookmarkHighlighting([])).not.toThrow()
     expect(() => bookmarkHighlighting([3, 1, 2])).not.toThrow()
+  })
+})
+
+describe('languageExtension', () => {
+  it('returns an extension for each supported language', () => {
+    expect(languageExtension('json')).toHaveLength(1)
+    expect(languageExtension('xml')).toHaveLength(1)
+    expect(languageExtension('javascript')).toHaveLength(1)
+  })
+
+  it('returns an empty array for an unrecognized/null language', () => {
+    expect(languageExtension(null)).toEqual([])
   })
 })

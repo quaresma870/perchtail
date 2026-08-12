@@ -6,16 +6,19 @@
   import {
     bookmarkHighlighting,
     darkTheme,
+    languageExtension,
     severityHighlighting,
     whitespaceHighlighting,
   } from '../codemirror-theme'
   import { formatLinesWithNumbers } from '../copy-lines'
+  import { languageForFilename } from '../file-language'
   import { nextLine, previousLine } from '../line-cycle'
   import { findProblemLines, nextProblemLine, previousProblemLine } from '../severity-highlighting'
   import type { SeverityPattern } from '../types'
 
   export let content = ''
   export let severityPatterns: SeverityPattern[] = []
+  export let filename = ''
   export let wrapEnabled = false
   export let showWhitespace = false
   export let bookmarks: number[] = []
@@ -32,6 +35,7 @@
       darkTheme,
       severityHighlighting(severityPatterns),
       bookmarkHighlighting(bookmarks),
+      languageExtension(languageForFilename(filename)),
       ...(wrapEnabled ? [EditorView.lineWrapping] : []),
       ...(showWhitespace ? [whitespaceHighlighting(content)] : []),
       EditorView.editable.of(false),
@@ -41,20 +45,23 @@
 
   let appliedContent: string | null = null
   let appliedPatterns: SeverityPattern[] | null = null
+  let appliedFilename: string | null = null
   let appliedWrap: boolean | null = null
   let appliedShowWhitespace: boolean | null = null
   let appliedBookmarks: number[] | null = null
 
   // Rebuilds the editor state whenever any of content, the effective
-  // severity-pattern set, wrap/show-whitespace toggles, or the bookmark
-  // list changes -- these can all change independently of each other (e.g.
-  // the pattern set finishes loading after the file is already open), so
-  // each is tracked rather than only reacting to content.
+  // severity-pattern set, the filename (-> language), wrap/show-whitespace
+  // toggles, or the bookmark list changes -- these can all change
+  // independently of each other (e.g. the pattern set finishes loading
+  // after the file is already open), so each is tracked rather than only
+  // reacting to content.
   function syncView() {
     if (!view) return
     if (
       content === appliedContent &&
       severityPatterns === appliedPatterns &&
+      filename === appliedFilename &&
       wrapEnabled === appliedWrap &&
       showWhitespace === appliedShowWhitespace &&
       bookmarks === appliedBookmarks
@@ -64,6 +71,7 @@
     view.setState(EditorState.create({ doc: content, extensions: extensions() }))
     appliedContent = content
     appliedPatterns = severityPatterns
+    appliedFilename = filename
     appliedWrap = wrapEnabled
     appliedShowWhitespace = showWhitespace
     appliedBookmarks = bookmarks
@@ -76,12 +84,13 @@
     })
     appliedContent = content
     appliedPatterns = severityPatterns
+    appliedFilename = filename
     appliedWrap = wrapEnabled
     appliedShowWhitespace = showWhitespace
     appliedBookmarks = bookmarks
   })
 
-  $: content, severityPatterns, wrapEnabled, showWhitespace, bookmarks, syncView()
+  $: content, severityPatterns, filename, wrapEnabled, showWhitespace, bookmarks, syncView()
 
   // Exposed for search click-through (Search.svelte -> Viewer.svelte): jump
   // to and select a specific line, e.g. after opening a file from a search

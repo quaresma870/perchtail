@@ -490,6 +490,7 @@
           bind:this={paneRef}
           content={activeTab.content}
           {severityPatterns}
+          filename={activeTab.name}
           wrapEnabled={activeTab.wrapEnabled}
           showWhitespace={activeTab.showWhitespace}
           bookmarks={activeTab.bookmarks}
