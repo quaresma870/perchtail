@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { darkTheme, severityHighlighting } from './codemirror-theme'
+import { darkTheme, languageExtension, severityHighlighting } from './codemirror-theme'
 
 // The actual matching logic (which pattern matches which substring, glob vs
 // regex, enabled/highlight_line handling) is pure and unit-tested
@@ -35,5 +35,17 @@ describe('severityHighlighting', () => {
         },
       ]),
     ).not.toThrow()
+  })
+})
+
+describe('languageExtension', () => {
+  it('returns an extension for each supported language', () => {
+    expect(languageExtension('json')).toHaveLength(1)
+    expect(languageExtension('xml')).toHaveLength(1)
+    expect(languageExtension('javascript')).toHaveLength(1)
+  })
+
+  it('returns an empty array for an unrecognized/null language', () => {
+    expect(languageExtension(null)).toEqual([])
   })
 })

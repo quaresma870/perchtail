@@ -891,12 +891,18 @@ viewing.
     `manage_rules`, same as `Rule` — consistent with how the rest of the
     grant model already splits "deployment-wide" from "per-source"
     concerns
-- [ ] **Per-file-type syntax highlighting.** Currently only severity-pattern
-      tokens are colored; there's no language-aware highlighting for e.g.
-      `.json`, `.xml`, `.js` config/log files. `@codemirror/lang-javascript`,
-      `@codemirror/lang-json`, and `@codemirror/lang-xml` are already
-      installed dependencies but currently unused anywhere in the
-      codebase.
+- [x] **Per-file-type syntax highlighting.** Language picked from the open
+      file's own extension (`lib/file-language.ts`'s `languageForFilename`,
+      pure and unit-tested) — `.json` → `@codemirror/lang-json`, `.xml`/
+      `.html`/`.htm`/`.svg` → `@codemirror/lang-xml`, `.js`/`.mjs`/`.cjs`/
+      `.jsx`/`.ts`/`.tsx` → `@codemirror/lang-javascript` (all three were
+      already-installed dependencies, unused anywhere in the codebase
+      until now). Coexists with severity-pattern highlighting on the same
+      pane; anything unrecognized (most log files) gets no language
+      extension and displays exactly as before — additive, never
+      required. Uses the archive member's own name for files opened
+      inside a `.zip`/`.tar.gz` (same field `FolderTree` already emits on
+      open), not the archive's name.
 - [ ] **Compare files (diff view), as a toggle button.** Arm the "Compare"
       button, pick a second file from the tree (or another open tab), and
       it renders a read-only diff against the currently active file in

@@ -3,12 +3,14 @@
   import { EditorView, basicSetup } from 'codemirror'
   import { EditorState } from '@codemirror/state'
   import { search, openSearchPanel } from '@codemirror/search'
-  import { darkTheme, severityHighlighting } from '../codemirror-theme'
+  import { darkTheme, languageExtension, severityHighlighting } from '../codemirror-theme'
+  import { languageForFilename } from '../file-language'
   import { findProblemLines, nextProblemLine, previousProblemLine } from '../severity-highlighting'
   import type { SeverityPattern } from '../types'
 
   export let content = ''
   export let severityPatterns: SeverityPattern[] = []
+  export let filename = ''
 
   let host: HTMLDivElement
   let view: EditorView | null = null
@@ -21,6 +23,7 @@
       search(),
       darkTheme,
       severityHighlighting(severityPatterns),
+      languageExtension(languageForFilename(filename)),
       EditorView.editable.of(false),
       EditorState.readOnly.of(true),
     ]
@@ -28,17 +31,26 @@
 
   let appliedContent: string | null = null
   let appliedPatterns: SeverityPattern[] | null = null
+  let appliedFilename: string | null = null
 
-  // Rebuilds the editor state whenever either the open file's content or
-  // the effective severity-pattern set changes -- the two can change
-  // independently (e.g. the pattern set finishes loading after the file is
-  // already open), so both are tracked rather than only reacting to content.
+  // Rebuilds the editor state whenever the open file's content, the
+  // effective severity-pattern set, or the filename (-> language) changes
+  // -- these can all change independently of each other (e.g. the pattern
+  // set finishes loading after the file is already open), so each is
+  // tracked rather than only reacting to content.
   function syncView() {
     if (!view) return
-    if (content === appliedContent && severityPatterns === appliedPatterns) return
+    if (
+      content === appliedContent &&
+      severityPatterns === appliedPatterns &&
+      filename === appliedFilename
+    ) {
+      return
+    }
     view.setState(EditorState.create({ doc: content, extensions: extensions() }))
     appliedContent = content
     appliedPatterns = severityPatterns
+    appliedFilename = filename
   }
 
   onMount(() => {
@@ -48,9 +60,10 @@
     })
     appliedContent = content
     appliedPatterns = severityPatterns
+    appliedFilename = filename
   })
 
-  $: content, severityPatterns, syncView()
+  $: content, severityPatterns, filename, syncView()
 
   // Exposed for search click-through (Search.svelte -> Viewer.svelte): jump
   // to and select a specific line, e.g. after opening a file from a search

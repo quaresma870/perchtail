@@ -1,3 +1,6 @@
+import { javascript } from '@codemirror/lang-javascript'
+import { json } from '@codemirror/lang-json'
+import { xml } from '@codemirror/lang-xml'
 import { RangeSetBuilder } from '@codemirror/state'
 import {
   Decoration,
@@ -6,6 +9,7 @@ import {
   ViewPlugin,
   type ViewUpdate,
 } from '@codemirror/view'
+import type { FileLanguage } from './file-language'
 import { findMatchesInLine, LEVEL_CLASS } from './severity-highlighting'
 import type { SeverityPattern } from './types'
 
@@ -135,4 +139,25 @@ export function severityHighlighting(patterns: SeverityPattern[]) {
   )
 
   return [lines, tokens]
+}
+
+/** Per-file-type syntax highlighting (ROADMAP.md's "Viewer: toward an
+ * advanced editor" section), picked from the open file's own extension
+ * (see file-language.ts) -- `@codemirror/lang-json`/`lang-xml`/
+ * `lang-javascript` were already-installed dependencies, unused anywhere
+ * in the codebase until now. Returns `[]` for anything unrecognized (most
+ * log files), same "highlighting is additive, never required" spirit as
+ * severityHighlighting -- a file with no matching language still opens
+ * and displays exactly as before. */
+export function languageExtension(language: FileLanguage) {
+  switch (language) {
+    case 'json':
+      return [json()]
+    case 'xml':
+      return [xml()]
+    case 'javascript':
+      return [javascript()]
+    default:
+      return []
+  }
 }

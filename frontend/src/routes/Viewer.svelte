@@ -318,7 +318,12 @@
             </a>
           </div>
         </div>
-        <CodeMirrorPane bind:this={paneRef} content={activeTab.content} {severityPatterns} />
+        <CodeMirrorPane
+          bind:this={paneRef}
+          content={activeTab.content}
+          {severityPatterns}
+          filename={activeTab.name}
+        />
         {#if findAllOpen}
           <FindInDocumentPanel
             content={activeTab.content}

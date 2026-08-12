@@ -113,6 +113,12 @@ release ships (0.x releases may include breaking changes between minors).
   unit-tested); `codemirror-theme.ts` now builds its highlighting
   `ViewPlugin`s from whatever pattern set is effective instead of a fixed
   regex.
+- Viewer: per-file-type syntax highlighting. Language is picked from the
+  open file's own extension (`lib/file-language.ts`) — `.json`, `.xml`/
+  `.html`/`.htm`/`.svg`, and `.js`/`.mjs`/`.cjs`/`.jsx`/`.ts`/`.tsx` now
+  render with real syntax coloring via `@codemirror/lang-json`/`lang-xml`/
+  `lang-javascript`, previously installed but unused dependencies.
+  Anything unrecognized (most log files) is unaffected.
 
 ### Changed
 - Frontend: Sources, Roles, Users, and SSO settings are now consolidated
