@@ -1,3 +1,4 @@
+import { nextLine, previousLine } from './line-cycle'
 import type { SeverityPattern } from './types'
 
 export interface SeverityMatch {
@@ -88,18 +89,9 @@ export function findProblemLines(content: string, patterns: SeverityPattern[]): 
 
 /** Steps forward from `currentLine` to the next problem line, wrapping
  * around to the first one past the end of the document. `problemLines`
- * must already be sorted ascending (as `findProblemLines` returns it). */
-export function nextProblemLine(problemLines: number[], currentLine: number): number | null {
-  if (problemLines.length === 0) return null
-  return problemLines.find((line) => line > currentLine) ?? problemLines[0]
-}
-
-/** Inverse of `nextProblemLine` -- steps backward, wrapping to the last
- * problem line past the start of the document. */
-export function previousProblemLine(problemLines: number[], currentLine: number): number | null {
-  if (problemLines.length === 0) return null
-  for (let i = problemLines.length - 1; i >= 0; i -= 1) {
-    if (problemLines[i] < currentLine) return problemLines[i]
-  }
-  return problemLines[problemLines.length - 1]
-}
+ * must already be sorted ascending (as `findProblemLines` returns it).
+ * Thin aliases over the generic `line-cycle.ts` steppers -- also used
+ * as-is for bookmark navigation (Viewer.svelte), which needs the exact
+ * same wrap-around behavior over its own list of marked lines. */
+export const nextProblemLine = nextLine
+export const previousProblemLine = previousLine

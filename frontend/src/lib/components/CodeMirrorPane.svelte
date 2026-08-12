@@ -3,12 +3,22 @@
   import { EditorView, basicSetup } from 'codemirror'
   import { EditorState } from '@codemirror/state'
   import { search, openSearchPanel } from '@codemirror/search'
-  import { darkTheme, severityHighlighting } from '../codemirror-theme'
+  import {
+    bookmarkHighlighting,
+    darkTheme,
+    severityHighlighting,
+    whitespaceHighlighting,
+  } from '../codemirror-theme'
+  import { formatLinesWithNumbers } from '../copy-lines'
+  import { nextLine, previousLine } from '../line-cycle'
   import { findProblemLines, nextProblemLine, previousProblemLine } from '../severity-highlighting'
   import type { SeverityPattern } from '../types'
 
   export let content = ''
   export let severityPatterns: SeverityPattern[] = []
+  export let wrapEnabled = false
+  export let showWhitespace = false
+  export let bookmarks: number[] = []
 
   let host: HTMLDivElement
   let view: EditorView | null = null
@@ -21,6 +31,9 @@
       search(),
       darkTheme,
       severityHighlighting(severityPatterns),
+      bookmarkHighlighting(bookmarks),
+      ...(wrapEnabled ? [EditorView.lineWrapping] : []),
+      ...(showWhitespace ? [whitespaceHighlighting(content)] : []),
       EditorView.editable.of(false),
       EditorState.readOnly.of(true),
     ]
@@ -28,17 +41,32 @@
 
   let appliedContent: string | null = null
   let appliedPatterns: SeverityPattern[] | null = null
+  let appliedWrap: boolean | null = null
+  let appliedShowWhitespace: boolean | null = null
+  let appliedBookmarks: number[] | null = null
 
-  // Rebuilds the editor state whenever either the open file's content or
-  // the effective severity-pattern set changes -- the two can change
-  // independently (e.g. the pattern set finishes loading after the file is
-  // already open), so both are tracked rather than only reacting to content.
+  // Rebuilds the editor state whenever any of content, the effective
+  // severity-pattern set, wrap/show-whitespace toggles, or the bookmark
+  // list changes -- these can all change independently of each other (e.g.
+  // the pattern set finishes loading after the file is already open), so
+  // each is tracked rather than only reacting to content.
   function syncView() {
     if (!view) return
-    if (content === appliedContent && severityPatterns === appliedPatterns) return
+    if (
+      content === appliedContent &&
+      severityPatterns === appliedPatterns &&
+      wrapEnabled === appliedWrap &&
+      showWhitespace === appliedShowWhitespace &&
+      bookmarks === appliedBookmarks
+    ) {
+      return
+    }
     view.setState(EditorState.create({ doc: content, extensions: extensions() }))
     appliedContent = content
     appliedPatterns = severityPatterns
+    appliedWrap = wrapEnabled
+    appliedShowWhitespace = showWhitespace
+    appliedBookmarks = bookmarks
   }
 
   onMount(() => {
@@ -48,9 +76,12 @@
     })
     appliedContent = content
     appliedPatterns = severityPatterns
+    appliedWrap = wrapEnabled
+    appliedShowWhitespace = showWhitespace
+    appliedBookmarks = bookmarks
   })
 
-  $: content, severityPatterns, syncView()
+  $: content, severityPatterns, wrapEnabled, showWhitespace, bookmarks, syncView()
 
   // Exposed for search click-through (Search.svelte -> Viewer.svelte): jump
   // to and select a specific line, e.g. after opening a file from a search
@@ -97,6 +128,50 @@
 
   export function jumpToPreviousProblem() {
     jumpToProblem(previousProblemLine)
+  }
+
+  // Exposed so Viewer.svelte can toggle a bookmark on whatever line the
+  // cursor is currently on, and for the "go to line" input to validate
+  // against the document's actual line count.
+  export function currentLine(): number {
+    if (!view) return 1
+    return view.state.doc.lineAt(view.state.selection.main.head).number
+  }
+
+  function jumpToBookmark(step: typeof nextLine | typeof previousLine) {
+    if (!view) return
+    const target = step(bookmarks, currentLine())
+    if (target !== null) scrollToLine(target)
+  }
+
+  export function jumpToNextBookmark() {
+    jumpToBookmark(nextLine)
+  }
+
+  export function jumpToPreviousBookmark() {
+    jumpToBookmark(previousLine)
+  }
+
+  // "Copy selected lines (with line numbers)" toolbar action: every full
+  // line touched by the current selection, prefixed with its line number.
+  // No-op (returns false) when there's nothing selected -- the browser's
+  // own Ctrl+C already handles a plain-text copy of an actual selection,
+  // so this is specifically for the "with line numbers" case, not a
+  // general-purpose copy replacement.
+  export async function copySelectedLines(): Promise<boolean> {
+    if (!view) return false
+    const { from, to } = view.state.selection.main
+    if (from === to) return false
+
+    const fromLine = view.state.doc.lineAt(from).number
+    const toLine = view.state.doc.lineAt(to).number
+    const lines = []
+    for (let n = fromLine; n <= toLine; n += 1) {
+      const line = view.state.doc.line(n)
+      lines.push({ number: n, text: line.text })
+    }
+    await navigator.clipboard.writeText(formatLinesWithNumbers(lines))
+    return true
   }
 
   onDestroy(() => {

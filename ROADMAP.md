@@ -901,7 +901,7 @@ viewing.
       button, pick a second file from the tree (or another open tab), and
       it renders a read-only diff against the currently active file in
       place. `@codemirror/merge` (not yet installed) is the natural fit.
-- [ ] **Line-wrap toggle.** `EditorView.lineWrapping`, cheap and directly
+- [x] **Line-wrap toggle.** `EditorView.lineWrapping`, cheap and directly
       useful for long log lines.
 - [ ] **Beautify / minify for embedded JSON, XML, and (lower priority) JS.**
       Display-only reformat, never touches the file on disk.
@@ -910,17 +910,54 @@ viewing.
       mechanisms: client-side polling (works uniformly but adds
       round-trips over SSH/SMB/WinRM), or extending the agent-mode
       WebSocket with a "watch" command (cheaper, agent-only).
-- [ ] **Reload/refresh button.** A manual re-fetch of the currently open
+- [x] **Reload/refresh button.** A manual re-fetch of the currently open
       file's content in place, without closing and reopening the tab.
-- [ ] **Copy selected lines (with line numbers).**
-- [ ] **"Show all characters" toggle** (whitespace/CRLF-vs-LF), relevant
+- [x] **Copy selected lines (with line numbers).**
+- [x] **"Show all characters" toggle** (whitespace/CRLF-vs-LF), relevant
       given this tool spans both Linux and Windows sources.
-- [ ] **Go-to-line** (Ctrl+G).
-- [ ] **Bookmarks.** Pure client-side/session state.
+- [x] **Go-to-line** (Ctrl+G).
+- [x] **Bookmarks.** Pure client-side/session state.
 - [ ] **Multi-pattern "mark" highlighting** (Notepad++'s Mark feature, not
       to be confused with severity indicators above). Persistently
       highlight all occurrences of one or more ad hoc patterns at once,
       each in its own color.
+
+### Notes on decisions made — small toolbar toggles
+
+- **CRLF can't be detected from a live CodeMirror `Line.text`.** CodeMirror's
+  default line-separator matching (`/\r\n?|\n/`) treats a `\r\n` pair as a
+  single separator and consumes the `\r` while splitting the document into
+  lines — by the time a line can be inspected, the `\r` is already gone.
+  `lib/whitespace-highlighting.ts`'s `findCrlfLineNumbers` instead scans the
+  *raw fetched content string* before CodeMirror ever ingests it (same line
+  numbering either way, since a `\r\n` pair collapses to one line break on
+  both sides), and the CRLF glyph is rendered as a zero-width
+  `Decoration.widget` appended after the line's last character rather than
+  a `Decoration.replace` over a character that no longer exists in the
+  document.
+- **"Next/previous problem" and "next/previous bookmark" share one
+  generic stepper** (`lib/line-cycle.ts`'s `nextLine`/`previousLine`) —
+  wrap-around cycling through a sorted list of line numbers relative to a
+  current position is the exact same operation either way; severity
+  navigation's `nextProblemLine`/`previousProblemLine` are now thin
+  aliases over it rather than a second implementation.
+- **Reload releases the old scratch reference, not just fetches fresh.**
+  `archive.py`'s scratch key is deterministic (hash of source id + path +
+  member), so a reload is: call `/open` again (a fresh fetch, acquiring a
+  new reference under the same key), then call `/close` once for the old
+  reference — same "path/member, not the literal scratch key" release
+  call `closeTab` already made, just triggered without closing the tab.
+- **Bookmarks and wrap/show-whitespace live on the `Tab` object in
+  Viewer.svelte, not inside `CodeMirrorPane`.** The pane is a singleton
+  reused across tab switches (`content` changes, the component doesn't
+  remount) — per-tab state has to live above it and flow down as props,
+  the same shape `severityPatterns` already established, or switching
+  tabs would show one tab's bookmarks/toggles against another's content.
+- **Copy-with-line-numbers is additive, not a Ctrl+C replacement.** The
+  browser's native copy already handles a plain-text copy of a selection;
+  this is specifically for the "prefixed with line numbers" case, exposed
+  as its own toolbar action (`CodeMirrorPane.copySelectedLines`) rather
+  than intercepting Ctrl+C.
 
 ### Notes on decisions made — severity indicators
 
