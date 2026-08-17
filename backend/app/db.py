@@ -24,15 +24,36 @@ def ensure_search_schema(target_engine=engine) -> None:
     can't be created by SQLModel.metadata.create_all() and needs this
     explicit, idempotent raw-SQL step alongside it. Called from init_db()
     (app startup) and directly by the migration and by tests' `session`
-    fixture, so every path that provisions a fresh schema covers this too."""
+    fixture, so every path that provisions a fresh schema covers this too.
+
+    A prior version declared `file_path UNINDEXED` (stored but not
+    searchable) — the path-matching addition to search needs it indexed,
+    and FTS5 virtual tables can't ALTER an existing column's UNINDEXED
+    status in place, so a table still carrying the old declaration is
+    dropped and recreated here. `search_index_state` rows are cleared
+    alongside it so previously-indexed files look "new" again and get
+    rebuilt into the new schema on the next sweep, instead of being
+    skipped as unchanged by size (see SearchIndexState's docstring)."""
     with target_engine.begin() as conn:
-        conn.execute(
+        existing_sql = conn.execute(
             text(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS search_index_fts "
-                "USING fts5(source_id UNINDEXED, file_path UNINDEXED, "
-                "line_number UNINDEXED, snippet)"
+                "SELECT sql FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'search_index_fts'"
             )
-        )
+        ).scalar()
+        if existing_sql is not None and "file_path UNINDEXED" in existing_sql:
+            conn.execute(text("DROP TABLE search_index_fts"))
+            conn.execute(text("DELETE FROM search_index_state"))
+            existing_sql = None
+
+        if existing_sql is None:
+            conn.execute(
+                text(
+                    "CREATE VIRTUAL TABLE search_index_fts "
+                    "USING fts5(source_id UNINDEXED, file_path, "
+                    "line_number UNINDEXED, snippet)"
+                )
+            )
 
 
 def init_db() -> None:

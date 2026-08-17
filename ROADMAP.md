@@ -457,7 +457,7 @@ they come before any connector or UI work, not after.
 
 - [x] Full-text search — needs its own indexing design since nothing persists
       from the viewing scratch space; design before building, per CLAUDE.md
-- [ ] Full-text search: match on file path and source host/name too, not just
+- [x] Full-text search: match on file path and source host/name too, not just
       line content, case-insensitive — a source or file whose name matches
       the query should surface even if none of its lines happen to contain
       that text (e.g. searching "win-app-02" should find the source, not just
@@ -571,28 +571,47 @@ they come before any connector or UI work, not after.
 
 ### Notes on decisions made — full-text search: path/host matching
 
-- **Working plan, not yet built**: make `file_path` an indexed FTS5 column
-  (it's currently `UNINDEXED`, storage-only) so a single MATCH query can hit
-  line content and file path together. FTS5's default `unicode61` tokenizer
-  already folds case for matching, so this is case-insensitive by
-  construction, same as content search already is today.
-- **Host/source-name matching is the harder half**, since neither lives
-  per-line in `search_index_fts` — a source's host is metadata on the
-  `Source` row, not something naturally indexed alongside its lines. Two
-  reasonable designs, not yet decided between:
-  1. Denormalize `host` (and the source's display name) into every FTS row
-     at index time, so one unified MATCH query and one ranked result list
-     covers content + path + host together — simplest UX, but means an
-     admin renaming a source's host doesn't reflect in search until that
-     source's files are next re-indexed (same accepted-staleness spirit as
-     the size-only change-detection already in place).
-  2. Resolve host/name matches separately (a plain case-insensitive `LIKE`
-     against `Source.host`/`Source.name`, no FTS involved) and surface them
-     as their own small "sources matching" section in the UI, distinct from
-     line-content hits — always current, no re-index lag, but a second
-     results list instead of one ranked one.
-  Leaning toward (1) for a simpler single-search-box experience, but this
-  is worth a real look before building rather than assuming.
+- **Built, but landed on (2) for host/name, not the (1) it was leaning
+  toward** — actually building both options out surfaced a problem with
+  (1) that wasn't obvious on paper: `search_index_fts` is one row per
+  *line*, so denormalizing a source's host/name into every row means a
+  host/name match is technically true of every single indexed line of that
+  source. For a source with thousands of indexed lines, that's not "the
+  source surfaces in results", it's "every line of that source floods the
+  top 50 results" — the opposite of the intended UX. (2) doesn't have this
+  problem since it's resolved outside the line-granularity index entirely.
+- **File path**: `file_path` is now an indexed FTS5 column (was
+  `UNINDEXED`, storage-only), so one unified MATCH query covers content and
+  path together, ranked by the same `rank`. This has the identical
+  every-line-of-a-matching-file problem host/name would have had under (1)
+  — solved in `search_index.search()` by asking FTS5's `snippet()` against
+  the content and path columns separately per row: a row is a genuine
+  content hit if the content snippet actually got highlighted; otherwise,
+  if the path snippet did, it's a path-only hit, deduplicated down to one
+  representative row per `(source_id, file_path)` before the result list is
+  built. `matched_field` (`"content"` | `"path"`) rides along on
+  `SearchHit`/the API response so the frontend can label a path-only hit
+  distinctly ("filename match") instead of showing a misleadingly
+  unhighlighted line.
+- **Host/source name**: resolved as (2), and it turned out to need *no
+  backend endpoint at all* — `Search.svelte` already fetches every
+  RBAC-visible source (`GET /sources`) to resolve a content hit's
+  `source_id` to a display name, so matching by name/host is just a
+  client-side filter over that same already-fetched list
+  (`lib/source-match.ts`'s `filterSourcesByNameOrHost`), rendered as its
+  own "Sources matching" section above the content-hit results. Always
+  current (it's live source metadata, not an index), no re-index lag, and
+  zero new round-trips.
+- **Schema upgrade for existing deployments**: `app.db.ensure_search_schema`
+  now detects a `search_index_fts` table still carrying the old `file_path
+  UNINDEXED` declaration (FTS5 can't ALTER a column's indexed-ness in
+  place), drops and recreates it, and clears `SearchIndexState` alongside
+  it so previously-indexed files look "new" again and rebuild into the new
+  schema on the next sweep — otherwise they'd stay permanently unsearchable
+  post-upgrade, skipped forever as "unchanged by size" despite the FTS
+  table under them having just been wiped. Runs automatically on startup,
+  same as the table's original creation; no separate Alembic migration,
+  consistent with FTS5 schema already living outside Alembic's management.
 
 ### Notes on decisions made — alerting
 

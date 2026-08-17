@@ -62,6 +62,14 @@ class SearchHit:
     file_path: str
     line_number: int
     snippet_html: str = field(repr=False)
+    # "content" -- the query matched this line's text, snippet_html
+    # highlights the match in the line itself (the original, only kind of
+    # hit before path matching was added). "path" -- the query matched the
+    # file's path/name, not this particular line's content; snippet_html
+    # highlights the match in the path instead, and line_number is just
+    # some line from that file (see search()'s dedup, not a claim that this
+    # specific line is where the match is).
+    matched_field: str = "content"
 
 
 def _iter_files(connector, source: Source, rules: list[Rule], directory: str = ""):
@@ -254,19 +262,37 @@ def search(
     phrase rather than passed through as its own query syntax — predictable
     substring-ish matching beats exposing FTS5's full AND/OR/NOT/prefix* DSL
     to a plain search box, and avoids a MATCH syntax error on input like
-    unbalanced quotes or a bare operator."""
+    unbalanced quotes or a bare operator.
+
+    `file_path` is an indexed column alongside `snippet`, so one unified
+    MATCH query covers both content and path/filename matches, ranked
+    together (see ROADMAP.md's path/host matching notes). A file whose path
+    matches but whose lines don't is real signal — "find this file even if
+    none of its lines say so" — but since the index is one row per line,
+    a path-only match is technically true of *every* line in that file, and
+    returning all of them would flood the results with near-duplicates for
+    one file. So each row's own snippet() call against the content column
+    is used to tell content matches (a real highlight) from path-only ones
+    (no highlight there), and path-only matches are deduplicated down to one
+    representative row per (source_id, file_path)."""
     if source_ids is not None and not source_ids:
         return []
 
     match_query = '"' + query.replace('"', '""') + '"'
     sql = (
         "SELECT source_id, file_path, line_number, "
-        "snippet(search_index_fts, 3, :highlight_start, :highlight_end, '…', 12) AS highlighted "
+        "snippet(search_index_fts, 3, :highlight_start, :highlight_end, '…', 12) "
+        "AS content_highlighted, "
+        "snippet(search_index_fts, 1, :highlight_start, :highlight_end, '…', 64) "
+        "AS path_highlighted "
         "FROM search_index_fts WHERE search_index_fts MATCH :query"
     )
+    # Over-fetch before dedup: a run of many lines from the same
+    # path-matched file would otherwise collapse to far fewer than `limit`
+    # final results.
     params: dict[str, object] = {
         "query": match_query,
-        "limit": limit,
+        "raw_limit": max(limit * 5, limit),
         "highlight_start": _HIGHLIGHT_START,
         "highlight_end": _HIGHLIGHT_END,
     }
@@ -274,15 +300,40 @@ def search(
         placeholders = ", ".join(f":sid{i}" for i in range(len(source_ids)))
         sql += f" AND source_id IN ({placeholders})"
         params.update({f"sid{i}": sid for i, sid in enumerate(source_ids)})
-    sql += " ORDER BY rank LIMIT :limit"
+    sql += " ORDER BY rank LIMIT :raw_limit"
 
     rows = session.execute(text(sql), params).all()
-    return [
-        SearchHit(
-            source_id=row.source_id,
-            file_path=row.file_path,
-            line_number=row.line_number,
-            snippet_html=_escape_snippet(row.highlighted),
+
+    hits: list[SearchHit] = []
+    seen_path_matches: set[tuple[int, str]] = set()
+    for row in rows:
+        if len(hits) >= limit:
+            break
+        is_content_match = _HIGHLIGHT_START in row.content_highlighted
+        if is_content_match:
+            hits.append(
+                SearchHit(
+                    source_id=row.source_id,
+                    file_path=row.file_path,
+                    line_number=row.line_number,
+                    snippet_html=_escape_snippet(row.content_highlighted),
+                    matched_field="content",
+                )
+            )
+            continue
+
+        path_key = (row.source_id, row.file_path)
+        if path_key in seen_path_matches:
+            continue
+        seen_path_matches.add(path_key)
+        hits.append(
+            SearchHit(
+                source_id=row.source_id,
+                file_path=row.file_path,
+                line_number=row.line_number,
+                snippet_html=_escape_snippet(row.path_highlighted),
+                matched_field="path",
+            )
         )
-        for row in rows
-    ]
+
+    return hits
