@@ -123,11 +123,20 @@ export interface SSOProvider {
   issuer: string
   client_id: string
   scopes: string
+  group_claim: string | null
 }
 
 export interface SSOStatus {
   enabled: boolean
   name: string | null
+}
+
+export interface GroupRoleMapping {
+  id: number
+  order: number
+  group_name: string
+  role_id: number
+  role_name: string
 }
 
 export type SearchMatchedField = 'content' | 'path'

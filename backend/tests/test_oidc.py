@@ -2,7 +2,7 @@ import time
 
 import pytest
 from app.audit import record_audit_event  # noqa: F401 - imported for readability of intent
-from app.auth.models import AuditLog, AuthProviderType, Role, User
+from app.auth.models import AuditLog, AuthProviderType, Role, SSOGroupRoleMapping, User
 from app.auth.providers import oidc
 from app.auth.rbac import create_role
 from joserfc import jwt
@@ -298,3 +298,215 @@ def test_complete_login_rejects_a_deactivated_account(session, monkeypatch, disc
             nonce="the-nonce",
             no_access_role_id=role.id,
         )
+
+
+# --- extract_claim_groups / resolve_group_mapped_role_id ---------------------------
+
+
+def test_extract_claim_groups_returns_empty_when_group_claim_not_configured():
+    assert oidc.extract_claim_groups({"groups": ["a"]}, group_claim=None) == []
+
+
+def test_extract_claim_groups_returns_empty_when_claim_missing():
+    assert oidc.extract_claim_groups({}, group_claim="groups") == []
+
+
+def test_extract_claim_groups_normalizes_a_bare_string_to_a_list():
+    assert oidc.extract_claim_groups({"groups": "engineering"}, group_claim="groups") == [
+        "engineering"
+    ]
+
+
+def test_extract_claim_groups_passes_through_a_list():
+    claims = {"groups": ["engineering", "on-call"]}
+    assert oidc.extract_claim_groups(claims, group_claim="groups") == ["engineering", "on-call"]
+
+
+def test_resolve_group_mapped_role_id_returns_none_when_no_groups(session):
+    assert oidc.resolve_group_mapped_role_id(session, []) is None
+
+
+def test_resolve_group_mapped_role_id_returns_none_when_nothing_matches(session):
+    role = create_role(session, actor_user_id=None, name="Tier2")
+    session.add(SSOGroupRoleMapping(order=0, group_name="engineering", role_id=role.id))
+    session.commit()
+
+    assert oidc.resolve_group_mapped_role_id(session, ["sales"]) is None
+
+
+def test_resolve_group_mapped_role_id_returns_the_matching_role(session):
+    role = create_role(session, actor_user_id=None, name="Tier2")
+    session.add(SSOGroupRoleMapping(order=0, group_name="engineering", role_id=role.id))
+    session.commit()
+
+    assert oidc.resolve_group_mapped_role_id(session, ["engineering"]) == role.id
+
+
+def test_resolve_group_mapped_role_id_last_match_wins(session):
+    tier1 = create_role(session, actor_user_id=None, name="Tier1")
+    tier2 = create_role(session, actor_user_id=None, name="Tier2")
+    session.add(SSOGroupRoleMapping(order=0, group_name="staff", role_id=tier1.id))
+    session.add(SSOGroupRoleMapping(order=1, group_name="engineering", role_id=tier2.id))
+    session.commit()
+
+    # Both mappings match this user's groups; the later-ordered one wins,
+    # same "last match wins" semantics as Rule.
+    assert oidc.resolve_group_mapped_role_id(session, ["staff", "engineering"]) == tier2.id
+
+
+def test_resolve_group_mapped_role_id_respects_order_not_insertion_order(session):
+    tier1 = create_role(session, actor_user_id=None, name="Tier1")
+    tier2 = create_role(session, actor_user_id=None, name="Tier2")
+    # Inserted out of `order` sequence on purpose.
+    session.add(SSOGroupRoleMapping(order=5, group_name="engineering", role_id=tier2.id))
+    session.add(SSOGroupRoleMapping(order=1, group_name="staff", role_id=tier1.id))
+    session.commit()
+
+    assert oidc.resolve_group_mapped_role_id(session, ["staff", "engineering"]) == tier2.id
+
+
+# --- find_or_provision_user with group mapping --------------------------------------
+
+
+def test_find_or_provision_user_uses_mapped_role_for_a_new_user(session):
+    no_access = _no_access_role(session)
+    mapped = create_role(session, actor_user_id=None, name="Tier2")
+
+    user = oidc.find_or_provision_user(
+        session,
+        external_id="sub-1",
+        email="new@example.com",
+        no_access_role_id=no_access.id,
+        mapped_role_id=mapped.id,
+    )
+
+    assert user.role_id == mapped.id
+
+
+def test_find_or_provision_user_falls_back_to_no_access_without_a_mapped_role(session):
+    no_access = _no_access_role(session)
+
+    user = oidc.find_or_provision_user(
+        session,
+        external_id="sub-1",
+        email="new@example.com",
+        no_access_role_id=no_access.id,
+        mapped_role_id=None,
+    )
+
+    assert user.role_id == no_access.id
+
+
+# --- OIDCProvider.complete_login group sync -----------------------------------------
+
+
+def test_complete_login_provisions_a_new_user_directly_into_the_mapped_role(
+    session, monkeypatch, discovery_document
+):
+    no_access = _no_access_role(session)
+    mapped = create_role(session, actor_user_id=None, name="Tier2")
+    session.add(SSOGroupRoleMapping(order=0, group_name="engineering", role_id=mapped.id))
+    session.commit()
+
+    key_set = _make_key_set()
+    id_token = _sign_claims(key_set, _valid_claims(groups=["engineering"]))
+    _patch_idp(
+        monkeypatch,
+        discovery=discovery_document,
+        tokens={"id_token": id_token},
+        jwks=key_set.as_dict(),
+    )
+
+    settings = oidc.OIDCSettings(
+        issuer=ISSUER, client_id=CLIENT_ID, client_secret="s3cret", group_claim="groups"
+    )
+    user = oidc.OIDCProvider(settings).complete_login(
+        session,
+        code="the-code",
+        redirect_uri="https://app.example.com/auth/sso/callback",
+        nonce="the-nonce",
+        no_access_role_id=no_access.id,
+    )
+
+    assert user.role_id == mapped.id
+
+
+def test_complete_login_resyncs_an_existing_users_role_on_each_login(
+    session, monkeypatch, discovery_document
+):
+    no_access = _no_access_role(session)
+    existing = oidc.find_or_provision_user(
+        session, external_id="user-123", email="jdoe@example.com", no_access_role_id=no_access.id
+    )
+    assert existing.role_id == no_access.id
+
+    mapped = create_role(session, actor_user_id=None, name="Tier2")
+    session.add(SSOGroupRoleMapping(order=0, group_name="engineering", role_id=mapped.id))
+    session.commit()
+
+    key_set = _make_key_set()
+    id_token = _sign_claims(key_set, _valid_claims(groups=["engineering"]))
+    _patch_idp(
+        monkeypatch,
+        discovery=discovery_document,
+        tokens={"id_token": id_token},
+        jwks=key_set.as_dict(),
+    )
+
+    settings = oidc.OIDCSettings(
+        issuer=ISSUER, client_id=CLIENT_ID, client_secret="s3cret", group_claim="groups"
+    )
+    user = oidc.OIDCProvider(settings).complete_login(
+        session,
+        code="the-code",
+        redirect_uri="https://app.example.com/auth/sso/callback",
+        nonce="the-nonce",
+        no_access_role_id=no_access.id,
+    )
+
+    assert user.id == existing.id
+    assert user.role_id == mapped.id
+    actions = [e.action for e in session.exec(select(AuditLog)).all()]
+    assert "user.sso_role_synced" in actions
+
+
+def test_complete_login_leaves_role_unchanged_when_no_group_matches(
+    session, monkeypatch, discovery_document
+):
+    no_access = _no_access_role(session)
+    manually_promoted = create_role(session, actor_user_id=None, name="ManuallyPromoted")
+    existing = oidc.find_or_provision_user(
+        session, external_id="user-123", email="jdoe@example.com", no_access_role_id=no_access.id
+    )
+    existing.role_id = manually_promoted.id
+    session.add(existing)
+    session.commit()
+
+    other_role = create_role(session, actor_user_id=None, name="Tier2")
+    session.add(SSOGroupRoleMapping(order=0, group_name="engineering", role_id=other_role.id))
+    session.commit()
+
+    key_set = _make_key_set()
+    # This user's groups claim doesn't include "engineering" -- the one
+    # configured mapping shouldn't apply, and the manually-set role should
+    # survive the login untouched.
+    id_token = _sign_claims(key_set, _valid_claims(groups=["sales"]))
+    _patch_idp(
+        monkeypatch,
+        discovery=discovery_document,
+        tokens={"id_token": id_token},
+        jwks=key_set.as_dict(),
+    )
+
+    settings = oidc.OIDCSettings(
+        issuer=ISSUER, client_id=CLIENT_ID, client_secret="s3cret", group_claim="groups"
+    )
+    user = oidc.OIDCProvider(settings).complete_login(
+        session,
+        code="the-code",
+        redirect_uri="https://app.example.com/auth/sso/callback",
+        nonce="the-nonce",
+        no_access_role_id=no_access.id,
+    )
+
+    assert user.role_id == manually_promoted.id

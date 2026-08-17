@@ -9,6 +9,17 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Added
+- SSO: IdP group-claim-to-role auto-mapping. Configure a "group claim" name
+  on the OIDC provider and an ordered list of group → role mappings
+  (evaluated last-match-wins, same rule as source Rules); a user's role is
+  resolved from their IdP groups and applied on every SSO login, not just
+  first provisioning, so it stays in sync as group membership changes.
+  Applies immediately on first sign-in too — a new user whose groups match
+  a mapping is provisioned straight into that role instead of always
+  landing on the no-access default. Note: this means a role changed
+  directly in PerchTail can be overwritten on that user's next login if
+  their IdP groups still match a configured mapping — remove the mapping
+  (or the user from that group) to stop the sync.
 - Search now matches file paths and source names/hosts, not just line
   content. A query matching a file's path (but none of its lines) surfaces
   that file as a "filename match" hit; a query matching a source's name or

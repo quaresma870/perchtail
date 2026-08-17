@@ -197,3 +197,110 @@ def test_connection_check_reports_incomplete_discovery_document(manage_client, m
     assert response.status_code == 200
     assert response.json()["ok"] is False
     assert "authorization_endpoint" in response.json()["detail"]
+
+
+# --- group_claim on the provider config ---------------------------------------------
+
+
+def test_create_provider_with_group_claim(manage_client):
+    payload = {**CREATE_PAYLOAD, "group_claim": "groups"}
+    response = manage_client.post("/sso", json=payload)
+    assert response.status_code == 201
+    assert response.json()["group_claim"] == "groups"
+
+
+def test_create_provider_defaults_group_claim_to_null(manage_client):
+    response = manage_client.post("/sso", json=CREATE_PAYLOAD)
+    assert response.json()["group_claim"] is None
+
+
+def test_update_can_set_and_clear_group_claim(manage_client):
+    created = manage_client.post("/sso", json=CREATE_PAYLOAD).json()
+
+    set_response = manage_client.patch(f"/sso/{created['id']}", json={"group_claim": "groups"})
+    assert set_response.json()["group_claim"] == "groups"
+
+    cleared_response = manage_client.patch(f"/sso/{created['id']}", json={"group_claim": ""})
+    assert cleared_response.json()["group_claim"] is None
+
+
+# --- group-role mappings --------------------------------------------------------------
+
+
+def _make_role(session, name="Tier2") -> int:
+    from app.auth.rbac import create_role
+
+    role = create_role(session, actor_user_id=None, name=name)
+    return role.id
+
+
+def test_list_group_mappings_requires_manage_sso(plain_client):
+    assert plain_client.get("/sso/group-mappings").status_code == 403
+
+
+def test_create_and_list_group_mapping(manage_client, session):
+    role_id = _make_role(session)
+
+    created = manage_client.post(
+        "/sso/group-mappings", json={"order": 0, "group_name": "engineering", "role_id": role_id}
+    )
+    assert created.status_code == 201
+    body = created.json()
+    assert body["group_name"] == "engineering"
+    assert body["role_id"] == role_id
+    assert body["role_name"] == "Tier2"
+
+    listed = manage_client.get("/sso/group-mappings")
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+
+
+def test_list_group_mappings_is_ordered(manage_client, session):
+    role_id = _make_role(session)
+    manage_client.post(
+        "/sso/group-mappings", json={"order": 5, "group_name": "b", "role_id": role_id}
+    )
+    manage_client.post(
+        "/sso/group-mappings", json={"order": 1, "group_name": "a", "role_id": role_id}
+    )
+
+    listed = manage_client.get("/sso/group-mappings").json()
+    assert [m["group_name"] for m in listed] == ["a", "b"]
+
+
+def test_create_group_mapping_rejects_unknown_role(manage_client):
+    response = manage_client.post(
+        "/sso/group-mappings", json={"order": 0, "group_name": "engineering", "role_id": 99999}
+    )
+    assert response.status_code == 404
+
+
+def test_update_group_mapping(manage_client, session):
+    role_id = _make_role(session)
+    other_role_id = _make_role(session, name="Tier3")
+    created = manage_client.post(
+        "/sso/group-mappings", json={"order": 0, "group_name": "engineering", "role_id": role_id}
+    ).json()
+
+    response = manage_client.patch(
+        f"/sso/group-mappings/{created['id']}",
+        json={"group_name": "platform", "role_id": other_role_id},
+    )
+    assert response.status_code == 200
+    assert response.json()["group_name"] == "platform"
+    assert response.json()["role_name"] == "Tier3"
+
+
+def test_delete_group_mapping(manage_client, session):
+    role_id = _make_role(session)
+    created = manage_client.post(
+        "/sso/group-mappings", json={"order": 0, "group_name": "engineering", "role_id": role_id}
+    ).json()
+
+    assert manage_client.delete(f"/sso/group-mappings/{created['id']}").status_code == 204
+    assert manage_client.get("/sso/group-mappings").json() == []
+
+
+def test_get_missing_group_mapping_is_404(manage_client):
+    assert manage_client.patch("/sso/group-mappings/99999", json={"order": 1}).status_code == 404
+    assert manage_client.delete("/sso/group-mappings/99999").status_code == 404

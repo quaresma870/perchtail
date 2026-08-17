@@ -464,7 +464,7 @@ they come before any connector or UI work, not after.
       lines that literally say "win-app-02")
 - [ ] Alerting — notify on new content matching a saved search (see the
       Alerting design notes below for the working scope decision)
-- [ ] IdP group-claim-to-role auto-mapping
+- [x] IdP group-claim-to-role auto-mapping — see notes below
 - [ ] System/operational health endpoint(s) for external monitoring
       (Zabbix, and ideally Prometheus too) — see notes below
 - [ ] Security hardening pass — see the dedicated section below; called out
@@ -685,6 +685,58 @@ they come before any connector or UI work, not after.
   wrapper over the same underlying health-check internals later**, even if
   only the Zabbix-oriented JSON endpoint ships first — several self-hosted
   shops standardize on Prometheus+Grafana instead of (or alongside) Zabbix.
+
+### Notes on decisions made — IdP group-claim-to-role auto-mapping
+
+- **New `SSOGroupRoleMapping` table** (`app/auth/models.py`): `order`,
+  `group_name`, `role_id`. Deliberately global, not scoped to a specific
+  `SSOProviderConfig` — v1 only ever has one active provider at a time
+  (see `_assert_single_enabled` in `api/sso.py`), so there was nothing to
+  disambiguate by adding that scoping now.
+- **Reused Rule's exact "evaluated in order, last match wins" semantics**
+  instead of inventing a new precedence rule (e.g. "most privileged role
+  wins") for what's otherwise the same kind of ordered-precedence problem
+  — this project's admins already know that mental model from rule
+  editing, so a user whose groups match more than one configured mapping
+  just gets whichever mapping is ordered last, exactly like an
+  include/exclude rule chain.
+- **A new `SSOProviderConfig.group_claim` field** (e.g. `"groups"`, or
+  `"roles"` for IdPs that use that name) names the ID token claim to read;
+  null/empty disables auto-mapping entirely, so this is fully backward
+  compatible with existing OIDC configs. `oidc.extract_claim_groups()`
+  normalizes the claim's value to a list of strings, since IdPs vary on
+  whether a single-group claim comes back as a bare string or a
+  one-element list.
+- **Applied on every login, not just first provisioning** — the harder
+  call in this design. First-provisioning-only would mean a user's role
+  never catches up when their IdP group membership changes; re-syncing on
+  every login (`OIDCProvider.complete_login`, via
+  `resolve_group_mapped_role_id`) keeps it current, at the cost of a real
+  gotcha worth flagging loudly (and documented in both
+  `SSOGroupRoleMapping`'s docstring and the SSO settings page's own copy):
+  **an admin's manual role change made directly in PerchTail doesn't
+  survive that user's next SSO login if their groups still match a
+  configured mapping.** Once a mapping exists for a group, the IdP is
+  treated as the source of truth for members of it, same spirit as an
+  IdP-driven SSO relationship generally (this is also how Okta/Google
+  Workspace-style group-sync integrations typically behave). Deleting the
+  mapping, or removing the user from the IdP group, stops the resync.
+  When no mapping matches at all (including for a returning user who was
+  never in any mapped group), the existing role is left untouched — only
+  a brand-new user with no match at all falls back to the no-access
+  default, same as before this feature existed.
+- **`GET /roles` now also accepts the `manage_sso` capability**
+  (`api/roles.py`'s `require_read`), alongside the existing
+  `manage_roles`/`manage_users` — needed so the SSO settings page's
+  mapping editor can populate its role picker for an admin who holds
+  `manage_sso` but neither of the other two. Read-only; creating/editing/
+  deleting roles still requires `manage_roles` specifically.
+- **No frontend change needed beyond the SSO settings page** — the
+  group→role mapping editor lives right below the existing OIDC provider
+  form (`SsoSettings.svelte`): an ordered list with inline delete, plus a
+  small create row (group name + role picker). No separate page, since
+  this is a small, tightly-scoped admin surface that only makes sense in
+  the context of the one OIDC provider it configures.
 
 ## Connections home redesign
 

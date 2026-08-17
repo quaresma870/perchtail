@@ -98,6 +98,39 @@ class SSOProviderConfig(SQLModel, table=True):
     enabled: bool = False
 
 
+class SSOGroupRoleMapping(SQLModel, table=True):
+    """Maps an IdP group name to a Role, applied automatically on every SSO
+    login (see auth/providers/oidc.py's resolve_group_mapped_role_id) —
+    CLAUDE.md's phase-2 "auto-mapping IdP group claims to roles" automation.
+    Deliberately global, not scoped to a specific SSOProviderConfig: v1 only
+    ever has one active provider at a time (see api/sso.py's
+    _assert_single_enabled), so there's nothing to disambiguate yet.
+
+    `order` gives mappings the exact same "evaluated in order, last match
+    wins" semantics as Rule (see CLAUDE.md's rule-matching section) —
+    reusing a mental model this project's admins already know, rather than
+    inventing a new one (e.g. "most privileged role wins") for what's
+    otherwise the same kind of ordered-precedence problem. A user whose ID
+    token's group claim contains more than one mapped group gets whichever
+    mapping is evaluated last.
+
+    Applied on every login, not just first provisioning: if a mapping still
+    matches, it overwrites User.role_id each time, keeping the user's role
+    in sync with their current IdP group membership. This means an admin's
+    manual role change made directly in PerchTail doesn't stick past that
+    user's next SSO login if their groups still match a configured mapping
+    — the IdP is treated as the source of truth once a mapping exists for
+    it, same spirit as an IdP-driven SSO relationship generally. Deleting
+    the mapping (or removing the user from the group) stops the resync."""
+
+    __tablename__ = "sso_group_role_mapping"
+
+    id: int | None = Field(default=None, primary_key=True)
+    order: int
+    group_name: str
+    role_id: int = Field(foreign_key="role.id")
+
+
 class AuthSession(SQLModel, table=True):
     """Server-side session backing the login cookie. Only the SHA-256 hash of
     the token is stored — same rationale as password hashing — so a DB leak

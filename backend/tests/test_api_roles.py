@@ -80,6 +80,16 @@ def test_manage_users_capability_can_list_roles_but_not_write(session, client_fo
     assert client.post("/roles", json={"name": "X"}).status_code == 403
 
 
+def test_manage_sso_capability_can_list_roles_but_not_write(session, client_for):
+    # Needed to populate the role picker for SSO group-role mappings
+    # (see api/sso.py) -- not a general roles-management grant.
+    user = _make_user(session, global_capabilities=[GlobalCapability.manage_sso])
+    client = client_for(user)
+
+    assert client.get("/roles").status_code == 200
+    assert client.post("/roles", json={"name": "X"}).status_code == 403
+
+
 def test_non_super_admin_cannot_create_super_admin_role(session, manage_roles_client):
     response = manage_roles_client.post(
         "/roles", json={"name": "Sneaky Admin", "is_super_admin": True}
