@@ -230,6 +230,14 @@ def run_indexing_sweep() -> None:
             except Exception:
                 logger.exception("search_index.sweep_failed", source_id=source.id)
 
+    # Alerting (app.alerts) rides on this same sweep rather than its own
+    # scheduler job -- it needs to see this sweep's freshly-updated
+    # SearchIndexState.indexed_at timestamps, so it runs right after,
+    # never concurrently with or ahead of indexing.
+    from app.alerts import evaluate_alerts
+
+    evaluate_alerts()
+
 
 _HIGHLIGHT_START = "\x01"
 _HIGHLIGHT_END = "\x02"
@@ -337,3 +345,44 @@ def search(
         )
 
     return hits
+
+
+def search_content_only(
+    session: Session, query: str, source_ids: set[int], limit: int = 200
+) -> list[SearchHit]:
+    """Same MATCH-query shape as search(), but column-filtered to `snippet`
+    only, never `file_path` — used by app.alerts to check for newly
+    appeared content matching a saved query. A path match wouldn't make
+    sense there: a file's path doesn't change just because a new line got
+    appended to it, so it could never be "new" the way a fresh line is."""
+    if not source_ids:
+        return []
+
+    match_query = 'snippet:"' + query.replace('"', '""') + '"'
+    placeholders = ", ".join(f":sid{i}" for i in range(len(source_ids)))
+    sql = (
+        "SELECT source_id, file_path, line_number, "
+        "snippet(search_index_fts, 3, :highlight_start, :highlight_end, '…', 12) "
+        "AS content_highlighted "
+        "FROM search_index_fts WHERE search_index_fts MATCH :query "
+        f"AND source_id IN ({placeholders}) ORDER BY rank LIMIT :limit"
+    )
+    params: dict[str, object] = {
+        "query": match_query,
+        "limit": limit,
+        "highlight_start": _HIGHLIGHT_START,
+        "highlight_end": _HIGHLIGHT_END,
+    }
+    params.update({f"sid{i}": sid for i, sid in enumerate(source_ids)})
+
+    rows = session.execute(text(sql), params).all()
+    return [
+        SearchHit(
+            source_id=row.source_id,
+            file_path=row.file_path,
+            line_number=row.line_number,
+            snippet_html=_escape_snippet(row.content_highlighted),
+            matched_field="content",
+        )
+        for row in rows
+    ]

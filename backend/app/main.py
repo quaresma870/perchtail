@@ -12,6 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.agent_registry import get_agent_registry
 from app.api.agent_ws import router as agent_ws_router
+from app.api.alerts import router as alerts_router
 from app.api.archive import router as archive_router
 from app.api.auth import router as auth_router
 from app.api.customers import router as customers_router
@@ -89,6 +90,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="PerchTail", version="0.1.1", lifespan=lifespan)
 app.add_middleware(RequestIDMiddleware)
 app.include_router(auth_router)
+app.include_router(alerts_router)
 app.include_router(archive_router)
 app.include_router(customers_router)
 app.include_router(folders_router)

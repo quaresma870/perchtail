@@ -9,6 +9,20 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Added
+- Alerting: a new "Alerts" page for saving a search query and getting a
+  webhook notification when new matching content shows up in a source's
+  index. Rides entirely on the existing full-text search index/indexer —
+  evaluated right after every indexing sweep, only re-checking files whose
+  index entry has changed since the alert's last check, and only ever
+  matching newly-appeared line content (never a filename match, which
+  can't meaningfully be "new"). RBAC is re-checked on every evaluation, not
+  just at creation, so losing access to a source silently stops that
+  alert's scope without needing to edit or delete it. A per-alert **Test**
+  button sends a synthetic webhook so the receiver can be verified without
+  waiting for real content. Alerts are owned by the creating user (simple
+  list/create/enable/delete, not part of the customer/folder/source grant
+  tree), and the nav entry is gated by the same deployment-wide toggle as
+  Search, since there's nothing for an alert to watch with it off.
 - Search now matches file paths and source names/hosts, not just line
   content. A query matching a file's path (but none of its lines) surfaces
   that file as a "filename match" hit; a query matching a source's name or

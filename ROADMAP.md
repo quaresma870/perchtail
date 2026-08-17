@@ -462,7 +462,7 @@ they come before any connector or UI work, not after.
       the query should surface even if none of its lines happen to contain
       that text (e.g. searching "win-app-02" should find the source, not just
       lines that literally say "win-app-02")
-- [ ] Alerting — notify on new content matching a saved search (see the
+- [x] Alerting — notify on new content matching a saved search (see the
       Alerting design notes below for the working scope decision)
 - [ ] IdP group-claim-to-role auto-mapping
 - [ ] System/operational health endpoint(s) for external monitoring
@@ -615,41 +615,69 @@ they come before any connector or UI work, not after.
 
 ### Notes on decisions made — alerting
 
-- **Scope, as currently understood: content-match alerts, not operational
-  health alerts.** "Alerting" in CLAUDE.md's phase list is one word with no
-  further spec; read in context (immediately after full-text search in the
-  same sentence) as "save a search, get notified when new indexed content
-  matches it" — extending the Phase 3 index rather than a separate
-  system-health-alerting concern (which the new monitoring-endpoint item
-  below covers instead). Flagged here explicitly since this is a judgment
-  call on an underspecified word, not a confirmed requirement.
+- **Built as scoped: content-match alerts, not operational health alerts.**
+  "Alerting" in CLAUDE.md's phase list is one word with no further spec;
+  read in context (immediately after full-text search in the same
+  sentence) as "save a search, get notified when new indexed content
+  matches it" — extending the Phase 3 index rather than the separate
+  system-health-alerting concern the monitoring endpoint covers instead.
 - **Rides on the existing FTS5 index and indexer, no parallel structure**:
-  a new `Alert` row (owner, saved query, optional source scope, webhook
-  config, `last_checked_at`) and an `evaluate_alerts()` sweep (same
-  APScheduler shape as `run_indexing_sweep`) that only looks at files whose
-  `SearchIndexState.indexed_at` advanced since the alert's last check —
-  reusing the timestamp signal already in place rather than depending on
-  FTS5 rowid stability (rowids aren't stable across re-indexes, since a
-  changed file's rows are deleted and reinserted).
+  a new `Alert` row (`app/models.py` — owner, saved query, optional source
+  scope, webhook URL, `enabled`, `last_checked_at`) and `app/alerts.py`'s
+  `evaluate_alerts()`, called directly at the end of every
+  `run_indexing_sweep()` rather than registered as its own APScheduler
+  job — it needs that sweep's just-updated `SearchIndexState.indexed_at`
+  timestamps, and chaining them guarantees it never runs concurrently with
+  or ahead of indexing the way two independent interval jobs could.
+  `evaluate_alerts()` only re-checks files whose `indexed_at` advanced past
+  the alert's `last_checked_at`, reusing that timestamp signal rather than
+  depending on FTS5 rowid stability (rowids aren't stable across
+  re-indexes, since a changed file's rows are deleted and reinserted).
+- **Alert matching is content-only, never path/filename** — reuses
+  `search_index.search_content_only()`, a column-filtered sibling of the
+  Search page's `search()` that never matches `file_path`. A file's path
+  doesn't change when a new line is appended to it, so a path match could
+  never be "new content" the way a fresh line is; including path matches
+  here would mean an alert fires forever on every sweep for any file whose
+  name happens to match the query.
 - **Webhook-only notification channel for v1, not email** — no SMTP
   sending exists anywhere in the project today (temporary passwords are
   displayed once in the UI, never emailed), so email would be new
-  infrastructure; a generic JSON webhook covers Slack/Teams/PagerDuty/
-  generic consumers with zero new dependencies, matching the project's
-  minimal-infra ethos.
+  infrastructure; a generic JSON webhook (`POST` with `alert_id`,
+  `alert_name`, `query`, `matched_count`, and up to 10 `hits`) covers
+  Slack/Teams/PagerDuty/generic consumers with zero new dependencies
+  (`httpx`, already a dependency), matching the project's minimal-infra
+  ethos. A per-alert **Test** button (`POST /alerts/{id}/test`) sends one
+  synthetic hit so the owner can verify the receiver works without waiting
+  for real matching content.
 - **An alert can only ever fire on sources with `search_indexing_enabled`
   already on** — a hard consequence of riding on the FTS5 index, not a
   separate opt-in decision to design.
-- **A webhook is a new "content leaves the system" path**, same category of
-  decision as full-text search's own opt-in indexing (CLAUDE.md's "nothing
-  sitting around afterward for someone to leak" ethos) — enabling an alert
-  is a deliberate export choice, worth calling out explicitly in the UI
-  copy when this gets built, not just in this doc.
 - **RBAC is re-checked at evaluation time, not just at alert-creation
-  time** — an alert only ever evaluates sources the owning user can
-  currently view via `visible_source_ids`, so revoking a grant silently
-  stops that alert's scope from firing again, without needing to remember
-  to also edit or delete the alert itself.
+  time** — `_resolve_alert_source_ids()` re-runs `visible_source_ids` on
+  every sweep, so revoking the owner's grant silently stops that alert's
+  scope from firing again without needing to remember to also edit or
+  delete it. One refinement beyond the original note: when an alert is
+  *fully* blocked (owner deactivated, grant revoked, nothing indexed in
+  scope), `evaluate_alerts()` deliberately does **not** advance
+  `last_checked_at` — so if access is later restored, the next sweep
+  re-checks everything that was missed while blocked, instead of silently
+  treating the gap as already-seen.
+- **Alerts are owned by the creating user, not RBAC-grant-scoped like
+  sources/folders/customers** — `app/api/alerts.py` is a simple
+  owner-only CRUD surface (list/create/update/delete all scoped to
+  `Alert.user_id == current_user`), not woven into the
+  customer/folder/source grant tree. A saved search and its webhook are
+  personal, like a bookmark, not an org-wide resource; RBAC still governs
+  *which sources* an alert is allowed to watch, just not who can manage
+  the alert row itself.
+- **Frontend**: a new "Alerts" nav entry, gated by the same
+  `search_view_enabled` system-setting toggle as Search (see
+  `App.svelte`) — alerting is meaningless without search-indexed content
+  to watch, so there'd be nothing for the page to do with that toggle
+  off. `Alerts.svelte` covers create/list/enable-toggle/delete/test; full
+  in-place editing of an existing alert's query/webhook/source scope
+  isn't built (delete-and-recreate covers it for v1).
 
 ### Notes on decisions made — system/operational health endpoint(s)
 
