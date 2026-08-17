@@ -130,11 +130,14 @@ export interface SSOStatus {
   name: string | null
 }
 
+export type SearchMatchedField = 'content' | 'path'
+
 export interface SearchHit {
   source_id: number
   file_path: string
   line_number: number
   snippet_html: string
+  matched_field: SearchMatchedField
 }
 
 export interface SystemSettings {

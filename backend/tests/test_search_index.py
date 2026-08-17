@@ -224,6 +224,60 @@ def test_search_returns_no_hits_for_unmatched_query(session, tmp_path):
     assert search(session, "nonexistent-term-xyz", source_ids=None) == []
 
 
+def test_search_marks_content_hits_as_matched_field_content(session, tmp_path):
+    source = _source(session, tmp_path)
+    _rule(session, source.id, "**/*.log")
+    (tmp_path / "app.log").write_text("connection refused by upstream\n")
+    index_source(session, source)
+
+    hits = search(session, "refused", source_ids=None)
+
+    assert len(hits) == 1
+    assert hits[0].matched_field == "content"
+
+
+def test_search_matches_file_path_even_when_no_line_contains_the_query(session, tmp_path):
+    source = _source(session, tmp_path)
+    _rule(session, source.id, "**/*.log")
+    (tmp_path / "win-app-02.log").write_text("first line\nsecond line\nthird line\n")
+    index_source(session, source)
+
+    hits = search(session, "win-app-02", source_ids=None)
+
+    assert len(hits) == 1
+    assert hits[0].matched_field == "path"
+    assert hits[0].file_path == "win-app-02.log"
+    assert "<mark>win-app-02</mark>" in hits[0].snippet_html
+
+
+def test_search_dedupes_path_only_matches_to_one_hit_per_file(session, tmp_path):
+    source = _source(session, tmp_path)
+    _rule(session, source.id, "**/*.log")
+    lines = "\n".join(f"line {i}" for i in range(20))
+    (tmp_path / "access-win-app-02.log").write_text(lines + "\n")
+    index_source(session, source)
+
+    hits = search(session, "win-app-02", source_ids=None)
+
+    # 20 lines all share the matching path, but should collapse to a
+    # single representative hit rather than flooding results with
+    # near-duplicates of the same file.
+    assert len(hits) == 1
+    assert hits[0].matched_field == "path"
+
+
+def test_search_prefers_content_matches_over_path_matches_for_the_same_row(session, tmp_path):
+    source = _source(session, tmp_path)
+    _rule(session, source.id, "**/*.log")
+    (tmp_path / "keyword.log").write_text("this line mentions keyword directly\n")
+    index_source(session, source)
+
+    hits = search(session, "keyword", source_ids=None)
+
+    assert len(hits) == 1
+    assert hits[0].matched_field == "content"
+
+
 def test_run_indexing_sweep_only_processes_enabled_opted_in_sources(tmp_path, monkeypatch):
     # run_indexing_sweep() opens its own session against app.db.engine
     # (deferred import, since app.db itself depends on this module for

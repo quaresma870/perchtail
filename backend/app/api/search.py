@@ -16,6 +16,7 @@ class SearchHitPublic(BaseModel):
     file_path: str
     line_number: int
     snippet_html: str
+    matched_field: str
 
 
 @router.get("", response_model=list[SearchHitPublic])
@@ -35,6 +36,7 @@ def search(
             file_path=hit.file_path,
             line_number=hit.line_number,
             snippet_html=hit.snippet_html,
+            matched_field=hit.matched_field,
         )
         for hit in hits
     ]
