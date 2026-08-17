@@ -9,6 +9,17 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Added
+- Detailed health endpoint for external monitoring: `GET /monitoring/health`,
+  gated by its own deployment-wide bearer token (generated from Settings →
+  System, hashed at rest, shown once) rather than user-session auth — a
+  monitoring system like Zabbix or Prometheus can't do an interactive login.
+  Reports overall status (ok/degraded/error), DB reachability + latency,
+  scratch usage, source counts by protocol, agent connected-vs-configured
+  counts, last search-indexing sweep time + overdue flag, and APScheduler job
+  health, alongside app version and uptime. Stays separate from the existing
+  fast, unauthenticated `GET /healthz` liveness check. See
+  `docs/monitoring.md` for the response shape and a Zabbix HTTP-agent-item +
+  JSONPath integration guide.
 - Viewer: a "Find All" results panel (`lib/find-in-document.ts`,
   `FindInDocumentPanel.svelte`) alongside the existing Ctrl+F inline
   search — lists every match in the currently open file (line number +

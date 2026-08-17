@@ -197,3 +197,22 @@ class SystemSetting(SQLModel, table=True):
 
     key: str = Field(primary_key=True)
     value: str
+
+
+class MonitoringToken(SQLModel, table=True):
+    """A single, deployment-wide bearer token gating the detailed health
+    endpoint (GET /monitoring/health, see app/api/monitoring.py) — a
+    monitoring system like Zabbix can't do an interactive cookie-session
+    login, so this is deliberately separate from user auth. Only the
+    SHA-256 hash is stored, same "hash at rest, plaintext shown once"
+    pattern as Source.agent_token_hash and session tokens; generating a
+    new one invalidates whatever token was issued before. Singleton by
+    convention (at most one row) rather than a dedicated key-value slot,
+    since it's a credential, not a feature toggle -- SystemSetting's
+    get_bool/set_bool shape doesn't fit a secret."""
+
+    __tablename__ = "monitoring_token"
+
+    id: int | None = Field(default=None, primary_key=True)
+    token_hash: str
+    created_at: datetime
