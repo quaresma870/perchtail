@@ -8,6 +8,16 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Security
+- Fixed an SSRF vulnerability (#49) in `Alert.webhook_url`: any authenticated
+  user — including a freshly auto-provisioned no-access account — could point
+  a webhook at an internal address (loopback, link-local/cloud-metadata,
+  RFC1918 private ranges) and use `POST /alerts/{id}/test` as a reachability
+  oracle against the server's own network. `webhook_url` is now resolved and
+  checked against disallowed address ranges both when an alert is created or
+  updated and again immediately before the webhook is actually sent, closing
+  the DNS-rebinding gap between those two points in time.
+
 ### Added
 - Alerting: a new "Alerts" page for saving a search query and getting a
   webhook notification when new matching content shows up in a source's

@@ -10,6 +10,7 @@ from app.db import get_session
 from app.models import Alert
 from app.search_index import SearchHit
 from app.timeutils import utcnow
+from app.webhook_safety import UnsafeWebhookURLError, assert_webhook_url_is_safe
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -48,6 +49,10 @@ class AlertCreate(BaseModel):
     def _webhook_url_is_http(cls, v: str) -> str:
         if not (v.startswith("http://") or v.startswith("https://")):
             raise ValueError("webhook_url must be an http:// or https:// URL")
+        try:
+            assert_webhook_url_is_safe(v)
+        except UnsafeWebhookURLError as exc:
+            raise ValueError(str(exc)) from exc
         return v
 
 
@@ -61,8 +66,14 @@ class AlertUpdate(BaseModel):
     @field_validator("webhook_url")
     @classmethod
     def _webhook_url_is_http(cls, v: str | None) -> str | None:
-        if v is not None and not (v.startswith("http://") or v.startswith("https://")):
+        if v is None:
+            return v
+        if not (v.startswith("http://") or v.startswith("https://")):
             raise ValueError("webhook_url must be an http:// or https:// URL")
+        try:
+            assert_webhook_url_is_safe(v)
+        except UnsafeWebhookURLError as exc:
+            raise ValueError(str(exc)) from exc
         return v
 
 

@@ -235,6 +235,40 @@ def test_send_webhook_posts_payload_and_returns_true_on_success(monkeypatch):
     assert posted["json"]["hits"][0]["file_path"] == "app.log"
 
 
+def test_send_webhook_blocks_a_url_that_now_resolves_privately(monkeypatch):
+    # Simulates DNS rebinding: the URL passed validation when the alert was
+    # created, but resolves to a private address by the time send_webhook
+    # actually dispatches it -- the pre-send check in app.alerts must catch
+    # this even though app.api.alerts already validated it once.
+    import socket
+
+    posted = []
+
+    def fake_getaddrinfo(host, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    def fake_post(url, json, timeout):
+        posted.append(url)
+        return SimpleNamespace(raise_for_status=lambda: None)
+
+    monkeypatch.setattr("app.webhook_safety.socket.getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr("app.alerts.httpx.post", fake_post)
+
+    alert = Alert(
+        id=1,
+        user_id=1,
+        name="my alert",
+        query="refused",
+        webhook_url="https://rebinds-to-internal.example/hook",
+        created_at=utcnow(),
+    )
+
+    ok = send_webhook(alert, [])
+
+    assert ok is False
+    assert posted == []
+
+
 def test_send_webhook_returns_false_on_http_error(monkeypatch):
     import httpx
 

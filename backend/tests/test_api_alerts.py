@@ -71,6 +71,18 @@ def test_create_alert_rejects_non_http_webhook_url(session, client_for):
     assert response.status_code == 422
 
 
+def test_create_alert_rejects_webhook_url_pointing_at_a_private_address(session, client_for):
+    user = _make_user(session)
+    client = client_for(user)
+
+    response = client.post(
+        "/alerts",
+        json={"name": "x", "query": "q", "webhook_url": "http://127.0.0.1:8000/hook"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_create_alert_requires_visible_source(session, client_for):
     user = _make_user(session, is_super_admin=False)
     source = _make_source(session)
@@ -170,6 +182,20 @@ def test_update_alert_can_disable_and_rename(session, client_for):
     assert response.status_code == 200
     assert response.json()["enabled"] is False
     assert response.json()["name"] == "renamed"
+
+
+def test_update_alert_rejects_webhook_url_pointing_at_a_private_address(session, client_for):
+    user = _make_user(session)
+    client = client_for(user)
+    created = client.post(
+        "/alerts", json={"name": "a", "query": "q", "webhook_url": "https://example.com/hook"}
+    ).json()
+
+    response = client.patch(
+        f"/alerts/{created['id']}", json={"webhook_url": "http://169.254.169.254/hook"}
+    )
+
+    assert response.status_code == 422
 
 
 def test_update_alert_rejects_source_the_user_cannot_view(session, client_for):

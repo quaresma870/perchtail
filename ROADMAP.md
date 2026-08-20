@@ -678,6 +678,26 @@ they come before any connector or UI work, not after.
   off. `Alerts.svelte` covers create/list/enable-toggle/delete/test; full
   in-place editing of an existing alert's query/webhook/source scope
   isn't built (delete-and-recreate covers it for v1).
+- **SSRF fix (issue #49)**: `Alert.webhook_url` was validated only for
+  scheme (`http(s)://`), so any authenticated user — including a freshly
+  auto-provisioned "No Access" account, since `source_id` is optional —
+  could point it at an internal address and use `POST /alerts/{id}/test`
+  as a reachability oracle for the server's own network, including cloud
+  metadata endpoints. Fixed with `app/webhook_safety.py`:
+  `assert_webhook_url_is_safe()` resolves the hostname and rejects
+  loopback/link-local/private/reserved/multicast/unspecified addresses.
+  Called twice, not once — at `AlertCreate`/`AlertUpdate` validation time
+  in `app/api/alerts.py` (fast feedback, a `422` instead of a `201`), and
+  again in `app/alerts.py::send_webhook()` immediately before the actual
+  `httpx.post`, to close the DNS-rebinding gap where a hostname resolves
+  publicly at save time and privately by the time it's dispatched.
+  `httpx.post`'s `follow_redirects` already defaults to `False` in this
+  project's installed version, so no separate redirect fix was needed.
+  Deliberately not built (tracked as follow-ups, not required to close
+  the vulnerability): an admin-configurable allowlist/escape-hatch for
+  self-hosted setups that genuinely want an internal webhook receiver,
+  and rate-limiting on `/alerts/{id}/test` (still a reachability oracle
+  for *public* addresses, just no longer an internal one).
 
 ### Notes on decisions made — system/operational health endpoint(s)
 

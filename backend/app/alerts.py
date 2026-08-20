@@ -15,6 +15,7 @@ from app.logging_config import get_logger
 from app.models import Alert, SearchIndexState, Source
 from app.search_index import SearchHit, search_content_only
 from app.timeutils import utcnow
+from app.webhook_safety import UnsafeWebhookURLError, assert_webhook_url_is_safe
 
 logger = get_logger(__name__)
 
@@ -101,10 +102,18 @@ def send_webhook(alert: Alert, hits: list[SearchHit]) -> bool:
         ],
     }
     try:
+        # Re-checked here, not just at alert create/update time (see
+        # app.api.alerts), to close the DNS-rebinding gap: the hostname
+        # could have resolved to a public address when the alert was saved
+        # and to a private one by the time it's actually dispatched.
+        assert_webhook_url_is_safe(alert.webhook_url)
         response = httpx.post(alert.webhook_url, json=payload, timeout=_WEBHOOK_TIMEOUT_SECONDS)
         response.raise_for_status()
         logger.info("alert.webhook_sent", alert_id=alert.id, matched_count=len(hits))
         return True
+    except UnsafeWebhookURLError as exc:
+        logger.warning("alert.webhook_blocked", alert_id=alert.id, error=str(exc))
+        return False
     except httpx.HTTPError as exc:
         logger.warning("alert.webhook_failed", alert_id=alert.id, error=str(exc))
         return False
