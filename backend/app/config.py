@@ -11,6 +11,16 @@ class Settings(BaseSettings):
     log_retention_days: int = 30
     database_url: str = "sqlite:///./data/perchtail.db"
     credential_encryption_key: str = "changeme"
+    # Per-install random salt for deriving the Fernet key from
+    # credential_encryption_key (see app/crypto.py) — generated on first use
+    # and persisted here, not stored in the DB, since crypto.py has no DB
+    # session and needs this before any request touches the database.
+    credential_salt_path: str = "./data/credential_salt"
+    # Persisted across connections so paramiko can detect a host key that
+    # changed since the last connection (see app/collectors/ssh.py) — a
+    # fresh SSHClient is created per call with no persistence otherwise,
+    # so every connection would silently trust whatever key is presented.
+    ssh_known_hosts_path: str = "./data/ssh_known_hosts"
     # Username for the auto-seeded break-glass super-admin (see
     # app/bootstrap.py's seed_initial_super_admin) — only used on a fresh
     # deployment with zero users; its password is randomly generated and

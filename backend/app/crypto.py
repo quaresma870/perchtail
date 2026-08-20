@@ -1,16 +1,47 @@
 import base64
-import hashlib
 import json
+import secrets
 from functools import lru_cache
+from pathlib import Path
 
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from app.config import get_settings
 
+# OWASP's current floor for PBKDF2-HMAC-SHA256 (2023 cheat sheet). A single
+# unsalted SHA-256 round -- the previous implementation -- has no work
+# factor at all, so even a reasonably long CREDENTIAL_ENCRYPTION_KEY was far
+# cheaper to brute-force than it should be.
+_PBKDF2_ITERATIONS = 600_000
+_KEY_LENGTH_BYTES = 32
+
+
+def _load_or_create_salt(path: Path) -> bytes:
+    """A per-install random salt, generated once and persisted next to the
+    database rather than derived from anything -- reusing the same salt
+    across every install would defeat its purpose (cross-deployment
+    rainbow-table resistance), and it has to stay stable across restarts or
+    every previously-encrypted credential becomes undecryptable the moment
+    it changes."""
+    if path.exists():
+        return path.read_bytes()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    salt = secrets.token_bytes(16)
+    path.write_bytes(salt)
+    return salt
+
 
 def _derive_fernet_key(secret: str) -> bytes:
-    digest = hashlib.sha256(secret.encode("utf-8")).digest()
-    return base64.urlsafe_b64encode(digest)
+    salt = _load_or_create_salt(Path(get_settings().credential_salt_path))
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=_KEY_LENGTH_BYTES,
+        salt=salt,
+        iterations=_PBKDF2_ITERATIONS,
+    )
+    return base64.urlsafe_b64encode(kdf.derive(secret.encode("utf-8")))
 
 
 @lru_cache

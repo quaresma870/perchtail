@@ -41,6 +41,13 @@ configure_logging()
 logger = get_logger(__name__)
 scheduler = BackgroundScheduler()
 
+# The default a fresh checkout ships with (see app/config.py) -- anyone can
+# derive the encryption key it produces from this project's own public
+# source, so starting with it still set would silently encrypt every
+# stored credential (SSH keys, SMB/WinRM passwords, SSO client secrets)
+# under a key that isn't actually secret at all.
+_INSECURE_DEFAULT_CREDENTIAL_KEY = "changeme"
+
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -54,6 +61,17 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
+    if settings.credential_encryption_key == _INSECURE_DEFAULT_CREDENTIAL_KEY:
+        logger.critical("startup.insecure_credential_encryption_key")
+        raise RuntimeError(
+            "CREDENTIAL_ENCRYPTION_KEY is still the insecure default "
+            f"({_INSECURE_DEFAULT_CREDENTIAL_KEY!r}) -- refusing to start. Set a "
+            "real value in .env before starting (see README's Quick start / "
+            ".env.example); every stored credential is encrypted with a key "
+            "derived from it, so this can't be silently defaulted."
+        )
+
     init_db()
     get_agent_registry().bind_loop(asyncio.get_running_loop())
     with Session(engine) as session:
@@ -62,7 +80,6 @@ async def lifespan(app: FastAPI):
         seed_no_access_role(session)
         seed_severity_patterns(session)
 
-    settings = get_settings()
     store = get_scratch_store()
     scheduler.add_job(
         store.sweep_idle,

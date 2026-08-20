@@ -8,6 +8,23 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Security
+- SSH connector now persists known host keys across connections
+  (`ssh_known_hosts_path`) instead of trusting whatever key each fresh
+  connection presents with no memory of previous ones — a connection to a
+  host whose key changed since it was last seen now fails loudly instead
+  of silently succeeding, closing a man-in-the-middle window on every SSH
+  source.
+- Credential encryption now derives its key via PBKDF2-HMAC-SHA256 (600k
+  iterations) with a persisted per-install salt, replacing a single
+  unsalted SHA-256 round that had no work factor at all. The app also now
+  refuses to start if `CREDENTIAL_ENCRYPTION_KEY` is still the shipped
+  `"changeme"` default, rather than silently encrypting every stored
+  credential under a key derivable from this project's own public source.
+  **Breaking for existing deployments**: previously-encrypted credentials
+  (source SSH/SMB/WinRM secrets, SSO client secrets) can't be decrypted
+  under the new derivation — reconfigure them after upgrading.
+
 ### Added
 - Search now matches file paths and source names/hosts, not just line
   content. A query matching a file's path (but none of its lines) surfaces
