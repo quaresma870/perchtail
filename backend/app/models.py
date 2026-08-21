@@ -184,6 +184,43 @@ class SearchIndexState(SQLModel, table=True):
     indexed_at: datetime
 
 
+class Alert(SQLModel, table=True):
+    """Phase 3 alerting (see ROADMAP.md) — notifies a webhook when new
+    content matching `query` appears in a source's full-text search index.
+    Rides entirely on the existing FTS5 index (app/search_index.py) and its
+    indexer, no parallel structure: an alert can only ever fire on sources
+    with `search_indexing_enabled` already on, evaluated by
+    `app.alerts.evaluate_alerts()` right after each indexing sweep so it
+    always sees fresh `SearchIndexState.indexed_at` timestamps.
+
+    `source_id` null means "every source the owner can currently view",
+    resolved dynamically at each evaluation via `auth.rbac.
+    visible_source_ids` rather than frozen at creation time — same "checked
+    live, not a snapshot" RBAC spirit as everywhere else in this project.
+    A consequence: revoking the owner's access to a scoped source silently
+    stops that alert from firing again, without needing to also edit or
+    delete it.
+
+    `last_checked_at` drives "new since last time" — only files whose
+    `SearchIndexState.indexed_at` has advanced past it are re-checked, not
+    the whole index every sweep. Webhook-only notification channel for v1
+    (no SMTP sending exists anywhere in this project); enabling an alert is
+    a deliberate "content leaves the system" export choice, same category
+    of decision as opting a source into indexing at all."""
+
+    __tablename__ = "alert"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id")
+    name: str
+    query: str
+    source_id: int | None = Field(default=None, foreign_key="source.id")
+    webhook_url: str
+    enabled: bool = True
+    last_checked_at: datetime | None = None
+    created_at: datetime
+
+
 class SystemSetting(SQLModel, table=True):
     """Deployment-wide feature toggles, admin-configurable from Settings ->
     System (see app/api/system_settings.py) rather than only via an env var
