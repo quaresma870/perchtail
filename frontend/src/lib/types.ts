@@ -123,11 +123,20 @@ export interface SSOProvider {
   issuer: string
   client_id: string
   scopes: string
+  group_claim: string | null
 }
 
 export interface SSOStatus {
   enabled: boolean
   name: string | null
+}
+
+export interface GroupRoleMapping {
+  id: number
+  order: number
+  group_name: string
+  role_id: number
+  role_name: string
 }
 
 export type SearchMatchedField = 'content' | 'path'
@@ -142,4 +151,38 @@ export interface SearchHit {
 
 export interface SystemSettings {
   search_view_enabled: boolean
+}
+
+export interface Alert {
+  id: number
+  name: string
+  query: string
+  source_id: number | null
+  webhook_url: string
+  enabled: boolean
+  last_checked_at: string | null
+}
+
+export interface AlertCreate {
+  name: string
+  query: string
+  source_id?: number | null
+  webhook_url: string
+  enabled?: boolean
+}
+
+export interface AlertUpdate {
+  name?: string
+  query?: string
+  source_id?: number | null
+  webhook_url?: string
+  enabled?: boolean
+}
+
+export interface MonitoringTokenResult {
+  token: string
+}
+
+export interface MonitoringTokenStatus {
+  configured: boolean
 }

@@ -15,9 +15,11 @@ const apiPrefixes = [
   '/roles',
   '/users',
   '/search',
+  '/alerts',
   '/sso',
   '/system-settings',
   '/severity-patterns',
+  '/monitoring',
   '/healthz',
 ]
 

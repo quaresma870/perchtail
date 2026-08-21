@@ -24,8 +24,52 @@ release ships (0.x releases may include breaking changes between minors).
   **Breaking for existing deployments**: previously-encrypted credentials
   (source SSH/SMB/WinRM secrets, SSO client secrets) can't be decrypted
   under the new derivation — reconfigure them after upgrading.
+- Fixed an SSRF vulnerability (#49) in `Alert.webhook_url`: any authenticated
+  user — including a freshly auto-provisioned no-access account — could point
+  a webhook at an internal address (loopback, link-local/cloud-metadata,
+  RFC1918 private ranges) and use `POST /alerts/{id}/test` as a reachability
+  oracle against the server's own network. `webhook_url` is now resolved and
+  checked against disallowed address ranges both when an alert is created or
+  updated and again immediately before the webhook is actually sent, closing
+  the DNS-rebinding gap between those two points in time.
 
 ### Added
+- SSO: IdP group-claim-to-role auto-mapping. Configure a "group claim" name
+  on the OIDC provider and an ordered list of group → role mappings
+  (evaluated last-match-wins, same rule as source Rules); a user's role is
+  resolved from their IdP groups and applied on every SSO login, not just
+  first provisioning, so it stays in sync as group membership changes.
+  Applies immediately on first sign-in too — a new user whose groups match
+  a mapping is provisioned straight into that role instead of always
+  landing on the no-access default. Note: this means a role changed
+  directly in PerchTail can be overwritten on that user's next login if
+  their IdP groups still match a configured mapping — remove the mapping
+  (or the user from that group) to stop the sync.
+- Alerting: a new "Alerts" page for saving a search query and getting a
+  webhook notification when new matching content shows up in a source's
+  index. Rides entirely on the existing full-text search index/indexer —
+  evaluated right after every indexing sweep, only re-checking files whose
+  index entry has changed since the alert's last check, and only ever
+  matching newly-appeared line content (never a filename match, which
+  can't meaningfully be "new"). RBAC is re-checked on every evaluation, not
+  just at creation, so losing access to a source silently stops that
+  alert's scope without needing to edit or delete it. A per-alert **Test**
+  button sends a synthetic webhook so the receiver can be verified without
+  waiting for real content. Alerts are owned by the creating user (simple
+  list/create/enable/delete, not part of the customer/folder/source grant
+  tree), and the nav entry is gated by the same deployment-wide toggle as
+  Search, since there's nothing for an alert to watch with it off.
+- Detailed health endpoint for external monitoring: `GET /monitoring/health`,
+  gated by its own deployment-wide bearer token (generated from Settings →
+  System, hashed at rest, shown once) rather than user-session auth — a
+  monitoring system like Zabbix or Prometheus can't do an interactive login.
+  Reports overall status (ok/degraded/error), DB reachability + latency,
+  scratch usage, source counts by protocol, agent connected-vs-configured
+  counts, last search-indexing sweep time + overdue flag, and APScheduler job
+  health, alongside app version and uptime. Stays separate from the existing
+  fast, unauthenticated `GET /healthz` liveness check. See
+  `docs/monitoring.md` for the response shape and a Zabbix HTTP-agent-item +
+  JSONPath integration guide.
 - Search now matches file paths and source names/hosts, not just line
   content. A query matching a file's path (but none of its lines) surfaces
   that file as a "filename match" hit; a query matching a source's name or

@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import structlog
-from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
@@ -12,10 +11,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.agent_registry import get_agent_registry
 from app.api.agent_ws import router as agent_ws_router
+from app.api.alerts import router as alerts_router
 from app.api.archive import router as archive_router
 from app.api.auth import router as auth_router
 from app.api.customers import router as customers_router
 from app.api.folders import router as folders_router
+from app.api.monitoring import router as monitoring_router
 from app.api.roles import router as roles_router
 from app.api.rules import router as rules_router
 from app.api.search import router as search_router
@@ -33,13 +34,15 @@ from app.bootstrap import (
 )
 from app.config import get_settings
 from app.db import engine, init_db
+from app.health import mark_started
 from app.logging_config import configure_logging, get_logger
+from app.scheduler import scheduler
 from app.scratch import get_scratch_store
 from app.search_index import run_indexing_sweep
+from app.version import APP_VERSION
 
 configure_logging()
 logger = get_logger(__name__)
-scheduler = BackgroundScheduler()
 
 # The default a fresh checkout ships with (see app/config.py) -- anyone can
 # derive the encryption key it produces from this project's own public
@@ -73,6 +76,7 @@ async def lifespan(app: FastAPI):
         )
 
     init_db()
+    mark_started()
     get_agent_registry().bind_loop(asyncio.get_running_loop())
     with Session(engine) as session:
         seed_system_log_source(session)
@@ -103,9 +107,10 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="PerchTail", version="0.1.1", lifespan=lifespan)
+app = FastAPI(title="PerchTail", version=APP_VERSION, lifespan=lifespan)
 app.add_middleware(RequestIDMiddleware)
 app.include_router(auth_router)
+app.include_router(alerts_router)
 app.include_router(archive_router)
 app.include_router(customers_router)
 app.include_router(folders_router)
@@ -119,6 +124,7 @@ app.include_router(search_router)
 app.include_router(system_settings_router)
 app.include_router(severity_patterns_global_router)
 app.include_router(severity_patterns_source_router)
+app.include_router(monitoring_router)
 
 
 @app.get("/healthz")

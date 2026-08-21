@@ -462,10 +462,10 @@ they come before any connector or UI work, not after.
       the query should surface even if none of its lines happen to contain
       that text (e.g. searching "win-app-02" should find the source, not just
       lines that literally say "win-app-02")
-- [ ] Alerting — notify on new content matching a saved search (see the
+- [x] Alerting — notify on new content matching a saved search (see the
       Alerting design notes below for the working scope decision)
-- [ ] IdP group-claim-to-role auto-mapping
-- [ ] System/operational health endpoint(s) for external monitoring
+- [x] IdP group-claim-to-role auto-mapping — see notes below
+- [x] System/operational health endpoint(s) for external monitoring
       (Zabbix, and ideally Prometheus too) — see notes below
 - [ ] Security hardening pass — see the dedicated section below; called out
       explicitly rather than left implicit, since this audience holds
@@ -615,76 +615,175 @@ they come before any connector or UI work, not after.
 
 ### Notes on decisions made — alerting
 
-- **Scope, as currently understood: content-match alerts, not operational
-  health alerts.** "Alerting" in CLAUDE.md's phase list is one word with no
-  further spec; read in context (immediately after full-text search in the
-  same sentence) as "save a search, get notified when new indexed content
-  matches it" — extending the Phase 3 index rather than a separate
-  system-health-alerting concern (which the new monitoring-endpoint item
-  below covers instead). Flagged here explicitly since this is a judgment
-  call on an underspecified word, not a confirmed requirement.
+- **Built as scoped: content-match alerts, not operational health alerts.**
+  "Alerting" in CLAUDE.md's phase list is one word with no further spec;
+  read in context (immediately after full-text search in the same
+  sentence) as "save a search, get notified when new indexed content
+  matches it" — extending the Phase 3 index rather than the separate
+  system-health-alerting concern the monitoring endpoint covers instead.
 - **Rides on the existing FTS5 index and indexer, no parallel structure**:
-  a new `Alert` row (owner, saved query, optional source scope, webhook
-  config, `last_checked_at`) and an `evaluate_alerts()` sweep (same
-  APScheduler shape as `run_indexing_sweep`) that only looks at files whose
-  `SearchIndexState.indexed_at` advanced since the alert's last check —
-  reusing the timestamp signal already in place rather than depending on
-  FTS5 rowid stability (rowids aren't stable across re-indexes, since a
-  changed file's rows are deleted and reinserted).
+  a new `Alert` row (`app/models.py` — owner, saved query, optional source
+  scope, webhook URL, `enabled`, `last_checked_at`) and `app/alerts.py`'s
+  `evaluate_alerts()`, called directly at the end of every
+  `run_indexing_sweep()` rather than registered as its own APScheduler
+  job — it needs that sweep's just-updated `SearchIndexState.indexed_at`
+  timestamps, and chaining them guarantees it never runs concurrently with
+  or ahead of indexing the way two independent interval jobs could.
+  `evaluate_alerts()` only re-checks files whose `indexed_at` advanced past
+  the alert's `last_checked_at`, reusing that timestamp signal rather than
+  depending on FTS5 rowid stability (rowids aren't stable across
+  re-indexes, since a changed file's rows are deleted and reinserted).
+- **Alert matching is content-only, never path/filename** — reuses
+  `search_index.search_content_only()`, a column-filtered sibling of the
+  Search page's `search()` that never matches `file_path`. A file's path
+  doesn't change when a new line is appended to it, so a path match could
+  never be "new content" the way a fresh line is; including path matches
+  here would mean an alert fires forever on every sweep for any file whose
+  name happens to match the query.
 - **Webhook-only notification channel for v1, not email** — no SMTP
   sending exists anywhere in the project today (temporary passwords are
   displayed once in the UI, never emailed), so email would be new
-  infrastructure; a generic JSON webhook covers Slack/Teams/PagerDuty/
-  generic consumers with zero new dependencies, matching the project's
-  minimal-infra ethos.
+  infrastructure; a generic JSON webhook (`POST` with `alert_id`,
+  `alert_name`, `query`, `matched_count`, and up to 10 `hits`) covers
+  Slack/Teams/PagerDuty/generic consumers with zero new dependencies
+  (`httpx`, already a dependency), matching the project's minimal-infra
+  ethos. A per-alert **Test** button (`POST /alerts/{id}/test`) sends one
+  synthetic hit so the owner can verify the receiver works without waiting
+  for real matching content.
 - **An alert can only ever fire on sources with `search_indexing_enabled`
   already on** — a hard consequence of riding on the FTS5 index, not a
   separate opt-in decision to design.
-- **A webhook is a new "content leaves the system" path**, same category of
-  decision as full-text search's own opt-in indexing (CLAUDE.md's "nothing
-  sitting around afterward for someone to leak" ethos) — enabling an alert
-  is a deliberate export choice, worth calling out explicitly in the UI
-  copy when this gets built, not just in this doc.
 - **RBAC is re-checked at evaluation time, not just at alert-creation
-  time** — an alert only ever evaluates sources the owning user can
-  currently view via `visible_source_ids`, so revoking a grant silently
-  stops that alert's scope from firing again, without needing to remember
-  to also edit or delete the alert itself.
+  time** — `_resolve_alert_source_ids()` re-runs `visible_source_ids` on
+  every sweep, so revoking the owner's grant silently stops that alert's
+  scope from firing again without needing to remember to also edit or
+  delete it. One refinement beyond the original note: when an alert is
+  *fully* blocked (owner deactivated, grant revoked, nothing indexed in
+  scope), `evaluate_alerts()` deliberately does **not** advance
+  `last_checked_at` — so if access is later restored, the next sweep
+  re-checks everything that was missed while blocked, instead of silently
+  treating the gap as already-seen.
+- **Alerts are owned by the creating user, not RBAC-grant-scoped like
+  sources/folders/customers** — `app/api/alerts.py` is a simple
+  owner-only CRUD surface (list/create/update/delete all scoped to
+  `Alert.user_id == current_user`), not woven into the
+  customer/folder/source grant tree. A saved search and its webhook are
+  personal, like a bookmark, not an org-wide resource; RBAC still governs
+  *which sources* an alert is allowed to watch, just not who can manage
+  the alert row itself.
+- **Frontend**: a new "Alerts" nav entry, gated by the same
+  `search_view_enabled` system-setting toggle as Search (see
+  `App.svelte`) — alerting is meaningless without search-indexed content
+  to watch, so there'd be nothing for the page to do with that toggle
+  off. `Alerts.svelte` covers create/list/enable-toggle/delete/test; full
+  in-place editing of an existing alert's query/webhook/source scope
+  isn't built (delete-and-recreate covers it for v1).
+- **SSRF fix (issue #49)**: `Alert.webhook_url` was validated only for
+  scheme (`http(s)://`), so any authenticated user — including a freshly
+  auto-provisioned "No Access" account, since `source_id` is optional —
+  could point it at an internal address and use `POST /alerts/{id}/test`
+  as a reachability oracle for the server's own network, including cloud
+  metadata endpoints. Fixed with `app/webhook_safety.py`:
+  `assert_webhook_url_is_safe()` resolves the hostname and rejects
+  loopback/link-local/private/reserved/multicast/unspecified addresses.
+  Called twice, not once — at `AlertCreate`/`AlertUpdate` validation time
+  in `app/api/alerts.py` (fast feedback, a `422` instead of a `201`), and
+  again in `app/alerts.py::send_webhook()` immediately before the actual
+  `httpx.post`, to close the DNS-rebinding gap where a hostname resolves
+  publicly at save time and privately by the time it's dispatched.
+  `httpx.post`'s `follow_redirects` already defaults to `False` in this
+  project's installed version, so no separate redirect fix was needed.
+  Deliberately not built (tracked as follow-ups, not required to close
+  the vulnerability): an admin-configurable allowlist/escape-hatch for
+  self-hosted setups that genuinely want an internal webhook receiver,
+  and rate-limiting on `/alerts/{id}/test` (still a reachability oracle
+  for *public* addresses, just no longer an internal one).
 
 ### Notes on decisions made — system/operational health endpoint(s)
 
-- **A separate, richer endpoint alongside the existing plain `/healthz`**,
-  not a replacement for it — `/healthz` stays a fast, unauthenticated
-  liveness check for the Docker healthcheck/orchestrator; a new endpoint
-  (`/health/detailed` or similar) carries the structured data an external
-  monitoring system like Zabbix (or Prometheus, if that gets added too)
-  actually wants to poll and alert on.
-- **Candidate contents**: overall status (ok/degraded/error), DB
-  reachability + latency, scratch usage vs `scratch_max_gb`, count of
-  enabled sources by protocol, count of currently-connected vs configured
-  agent-protocol sources, last successful search-indexing sweep time (and
-  whether any opted-in source is overdue), whether the APScheduler jobs are
-  still actually running (next-run time not stuck in the past), app
-  version, uptime.
-- **Needs its own auth, separate from user sessions** — a monitoring
-  system can't do an interactive cookie-session login. Leaning toward a
-  single long-lived, admin-generated bearer token (hashed at rest, shown
-  once at generation) scoped only to this endpoint — the same "hash at
-  rest, plaintext shown once" pattern the agent enrollment token
-  (`Source.agent_token_hash`) and session tokens already use, rather than
-  inventing a new credential-handling convention. IP-allowlisting the
-  endpoint is a reasonable *additional* deployment-level measure (nginx
-  `allow`/`deny`) but not a substitute for real auth on the app's side.
-- **Zabbix specifically favors an HTTP agent item + JSONPath preprocessing
-  per metric** (modern Zabbix, ≥5.0) against one JSON endpoint, rather than
-  one endpoint per scalar metric — plan the response shape and document
-  the JSONPath expressions for the common items (a short `docs/
-  monitoring.md`, mirroring `docs/source-setup.md`'s per-integration style)
-  rather than requiring Zabbix-specific endpoint variants.
-- **Worth designing so a Prometheus `/metrics` endpoint is a thin second
-  wrapper over the same underlying health-check internals later**, even if
-  only the Zabbix-oriented JSON endpoint ships first — several self-hosted
-  shops standardize on Prometheus+Grafana instead of (or alongside) Zabbix.
+- **Built as planned, close to the original design.** `GET /monitoring/health`
+  sits alongside the existing plain `GET /healthz`, not replacing it —
+  `/healthz` stays a fast, unauthenticated liveness check; the new endpoint
+  does a real DB round-trip and carries the structured data worth polling
+  and alerting on. Response shape and status-rollup rules (ok / degraded /
+  error) are documented in `docs/monitoring.md`, mirroring
+  `docs/source-setup.md`'s per-integration style.
+- **Contents shipped**: overall status, DB reachability + latency, scratch
+  usage vs `scratch_max_gb`, enabled-source counts by protocol,
+  connected-vs-configured agent-protocol sources (`AgentRegistry.
+  connected_count`), last successful search-indexing sweep time + an
+  overdue flag, and whether every APScheduler job has a live next-run time
+  (`app/scheduler.py`'s shared `scheduler` instance, extracted into its own
+  module so both `app/main.py` and `app/api/monitoring.py` can import it
+  without a circular dependency), app version (`app/version.py`, also now
+  what `app/main.py` passes to `FastAPI(version=...)`), and process uptime
+  (`app/health.py` — in-memory, not persisted, same "per-process state"
+  reasoning as `app.agent_registry`).
+- **Auth**: a single deployment-wide bearer token (`MonitoringToken`,
+  singleton by convention), hashed at rest and shown once on generation —
+  same pattern as `Source.agent_token_hash`. Generated/regenerated from
+  Settings → System (gated by `manage_system_settings`, same capability as
+  the rest of that page), not tied to any single user account.
+- **Zabbix**: `docs/monitoring.md` documents the HTTP-agent-item +
+  JSONPath-preprocessing-per-metric approach for modern Zabbix (≥5.0)
+  against the one JSON endpoint, with a table of the common JSONPath
+  expressions, rather than shipping Zabbix-specific endpoint variants.
+- **Prometheus**: no `/metrics` endpoint yet — the response shape is
+  documented as designed to let a future Prometheus exporter be a thin
+  text-exposition wrapper over the same internals, not a parallel
+  implementation, whenever that's actually needed.
+
+### Notes on decisions made — IdP group-claim-to-role auto-mapping
+
+- **New `SSOGroupRoleMapping` table** (`app/auth/models.py`): `order`,
+  `group_name`, `role_id`. Deliberately global, not scoped to a specific
+  `SSOProviderConfig` — v1 only ever has one active provider at a time
+  (see `_assert_single_enabled` in `api/sso.py`), so there was nothing to
+  disambiguate by adding that scoping now.
+- **Reused Rule's exact "evaluated in order, last match wins" semantics**
+  instead of inventing a new precedence rule (e.g. "most privileged role
+  wins") for what's otherwise the same kind of ordered-precedence problem
+  — this project's admins already know that mental model from rule
+  editing, so a user whose groups match more than one configured mapping
+  just gets whichever mapping is ordered last, exactly like an
+  include/exclude rule chain.
+- **A new `SSOProviderConfig.group_claim` field** (e.g. `"groups"`, or
+  `"roles"` for IdPs that use that name) names the ID token claim to read;
+  null/empty disables auto-mapping entirely, so this is fully backward
+  compatible with existing OIDC configs. `oidc.extract_claim_groups()`
+  normalizes the claim's value to a list of strings, since IdPs vary on
+  whether a single-group claim comes back as a bare string or a
+  one-element list.
+- **Applied on every login, not just first provisioning** — the harder
+  call in this design. First-provisioning-only would mean a user's role
+  never catches up when their IdP group membership changes; re-syncing on
+  every login (`OIDCProvider.complete_login`, via
+  `resolve_group_mapped_role_id`) keeps it current, at the cost of a real
+  gotcha worth flagging loudly (and documented in both
+  `SSOGroupRoleMapping`'s docstring and the SSO settings page's own copy):
+  **an admin's manual role change made directly in PerchTail doesn't
+  survive that user's next SSO login if their groups still match a
+  configured mapping.** Once a mapping exists for a group, the IdP is
+  treated as the source of truth for members of it, same spirit as an
+  IdP-driven SSO relationship generally (this is also how Okta/Google
+  Workspace-style group-sync integrations typically behave). Deleting the
+  mapping, or removing the user from the IdP group, stops the resync.
+  When no mapping matches at all (including for a returning user who was
+  never in any mapped group), the existing role is left untouched — only
+  a brand-new user with no match at all falls back to the no-access
+  default, same as before this feature existed.
+- **`GET /roles` now also accepts the `manage_sso` capability**
+  (`api/roles.py`'s `require_read`), alongside the existing
+  `manage_roles`/`manage_users` — needed so the SSO settings page's
+  mapping editor can populate its role picker for an admin who holds
+  `manage_sso` but neither of the other two. Read-only; creating/editing/
+  deleting roles still requires `manage_roles` specifically.
+- **No frontend change needed beyond the SSO settings page** — the
+  group→role mapping editor lives right below the existing OIDC provider
+  form (`SsoSettings.svelte`): an ordered list with inline delete, plus a
+  small create row (group name + role picker). No separate page, since
+  this is a small, tightly-scoped admin surface that only makes sense in
+  the context of the one OIDC provider it configures.
 
 ## Connections home redesign
 
