@@ -27,6 +27,7 @@ from app.collectors import ssh as ssh_collector
 from app.collectors import winrm as winrm_collector
 from app.collectors.base import DirEntry
 from app.config import get_settings
+from app.health import record_search_sweep
 from app.logging_config import get_logger
 from app.models import Protocol, Rule, SearchIndexState, Source
 from app.timeutils import utcnow
@@ -229,6 +230,8 @@ def run_indexing_sweep() -> None:
                 index_source(session, source)
             except Exception:
                 logger.exception("search_index.sweep_failed", source_id=source.id)
+
+    record_search_sweep()
 
 
 _HIGHLIGHT_START = "\x01"

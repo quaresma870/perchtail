@@ -145,6 +145,8 @@ scratch cache) lives in the `perchtail-data` Docker volume, so it survives
 - [ROADMAP.md](ROADMAP.md) — phased milestones and what's next
 - [docs/source-setup.md](docs/source-setup.md) — how to prepare a Linux or
   Windows server so PerchTail can reach it over SSH/SFTP, SMB, or WinRM
+- [docs/monitoring.md](docs/monitoring.md) — the detailed health endpoint for
+  external monitoring (Zabbix, Prometheus), and how to generate its token
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
   submit changes
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability

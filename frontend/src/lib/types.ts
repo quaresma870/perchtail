@@ -143,3 +143,11 @@ export interface SearchHit {
 export interface SystemSettings {
   search_view_enabled: boolean
 }
+
+export interface MonitoringTokenResult {
+  token: string
+}
+
+export interface MonitoringTokenStatus {
+  configured: boolean
+}
