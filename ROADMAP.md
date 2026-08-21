@@ -1147,6 +1147,41 @@ Everything below is a candidate, not yet triaged into "must-have before
       — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
       this is about actively looking for one before external users show up
 
+### Notes on decisions made — audit findings fixed
+
+A manual code-level security pass (SAST + live black-box testing against a
+local instance, no external exploitation tools run against anything but
+this project's own local instance) found and fixed three issues, filed as
+GitHub issues (#49, #50, #51). The SSRF fix (#49, in `Alert.webhook_url`)
+shipped alongside the alerting feature itself, since that's the branch the
+vulnerable code lives on — see that feature's own notes for it. The other
+two:
+
+- **#50 — SSH connector trusted any host key, every connection, with no
+  persistence.** `AutoAddPolicy()` alone only governs what happens for a
+  host paramiko has *never* seen; paramiko itself already raises
+  `BadHostKeyException` on a mismatch for a host it *has* on file —
+  independent of policy. The actual bug was that nothing ever loaded or
+  saved a known_hosts file, so every host looked "never seen" on every
+  single connection. Fixed by persisting host keys across connections
+  (`ssh_known_hosts_path`); `AutoAddPolicy()` itself was correct to keep.
+- **#51 — Credential encryption used a single unsalted SHA-256 round (no
+  KDF work factor) and the `"changeme"` default had no startup guard.**
+  Fixed with PBKDF2-HMAC-SHA256 (600k iterations, OWASP's 2023 floor) and
+  a persisted per-install salt (`credential_salt_path`), plus a `lifespan`
+  check that now refuses to start at all if
+  `CREDENTIAL_ENCRYPTION_KEY` is still `"changeme"`. **This changes the
+  derived key for every existing deployment** — anything encrypted under
+  the old derivation (source credentials, SSO client secrets) becomes
+  undecryptable after upgrading. Acceptable pre-1.0 (CHANGELOG.md's own
+  stated policy: "0.x releases may include breaking changes between
+  minors") given this project "hasn't seen production traffic beyond the
+  maintainer's own use" per the README, but this sharpens the existing
+  `CREDENTIAL_ENCRYPTION_KEY` rotation-path item above from "nice to have"
+  toward "actually needed soon" — the next deployment to actually hold
+  real credentials at any scale will want a rotation/re-encrypt tool
+  before its next KDF change, not after.
+
 ## Ideas worth considering (not yet triaged into a phase)
 
 Raised while discussing what else belongs on this roadmap — real candidates,

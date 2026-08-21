@@ -2,17 +2,26 @@ import io
 import posixpath
 import stat as stat_module
 import tempfile
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
 import paramiko
 
 from app.collectors.base import DirEntry
+from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.models import Rule, Source
 from app.rules import is_visible
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
+
+# Guards load_host_keys()/save_host_keys() against the shared known_hosts
+# file being read and rewritten concurrently by two connections from
+# FastAPI's thread pool at once (paramiko's HostKeys I/O isn't itself
+# thread-safe) -- see _connect()'s docstring for why this file exists at
+# all.
+_host_keys_lock = threading.Lock()
 
 
 def _connect(source: Source) -> paramiko.SSHClient:
@@ -20,13 +29,21 @@ def _connect(source: Source) -> paramiko.SSHClient:
     matching the project's fetch-on-open model (CLAUDE.md's "Live browsing &
     ephemeral fetch behavior"). credential_ref decrypts to a JSON blob with
     `username` plus either `private_key` or `password` (see docs/source-
-    setup.md for what to configure on the source server side)."""
+    setup.md for what to configure on the source server side).
+
+    Host keys are persisted across connections in a shared known_hosts file
+    (ssh_known_hosts_path) rather than trusted fresh every single time.
+    AutoAddPolicy on its own only decides what happens for a host paramiko
+    has *never* seen at all (trust-on-first-use, same as a real SSH
+    client's "accept-new" mode) — paramiko itself, independent of policy,
+    already raises BadHostKeyException if a host key it *has* on file
+    doesn't match what the server just presented. Without ever loading or
+    saving that file, every connection looked "never seen" and silently
+    trusted whatever key showed up, every time — this is the fix, not a
+    behavior change to AutoAddPolicy itself."""
     creds = decrypt_credential(source.credential_ref)
 
     client = paramiko.SSHClient()
-    # Sources are admin-configured, not arbitrary user input, so trust-on-
-    # first-use is an acceptable default here; pinning host keys is a
-    # possible future hardening, not required for this milestone.
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     connect_kwargs: dict = {"username": creds["username"], "timeout": 10}
@@ -37,7 +54,31 @@ def _connect(source: Source) -> paramiko.SSHClient:
     else:
         raise ValueError("SSH credential must include private_key or password")
 
+    known_hosts_path = Path(get_settings().ssh_known_hosts_path)
+    known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Lock only guards the file read/write, not the network round-trip in
+    # connect() below -- holding it across a potentially slow SSH handshake
+    # would serialize every concurrent connection in the app onto one
+    # source at a time, even to unrelated hosts. The narrow gap this
+    # leaves (two hosts discovered for the very first time in the same
+    # instant could clobber each other's freshly-saved entry) only ever
+    # costs a redo of TOFU for the host that lost the race, next time it's
+    # connected to -- an already-pinned host's entry was already on disk
+    # before either connection started, so it can't be un-pinned this way.
+    with _host_keys_lock:
+        if known_hosts_path.exists():
+            client.load_host_keys(str(known_hosts_path))
+
+    # If the host's key already differs from what's on file, this raises
+    # paramiko.ssh_exception.BadHostKeyException -- that's the intended
+    # MITM-detection outcome, so it's left uncaught and propagates to the
+    # caller like any other connection failure.
     client.connect(source.host, port=source.port or 22, **connect_kwargs)
+
+    with _host_keys_lock:
+        client.save_host_keys(str(known_hosts_path))
+
     return client
 
 
