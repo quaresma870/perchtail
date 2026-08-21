@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # browser silently drops Secure cookies over plain HTTP.
     session_cookie_secure: bool = True
 
+    # Login brute-force lockout (app/login_throttle.py) — consecutive failed
+    # attempts against one username before it's locked out, and how long the
+    # lockout lasts once triggered.
+    login_max_attempts: int = 5
+    login_lockout_seconds: int = 300
+
     scratch_dir: str = "./data/scratch"
     scratch_max_gb: float = 5.0
     # Backstop for crashed/disconnected clients that never send a close

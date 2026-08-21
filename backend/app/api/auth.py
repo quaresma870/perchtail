@@ -1,4 +1,5 @@
 import json
+import math
 import secrets
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
@@ -15,6 +16,7 @@ from app.config import get_settings
 from app.crypto import decrypt_secret
 from app.db import get_session
 from app.logging_config import get_logger
+from app.login_throttle import record_failure, record_success, seconds_until_unlocked
 
 logger = get_logger(__name__)
 
@@ -98,10 +100,21 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 @router.post("/login", response_model=UserPublic)
 def login(payload: LoginRequest, response: Response, session: Session = Depends(get_session)):
+    remaining = seconds_until_unlocked(payload.username)
+    if remaining is not None:
+        retry_after = math.ceil(remaining)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     user = LocalPasswordProvider().authenticate(session, payload.username, payload.password)
     if user is None:
+        record_failure(payload.username)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
+    record_success(payload.username)
     _, token = create_session(session, user)
     _set_session_cookie(response, token)
     return UserPublic.from_user(user)

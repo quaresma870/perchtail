@@ -1114,12 +1114,12 @@ first-class, tracked requirement rather than an implicit assumption.
 Everything below is a candidate, not yet triaged into "must-have before
 1.0" versus "nice-to-have" — that pass still needs doing.
 
-- [ ] Login rate limiting / brute-force lockout on `/auth/login` — no
-      throttling exists today beyond argon2id's own hashing cost
-- [ ] Security response headers on every response (CSP, X-Frame-Options,
+- [x] Login rate limiting / brute-force lockout on `/auth/login` — see
+      notes below
+- [x] Security response headers on every response (CSP, X-Frame-Options,
       X-Content-Type-Options, Referrer-Policy; HSTS is a deployment-level
       concern wherever TLS actually terminates, per CLAUDE.md's "sit behind
-      a reverse proxy" packaging note)
+      a reverse proxy" packaging note) — see notes below
 - [ ] Dependency vulnerability scanning in CI, blocking or at minimum
       reporting: `pip-audit`/`safety` (backend), `npm audit` (frontend),
       `govulncheck` (the Go agent) — three ecosystems, three tools
@@ -1146,6 +1146,44 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [ ] A formal third-party security review or pentest before declaring 1.0
       — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
       this is about actively looking for one before external users show up
+
+### Notes on decisions made — response headers and login lockout
+
+- **Security response headers** (`app/main.py`'s `SecurityHeadersMiddleware`,
+  next to the existing `RequestIDMiddleware`) apply globally to every
+  response, API and static frontend build alike — no per-route tuning,
+  since none of the headers restrict anything this app actually needs.
+  `Content-Security-Policy` is `default-src 'self'` plus `script-src
+  'self'` (no `unsafe-inline`/`unsafe-eval` — this is the directive that
+  actually matters against XSS) and `style-src 'self' 'unsafe-inline'`,
+  the one deliberate loosening: CodeMirror 6 (CLAUDE.md's chosen viewer)
+  injects its editor styles via a runtime `<style>` element (the
+  `style-mod` package), not a static stylesheet, and there's no nonce to
+  hand a static SPA build. `frame-ancestors 'none'` in the CSP is the
+  modern equivalent of the `X-Frame-Options: DENY` header sent alongside
+  it — kept both for older browsers/embedded webviews that only honor one
+  or the other. HSTS deliberately isn't set, matching the checklist item's
+  own framing — it's a deployment-level concern wherever TLS terminates.
+- **Login lockout** (`app/login_throttle.py`) is in-memory and
+  per-process, not persisted to the DB or shared across instances — an
+  accepted trade-off for this project's single-container SQLite deployment
+  model, same reasoning CLAUDE.md already gives for running APScheduler
+  in-process rather than as a separate worker. A restart clears every
+  lockout; that's a narrow, self-healing gap (an unauthenticated attacker
+  can't trigger an app restart), not a security regression.
+  **Keyed by the submitted username, not by client IP** — the threat is
+  repeated password guessing against one account, which must be caught
+  regardless of how many source IPs an attacker spreads attempts across;
+  per-IP throttling on top of this is a reasonable future addition if
+  distributed credential-stuffing against many accounts at once becomes a
+  real concern, not required to close the audit item as written. Default
+  thresholds (`login_max_attempts=5`, `login_lockout_seconds=300`,
+  `app/config.py`) return `429` with a `Retry-After` header once tripped;
+  a successful login resets the count. The tracked-username dict is
+  bounded (`_MAX_TRACKED_USERNAMES`, LRU-evicted) since usernames that
+  don't exist are cheap to submit (no password hashing is attempted) and
+  otherwise a flood of distinct nonexistent usernames could grow the dict
+  without limit.
 
 ### Notes on decisions made — audit findings fixed
 

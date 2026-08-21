@@ -2,7 +2,10 @@ import ipaddress
 import socket
 
 import pytest
-from app import models  # noqa: F401  registers tables on SQLModel.metadata
+from app import (
+    login_throttle,
+    models,  # noqa: F401  registers tables on SQLModel.metadata
+)
 from app.auth import models as auth_models  # noqa: F401  registers tables on SQLModel.metadata
 from app.db import ensure_search_schema
 from sqlalchemy.pool import StaticPool
@@ -31,6 +34,16 @@ def _fake_getaddrinfo(host, *args, **kwargs):
 @pytest.fixture(autouse=True)
 def _stub_dns_for_webhook_safety(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+
+
+@pytest.fixture(autouse=True)
+def _reset_login_throttle():
+    # app.login_throttle keeps its state in a module-level dict (see its
+    # docstring), so one test's failed-login attempts would otherwise bleed
+    # into the next test that reuses the same username.
+    login_throttle.reset_for_tests()
+    yield
+    login_throttle.reset_for_tests()
 
 
 @pytest.fixture()
