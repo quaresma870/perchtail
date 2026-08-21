@@ -20,6 +20,15 @@ release ships (0.x releases may include breaking changes between minors).
   fast, unauthenticated `GET /healthz` liveness check. See
   `docs/monitoring.md` for the response shape and a Zabbix HTTP-agent-item +
   JSONPath integration guide.
+- Search now matches file paths and source names/hosts, not just line
+  content. A query matching a file's path (but none of its lines) surfaces
+  that file as a "filename match" hit; a query matching a source's name or
+  host surfaces the source itself in a new "Sources matching" section,
+  distinct from content hits — always current since it's a live filter over
+  RBAC-visible source metadata, not part of the lagging background index.
+  `search_index_fts`'s `file_path` column is now indexed (previously
+  storage-only); existing deployments self-migrate their FTS schema and
+  re-index on the next sweep, handled automatically at startup.
 - Viewer: a "Find All" results panel (`lib/find-in-document.ts`,
   `FindInDocumentPanel.svelte`) alongside the existing Ctrl+F inline
   search — lists every match in the currently open file (line number +

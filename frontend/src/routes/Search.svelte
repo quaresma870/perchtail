@@ -2,19 +2,22 @@
   import { onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
+  import { filterSourcesByNameOrHost } from '../lib/source-match'
   import type { SearchHit, Source } from '../lib/types'
 
   let query = ''
   let hits: SearchHit[] = []
+  let allSources: Source[] = []
   let sourcesById: Record<number, Source> = {}
+  let matchingSources: Source[] = []
   let loading = false
   let searched = false
   let error = ''
 
   async function loadSources() {
     try {
-      const sources = await api.get<Source[]>('/sources')
-      sourcesById = Object.fromEntries(sources.map((s) => [s.id, s]))
+      allSources = await api.get<Source[]>('/sources')
+      sourcesById = Object.fromEntries(allSources.map((s) => [s.id, s]))
     } catch {
       // Best-effort — a missing name just falls back to "source #<id>" below,
       // the search itself doesn't depend on this.
@@ -24,6 +27,11 @@
   async function runSearch() {
     const trimmed = query.trim()
     searched = true
+    // Matching sources by name/host is a plain client-side filter over the
+    // already-fetched, RBAC-scoped source list (see lib/source-match.ts) —
+    // metadata, not indexed content, so it's always current and doesn't
+    // need a round-trip of its own.
+    matchingSources = filterSourcesByNameOrHost(allSources, trimmed)
     if (!trimmed) {
       hits = []
       return
@@ -48,6 +56,10 @@
     push(`/viewer/${hit.source_id}?${params.toString()}`)
   }
 
+  function openSource(source: Source) {
+    push(`/viewer/${source.id}`)
+  }
+
   onMount(loadSources)
 </script>
 
@@ -70,27 +82,55 @@
     <p class="error">{error}</p>
   {:else if loading}
     <p class="hint">Searching…</p>
-  {:else if searched && hits.length === 0}
+  {:else if searched && hits.length === 0 && matchingSources.length === 0}
     <p class="hint">
       No matches. Only sources with full-text search enabled (an opt-in per source, in its editor)
       are indexed, and indexing runs periodically in the background — a very recently written line
       may not be searchable yet.
     </p>
-  {:else if hits.length > 0}
-    <ul class="results">
-      {#each hits as hit, i (i)}
-        <li>
-          <button class="result" on:click={() => openHit(hit)}>
-            <div class="result-meta">
-              <span class="badge badge-accent">{sourceName(hit.source_id)}</span>
-              <span class="path">{hit.file_path}</span>
-              <span class="line">:{hit.line_number}</span>
-            </div>
-            <div class="snippet">{@html hit.snippet_html}</div>
-          </button>
-        </li>
-      {/each}
-    </ul>
+  {:else if searched}
+    {#if matchingSources.length > 0}
+      <div class="section">
+        <h2>Sources matching "{query.trim()}"</h2>
+        <ul class="results">
+          {#each matchingSources as source (source.id)}
+            <li>
+              <button class="result" on:click={() => openSource(source)}>
+                <div class="result-meta">
+                  <span class="badge badge-accent">{source.name}</span>
+                  <span class="path">{source.host}</span>
+                </div>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
+
+    {#if hits.length > 0}
+      <div class="section">
+        {#if matchingSources.length > 0}
+          <h2>Matching content</h2>
+        {/if}
+        <ul class="results">
+          {#each hits as hit, i (i)}
+            <li>
+              <button class="result" on:click={() => openHit(hit)}>
+                <div class="result-meta">
+                  <span class="badge badge-accent">{sourceName(hit.source_id)}</span>
+                  <span class="path">{hit.file_path}</span>
+                  <span class="line">:{hit.line_number}</span>
+                  {#if hit.matched_field === 'path'}
+                    <span class="badge badge-muted">filename match</span>
+                  {/if}
+                </div>
+                <div class="snippet">{@html hit.snippet_html}</div>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -113,6 +153,17 @@
   }
   .search-form input {
     flex: 1;
+  }
+  .section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .section h2 {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin: 0;
   }
   .results {
     list-style: none;
@@ -163,6 +214,14 @@
     color: var(--warning);
     border-radius: 3px;
     padding: 0 0.15rem;
+  }
+  .badge-accent {
+    background: var(--accent-soft);
+    color: var(--accent-hover);
+  }
+  .badge-muted {
+    background: var(--muted-badge-bg);
+    color: var(--muted-badge-text);
   }
   .error {
     color: var(--danger);
