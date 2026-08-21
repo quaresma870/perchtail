@@ -152,3 +152,37 @@ export interface SearchHit {
 export interface SystemSettings {
   search_view_enabled: boolean
 }
+
+export interface Alert {
+  id: number
+  name: string
+  query: string
+  source_id: number | null
+  webhook_url: string
+  enabled: boolean
+  last_checked_at: string | null
+}
+
+export interface AlertCreate {
+  name: string
+  query: string
+  source_id?: number | null
+  webhook_url: string
+  enabled?: boolean
+}
+
+export interface AlertUpdate {
+  name?: string
+  query?: string
+  source_id?: number | null
+  webhook_url?: string
+  enabled?: boolean
+}
+
+export interface MonitoringTokenResult {
+  token: string
+}
+
+export interface MonitoringTokenStatus {
+  configured: boolean
+}

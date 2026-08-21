@@ -10,6 +10,7 @@
   import SourceEditor from './routes/SourceEditor.svelte'
   import Viewer from './routes/Viewer.svelte'
   import Search from './routes/Search.svelte'
+  import Alerts from './routes/Alerts.svelte'
   import SettingsIndex from './routes/SettingsIndex.svelte'
   import Roles from './routes/Roles.svelte'
   import RoleEditor from './routes/RoleEditor.svelte'
@@ -24,6 +25,7 @@
     '/viewer': Viewer,
     '/viewer/:sourceId': Viewer,
     '/search': Search,
+    '/alerts': Alerts,
     '/settings': SettingsIndex,
     '/settings/sources': Sources,
     '/settings/sources/new': SourceEditor,
@@ -54,12 +56,14 @@
   }
   // The Search view can be turned off deployment-wide (Settings -> System);
   // guard the route itself, not just the nav link, so it's actually off for
-  // a bookmarked/typed URL too, not merely unlinked.
+  // a bookmarked/typed URL too, not merely unlinked. Alerts rides entirely
+  // on the search index (see ROADMAP.md's alerting notes), so it's gated by
+  // the same toggle -- there'd be nothing for an alert to watch otherwise.
   $: if (
     $authChecked &&
     $currentUser &&
     !$systemSettings.search_view_enabled &&
-    $currentHash.startsWith('/search')
+    ($currentHash.startsWith('/search') || $currentHash.startsWith('/alerts'))
   ) {
     push('/viewer')
   }
@@ -82,6 +86,7 @@
       <a href="#/viewer" class:active={isActive('/viewer')}>Viewer</a>
       {#if $systemSettings.search_view_enabled}
         <a href="#/search" class:active={isActive('/search')}>Search</a>
+        <a href="#/alerts" class:active={isActive('/alerts')}>Alerts</a>
       {/if}
       <a href="#/settings" class:active={isActive('/settings')}>Settings</a>
       <span class="spacer"></span>
