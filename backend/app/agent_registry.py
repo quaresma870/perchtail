@@ -65,6 +65,12 @@ class AgentRegistry:
         with self._lock:
             return source_id in self._connections
 
+    def connected_count(self) -> int:
+        """Exposed for the detailed health endpoint (app/api/monitoring.py)
+        to report connected-vs-configured agent sources."""
+        with self._lock:
+            return len(self._connections)
+
     def register(self, source_id: int, websocket: WebSocket) -> None:
         with self._lock:
             self._connections[source_id] = _AgentConnection(websocket=websocket)

@@ -169,3 +169,11 @@ export interface AlertUpdate {
   webhook_url?: string
   enabled?: boolean
 }
+
+export interface MonitoringTokenResult {
+  token: string
+}
+
+export interface MonitoringTokenStatus {
+  configured: boolean
+}

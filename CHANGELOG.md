@@ -33,6 +33,17 @@ release ships (0.x releases may include breaking changes between minors).
   list/create/enable/delete, not part of the customer/folder/source grant
   tree), and the nav entry is gated by the same deployment-wide toggle as
   Search, since there's nothing for an alert to watch with it off.
+- Detailed health endpoint for external monitoring: `GET /monitoring/health`,
+  gated by its own deployment-wide bearer token (generated from Settings →
+  System, hashed at rest, shown once) rather than user-session auth — a
+  monitoring system like Zabbix or Prometheus can't do an interactive login.
+  Reports overall status (ok/degraded/error), DB reachability + latency,
+  scratch usage, source counts by protocol, agent connected-vs-configured
+  counts, last search-indexing sweep time + overdue flag, and APScheduler job
+  health, alongside app version and uptime. Stays separate from the existing
+  fast, unauthenticated `GET /healthz` liveness check. See
+  `docs/monitoring.md` for the response shape and a Zabbix HTTP-agent-item +
+  JSONPath integration guide.
 - Search now matches file paths and source names/hosts, not just line
   content. A query matching a file's path (but none of its lines) surfaces
   that file as a "filename match" hit; a query matching a source's name or

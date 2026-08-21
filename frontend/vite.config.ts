@@ -19,6 +19,7 @@ const apiPrefixes = [
   '/sso',
   '/system-settings',
   '/severity-patterns',
+  '/monitoring',
   '/healthz',
 ]
 

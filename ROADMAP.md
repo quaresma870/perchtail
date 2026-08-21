@@ -465,7 +465,7 @@ they come before any connector or UI work, not after.
 - [x] Alerting — notify on new content matching a saved search (see the
       Alerting design notes below for the working scope decision)
 - [ ] IdP group-claim-to-role auto-mapping
-- [ ] System/operational health endpoint(s) for external monitoring
+- [x] System/operational health endpoint(s) for external monitoring
       (Zabbix, and ideally Prometheus too) — see notes below
 - [ ] Security hardening pass — see the dedicated section below; called out
       explicitly rather than left implicit, since this audience holds
@@ -701,38 +701,37 @@ they come before any connector or UI work, not after.
 
 ### Notes on decisions made — system/operational health endpoint(s)
 
-- **A separate, richer endpoint alongside the existing plain `/healthz`**,
-  not a replacement for it — `/healthz` stays a fast, unauthenticated
-  liveness check for the Docker healthcheck/orchestrator; a new endpoint
-  (`/health/detailed` or similar) carries the structured data an external
-  monitoring system like Zabbix (or Prometheus, if that gets added too)
-  actually wants to poll and alert on.
-- **Candidate contents**: overall status (ok/degraded/error), DB
-  reachability + latency, scratch usage vs `scratch_max_gb`, count of
-  enabled sources by protocol, count of currently-connected vs configured
-  agent-protocol sources, last successful search-indexing sweep time (and
-  whether any opted-in source is overdue), whether the APScheduler jobs are
-  still actually running (next-run time not stuck in the past), app
-  version, uptime.
-- **Needs its own auth, separate from user sessions** — a monitoring
-  system can't do an interactive cookie-session login. Leaning toward a
-  single long-lived, admin-generated bearer token (hashed at rest, shown
-  once at generation) scoped only to this endpoint — the same "hash at
-  rest, plaintext shown once" pattern the agent enrollment token
-  (`Source.agent_token_hash`) and session tokens already use, rather than
-  inventing a new credential-handling convention. IP-allowlisting the
-  endpoint is a reasonable *additional* deployment-level measure (nginx
-  `allow`/`deny`) but not a substitute for real auth on the app's side.
-- **Zabbix specifically favors an HTTP agent item + JSONPath preprocessing
-  per metric** (modern Zabbix, ≥5.0) against one JSON endpoint, rather than
-  one endpoint per scalar metric — plan the response shape and document
-  the JSONPath expressions for the common items (a short `docs/
-  monitoring.md`, mirroring `docs/source-setup.md`'s per-integration style)
-  rather than requiring Zabbix-specific endpoint variants.
-- **Worth designing so a Prometheus `/metrics` endpoint is a thin second
-  wrapper over the same underlying health-check internals later**, even if
-  only the Zabbix-oriented JSON endpoint ships first — several self-hosted
-  shops standardize on Prometheus+Grafana instead of (or alongside) Zabbix.
+- **Built as planned, close to the original design.** `GET /monitoring/health`
+  sits alongside the existing plain `GET /healthz`, not replacing it —
+  `/healthz` stays a fast, unauthenticated liveness check; the new endpoint
+  does a real DB round-trip and carries the structured data worth polling
+  and alerting on. Response shape and status-rollup rules (ok / degraded /
+  error) are documented in `docs/monitoring.md`, mirroring
+  `docs/source-setup.md`'s per-integration style.
+- **Contents shipped**: overall status, DB reachability + latency, scratch
+  usage vs `scratch_max_gb`, enabled-source counts by protocol,
+  connected-vs-configured agent-protocol sources (`AgentRegistry.
+  connected_count`), last successful search-indexing sweep time + an
+  overdue flag, and whether every APScheduler job has a live next-run time
+  (`app/scheduler.py`'s shared `scheduler` instance, extracted into its own
+  module so both `app/main.py` and `app/api/monitoring.py` can import it
+  without a circular dependency), app version (`app/version.py`, also now
+  what `app/main.py` passes to `FastAPI(version=...)`), and process uptime
+  (`app/health.py` — in-memory, not persisted, same "per-process state"
+  reasoning as `app.agent_registry`).
+- **Auth**: a single deployment-wide bearer token (`MonitoringToken`,
+  singleton by convention), hashed at rest and shown once on generation —
+  same pattern as `Source.agent_token_hash`. Generated/regenerated from
+  Settings → System (gated by `manage_system_settings`, same capability as
+  the rest of that page), not tied to any single user account.
+- **Zabbix**: `docs/monitoring.md` documents the HTTP-agent-item +
+  JSONPath-preprocessing-per-metric approach for modern Zabbix (≥5.0)
+  against the one JSON endpoint, with a table of the common JSONPath
+  expressions, rather than shipping Zabbix-specific endpoint variants.
+- **Prometheus**: no `/metrics` endpoint yet — the response shape is
+  documented as designed to let a future Prometheus exporter be a thin
+  text-exposition wrapper over the same internals, not a parallel
+  implementation, whenever that's actually needed.
 
 ## Connections home redesign
 
