@@ -19,6 +19,17 @@ release ships (0.x releases may include breaking changes between minors).
   the DNS-rebinding gap between those two points in time.
 
 ### Added
+- SSO: IdP group-claim-to-role auto-mapping. Configure a "group claim" name
+  on the OIDC provider and an ordered list of group → role mappings
+  (evaluated last-match-wins, same rule as source Rules); a user's role is
+  resolved from their IdP groups and applied on every SSO login, not just
+  first provisioning, so it stays in sync as group membership changes.
+  Applies immediately on first sign-in too — a new user whose groups match
+  a mapping is provisioned straight into that role instead of always
+  landing on the no-access default. Note: this means a role changed
+  directly in PerchTail can be overwritten on that user's next login if
+  their IdP groups still match a configured mapping — remove the mapping
+  (or the user from that group) to stop the sync.
 - Alerting: a new "Alerts" page for saving a search query and getting a
   webhook notification when new matching content shows up in a source's
   index. Rides entirely on the existing full-text search index/indexer —

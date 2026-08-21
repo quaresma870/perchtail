@@ -22,7 +22,7 @@ from joserfc.jwk import KeySet
 from sqlmodel import Session, select
 
 from app.audit import record_audit_event
-from app.auth.models import AuthProviderType, User
+from app.auth.models import AuthProviderType, SSOGroupRoleMapping, User
 from app.crypto import decrypt_secret, encrypt_secret
 from app.timeutils import utcnow
 
@@ -36,6 +36,11 @@ class OIDCSettings:
     client_id: str
     client_secret: str
     scopes: str = "openid email profile"
+    # Name of the ID token claim carrying the user's IdP group memberships
+    # (e.g. "groups", or "roles" for some IdPs) -- see
+    # resolve_group_mapped_role_id. None/empty disables group-to-role
+    # auto-mapping entirely, same as today's behavior.
+    group_claim: str | None = None
 
 
 def parse_oidc_settings(raw_config: dict) -> OIDCSettings:
@@ -44,7 +49,42 @@ def parse_oidc_settings(raw_config: dict) -> OIDCSettings:
         client_id=raw_config["client_id"],
         client_secret=raw_config["client_secret"],
         scopes=raw_config.get("scopes", "openid email profile"),
+        group_claim=raw_config.get("group_claim") or None,
     )
+
+
+def extract_claim_groups(claims: dict, group_claim: str | None) -> list[str]:
+    """Reads the configured group claim out of the ID token's claims and
+    normalizes it to a list of group names -- IdPs vary on whether a
+    single-group claim comes back as a bare string or a one-element list."""
+    if not group_claim:
+        return []
+    value = claims.get(group_claim)
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return []
+
+
+def resolve_group_mapped_role_id(session: Session, claim_groups: list[str]) -> int | None:
+    """Returns the role_id the user's IdP groups map to, or None if none of
+    the configured SSOGroupRoleMapping rows match -- callers decide what
+    "no match" means (fall back to the no-access default for a brand-new
+    user; leave the existing role untouched for a returning one). Mappings
+    are evaluated in `order`, last match wins, same semantics as Rule's
+    include/exclude precedence (see CLAUDE.md)."""
+    if not claim_groups:
+        return None
+    claim_set = set(claim_groups)
+    mappings = session.exec(select(SSOGroupRoleMapping).order_by(SSOGroupRoleMapping.order)).all()
+    matched_role_id: int | None = None
+    for mapping in mappings:
+        if mapping.group_name in claim_set:
+            matched_role_id = mapping.role_id
+    return matched_role_id
 
 
 def fetch_discovery_document(issuer: str) -> dict:
@@ -138,14 +178,21 @@ def decode_state(state: str) -> str:
 
 
 def find_or_provision_user(
-    session: Session, *, external_id: str, email: str, no_access_role_id: int
+    session: Session,
+    *,
+    external_id: str,
+    email: str,
+    no_access_role_id: int,
+    mapped_role_id: int | None = None,
 ) -> User:
     """Finds the existing SSO user by (auth_provider=oidc, external_id), or
-    auto-provisions a new one with the no-access default role per CLAUDE.md's
-    Access control section. Does not attempt to link to an existing local
-    account sharing the same email/username — that's a deliberate account-
-    linking decision left out of v1; a username collision surfaces as a
-    plain 409 to the caller instead (see api/auth.py's callback handler)."""
+    auto-provisions a new one per CLAUDE.md's Access control section --
+    `mapped_role_id` (see resolve_group_mapped_role_id) if the IdP's group
+    claim matched a configured SSOGroupRoleMapping, else the no-access
+    default role. Does not attempt to link to an existing local account
+    sharing the same email/username — that's a deliberate account-linking
+    decision left out of v1; a username collision surfaces as a plain 409
+    to the caller instead (see api/auth.py's callback handler)."""
     user = session.exec(
         select(User).where(
             User.auth_provider == AuthProviderType.oidc, User.external_id == external_id
@@ -157,7 +204,7 @@ def find_or_provision_user(
     user = User(
         username=email,
         password_hash=None,
-        role_id=no_access_role_id,
+        role_id=mapped_role_id if mapped_role_id is not None else no_access_role_id,
         auth_provider=AuthProviderType.oidc,
         external_id=external_id,
     )
@@ -234,11 +281,32 @@ class OIDCProvider:
             raise ValueError("ID token is missing a sub claim")
         email = claims.get("email") or claims.get("preferred_username") or external_id
 
+        claim_groups = extract_claim_groups(claims, self.settings.group_claim)
+        mapped_role_id = resolve_group_mapped_role_id(session, claim_groups)
+
         user = find_or_provision_user(
-            session, external_id=external_id, email=email, no_access_role_id=no_access_role_id
+            session,
+            external_id=external_id,
+            email=email,
+            no_access_role_id=no_access_role_id,
+            mapped_role_id=mapped_role_id,
         )
         if not user.active:
             raise ValueError("account is deactivated")
+
+        # Re-synced on every login, not just first provisioning -- see
+        # SSOGroupRoleMapping's docstring for why this can override a
+        # manual role change made directly in PerchTail.
+        if mapped_role_id is not None and user.role_id != mapped_role_id:
+            user.role_id = mapped_role_id
+            record_audit_event(
+                session,
+                user_id=user.id,
+                action="user.sso_role_synced",
+                target_type="user",
+                target_id=user.id,
+                metadata={"role_id": mapped_role_id, "groups": claim_groups},
+            )
 
         user.last_login_at = utcnow()
         session.add(user)
