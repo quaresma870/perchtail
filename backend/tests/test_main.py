@@ -19,6 +19,20 @@ def test_healthz_sets_request_id_header():
     assert "x-request-id" in response.headers
 
 
+def test_responses_carry_security_headers():
+    client = TestClient(app)
+    response = client.get("/healthz")
+
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "same-origin"
+    csp = response.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+    assert "script-src 'self'" in csp
+    assert "unsafe-eval" not in csp
+
+
 def test_lifespan_refuses_to_start_with_the_default_credential_key(monkeypatch):
     monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "changeme")
     get_settings.cache_clear()

@@ -62,6 +62,47 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# CSP: everything the frontend needs is same-origin (see frontend/index.html --
+# no third-party scripts/styles/fonts anywhere). style-src needs
+# 'unsafe-inline' because CodeMirror 6 (app/CLAUDE.md's chosen viewer) injects
+# its editor styles via a runtime <style> element (the style-mod package), not
+# a static stylesheet -- there's no nonce to hand a static SPA build, so this
+# is the standard, accepted trade-off for CodeMirror-based apps. script-src
+# stays strict ('self' only, no unsafe-inline/unsafe-eval), which is the
+# directive that actually matters against XSS. frame-ancestors 'none' is the
+# modern equivalent of X-Frame-Options: DENY, kept alongside it for older
+# browsers/embedded webviews that don't honor CSP framing directives. HSTS is
+# deliberately not set here -- it's a deployment-level concern wherever TLS
+# actually terminates, per CLAUDE.md's "sit behind a reverse proxy" note.
+_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Applies to every response, API and static frontend alike -- see
+    ROADMAP.md's security hardening backlog. Cheap and blanket rather than
+    tuned per-route: none of these headers restrict anything this app
+    actually needs (no inline scripts, no third-party embeds, no framing by
+    another origin)."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = _CONTENT_SECURITY_POLICY
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "same-origin"
+        return response
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -108,6 +149,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="PerchTail", version=APP_VERSION, lifespan=lifespan)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.include_router(auth_router)
 app.include_router(alerts_router)

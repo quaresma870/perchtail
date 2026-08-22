@@ -34,7 +34,7 @@ def client(session, monkeypatch):
 
 
 def _make_user(session, *, username: str = USERNAME, password: str = PASSWORD) -> User:
-    role = Role(name="Support")
+    role = Role(name=f"Support-{id(object())}")
     session.add(role)
     session.commit()
     session.refresh(role)
@@ -149,3 +149,53 @@ def test_change_password_rejects_wrong_current_password(client, session):
         json={"current_password": "wrong", "new_password": "new-password!"},
     )
     assert response.status_code == 401
+
+
+def test_login_locks_out_after_repeated_failures(client, session, monkeypatch):
+    monkeypatch.setenv("LOGIN_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
+    _make_user(session)
+
+    for _ in range(3):
+        response = _login(client, password="wrong")
+        assert response.status_code == 401
+
+    locked_response = _login(client, password=PASSWORD)  # even the right password now
+    assert locked_response.status_code == 429
+    assert "Retry-After" in locked_response.headers
+
+    get_settings.cache_clear()
+
+
+def test_login_lockout_is_scoped_to_the_attempted_username(client, session, monkeypatch):
+    monkeypatch.setenv("LOGIN_MAX_ATTEMPTS", "1")
+    get_settings.cache_clear()
+    _make_user(session)
+    _make_user(session, username="other@example.com")
+
+    locked_out = _login(client, password="wrong")
+    assert locked_out.status_code == 401
+
+    still_open = _login(client, username="other@example.com", password="wrong")
+    assert still_open.status_code == 401  # not 429 -- different username
+
+    get_settings.cache_clear()
+
+
+def test_successful_login_clears_prior_failures(client, session, monkeypatch):
+    monkeypatch.setenv("LOGIN_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
+    _make_user(session)
+
+    _login(client, password="wrong")
+    _login(client, password="wrong")
+    ok_response = _login(client, password=PASSWORD)
+    assert ok_response.status_code == 200
+
+    # Two more wrong attempts shouldn't lock out -- the successful login
+    # above should have reset the failure count back to zero.
+    _login(client, password="wrong")
+    second_wrong = _login(client, password="wrong")
+    assert second_wrong.status_code == 401
+
+    get_settings.cache_clear()

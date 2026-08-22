@@ -9,6 +9,17 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- Security response headers (`Content-Security-Policy`, `X-Frame-Options`,
+  `X-Content-Type-Options`, `Referrer-Policy`) are now sent on every
+  response, API and frontend alike. CSP allows only same-origin scripts and
+  styles (`'unsafe-inline'` for `style-src` only, to accommodate CodeMirror
+  6's runtime-injected editor styles); `frame-ancestors 'none'` backs up
+  `X-Frame-Options: DENY` for clickjacking protection.
+- Login now locks out after repeated failed attempts against one username
+  (`login_max_attempts`, default 5) for a configurable duration
+  (`login_lockout_seconds`, default 300s), returning `429` with a
+  `Retry-After` header — previously nothing throttled `/auth/login` beyond
+  argon2id's own hashing cost.
 - SSH connector now persists known host keys across connections
   (`ssh_known_hosts_path`) instead of trusting whatever key each fresh
   connection presents with no memory of previous ones — a connection to a
