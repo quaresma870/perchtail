@@ -18,6 +18,7 @@
   import SsoSettings from './routes/SsoSettings.svelte'
   import SystemSettings from './routes/SystemSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
+  import SessionsSettings from './routes/SessionsSettings.svelte'
 
   const routes = {
     '/login': Login,
@@ -37,6 +38,7 @@
     '/settings/sso': SsoSettings,
     '/settings/system': SystemSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
+    '/settings/sessions': SessionsSettings,
   }
 
   onMount(async () => {
