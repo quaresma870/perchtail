@@ -107,10 +107,15 @@ jobs:
           name: perchtail-agent-binaries
           path: agent/dist/
 
+      # govulncheck-action installs golang.org/x/vuln@latest, which now
+      # requires Go >= 1.25 to build -- independent of agent/go.mod's own
+      # "go 1.24.7" directive (used for the build/vet/test steps above).
+      # A 1.25 toolchain here only runs the govulncheck tool itself; it
+      # doesn't change what Go version the agent binaries are built for.
       - name: Dependency vulnerability scan (govulncheck)
         uses: golang/govulncheck-action@v1
         with:
-          go-version-input: "1.24"
+          go-version-input: "1.25"
           work-dir: agent
 
   docker-image:
