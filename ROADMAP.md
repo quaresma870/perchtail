@@ -1120,13 +1120,15 @@ Everything below is a candidate, not yet triaged into "must-have before
       X-Content-Type-Options, Referrer-Policy; HSTS is a deployment-level
       concern wherever TLS actually terminates, per CLAUDE.md's "sit behind
       a reverse proxy" packaging note) — see notes below
-- [ ] Dependency vulnerability scanning in CI, blocking or at minimum
+- [x] Dependency vulnerability scanning in CI, blocking or at minimum
       reporting: `pip-audit`/`safety` (backend), `npm audit` (frontend),
-      `govulncheck` (the Go agent) — three ecosystems, three tools
-- [ ] Container image scanning (e.g. Trivy/Grype) for the published Docker
-      image, plus an SBOM published alongside releases
-- [ ] Automated dependency-update PRs (Dependabot/Renovate) across all
-      three ecosystems — keeping current, not just detecting known-bad
+      `govulncheck` (the Go agent) — three ecosystems, three tools — see
+      notes below
+- [x] Container image scanning (e.g. Trivy/Grype) for the published Docker
+      image, plus an SBOM published alongside releases — see notes below
+- [x] Automated dependency-update PRs (Dependabot/Renovate) across all
+      three ecosystems — keeping current, not just detecting known-bad —
+      see notes below
 - [ ] `CREDENTIAL_ENCRYPTION_KEY` rotation path — currently no documented
       or tooled way to rotate this key without losing access to every
       already-encrypted `Source.credential_ref`/`SSOProviderConfig.config`
@@ -1184,6 +1186,48 @@ Everything below is a candidate, not yet triaged into "must-have before
   don't exist are cheap to submit (no password hashing is attempted) and
   otherwise a flood of distinct nonexistent usernames could grow the dict
   without limit.
+
+### Notes on decisions made — CI scanning and dependency updates
+
+- **Dependency scanning is blocking, not just reporting** — the checklist
+  item's own preferred option — for all three ecosystems, added as steps
+  in `.github/workflows/ci.yml`'s existing `backend`/`frontend`/`agent`
+  jobs rather than a separate job, since each already has the right
+  toolchain set up: `pip-audit` against both `backend/requirements.txt`
+  and `requirements-dev.txt`, `npm audit --audit-level=high` (capped at
+  high+ to avoid noisy low/moderate transitive-dep churn common in the npm
+  ecosystem), and `golang/govulncheck-action` for the agent (its call-graph
+  analysis only flags vulnerabilities in code actually reachable from the
+  agent's own code, which is inherently more precise than a flat
+  dependency-list scan). Baseline was clean at the time this shipped
+  except one high-severity transitive `nanoid` advisory (via
+  vite→postcss), fixed with a plain `npm audit fix` alongside this work —
+  not a design change, just clearing the slate before turning blocking on.
+- **Container image scanning** is a new `docker-image` job: builds the
+  published `Dockerfile` with `docker/build-push-action` (`push: false,
+  load: true` — never leaves the runner, no registry involved), then
+  `aquasecurity/trivy-action` scans it, blocking on HIGH/CRITICAL with
+  `ignore-unfixed: true` (an unfixable OS-package advisory blocking every
+  build forever isn't actionable, so it's excluded from the gate).
+- **SBOM is a build artifact, not yet attached to a release** — the
+  checklist item says "published alongside releases," but this repo has no
+  release-publishing workflow yet (tags exist, e.g. `v0.1.1`, but nothing
+  automates a GitHub Release or a registry push from one). Trivy generates
+  a CycloneDX SBOM (`sbom.cyclonedx.json`) and it's uploaded via
+  `actions/upload-artifact`, same mechanism already used for the agent's
+  cross-compiled binaries — genuinely useful today (downloadable per CI
+  run), but wiring it onto an actual Release is a follow-up once that
+  pipeline exists, not invented here to avoid scope creep beyond what was
+  asked.
+- **Dependabot** (`.github/dependabot.yml`) covers exactly the three
+  ecosystems named in the checklist item (`pip` for `backend/`, `npm` for
+  `frontend/`, `gomod` for `agent/`), weekly, opening PRs against `dev` —
+  not the repo's actual default branch (`main`), which sits 71 commits
+  behind `dev` and isn't where active development happens; every PR in
+  this project's history targets `dev`, so Dependabot follows the same
+  convention. GitHub Actions itself (a fourth, common Dependabot
+  ecosystem) was deliberately left out — the checklist item asks for
+  "three ecosystems," and adding a fourth wasn't requested.
 
 ### Notes on decisions made — audit findings fixed
 

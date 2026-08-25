@@ -9,6 +9,15 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- CI now blocks on dependency and container vulnerabilities: `pip-audit`
+  (backend), `npm audit --audit-level=high` (frontend), and `govulncheck`
+  (the Go agent) run in their respective CI jobs; a new `docker-image` job
+  builds the published `Dockerfile` and scans it with Trivy
+  (HIGH/CRITICAL, fixable only), and generates a CycloneDX SBOM uploaded as
+  a build artifact on every run. `.github/dependabot.yml` opens weekly
+  update PRs against `dev` for all three ecosystems (pip, npm, gomod).
+  Fixed one pre-existing high-severity transitive vulnerability (`nanoid`,
+  via vite→postcss) as part of turning this on.
 - Security response headers (`Content-Security-Policy`, `X-Frame-Options`,
   `X-Content-Type-Options`, `Referrer-Policy`) are now sent on every
   response, API and frontend alike. CSP allows only same-origin scripts and
