@@ -1129,9 +1129,10 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [x] Automated dependency-update PRs (Dependabot/Renovate) across all
       three ecosystems — keeping current, not just detecting known-bad —
       see notes below
-- [ ] `CREDENTIAL_ENCRYPTION_KEY` rotation path — currently no documented
+- [x] `CREDENTIAL_ENCRYPTION_KEY` rotation path — currently no documented
       or tooled way to rotate this key without losing access to every
       already-encrypted `Source.credential_ref`/`SSOProviderConfig.config`
+      — see notes below
 - [ ] Session management UI: list a user's own active sessions
       (`AuthSession` already exists at the data layer) with the ability to
       revoke one remotely — useful on its own, and a prerequisite for any
@@ -1228,6 +1229,44 @@ Everything below is a candidate, not yet triaged into "must-have before
   convention. GitHub Actions itself (a fourth, common Dependabot
   ecosystem) was deliberately left out — the checklist item asks for
   "three ecosystems," and adding a fourth wasn't requested.
+
+### Notes on decisions made — CREDENTIAL_ENCRYPTION_KEY rotation
+
+- **A standalone script (`app/rotate_credential_key.py`, run via
+  `python -m app.rotate_credential_key`), not an API endpoint.** Rotating
+  this key rewrites every encrypted row in the database in one pass — a
+  destructive-if-interrupted, admin-only, run-with-the-app-stopped
+  operation, not something that belongs behind a web request. Reuses
+  `app/crypto.py`'s existing KDF/salt machinery via a new `build_fernet()`
+  (previously private, now exposed) so the script builds two independent
+  Fernet instances at once — old key, new key — neither of which is what
+  the running app's own cached singleton would give it.
+- **The new key is never accepted as a CLI argument** (`--new-key foo`
+  would land in shell history and any `ps` output any other user on the
+  host could see) — read from `NEW_CREDENTIAL_ENCRYPTION_KEY` in the
+  environment, or prompted for interactively via `getpass` if that's
+  unset.
+- **All-or-nothing, one transaction.** Every `Source` row with a non-null
+  `credential_ref` and every `SSOProviderConfig` row (not just the
+  currently-`enabled` one — a disabled provider's config still needs to
+  stay decryptable) is decrypted under the old key and re-encrypted under
+  the new one; if any row fails to decrypt (wrong old key, or the
+  rotation already ran), nothing is written at all and the script reports
+  exactly which row failed. No partial-recovery logic — simpler, and
+  matches this project's general preference for straightforward
+  all-or-nothing operations over speculative resumability nothing has
+  asked for yet.
+- **`--dry-run`** decrypts everything under the old key and reports what
+  would be rotated without writing anything — lets an operator confirm
+  the old key is actually correct (and see the scope) before committing.
+- **Documented in a new `docs/credential-key-rotation.md`**, linked from
+  the README, rather than folded into the Quick start section — this is
+  an occasional admin procedure, not part of initial setup, matching
+  `docs/monitoring.md`'s precedent for that kind of standalone guide.
+  Live-verified end to end: seeded a real SQLite DB with an encrypted
+  credential, ran `--dry-run` then the real rotation, confirmed the
+  credential decrypts correctly under the new key and raises
+  `InvalidToken` under the old one.
 
 ### Notes on decisions made — audit findings fixed
 
