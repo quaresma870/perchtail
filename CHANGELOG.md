@@ -15,6 +15,18 @@ release ships (0.x releases may include breaking changes between minors).
   and `SSOProviderConfig.config` row from the old key to a new one in a
   single all-or-nothing transaction. See
   [docs/credential-key-rotation.md](docs/credential-key-rotation.md).
+- CSRF review: confirmed the existing `SameSite=strict` session cookie is
+  sufficient protection on its own across all 44 state-changing endpoints
+  (every one requires that cookie; no `CORSMiddleware` exists; the agent
+  WebSocket endpoint uses a bearer token, not a cookie). Added
+  `OriginCheckMiddleware` anyway as defense-in-depth: for every
+  `POST`/`PUT`/`PATCH`/`DELETE`, `Origin` (or `Referer`) must match the
+  request's own `Host` header when either is present, closing the residual
+  gap of a browser bug or non-standard client not honoring `SameSite`. No
+  frontend changes needed for this — `vite.config.ts`'s dev proxy was
+  updated to strip these headers on proxied requests so local dev (which
+  legitimately runs frontend and backend on different ports) isn't
+  affected.
 - CI now blocks on dependency and container vulnerabilities: `pip-audit`
   (backend), `npm audit --audit-level=high` (frontend), and `govulncheck`
   (the Go agent) run in their respective CI jobs; a new `docker-image` job
