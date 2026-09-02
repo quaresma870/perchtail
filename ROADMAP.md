@@ -1142,9 +1142,9 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [ ] Audit log tamper-evidence (e.g. hash-chaining `AuditLog` rows) so a
       compromised admin account can't quietly edit history without it
       being detectable
-- [ ] CSRF review across every state-changing endpoint — confirm the
+- [x] CSRF review across every state-changing endpoint — confirm the
       existing `SameSite=strict` session cookie is sufficient on its own,
-      or add explicit CSRF tokens where it isn't
+      or add explicit CSRF tokens where it isn't — see notes below
 - [ ] A formal third-party security review or pentest before declaring 1.0
       — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
       this is about actively looking for one before external users show up
@@ -1228,6 +1228,72 @@ Everything below is a candidate, not yet triaged into "must-have before
   convention. GitHub Actions itself (a fourth, common Dependabot
   ecosystem) was deliberately left out — the checklist item asks for
   "three ecosystems," and adding a fourth wasn't requested.
+
+### Notes on decisions made — CSRF review
+
+- **Conclusion: `SameSite=strict` is sufficient on its own; no CSRF tokens
+  added.** Every one of the 44 state-changing endpoints across every
+  router funnels through `get_current_active_user` (directly, or via the
+  `require_capability`/`require_global_capability` dependency factories,
+  which both wrap it) — meaning every mutating action requires the
+  `perchtail_session` cookie, and nothing else grants access to them. That
+  cookie is `SameSite=strict`, the strictest setting: unlike `Lax`, it
+  withholds the cookie on cross-site top-level navigation too, not just
+  cross-site `fetch`/form submissions — so a forged request from another
+  origin arrives with no cookie at all and is rejected as unauthenticated
+  regardless of what parameters it carries. `change-password` is doubly
+  safe regardless, since it requires the current password as a body
+  parameter an attacker can't know. `POST /monitoring/token` (the one
+  action that looked like it might be bearer-token-gated like
+  `GET /monitoring/health` is) is actually cookie-session-gated same as
+  everything else — only the health-check *read* uses the separate
+  deployment-wide bearer token. No `CORSMiddleware` exists anywhere in the
+  app, so there's no cross-origin credentialed-fetch exposure either. The
+  agent WebSocket endpoint (`/agent/connect`) authenticates with a bearer
+  token read from the WebSocket handshake's `Authorization` header, not a
+  cookie, and browsers provide no API to set custom headers on a
+  `new WebSocket(...)` handshake — so a browser page on another origin
+  can't attempt cross-site WebSocket hijacking against it even in
+  principle, independent of the SameSite question entirely.
+- **Added one defense-in-depth layer anyway: `OriginCheckMiddleware`**
+  (`app/main.py`, alongside `SecurityHeadersMiddleware`). Not required by
+  the analysis above, but cheap (no frontend changes needed — browsers
+  attach `Origin`/`Referer` automatically) and closes the one theoretical
+  residual gap: a browser bug or a non-standard client that doesn't honor
+  `SameSite`. For every `POST`/`PUT`/`PATCH`/`DELETE`, it requires the
+  `Origin` header (falling back to `Referer` if `Origin` is absent) to
+  match *the request's own `Host` header* — self-referential rather than
+  compared against a configured value like `public_base_url`, both because
+  that's the standard approach (OWASP's CSRF cheat sheet: compare `Origin`
+  against the origin "as registered with the server," i.e. `Host`) and
+  because it's the only thing that works correctly in every deployment
+  shape this project has: a reverse proxy in front in production (passes
+  `Host` through) and Vite's dev-server proxy locally, where the frontend
+  and backend legitimately sit on different ports. If neither header is
+  present at all, the request is let through to rely on `SameSite` alone —
+  rejecting on a merely absent header would break legitimate non-browser
+  API use (curl, scripts) as a side effect a security *review* shouldn't
+  introduce.
+- **Caught and fixed a real regression before it shipped**: the first
+  version of this compared `Origin` against a fixed `public_base_url`
+  setting, which broke `npm run dev` entirely — Vite's dev server proxies
+  API calls from its own port to the backend's, so the browser's genuine
+  `Origin` (Vite's port) would never match a configured backend URL,
+  403-ing every mutating request in local dev. Fixed two ways together:
+  the middleware compares against the request's own `Host` (see above,
+  correct in both deployment shapes on its own), and `vite.config.ts`'s
+  proxy config now strips `Origin`/`Referer` on proxied requests
+  (`configure(proxy) { proxy.on('proxyReq', ...) }`) so the backend sees
+  no header at all for locally-proxied traffic and falls into the
+  no-header-present case, same as production's single-origin setup has
+  nothing to strip in the first place. Verified live: a real POST through
+  the Vite dev proxy with a realistic `Origin: http://localhost:5173`
+  reached the actual login handler (`401` for a wrong password, not the
+  middleware's `403`), while the same request sent directly to the backend
+  with a forged `Origin: http://evil.example` was blocked with `403` and
+  still carried the standard security headers (confirming the middleware
+  ordering: innermost, wrapped by `SecurityHeadersMiddleware`/
+  `RequestIDMiddleware`, so even a blocked response gets them).
 
 ### Notes on decisions made — audit findings fixed
 
