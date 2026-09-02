@@ -147,6 +147,9 @@ scratch cache) lives in the `perchtail-data` Docker volume, so it survives
   Windows server so PerchTail can reach it over SSH/SFTP, SMB, or WinRM
 - [docs/monitoring.md](docs/monitoring.md) — the detailed health endpoint for
   external monitoring (Zabbix, Prometheus), and how to generate its token
+- [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — how to
+  rotate `CREDENTIAL_ENCRYPTION_KEY` without losing access to already-
+  encrypted credentials
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
   submit changes
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability

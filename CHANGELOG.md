@@ -9,6 +9,12 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- `CREDENTIAL_ENCRYPTION_KEY` can now be rotated without losing access to
+  already-encrypted credentials: `python -m app.rotate_credential_key`
+  (with `--dry-run` to preview first) re-encrypts every `Source.credential_ref`
+  and `SSOProviderConfig.config` row from the old key to a new one in a
+  single all-or-nothing transaction. See
+  [docs/credential-key-rotation.md](docs/credential-key-rotation.md).
 - CSRF review: confirmed the existing `SameSite=strict` session cookie is
   sufficient protection on its own across all 44 state-changing endpoints
   (every one requires that cookie; no `CORSMiddleware` exists; the agent
