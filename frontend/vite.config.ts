@@ -27,7 +27,31 @@ export default defineConfig({
   plugins: [svelte()],
   server: {
     proxy: Object.fromEntries(
-      apiPrefixes.map((prefix) => [prefix, { target: backendTarget, changeOrigin: true }]),
+      apiPrefixes.map((prefix) => [
+        prefix,
+        {
+          target: backendTarget,
+          changeOrigin: true,
+          // The backend's OriginCheckMiddleware (see backend/app/main.py)
+          // compares Origin/Referer against the request's own Host header
+          // as CSRF defense-in-depth. In dev, this proxy legitimately sits
+          // between two different ports (Vite's own, and backendTarget
+          // above) -- forwarding the browser's real Origin (Vite's port)
+          // unchanged would make every proxied POST/PATCH/PUT/DELETE look
+          // cross-origin to the backend and get blocked. Stripping these
+          // headers here mirrors what a same-origin request looks like
+          // (the middleware treats an absent Origin/Referer as "rely on
+          // SameSite instead"), same as production's reverse-proxy setup
+          // where frontend and backend share one origin, so there's
+          // nothing to strip in the first place.
+          configure(proxy) {
+            proxy.on('proxyReq', (proxyReq) => {
+              proxyReq.removeHeader('origin')
+              proxyReq.removeHeader('referer')
+            })
+          },
+        },
+      ]),
     ),
   },
   test: {

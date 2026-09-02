@@ -1129,9 +1129,10 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [x] Automated dependency-update PRs (Dependabot/Renovate) across all
       three ecosystems — keeping current, not just detecting known-bad —
       see notes below
-- [ ] `CREDENTIAL_ENCRYPTION_KEY` rotation path — currently no documented
+- [x] `CREDENTIAL_ENCRYPTION_KEY` rotation path — currently no documented
       or tooled way to rotate this key without losing access to every
       already-encrypted `Source.credential_ref`/`SSOProviderConfig.config`
+      — see notes below
 - [x] Session management UI: list a user's own active sessions
       (`AuthSession` already exists at the data layer) with the ability to
       revoke one remotely — useful on its own, and a prerequisite for any
@@ -1142,9 +1143,9 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [ ] Audit log tamper-evidence (e.g. hash-chaining `AuditLog` rows) so a
       compromised admin account can't quietly edit history without it
       being detectable
-- [ ] CSRF review across every state-changing endpoint — confirm the
+- [x] CSRF review across every state-changing endpoint — confirm the
       existing `SameSite=strict` session cookie is sufficient on its own,
-      or add explicit CSRF tokens where it isn't
+      or add explicit CSRF tokens where it isn't — see notes below
 - [ ] A formal third-party security review or pentest before declaring 1.0
       — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
       this is about actively looking for one before external users show up
@@ -1271,6 +1272,110 @@ Everything below is a candidate, not yet triaged into "must-have before
   first device's UI removed it from the list and the second device's next
   API call actually got `401` (confirmed via a direct API call in that
   browser context, not just the UI).
+
+### Notes on decisions made — CREDENTIAL_ENCRYPTION_KEY rotation
+
+- **A standalone script (`app/rotate_credential_key.py`, run via
+  `python -m app.rotate_credential_key`), not an API endpoint.** Rotating
+  this key rewrites every encrypted row in the database in one pass — a
+  destructive-if-interrupted, admin-only, run-with-the-app-stopped
+  operation, not something that belongs behind a web request. Reuses
+  `app/crypto.py`'s existing KDF/salt machinery via a new `build_fernet()`
+  (previously private, now exposed) so the script builds two independent
+  Fernet instances at once — old key, new key — neither of which is what
+  the running app's own cached singleton would give it.
+- **The new key is never accepted as a CLI argument** (`--new-key foo`
+  would land in shell history and any `ps` output any other user on the
+  host could see) — read from `NEW_CREDENTIAL_ENCRYPTION_KEY` in the
+  environment, or prompted for interactively via `getpass` if that's
+  unset.
+- **All-or-nothing, one transaction.** Every `Source` row with a non-null
+  `credential_ref` and every `SSOProviderConfig` row (not just the
+  currently-`enabled` one — a disabled provider's config still needs to
+  stay decryptable) is decrypted under the old key and re-encrypted under
+  the new one; if any row fails to decrypt (wrong old key, or the
+  rotation already ran), nothing is written at all and the script reports
+  exactly which row failed. No partial-recovery logic — simpler, and
+  matches this project's general preference for straightforward
+  all-or-nothing operations over speculative resumability nothing has
+  asked for yet.
+- **`--dry-run`** decrypts everything under the old key and reports what
+  would be rotated without writing anything — lets an operator confirm
+  the old key is actually correct (and see the scope) before committing.
+- **Documented in a new `docs/credential-key-rotation.md`**, linked from
+  the README, rather than folded into the Quick start section — this is
+  an occasional admin procedure, not part of initial setup, matching
+  `docs/monitoring.md`'s precedent for that kind of standalone guide.
+  Live-verified end to end: seeded a real SQLite DB with an encrypted
+  credential, ran `--dry-run` then the real rotation, confirmed the
+  credential decrypts correctly under the new key and raises
+  `InvalidToken` under the old one.
+
+### Notes on decisions made — CSRF review
+
+- **Conclusion: `SameSite=strict` is sufficient on its own; no CSRF tokens
+  added.** Every one of the 44 state-changing endpoints across every
+  router funnels through `get_current_active_user` (directly, or via the
+  `require_capability`/`require_global_capability` dependency factories,
+  which both wrap it) — meaning every mutating action requires the
+  `perchtail_session` cookie, and nothing else grants access to them. That
+  cookie is `SameSite=strict`, the strictest setting: unlike `Lax`, it
+  withholds the cookie on cross-site top-level navigation too, not just
+  cross-site `fetch`/form submissions — so a forged request from another
+  origin arrives with no cookie at all and is rejected as unauthenticated
+  regardless of what parameters it carries. `change-password` is doubly
+  safe regardless, since it requires the current password as a body
+  parameter an attacker can't know. `POST /monitoring/token` (the one
+  action that looked like it might be bearer-token-gated like
+  `GET /monitoring/health` is) is actually cookie-session-gated same as
+  everything else — only the health-check *read* uses the separate
+  deployment-wide bearer token. No `CORSMiddleware` exists anywhere in the
+  app, so there's no cross-origin credentialed-fetch exposure either. The
+  agent WebSocket endpoint (`/agent/connect`) authenticates with a bearer
+  token read from the WebSocket handshake's `Authorization` header, not a
+  cookie, and browsers provide no API to set custom headers on a
+  `new WebSocket(...)` handshake — so a browser page on another origin
+  can't attempt cross-site WebSocket hijacking against it even in
+  principle, independent of the SameSite question entirely.
+- **Added one defense-in-depth layer anyway: `OriginCheckMiddleware`**
+  (`app/main.py`, alongside `SecurityHeadersMiddleware`). Not required by
+  the analysis above, but cheap (no frontend changes needed — browsers
+  attach `Origin`/`Referer` automatically) and closes the one theoretical
+  residual gap: a browser bug or a non-standard client that doesn't honor
+  `SameSite`. For every `POST`/`PUT`/`PATCH`/`DELETE`, it requires the
+  `Origin` header (falling back to `Referer` if `Origin` is absent) to
+  match *the request's own `Host` header* — self-referential rather than
+  compared against a configured value like `public_base_url`, both because
+  that's the standard approach (OWASP's CSRF cheat sheet: compare `Origin`
+  against the origin "as registered with the server," i.e. `Host`) and
+  because it's the only thing that works correctly in every deployment
+  shape this project has: a reverse proxy in front in production (passes
+  `Host` through) and Vite's dev-server proxy locally, where the frontend
+  and backend legitimately sit on different ports. If neither header is
+  present at all, the request is let through to rely on `SameSite` alone —
+  rejecting on a merely absent header would break legitimate non-browser
+  API use (curl, scripts) as a side effect a security *review* shouldn't
+  introduce.
+- **Caught and fixed a real regression before it shipped**: the first
+  version of this compared `Origin` against a fixed `public_base_url`
+  setting, which broke `npm run dev` entirely — Vite's dev server proxies
+  API calls from its own port to the backend's, so the browser's genuine
+  `Origin` (Vite's port) would never match a configured backend URL,
+  403-ing every mutating request in local dev. Fixed two ways together:
+  the middleware compares against the request's own `Host` (see above,
+  correct in both deployment shapes on its own), and `vite.config.ts`'s
+  proxy config now strips `Origin`/`Referer` on proxied requests
+  (`configure(proxy) { proxy.on('proxyReq', ...) }`) so the backend sees
+  no header at all for locally-proxied traffic and falls into the
+  no-header-present case, same as production's single-origin setup has
+  nothing to strip in the first place. Verified live: a real POST through
+  the Vite dev proxy with a realistic `Origin: http://localhost:5173`
+  reached the actual login handler (`401` for a wrong password, not the
+  middleware's `403`), while the same request sent directly to the backend
+  with a forged `Origin: http://evil.example` was blocked with `403` and
+  still carried the standard security headers (confirming the middleware
+  ordering: innermost, wrapped by `SecurityHeadersMiddleware`/
+  `RequestIDMiddleware`, so even a blocked response gets them).
 
 ### Notes on decisions made — audit findings fixed
 

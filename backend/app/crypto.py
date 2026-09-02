@@ -44,9 +44,18 @@ def _derive_fernet_key(secret: str) -> bytes:
     return base64.urlsafe_b64encode(kdf.derive(secret.encode("utf-8")))
 
 
+def build_fernet(secret: str) -> Fernet:
+    """Exposed (not just the cached singleton below) for
+    app/rotate_credential_key.py, which needs two independent Fernet
+    instances at once -- one for the old CREDENTIAL_ENCRYPTION_KEY, one for
+    the new -- neither of which is necessarily what get_settings() reports
+    at the time it runs."""
+    return Fernet(_derive_fernet_key(secret))
+
+
 @lru_cache
 def _fernet() -> Fernet:
-    return Fernet(_derive_fernet_key(get_settings().credential_encryption_key))
+    return build_fernet(get_settings().credential_encryption_key)
 
 
 def encrypt_secret(plaintext: str) -> str:

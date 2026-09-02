@@ -2,9 +2,11 @@ import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import structlog
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -103,6 +105,61 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+_ORIGIN_CHECKED_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _is_same_origin(candidate: str, expected_origin: str) -> bool:
+    """candidate is a raw Origin header value, or a full Referer URL -- both
+    get reduced to scheme://host[:port] before comparing, since Referer
+    carries a path/query Origin never does."""
+    parsed = urlsplit(candidate)
+    if not parsed.scheme or not parsed.netloc:
+        return False
+    return f"{parsed.scheme}://{parsed.netloc}" == expected_origin
+
+
+class OriginCheckMiddleware(BaseHTTPMiddleware):
+    """Defense-in-depth CSRF protection layered on top of the session
+    cookie's SameSite=strict attribute (app/api/auth.py's
+    _set_session_cookie) -- see ROADMAP.md's security hardening backlog.
+    SameSite=Strict is already sufficient CSRF protection on its own in any
+    standards-compliant browser: it blocks the cookie on every cross-site
+    request, including top-level navigation (unlike Lax), so a forged
+    cross-site request simply arrives unauthenticated regardless of what
+    parameters it carries. This closes the one residual gap that leaves --
+    a browser bug or a non-standard client that doesn't honor SameSite.
+
+    For every state-changing request, the Origin header (falling back to
+    Referer, since some legitimate same-origin requests omit Origin in edge
+    cases) must match *this same request's own Host header* -- deliberately
+    self-referential rather than compared against a configured value like
+    public_base_url, both because it's the standard approach (OWASP's CSRF
+    cheat sheet: compare Origin against the target origin "as registered
+    with the server", which in practice means Host) and because it's the
+    only thing that works correctly in every deployment shape this project
+    actually has: behind a reverse proxy in production (nginx/whatever
+    passes Host through) and via Vite's dev-server proxy locally (`npm run
+    dev` runs the frontend on its own port, proxying API calls to the
+    backend on a different one -- see vite.config.ts, which strips
+    Origin/Referer on the way through so this falls to the no-header case
+    below rather than comparing two ports that are legitimately different).
+    If neither header is present at all, the request is let through to
+    rely on SameSite alone -- rejecting on a merely absent header would
+    also break legitimate non-browser API use (curl, scripts) that a
+    security review shouldn't introduce as a side effect."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in _ORIGIN_CHECKED_METHODS:
+            candidate = request.headers.get("origin") or request.headers.get("referer")
+            if candidate is not None:
+                expected = f"{request.url.scheme}://{request.url.netloc}"
+                if not _is_same_origin(candidate, expected):
+                    return JSONResponse(
+                        status_code=403, content={"detail": "Cross-site request blocked"}
+                    )
+        return await call_next(request)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -149,6 +206,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="PerchTail", version=APP_VERSION, lifespan=lifespan)
+app.add_middleware(OriginCheckMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.include_router(auth_router)
