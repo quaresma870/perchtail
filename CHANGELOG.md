@@ -9,6 +9,12 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- New "Sessions" page under Settings (visible to every user, like Sources)
+  lists every device/browser currently signed in as you and lets you
+  revoke one remotely — a prerequisite for "someone else is logged in as
+  me" incident response. Sessions now record the browser's `User-Agent` at
+  login so rows in the list are actually distinguishable from each other.
+  Self-service only — a user can see and revoke only their own sessions.
 - `CREDENTIAL_ENCRYPTION_KEY` can now be rotated without losing access to
   already-encrypted credentials: `python -m app.rotate_credential_key`
   (with `--dry-run` to preview first) re-encrypts every `Source.credential_ref`

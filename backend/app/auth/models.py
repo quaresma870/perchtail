@@ -144,6 +144,14 @@ class AuthSession(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
     expires_at: datetime
     last_seen_at: datetime | None = None
+    # Captured at login (local and SSO) straight from the request's own
+    # User-Agent header -- not IP address, deliberately: a real client IP
+    # behind a reverse proxy means trusting X-Forwarded-For, the same trust
+    # question app/config.py's public_base_url sidesteps entirely by not
+    # deriving anything from proxy headers. User-Agent has no such
+    # trust-boundary issue and is still the main signal the session
+    # management UI needs to answer "is this me, or someone else."
+    user_agent: str | None = None
 
 
 class AuditLog(SQLModel, table=True):

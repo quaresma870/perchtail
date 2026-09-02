@@ -1133,10 +1133,10 @@ Everything below is a candidate, not yet triaged into "must-have before
       or tooled way to rotate this key without losing access to every
       already-encrypted `Source.credential_ref`/`SSOProviderConfig.config`
       — see notes below
-- [ ] Session management UI: list a user's own active sessions
+- [x] Session management UI: list a user's own active sessions
       (`AuthSession` already exists at the data layer) with the ability to
       revoke one remotely — useful on its own, and a prerequisite for any
-      "someone else is logged in as me" incident response
+      "someone else is logged in as me" incident response — see notes below
 - [ ] Optional TOTP/MFA for local accounts — SSO already delegates this to
       the IdP, but the local break-glass account (and any org that doesn't
       enable SSO) has no second factor today
@@ -1229,6 +1229,49 @@ Everything below is a candidate, not yet triaged into "must-have before
   convention. GitHub Actions itself (a fourth, common Dependabot
   ecosystem) was deliberately left out — the checklist item asks for
   "three ecosystems," and adding a fourth wasn't requested.
+
+### Notes on decisions made — session management UI
+
+- **Self-service only, no admin-of-others view** — matches the checklist
+  item's own wording ("a user's own active sessions"). `GET /auth/sessions`
+  and `DELETE /auth/sessions/{id}` are gated by `get_current_user` alone
+  (like `change-password`, not a global capability), and
+  `auth/sessions.py`'s `list_sessions_for_user`/`revoke_session` are scoped
+  to `AuthSession.user_id == <the caller>` at the query level — an admin
+  wanting to force-revoke *another* user's sessions as part of incident
+  response is a real, different feature (closer to `manage_users`) that
+  wasn't asked for here and isn't built.
+- **Added `AuthSession.user_agent`** (new column, captured at login —
+  local and SSO both — straight from the request's own header), even
+  though the checklist item says the data layer "already exists." A
+  session list with nothing to tell rows apart besides timestamps doesn't
+  actually serve the item's own stated purpose ("someone else is logged in
+  as me" — you need *something* to eyeball). Deliberately not IP address:
+  the real client IP behind a reverse proxy means trusting
+  `X-Forwarded-For`, the exact trust question `app/config.py`'s
+  `public_base_url` already sidesteps by not deriving anything from proxy
+  headers (see that setting's own comment) — User-Agent has no such
+  trust-boundary problem, since it comes straight off the request with no
+  proxy involved in choosing its value.
+- **Revoking your own current session goes through the normal `logout()`
+  flow client-side**, not the new `DELETE` endpoint — the frontend
+  (`SessionsSettings.svelte`) special-cases `is_current` to call the
+  existing `POST /auth/logout` + clear-cookie + redirect instead, since
+  the raw revoke endpoint deletes the server-side row but was never meant
+  to also clear the browser's own cookie. Revoking a *different* session
+  is a plain `DELETE /auth/sessions/{id}`; that device simply gets a `401`
+  on its next request and the existing auth guard sends it to `/login` —
+  no live-invalidation push needed.
+- **New "Sessions" tab in Settings**, visible to every authenticated user
+  regardless of role/capability — same as the existing "Sources" tab,
+  unlike every other Settings tab, which is capability-gated. This is a
+  personal-account page, not an admin one.
+- Live-verified end to end with two independent browser contexts (two
+  "devices") signed in as the same user: the session list correctly showed
+  both, exactly one marked "This device"; revoking the other from the
+  first device's UI removed it from the list and the second device's next
+  API call actually got `401` (confirmed via a direct API call in that
+  browser context, not just the UI).
 
 ### Notes on decisions made — CREDENTIAL_ENCRYPTION_KEY rotation
 

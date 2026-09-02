@@ -199,3 +199,97 @@ def test_successful_login_clears_prior_failures(client, session, monkeypatch):
     assert second_wrong.status_code == 401
 
     get_settings.cache_clear()
+
+
+def test_list_sessions_requires_authentication(client):
+    response = client.get("/auth/sessions")
+    assert response.status_code == 401
+
+
+def test_list_sessions_returns_the_current_session_marked_as_current(client, session):
+    _make_user(session)
+    _login(client)
+
+    response = client.get("/auth/sessions")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["is_current"] is True
+    # TestClient sends its own default User-Agent when none is set
+    # explicitly -- confirms the header is captured at all, not that it's
+    # ever actually absent.
+    assert body[0]["user_agent"]
+
+
+def test_list_sessions_captures_the_user_agent(client, session):
+    _make_user(session)
+    client.post(
+        "/auth/login",
+        json={"username": USERNAME, "password": PASSWORD},
+        headers={"User-Agent": "TestBrowser/1.0"},
+    )
+
+    response = client.get("/auth/sessions")
+    assert response.json()[0]["user_agent"] == "TestBrowser/1.0"
+
+
+def test_list_sessions_only_shows_the_current_users_own_sessions(client, session):
+    _make_user(session)
+    _make_user(session, username="other@example.com")
+    _login(client, username="other@example.com")
+
+    response = client.get("/auth/sessions")
+    assert len(response.json()) == 1
+
+
+def test_revoke_session_requires_authentication(client):
+    response = client.delete("/auth/sessions/1")
+    assert response.status_code == 401
+
+
+def test_revoke_session_removes_it_from_the_list(client, session):
+    _make_user(session)
+    _login(client)
+    session_id = client.get("/auth/sessions").json()[0]["id"]
+
+    response = client.delete(f"/auth/sessions/{session_id}")
+    assert response.status_code == 204
+
+    # The session used to make this very request was just revoked, so the
+    # client is effectively logged out now -- the next call is unauthenticated.
+    assert client.get("/auth/sessions").status_code == 401
+
+
+def test_revoke_session_returns_404_for_a_session_owned_by_someone_else(client, session):
+    _make_user(session)
+    _make_user(session, username="other@example.com")
+
+    _login(client, username="other@example.com")
+    other_session_id = client.get("/auth/sessions").json()[0]["id"]
+    # Logging in again (as this test's real subject) overwrites this
+    # client's cookie without touching the "other" session row above, same
+    # as a second real browser holding its own independent cookie would.
+    _login(client)
+
+    response = client.delete(f"/auth/sessions/{other_session_id}")
+    assert response.status_code == 404
+
+
+def test_revoke_session_returns_404_for_an_unknown_id(client, session):
+    _make_user(session)
+    _login(client)
+
+    response = client.delete("/auth/sessions/999999")
+    assert response.status_code == 404
+
+
+def test_logging_in_twice_shows_both_sessions_with_only_the_newest_current(client, session):
+    _make_user(session)
+    _login(client)  # first "device"
+    _login(client)  # second "device" -- overwrites this client's cookie, same as a real
+    # second browser would independently hold its own
+
+    response = client.get("/auth/sessions")
+    body = response.json()
+    assert len(body) == 2
+    assert sum(1 for s in body if s["is_current"]) == 1

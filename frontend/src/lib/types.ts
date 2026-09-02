@@ -153,6 +153,15 @@ export interface SystemSettings {
   search_view_enabled: boolean
 }
 
+export interface AuthSessionInfo {
+  id: number
+  created_at: string
+  last_seen_at: string | null
+  expires_at: string
+  user_agent: string | null
+  is_current: boolean
+}
+
 export interface Alert {
   id: number
   name: string

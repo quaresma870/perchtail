@@ -2,15 +2,22 @@ import json
 import math
 import secrets
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
-from app.auth.models import GlobalCapability, Role, SSOProviderConfig, User
+from app.auth.models import AuthSession, GlobalCapability, Role, SSOProviderConfig, User
 from app.auth.providers.local import LocalPasswordProvider, change_password, verify_password
 from app.auth.providers.oidc import OIDCProvider, decode_state, encode_state, parse_oidc_settings
-from app.auth.sessions import create_session, delete_session, get_user_by_token
+from app.auth.sessions import (
+    create_session,
+    delete_session,
+    get_user_by_token,
+    hash_token,
+    list_sessions_for_user,
+    revoke_session,
+)
 from app.bootstrap import NO_ACCESS_ROLE_NAME
 from app.config import get_settings
 from app.crypto import decrypt_secret
@@ -99,7 +106,12 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 
 @router.post("/login", response_model=UserPublic)
-def login(payload: LoginRequest, response: Response, session: Session = Depends(get_session)):
+def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    session: Session = Depends(get_session),
+):
     remaining = seconds_until_unlocked(payload.username)
     if remaining is not None:
         retry_after = math.ceil(remaining)
@@ -115,7 +127,7 @@ def login(payload: LoginRequest, response: Response, session: Session = Depends(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     record_success(payload.username)
-    _, token = create_session(session, user)
+    _, token = create_session(session, user, user_agent=request.headers.get("user-agent"))
     _set_session_cookie(response, token)
     return UserPublic.from_user(user)
 
@@ -150,6 +162,64 @@ def change_password_endpoint(
     change_password(session, user, payload.new_password)
     session.refresh(user)
     return UserPublic.from_user(user)
+
+
+class AuthSessionPublic(BaseModel):
+    id: int
+    created_at: str
+    last_seen_at: str | None
+    expires_at: str
+    user_agent: str | None
+    is_current: bool
+
+    @classmethod
+    def from_session(
+        cls, auth_session: AuthSession, *, current_token_hash: str | None
+    ) -> "AuthSessionPublic":
+        return cls(
+            id=auth_session.id,
+            created_at=auth_session.created_at.isoformat(),
+            last_seen_at=(
+                auth_session.last_seen_at.isoformat() if auth_session.last_seen_at else None
+            ),
+            expires_at=auth_session.expires_at.isoformat(),
+            user_agent=auth_session.user_agent,
+            is_current=auth_session.token_hash == current_token_hash,
+        )
+
+
+@router.get("/sessions", response_model=list[AuthSessionPublic])
+def list_sessions(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+):
+    """Self-service only -- a user's own active sessions, never another
+    user's (see auth/sessions.py's list_sessions_for_user). Uses
+    get_current_user rather than get_current_active_user so an
+    admin-created account mid forced-password-change can still see (and if
+    needed, revoke) its own sessions."""
+    current_hash = hash_token(session_token) if session_token else None
+    auth_sessions = list_sessions_for_user(session, user.id)
+    return [
+        AuthSessionPublic.from_session(s, current_token_hash=current_hash) for s in auth_sessions
+    ]
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_session_endpoint(
+    session_id: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Revoking the session you're currently using is allowed (same as
+    clicking "log out" on this device from another device's session list)
+    -- the next request on that browser simply finds no matching
+    AuthSession and gets redirected to /login by the existing auth guard,
+    no special-casing needed here."""
+    found = revoke_session(session, user_id=user.id, session_id=session_id)
+    if not found:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
 
 class SSOStatus(BaseModel):
@@ -200,6 +270,7 @@ def sso_login(session: Session = Depends(get_session)):
 
 @router.get("/sso/callback")
 def sso_callback(
+    request: Request,
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
@@ -245,7 +316,7 @@ def sso_callback(
         logger.warning("sso.callback.login_failed", error=str(exc))
         return login_error_redirect
 
-    _, token = create_session(session, user)
+    _, token = create_session(session, user, user_agent=request.headers.get("user-agent"))
     response = RedirectResponse(
         f"{app_settings.public_base_url}/", status_code=status.HTTP_302_FOUND
     )

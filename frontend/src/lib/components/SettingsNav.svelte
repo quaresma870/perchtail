@@ -7,6 +7,7 @@
 
 <nav class="settings-nav">
   <a href="#/settings/sources" class:active={isActive('/settings/sources')}>Sources</a>
+  <a href="#/settings/sessions" class:active={isActive('/settings/sessions')}>Sessions</a>
   {#if hasCapability($currentUser, 'manage_roles')}
     <a href="#/settings/roles" class:active={isActive('/settings/roles')}>Roles</a>
   {/if}
