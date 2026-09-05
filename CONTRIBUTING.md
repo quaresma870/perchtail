@@ -31,6 +31,19 @@ npm run check    # svelte-check
 npm test         # vitest
 ```
 
+End-to-end tests (Playwright), from `frontend/`:
+
+```bash
+npx playwright install --with-deps chromium   # one-time, per machine
+npm run test:e2e
+```
+
+This builds the frontend and starts its own isolated backend on port 8001
+with a throwaway SQLite DB (`backend/scripts/run_e2e_server.sh`) — it won't
+touch a `npm run dev` backend you already have running on :8000. See
+`frontend/e2e/` and ROADMAP.md's "Frontend E2E testing (Playwright)" section
+for how it's wired together.
+
 See [CLAUDE.md](CLAUDE.md) for the full architecture and repo layout — it's kept
 up to date as the source of truth for design decisions.
 

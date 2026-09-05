@@ -78,6 +78,16 @@ release ships (0.x releases may include breaking changes between minors).
   the DNS-rebinding gap between those two points in time.
 
 ### Added
+- A Playwright end-to-end test suite (`frontend/e2e/`, `npm run test:e2e`)
+  covering login (success, failure, and the logged-out redirect), opening
+  and reading a file through the built-in system log source's viewer, the
+  system source's non-editable row in the sources list, and the sessions
+  page. Runs against an isolated backend (`backend/scripts/run_e2e_server.sh`)
+  seeded with a deterministic super-admin account
+  (`backend/app/seed_e2e_admin.py`), on its own port and its own throwaway
+  SQLite DB so it never touches a developer's real dev environment. Wired
+  into CI as a new `e2e` job. See ROADMAP.md's "Frontend E2E testing
+  (Playwright)" section for the design notes.
 - SSO: IdP group-claim-to-role auto-mapping. Configure a "group claim" name
   on the OIDC provider and an ordered list of group → role mappings
   (evaluated last-match-wins, same rule as source Rules); a user's role is

@@ -56,5 +56,8 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // e2e/ holds Playwright specs (see playwright.config.ts) -- a separate
+    // test runner with its own test()/expect(), not vitest's.
+    exclude: ['e2e/**', 'node_modules/**'],
   },
 })

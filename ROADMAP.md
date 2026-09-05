@@ -1412,6 +1412,70 @@ two:
   real credentials at any scale will want a rotation/re-encrypt tool
   before its next KDF change, not after.
 
+## Frontend E2E testing (Playwright)
+
+Everything on this roadmap so far is covered end-to-end only by backend
+`pytest` and frontend `vitest` unit tests — nothing exercises the real
+browser UI against a real running backend. A Playwright suite closes that
+gap for the handful of flows that actually matter (auth, the viewer, the
+built-in system source), without trying to cover every screen.
+
+- [x] Isolated e2e backend (`backend/scripts/run_e2e_server.sh`): its own
+      SQLite DB/credential-salt/known-hosts/log-dir/scratch-dir under
+      `backend/data/e2e/` (wiped on every run), port 8001 so it can run
+      alongside a developer's own dev backend on the documented port 8000
+- [x] Deterministic super-admin login for tests
+      (`backend/app/seed_e2e_admin.py`) — inserts a known-password user
+      directly before the app's own lifespan runs, so `seed_initial_super_admin`
+      (app/bootstrap.py) naturally no-ops instead of generating a throwaway
+      random password nothing could read back
+- [x] Playwright's "setup project" + `storageState` reuse (`e2e/auth.setup.ts`)
+      so every other spec starts already authenticated, logging in once
+- [x] Specs: unauthenticated redirect + login success/failure
+      (`login.spec.ts`), opening the built-in log source and reading a real
+      file through the CodeMirror pane (`viewer.spec.ts`), the system
+      source's non-editable row (`sources.spec.ts`), and the sessions page
+      (`sessions.spec.ts`)
+- [x] CI job (`.github/workflows/ci.yml`'s `e2e` job) — separate from the
+      existing `backend`/`frontend` jobs since it needs both toolchains
+
+### Notes on decisions made — Playwright E2E setup
+
+- **StrykerJS (mutation testing) was considered alongside Playwright and
+  deliberately not adopted yet.** It's a real tool for a real problem
+  (are the *existing* unit tests actually asserting anything, or just
+  exercising code paths?), but it's premature until the suite it would be
+  mutating has more breadth — better to sequence this new E2E layer in
+  first, once there's more surface for a mutation score to be a meaningful
+  signal about. Revisit later, not as part of this work.
+- **The e2e backend serves the built frontend itself, rather than running
+  against Vite's dev server.** `frontend/vite.config.ts`'s dev proxy has a
+  hardcoded target of `127.0.0.1:8000` and deliberately strips
+  Origin/Referer to look same-origin to `OriginCheckMiddleware` — reusing
+  it for e2e would mean either fighting that hardcoding or reintroducing
+  the exact cross-origin problem it exists to work around. Building the
+  frontend (`npm run build`) and letting the FastAPI backend serve it from
+  `frontend/dist` (already how `app/main.py` behaves in production, per
+  CLAUDE.md's packaging section) sidesteps both: one origin, no proxy, and
+  the suite exercises the same static-serving path production actually
+  uses.
+- **Port 8001, not 8000.** The dev backend's documented port
+  (CONTRIBUTING.md) is 8000; picking a different port for the e2e server
+  means a developer can run `npm run dev` against their own local backend
+  and `npm run test:e2e` at the same time without a collision.
+- **No Alembic migration step needed for the e2e DB.** `app/db.py`'s
+  `init_db()` (called from both the app's own `lifespan` and
+  `seed_e2e_admin.py`) creates the schema directly via
+  `SQLModel.metadata.create_all` — Alembic's migration chain is how an
+  *existing* deployment upgrades in place, not how a fresh schema gets
+  created, so there's nothing for the e2e script to run there.
+- **The sandboxed dev container this suite was built in pre-installs
+  Chromium at a fixed path outside the project.** Deliberately not baked
+  into `playwright.config.ts` or the CI workflow — everywhere else (CI,
+  another contributor's machine) needs its own
+  `npx playwright install --with-deps chromium` first, which the new `e2e`
+  CI job does.
+
 ## Ideas worth considering (not yet triaged into a phase)
 
 Raised while discussing what else belongs on this roadmap — real candidates,
