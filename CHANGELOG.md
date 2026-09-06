@@ -9,6 +9,27 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- Fixed a residual SSRF gap in the alert webhook safety check (found via a
+  full security-review pass over everything merged since v0.1.1, follow-up
+  to #49): the pre-send re-check re-validated the plain hostname and then
+  handed it straight to `httpx.post`, which resolves DNS independently at
+  connect time — an attacker's own authoritative DNS server could answer
+  the validation query with a public address and the connection query,
+  moments later, with an internal one (e.g. cloud metadata), since those
+  were always two separate lookups no matter how close together. `send_webhook`
+  now resolves and validates the hostname exactly once
+  (`webhook_safety.resolve_pinned_webhook_target`) and connects directly to
+  that specific already-validated IP, with the original hostname preserved
+  as the `Host` header and TLS SNI/certificate-verification name — nothing
+  re-resolves the hostname between validation and connection.
+- Fixed a login-CSRF gap in OIDC SSO (issue #61): the OAuth `state` param
+  was never bound to the browser that started the flow, so a code+state
+  pair captured from an attacker's own successful login could be replayed
+  by a victim's browser, silently logging the victim into the attacker's
+  PerchTail account. `/auth/sso/login` now also sets a short-lived,
+  `httponly`, `samesite=lax` cookie carrying the same `state` value;
+  `/auth/sso/callback` rejects any request whose `state` doesn't match
+  that cookie, closing the gap without needing a server-side flow table.
 - New "Sessions" page under Settings (visible to every user, like Sources)
   lists every device/browser currently signed in as you and lets you
   revoke one remotely — a prerequisite for "someone else is logged in as

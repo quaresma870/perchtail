@@ -204,16 +204,36 @@ def test_check_alert_returns_nothing_for_inactive_owner(session, tmp_path):
     assert check_alert(session, alert) == []
 
 
+class _FakeHttpxClient:
+    """Stands in for `httpx.Client(timeout=...)` used as a context manager
+    (see app.alerts.send_webhook) -- `fake_post` is called with the same
+    kwargs send_webhook actually passes (json, headers, extensions), on the
+    already-pinned (IP-literal) URL, not the original hostname URL."""
+
+    def __init__(self, fake_post, **_client_kwargs):
+        self._fake_post = fake_post
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def post(self, url, *, json, headers=None, extensions=None):
+        return self._fake_post(url, json=json, headers=headers, extensions=extensions)
+
+
 def test_send_webhook_posts_payload_and_returns_true_on_success(monkeypatch):
     posted = {}
 
-    def fake_post(url, json, timeout):
+    def fake_post(url, json, headers, extensions):
         posted["url"] = url
         posted["json"] = json
-        posted["timeout"] = timeout
+        posted["headers"] = headers
+        posted["extensions"] = extensions
         return SimpleNamespace(raise_for_status=lambda: None)
 
-    monkeypatch.setattr("app.alerts.httpx.post", fake_post)
+    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
 
     alert = Alert(
         id=1,
@@ -230,7 +250,13 @@ def test_send_webhook_posts_payload_and_returns_true_on_success(monkeypatch):
     ok = send_webhook(alert, [hit])
 
     assert ok is True
-    assert posted["url"] == "https://example.com/hook"
+    # The connection target is pinned to the already-validated IP (see
+    # webhook_safety.resolve_pinned_webhook_target) -- conftest.py's
+    # autouse DNS stub resolves any non-literal hostname to a fixed fake
+    # public IP, so this is deterministic, not a real network lookup.
+    assert posted["url"] == "https://93.184.216.34:443/hook"
+    assert posted["headers"] == {"Host": "example.com"}
+    assert posted["extensions"] == {"sni_hostname": "example.com"}
     assert posted["json"]["alert_id"] == 1
     assert posted["json"]["matched_count"] == 1
     assert posted["json"]["hits"][0]["file_path"] == "app.log"
@@ -248,12 +274,12 @@ def test_send_webhook_blocks_a_url_that_now_resolves_privately(monkeypatch):
     def fake_getaddrinfo(host, *args, **kwargs):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
 
-    def fake_post(url, json, timeout):
+    def fake_post(url, json, headers, extensions):
         posted.append(url)
         return SimpleNamespace(raise_for_status=lambda: None)
 
     monkeypatch.setattr("app.webhook_safety.socket.getaddrinfo", fake_getaddrinfo)
-    monkeypatch.setattr("app.alerts.httpx.post", fake_post)
+    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
 
     alert = Alert(
         id=1,
@@ -273,10 +299,10 @@ def test_send_webhook_blocks_a_url_that_now_resolves_privately(monkeypatch):
 def test_send_webhook_returns_false_on_http_error(monkeypatch):
     import httpx
 
-    def fake_post(url, json, timeout):
+    def fake_post(url, json, headers, extensions):
         raise httpx.ConnectError("connection refused", request=None)
 
-    monkeypatch.setattr("app.alerts.httpx.post", fake_post)
+    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
 
     alert = Alert(
         id=1,
@@ -311,11 +337,11 @@ def test_evaluate_alerts_sends_webhook_and_advances_last_checked_at(tmp_path, mo
 
     posted = []
 
-    def fake_post(url, json, timeout):
+    def fake_post(url, json, headers, extensions):
         posted.append(json)
         return SimpleNamespace(raise_for_status=lambda: None)
 
-    monkeypatch.setattr("app.alerts.httpx.post", fake_post)
+    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
 
     with Session(engine) as session:
         user = _user(session, is_super_admin=True)
@@ -339,7 +365,12 @@ def test_evaluate_alerts_sends_webhook_and_advances_last_checked_at(tmp_path, mo
 def test_evaluate_alerts_does_not_advance_watermark_when_fully_blocked(tmp_path, monkeypatch):
     engine = _throwaway_engine(monkeypatch)
     posted = []
-    monkeypatch.setattr("app.alerts.httpx.post", lambda url, json, timeout: posted.append(json))
+    monkeypatch.setattr(
+        "app.alerts.httpx.Client",
+        lambda **kw: _FakeHttpxClient(
+            lambda url, json, headers, extensions: posted.append(json), **kw
+        ),
+    )
 
     with Session(engine) as session:
         owner = _user(session, is_super_admin=False)
@@ -361,7 +392,12 @@ def test_evaluate_alerts_does_not_advance_watermark_when_fully_blocked(tmp_path,
 def test_evaluate_alerts_skips_disabled_alerts(tmp_path, monkeypatch):
     engine = _throwaway_engine(monkeypatch)
     posted = []
-    monkeypatch.setattr("app.alerts.httpx.post", lambda url, json, timeout: posted.append(json))
+    monkeypatch.setattr(
+        "app.alerts.httpx.Client",
+        lambda **kw: _FakeHttpxClient(
+            lambda url, json, headers, extensions: posted.append(json), **kw
+        ),
+    )
 
     with Session(engine) as session:
         user = _user(session, is_super_admin=True)

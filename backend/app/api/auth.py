@@ -9,7 +9,13 @@ from sqlmodel import Session, select
 
 from app.auth.models import AuthSession, GlobalCapability, Role, SSOProviderConfig, User
 from app.auth.providers.local import LocalPasswordProvider, change_password, verify_password
-from app.auth.providers.oidc import OIDCProvider, decode_state, encode_state, parse_oidc_settings
+from app.auth.providers.oidc import (
+    STATE_TTL_SECONDS,
+    OIDCProvider,
+    decode_state,
+    encode_state,
+    parse_oidc_settings,
+)
 from app.auth.sessions import (
     create_session,
     delete_session,
@@ -28,6 +34,19 @@ from app.login_throttle import record_failure, record_success, seconds_until_unl
 logger = get_logger(__name__)
 
 SESSION_COOKIE_NAME = "perchtail_session"
+# Binds the OAuth `state` param to the browser that started the SSO flow --
+# see sso_login/sso_callback below and issue #61. Lax, not Strict: it must
+# still be sent on the top-level GET navigation the IdP uses to redirect
+# back to /auth/sso/callback, which is cross-site from the cookie's own
+# origin's perspective (Strict would never attach it there at all).
+#
+# One cookie, not a set -- a second concurrent /auth/sso/login call in the
+# same browser (a second tab, a double-click) overwrites it, so finishing
+# an earlier flow afterward fails this check and the user just retries.
+# Supporting truly concurrent flows would need a per-flow cookie name or a
+# list of valid states; not worth that complexity for what's normally a
+# single linear login action.
+SSO_STATE_COOKIE_NAME = "perchtail_sso_state"
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -102,6 +121,18 @@ def _set_session_cookie(response: Response, token: str) -> None:
         secure=settings.session_cookie_secure,
         samesite="strict",
         max_age=settings.session_ttl_hours * 3600,
+    )
+
+
+def _clear_sso_state_cookie(response: Response) -> None:
+    # Match the attributes it was set with (see sso_login) -- Response
+    # .delete_cookie()'s own defaults (secure=False) wouldn't necessarily
+    # clear a cookie that was set with secure=True.
+    settings = get_settings()
+    response.delete_cookie(
+        SSO_STATE_COOKIE_NAME,
+        secure=settings.session_cookie_secure,
+        samesite="lax",
     )
 
 
@@ -265,7 +296,21 @@ def sso_login(session: Session = Depends(get_session)):
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach the identity provider"
         ) from exc
 
-    return RedirectResponse(authorize_url, status_code=status.HTTP_302_FOUND)
+    response = RedirectResponse(authorize_url, status_code=status.HTTP_302_FOUND)
+    # Binds this flow to this browser (see SSO_STATE_COOKIE_NAME above) --
+    # sso_callback rejects a state it can't match against this same cookie,
+    # closing the "attacker replays their own valid code+state to a victim"
+    # login-CSRF gap (issue #61). Same TTL as the state token itself; no
+    # point outliving what decode_state would accept anyway.
+    response.set_cookie(
+        key=SSO_STATE_COOKIE_NAME,
+        value=state,
+        httponly=True,
+        secure=app_settings.session_cookie_secure,
+        samesite="lax",
+        max_age=STATE_TTL_SECONDS,
+    )
+    return response
 
 
 @router.get("/sso/callback")
@@ -274,15 +319,33 @@ def sso_callback(
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
+    sso_state_cookie: str | None = Cookie(default=None, alias=SSO_STATE_COOKIE_NAME),
     session: Session = Depends(get_session),
 ):
     app_settings = get_settings()
     login_error_redirect = RedirectResponse(
         f"{app_settings.public_base_url}/#/login?sso_error=1", status_code=status.HTTP_302_FOUND
     )
+    # One-time cookie either way -- a failed attempt shouldn't leave it
+    # sitting around for a retry to reuse, and a successful one is about to
+    # get its own real session cookie instead.
+    _clear_sso_state_cookie(login_error_redirect)
 
     if error is not None or code is None or state is None:
         logger.warning("sso.callback.idp_error", error=error)
+        return login_error_redirect
+
+    # Login-CSRF / state-fixation guard (issue #61): `state` must match the
+    # cookie /sso/login set in THIS browser. Without this, an attacker who
+    # holds any valid IdP account can complete their own login, capture the
+    # resulting code+state before their own browser follows it, and hand
+    # that URL to a victim -- whose browser would otherwise happily
+    # exchange it and receive a session for the attacker's account. A
+    # forged URL carries a `state` value but never the matching cookie,
+    # since setting that requires the victim's own browser to have visited
+    # /sso/login itself.
+    if sso_state_cookie is None or not secrets.compare_digest(sso_state_cookie, state):
+        logger.warning("sso.callback.state_cookie_mismatch")
         return login_error_redirect
 
     try:
@@ -320,5 +383,6 @@ def sso_callback(
     response = RedirectResponse(
         f"{app_settings.public_base_url}/", status_code=status.HTTP_302_FOUND
     )
+    _clear_sso_state_cookie(response)
     _set_session_cookie(response, token)
     return response
