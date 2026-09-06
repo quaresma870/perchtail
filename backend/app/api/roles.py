@@ -15,13 +15,15 @@ require_manage = require_global_capability(GlobalCapability.manage_roles, get_cu
 
 def require_read(user: User = Depends(get_current_active_user)) -> User:
     # Listing roles/reading one is also needed by the users admin surface
-    # (to populate the role picker when assigning a role to a user), so
-    # manage_users is accepted here too — only create/update/delete/grants
-    # below require manage_roles specifically.
+    # (to populate the role picker when assigning a role to a user) and the
+    # SSO settings page (to populate the role picker for group-role
+    # mappings), so manage_users/manage_sso are accepted here too — only
+    # create/update/delete/grants below require manage_roles specifically.
     if (
         user.role.is_super_admin
         or GlobalCapability.manage_roles in user.role.global_capabilities
         or GlobalCapability.manage_users in user.role.global_capabilities
+        or GlobalCapability.manage_sso in user.role.global_capabilities
     ):
         return user
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted")

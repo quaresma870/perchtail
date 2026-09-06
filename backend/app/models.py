@@ -1,7 +1,8 @@
+from datetime import datetime
 from enum import StrEnum
 from typing import Optional
 
-from sqlmodel import Field, Relationship, SQLModel
+from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
 class Protocol(StrEnum):
@@ -9,6 +10,14 @@ class Protocol(StrEnum):
     smb = "smb"
     winrm = "winrm"
     local = "local"
+    # Phase 2: for sources not reachable inbound. The Go push-agent dials
+    # *out* to this app (solving the firewall/NAT problem) and holds that
+    # connection open; the connector then sends live list/fetch commands
+    # down it on demand — see collectors/agent.py and app/agent_registry.py.
+    # Deliberately not a proactive sync: CLAUDE.md's always-fresh,
+    # nothing-persisted rule still applies here, just relayed through the
+    # agent's connection instead of a direct SSH/SMB/WinRM dial.
+    agent = "agent"
 
 
 class RuleType(StrEnum):
@@ -19,6 +28,13 @@ class RuleType(StrEnum):
 class PatternKind(StrEnum):
     glob = "glob"
     regex = "regex"
+
+
+class SeverityLevel(StrEnum):
+    error = "error"
+    warning = "warning"
+    info = "info"
+    debug = "debug"
 
 
 class Customer(SQLModel, table=True):
@@ -67,6 +83,22 @@ class Source(SQLModel, table=True):
     enabled: bool = True
     schedule_cron: str | None = None
     is_system: bool = False
+    # Push-agent (protocol=agent) enrollment: only the SHA-256 hash of the
+    # enrollment token is stored (same rationale as password/session-token
+    # hashing) — the plaintext is shown exactly once, when generated, via
+    # POST /sources/{id}/agent-token. Null for every other protocol.
+    agent_token_hash: str | None = None
+    # Updated whenever the agent's connection is established or sends a
+    # response — purely informational for the admin UI ("last seen"); live
+    # connection state itself lives in app.agent_registry, not the DB, since
+    # it's inherently per-process and shouldn't survive a restart.
+    agent_last_seen_at: datetime | None = None
+    # Phase 3 full-text search (see app/search_index.py and ROADMAP.md):
+    # opt-in, off by default — same "explicit opt-in, not on-by-default"
+    # conservatism as the rule engine's zero-rules-matches-nothing default,
+    # since indexing stores short line-level snippets at rest, which some
+    # customers' logs may be too sensitive for even in that reduced form.
+    search_indexing_enabled: bool = False
 
     customer: Customer | None = Relationship(back_populates="sources")
     folder: Folder | None = Relationship(back_populates="sources")
@@ -86,3 +118,138 @@ class Rule(SQLModel, table=True):
     notes: str | None = None
 
     source: Source = Relationship(back_populates="rules")
+
+
+class SeverityPattern(SQLModel, table=True):
+    """Admin-configurable line-highlighting rule for the Viewer (see
+    CLAUDE.md's CodeMirror choice and ROADMAP.md's "Viewer: toward an
+    advanced editor" section) — display-only, never affects what's
+    readable/fetchable the way `Rule` does. Matching itself runs client-side
+    (see frontend/src/lib/severity-highlighting.ts); this table is pure
+    config storage + CRUD.
+
+    `source_id` null means a global default pattern; set means a
+    per-source override. A source's own patterns fully replace the global
+    set when it has any at all (not merged with it) — same "override, not
+    merge" simplicity as choosing not to invent new fallback rules, see the
+    effective-set resolution in app/api/severity_patterns.py."""
+
+    __tablename__ = "severity_pattern"
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_id: int | None = Field(default=None, foreign_key="source.id")
+    level: SeverityLevel
+    pattern: str
+    pattern_kind: PatternKind = PatternKind.glob
+    enabled: bool = True
+    # Whether a match also tints the whole line, not just the matched
+    # substring -- traditionally wanted for error/fatal-style markers, not
+    # for a routine info/debug token.
+    highlight_line: bool = False
+    # Separate from `enabled`: whether this pattern's matches are included
+    # when stepping through "next problem" navigation. A pattern can be
+    # visually highlighted without cluttering that step-through, or vice
+    # versa -- deliberately not reusing `enabled` for both meanings (see
+    # ROADMAP.md's open-decision note on this).
+    include_in_navigation: bool = True
+
+
+class SearchIndexState(SQLModel, table=True):
+    """Per-file bookkeeping for the Phase 3 full-text search indexer (see
+    app/search_index.py) — tracks what's already indexed for a source so a
+    sweep only re-reads files that changed. Deliberately separate from the
+    actual searchable content, which lives in the `search_index_fts` SQLite
+    FTS5 virtual table (raw SQL, not an ORM model — see
+    app.db.ensure_search_schema) rather than here, since FTS5 tables aren't
+    representable as a SQLModel/SQLAlchemy table class.
+
+    Staleness is tracked by file size alone, not size+mtime: none of the
+    connector protocols (ssh/smb/winrm/local/agent) report a file's
+    modification time today, only name/path/is_dir/size (see
+    collectors/base.py's DirEntry) — so size is the only signal available
+    across all of them uniformly. This under-detects the rare case of a
+    same-size content change, which is an accepted tradeoff for a lagging,
+    approximate secondary index over log files that are typically
+    append-only (grow) or rotated (renamed), not edited in place."""
+
+    __tablename__ = "search_index_state"
+    __table_args__ = (
+        UniqueConstraint("source_id", "file_path", name="uq_search_index_state_source_path"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_id: int = Field(foreign_key="source.id")
+    file_path: str
+    size: int
+    indexed_at: datetime
+
+
+class Alert(SQLModel, table=True):
+    """Phase 3 alerting (see ROADMAP.md) — notifies a webhook when new
+    content matching `query` appears in a source's full-text search index.
+    Rides entirely on the existing FTS5 index (app/search_index.py) and its
+    indexer, no parallel structure: an alert can only ever fire on sources
+    with `search_indexing_enabled` already on, evaluated by
+    `app.alerts.evaluate_alerts()` right after each indexing sweep so it
+    always sees fresh `SearchIndexState.indexed_at` timestamps.
+
+    `source_id` null means "every source the owner can currently view",
+    resolved dynamically at each evaluation via `auth.rbac.
+    visible_source_ids` rather than frozen at creation time — same "checked
+    live, not a snapshot" RBAC spirit as everywhere else in this project.
+    A consequence: revoking the owner's access to a scoped source silently
+    stops that alert from firing again, without needing to also edit or
+    delete it.
+
+    `last_checked_at` drives "new since last time" — only files whose
+    `SearchIndexState.indexed_at` has advanced past it are re-checked, not
+    the whole index every sweep. Webhook-only notification channel for v1
+    (no SMTP sending exists anywhere in this project); enabling an alert is
+    a deliberate "content leaves the system" export choice, same category
+    of decision as opting a source into indexing at all."""
+
+    __tablename__ = "alert"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id")
+    name: str
+    query: str
+    source_id: int | None = Field(default=None, foreign_key="source.id")
+    webhook_url: str
+    enabled: bool = True
+    last_checked_at: datetime | None = None
+    created_at: datetime
+
+
+class SystemSetting(SQLModel, table=True):
+    """Deployment-wide feature toggles, admin-configurable from Settings ->
+    System (see app/api/system_settings.py) rather than only via an env var
+    and a redeploy. Key-value rather than dedicated columns so a new toggle
+    (e.g. the audit log viewer, once built) slots in without its own
+    migration each time. Missing key == default, defined in code
+    (app.system_settings.DEFAULTS), not stored — so shipping a new toggle
+    doesn't require backfilling every existing deployment's rows."""
+
+    __tablename__ = "system_setting"
+
+    key: str = Field(primary_key=True)
+    value: str
+
+
+class MonitoringToken(SQLModel, table=True):
+    """A single, deployment-wide bearer token gating the detailed health
+    endpoint (GET /monitoring/health, see app/api/monitoring.py) — a
+    monitoring system like Zabbix can't do an interactive cookie-session
+    login, so this is deliberately separate from user auth. Only the
+    SHA-256 hash is stored, same "hash at rest, plaintext shown once"
+    pattern as Source.agent_token_hash and session tokens; generating a
+    new one invalidates whatever token was issued before. Singleton by
+    convention (at most one row) rather than a dedicated key-value slot,
+    since it's a credential, not a feature toggle -- SystemSetting's
+    get_bool/set_bool shape doesn't fit a secret."""
+
+    __tablename__ = "monitoring_token"
+
+    id: int | None = Field(default=None, primary_key=True)
+    token_hash: str
+    created_at: datetime

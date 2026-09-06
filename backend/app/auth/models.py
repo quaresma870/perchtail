@@ -25,6 +25,18 @@ class GlobalCapability(StrEnum):
     manage_roles = "manage_roles"
     manage_sso = "manage_sso"
     create_source = "create_source"
+    # Deployment-wide feature toggles (SystemSetting) -- distinct from the
+    # other capabilities above, which all gate *managing something scoped*
+    # (users, roles, SSO config, sources). This one gates flipping a switch
+    # that changes what every user in the deployment sees.
+    manage_system_settings = "manage_system_settings"
+    # Read access to AuditLog (app/api/audit.py). Deliberately its own global
+    # capability rather than folded into the customer/folder/source grant
+    # tree: audit visibility is a global concern (who did what, anywhere in
+    # the deployment), not something scoped to what a role can browse. Never
+    # implied by any other capability above -- a role needs this explicitly,
+    # same as a super-admin needs no capability at all to see everything.
+    view_audit_log = "view_audit_log"
 
 
 class AuthProviderType(StrEnum):
@@ -93,6 +105,39 @@ class SSOProviderConfig(SQLModel, table=True):
     enabled: bool = False
 
 
+class SSOGroupRoleMapping(SQLModel, table=True):
+    """Maps an IdP group name to a Role, applied automatically on every SSO
+    login (see auth/providers/oidc.py's resolve_group_mapped_role_id) —
+    CLAUDE.md's phase-2 "auto-mapping IdP group claims to roles" automation.
+    Deliberately global, not scoped to a specific SSOProviderConfig: v1 only
+    ever has one active provider at a time (see api/sso.py's
+    _assert_single_enabled), so there's nothing to disambiguate yet.
+
+    `order` gives mappings the exact same "evaluated in order, last match
+    wins" semantics as Rule (see CLAUDE.md's rule-matching section) —
+    reusing a mental model this project's admins already know, rather than
+    inventing a new one (e.g. "most privileged role wins") for what's
+    otherwise the same kind of ordered-precedence problem. A user whose ID
+    token's group claim contains more than one mapped group gets whichever
+    mapping is evaluated last.
+
+    Applied on every login, not just first provisioning: if a mapping still
+    matches, it overwrites User.role_id each time, keeping the user's role
+    in sync with their current IdP group membership. This means an admin's
+    manual role change made directly in PerchTail doesn't stick past that
+    user's next SSO login if their groups still match a configured mapping
+    — the IdP is treated as the source of truth once a mapping exists for
+    it, same spirit as an IdP-driven SSO relationship generally. Deleting
+    the mapping (or removing the user from the group) stops the resync."""
+
+    __tablename__ = "sso_group_role_mapping"
+
+    id: int | None = Field(default=None, primary_key=True)
+    order: int
+    group_name: str
+    role_id: int = Field(foreign_key="role.id")
+
+
 class AuthSession(SQLModel, table=True):
     """Server-side session backing the login cookie. Only the SHA-256 hash of
     the token is stored — same rationale as password hashing — so a DB leak
@@ -106,6 +151,14 @@ class AuthSession(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
     expires_at: datetime
     last_seen_at: datetime | None = None
+    # Captured at login (local and SSO) straight from the request's own
+    # User-Agent header -- not IP address, deliberately: a real client IP
+    # behind a reverse proxy means trusting X-Forwarded-For, the same trust
+    # question app/config.py's public_base_url sidesteps entirely by not
+    # deriving anything from proxy headers. User-Agent has no such
+    # trust-boundary issue and is still the main signal the session
+    # management UI needs to answer "is this me, or someone else."
+    user_agent: str | None = None
 
 
 class AuditLog(SQLModel, table=True):

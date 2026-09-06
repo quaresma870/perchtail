@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
+  import SettingsNav from '../lib/components/SettingsNav.svelte'
   import type { Role } from '../lib/types'
 
   let roles: Role[] = []
@@ -23,7 +24,7 @@
   async function duplicate(role: Role) {
     try {
       const copy = await api.post<Role>(`/roles/${role.id}/duplicate`, {})
-      push(`/roles/${copy.id}`)
+      push(`/settings/roles/${copy.id}`)
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to duplicate role'
     }
@@ -42,10 +43,12 @@
   onMount(load)
 </script>
 
+<SettingsNav />
+
 <div class="page">
   <div class="header">
     <h1>Roles</h1>
-    <button class="btn btn-primary" on:click={() => push('/roles/new')}>+ New role</button>
+    <button class="btn btn-primary" on:click={() => push('/settings/roles/new')}>+ New role</button>
   </div>
 
   {#if loading}
@@ -72,7 +75,9 @@
               </td>
               <td class="caps">{role.global_capabilities.join(', ') || '—'}</td>
               <td class="actions">
-                <button class="link" on:click={() => push(`/roles/${role.id}`)}>edit</button>
+                <button class="link" on:click={() => push(`/settings/roles/${role.id}`)}
+                  >edit</button
+                >
                 <button class="link" on:click={() => duplicate(role)}>duplicate</button>
                 {#if !role.is_builtin}
                   <button class="link danger" on:click={() => remove(role)}>delete</button>

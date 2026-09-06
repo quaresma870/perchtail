@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import SettingsNav from '../lib/components/SettingsNav.svelte'
   import type { AppUser, Role } from '../lib/types'
 
   let users: AppUser[] = []
@@ -84,6 +85,8 @@
 
   onMount(load)
 </script>
+
+<SettingsNav />
 
 <div class="page">
   <h1>Users</h1>

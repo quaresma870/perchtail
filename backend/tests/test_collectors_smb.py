@@ -5,22 +5,19 @@ import pytest
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 
 
-class FakeStat:
+class FakeSMBInfo:
     def __init__(self, size: int):
-        self.st_size = size
+        self.end_of_file = size
 
 
 class FakeSMBDirEntry:
     def __init__(self, name: str, is_dir: bool, size: int = 0):
         self.name = name
         self._is_dir = is_dir
-        self._size = size
+        self.smb_info = FakeSMBInfo(size)
 
     def is_dir(self) -> bool:
         return self._is_dir
-
-    def stat(self) -> FakeStat:
-        return FakeStat(self._size)
 
 
 class FakeSMBClient:
@@ -29,16 +26,20 @@ class FakeSMBClient:
         self.listing: list[FakeSMBDirEntry] = []
         self.files: dict[str, bytes] = {}
         self.requested_paths: list[str] = []
+        self.scandir_kwargs: list[dict] = []
+        self.open_file_kwargs: list[dict] = []
 
-    def register_session(self, host, username=None, password=None, port=None):
-        self.sessions.append((host, username, password, port))
+    def register_session(self, host, username=None, password=None, port=None, auth_protocol=None):
+        self.sessions.append((host, username, password, port, auth_protocol))
 
-    def scandir(self, path):
+    def scandir(self, path, **kwargs):
         self.requested_paths.append(path)
+        self.scandir_kwargs.append(kwargs)
         return self.listing
 
-    def open_file(self, path, mode="rb"):
+    def open_file(self, path, mode="rb", **kwargs):
         self.requested_paths.append(path)
+        self.open_file_kwargs.append(kwargs)
         return io.BytesIO(self.files[path])
 
 
@@ -91,6 +92,35 @@ def test_list_directory_registers_session_and_filters_files(fake_smbclient):
     assert "app.log" in entries and entries["app.log"].size == 100
     assert "secret.txt" not in entries
     assert fake_smbclient.sessions[0][0] == "fileserver.example.com"
+
+
+def test_connect_kwargs_pins_ntlm_auth_protocol(fake_smbclient):
+    """See _connect_kwargs's docstring -- credential_ref never carries
+    Kerberos credentials, so leaving smbclient's default "negotiate" in
+    place can fail the whole SPNEGO negotiation on a client with no
+    Kerberos configuration at all, instead of falling back to NTLM."""
+    kwargs = smb_module._connect_kwargs(_source())
+    assert kwargs["auth_protocol"] == "ntlm"
+
+
+def test_non_default_port_reaches_scandir_and_open_file_not_just_register_session(
+    fake_smbclient, tmp_path
+):
+    """smbclient's own scandir()/open_file() resolve their session via
+    get_smb_tree(path, port=445, ...) -- a *separate* default from whatever
+    was passed to register_session() -- so a source pinned to a
+    non-standard port must still see that port on every call, not just the
+    initial register_session()."""
+    fake_smbclient.listing = [FakeSMBDirEntry("app.log", is_dir=False, size=1)]
+    fake_smbclient.files["\\\\fileserver.example.com\\AppLogs\\app.log"] = b"x"
+    source = _source(port=1445)
+
+    smb_module.list_directory(source, [_rule(0, RuleType.include, "*.log")])
+    assert fake_smbclient.sessions[0][3] == 1445
+    assert fake_smbclient.scandir_kwargs[0]["port"] == 1445
+
+    smb_module.fetch_file(source, "app.log", tmp_path / "out")
+    assert fake_smbclient.open_file_kwargs[0]["port"] == 1445
 
 
 def test_list_directory_builds_relative_paths_for_nested_calls(fake_smbclient):

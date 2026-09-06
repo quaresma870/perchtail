@@ -1,12 +1,19 @@
+import { javascript } from '@codemirror/lang-javascript'
+import { json } from '@codemirror/lang-json'
+import { xml } from '@codemirror/lang-xml'
 import { RangeSetBuilder } from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
   EditorView,
-  MatchDecorator,
   ViewPlugin,
   type ViewUpdate,
+  WidgetType,
 } from '@codemirror/view'
+import type { FileLanguage } from './file-language'
+import { findMatchesInLine, LEVEL_CLASS } from './severity-highlighting'
+import { findCrlfLineNumbers, findWhitespaceRuns } from './whitespace-highlighting'
+import type { SeverityPattern } from './types'
 
 /** Dark theme matching the app's own design tokens (app.css custom
  * properties) rather than a fixed CodeMirror preset — a log viewer should
@@ -49,65 +56,52 @@ export const darkTheme = EditorView.theme(
       backgroundColor: 'var(--danger-soft)',
       borderLeft: '2px solid var(--danger)',
     },
+    '.cm-line-bookmark': {
+      backgroundColor: 'var(--accent-soft)',
+      borderLeft: '2px solid var(--accent)',
+    },
+    '.cm-ws-glyph': {
+      color: 'var(--text-faint)',
+      opacity: '0.6',
+    },
+    '.cm-crlf-glyph': {
+      color: 'var(--text-faint)',
+      opacity: '0.6',
+      fontSize: '0.75em',
+      verticalAlign: 'middle',
+    },
   },
   { dark: true },
 )
 
-export const LEVEL_TOKEN = /\[(info|warn|warning|error|fatal|debug|trace)\]/gi
-
-export const LEVEL_CLASS: Record<string, string> = {
-  info: 'cm-level-info',
-  warn: 'cm-level-warn',
-  warning: 'cm-level-warn',
-  error: 'cm-level-error',
-  fatal: 'cm-level-error',
-  debug: 'cm-level-debug',
-  trace: 'cm-level-debug',
-}
-
-/** Pure lookup extracted so the token→class mapping is unit-testable
- * without spinning up a CodeMirror view. */
-export function classForLevelToken(rawLevel: string): string {
-  return LEVEL_CLASS[rawLevel.toLowerCase()]
-}
-
-const tokenDecorator = new MatchDecorator({
-  regexp: LEVEL_TOKEN,
-  decoration: (match) => Decoration.mark({ class: classForLevelToken(match[1]) }),
-})
-
-/** Lightweight, viewport-scoped log-level highlighting — colors `[info]`/
- * `[warn]`/`[error]`-style tokens and tints the whole line for anything
- * that looks like an error, so a scan of a log file reads the same way
- * `grep -i error` would highlight it. Not a real log-format parser: this
- * is a log *viewer*, not a language server, per CLAUDE.md's reasoning for
- * choosing CodeMirror over Monaco in the first place. */
-const logLevelTokens = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet
-    constructor(view: EditorView) {
-      this.decorations = tokenDecorator.createDeco(view)
-    }
-    update(update: ViewUpdate) {
-      this.decorations = tokenDecorator.updateDeco(update, this.decorations)
-    }
-  },
-  { decorations: (v) => v.decorations },
-)
-
-export const ERROR_LINE = /\b(error|fatal)\b/i
-
-export function isErrorLine(text: string): boolean {
-  return ERROR_LINE.test(text)
-}
-
-function buildLineDecorations(view: EditorView): DecorationSet {
+function buildTokenDecorations(view: EditorView, patterns: SeverityPattern[]): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>()
   for (const { from, to } of view.visibleRanges) {
     let pos = from
     while (pos <= to) {
       const line = view.state.doc.lineAt(pos)
-      if (isErrorLine(line.text)) {
+      const matches = findMatchesInLine(line.text, patterns).sort(
+        (a, b) => a.matchStart - b.matchStart,
+      )
+      for (const match of matches) {
+        const start = line.from + match.matchStart
+        const end = start + match.matchLength
+        builder.add(start, end, Decoration.mark({ class: LEVEL_CLASS[match.level] }))
+      }
+      pos = line.to + 1
+    }
+  }
+  return builder.finish()
+}
+
+function buildLineDecorations(view: EditorView, patterns: SeverityPattern[]): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>()
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from
+    while (pos <= to) {
+      const line = view.state.doc.lineAt(pos)
+      const hasLineTint = findMatchesInLine(line.text, patterns).some((m) => m.highlightLine)
+      if (hasLineTint) {
         builder.add(line.from, line.from, Decoration.line({ class: 'cm-line-error' }))
       }
       pos = line.to + 1
@@ -116,19 +110,193 @@ function buildLineDecorations(view: EditorView): DecorationSet {
   return builder.finish()
 }
 
-const logLevelLines = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet
-    constructor(view: EditorView) {
-      this.decorations = buildLineDecorations(view)
-    }
-    update(update: ViewUpdate) {
-      if (update.docChanged || update.viewportChanged) {
-        this.decorations = buildLineDecorations(update.view)
-      }
-    }
-  },
-  { decorations: (v) => v.decorations },
-)
+/** Admin-configurable severity highlighting (see ROADMAP.md's "Viewer:
+ * toward an advanced editor" section and backend/app/api/severity_patterns.py)
+ * — colors matched tokens and optionally tints the whole line, driven by
+ * whatever pattern set is effective for the currently open source, rather
+ * than a fixed set of regexes. Two separate ViewPlugins/builders (line
+ * tints vs. token marks), not one combined builder: RangeSetBuilder
+ * requires strictly ascending position order, and interleaving line-level
+ * and mark-level decorations from independently-sized ranges in a single
+ * builder would violate that. `patterns` is captured at construction time —
+ * the caller (CodeMirrorPane) rebuilds the whole extension set when the
+ * effective pattern list changes, same as it already does for `content`. */
+export function severityHighlighting(patterns: SeverityPattern[]) {
+  const enabled = patterns.filter((p) => p.enabled)
 
-export const logLevelHighlighting = [logLevelLines, logLevelTokens]
+  const lines = ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet
+      constructor(view: EditorView) {
+        this.decorations = buildLineDecorations(view, enabled)
+      }
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.viewportChanged) {
+          this.decorations = buildLineDecorations(update.view, enabled)
+        }
+      }
+    },
+    { decorations: (v) => v.decorations },
+  )
+
+  const tokens = ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet
+      constructor(view: EditorView) {
+        this.decorations = buildTokenDecorations(view, enabled)
+      }
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.viewportChanged) {
+          this.decorations = buildTokenDecorations(update.view, enabled)
+        }
+      }
+    },
+    { decorations: (v) => v.decorations },
+  )
+
+  return [lines, tokens]
+}
+
+class GlyphWidget extends WidgetType {
+  constructor(
+    readonly text: string,
+    readonly className: string,
+  ) {
+    super()
+  }
+  toDOM(): HTMLElement {
+    const span = document.createElement('span')
+    span.className = this.className
+    span.textContent = this.text
+    return span
+  }
+  eq(other: GlyphWidget): boolean {
+    return other.text === this.text && other.className === this.className
+  }
+  ignoreEvent(): boolean {
+    return true
+  }
+}
+
+const SPACE_GLYPH = '·'
+const TAB_GLYPH = '→'
+const CRLF_GLYPH = '␍'
+
+function buildWhitespaceDecorations(view: EditorView, crlfLines: Set<number>): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>()
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from
+    while (pos <= to) {
+      const line = view.state.doc.lineAt(pos)
+      for (const run of findWhitespaceRuns(line.text)) {
+        const glyph = run.char === ' ' ? SPACE_GLYPH : TAB_GLYPH
+        const start = line.from + run.start
+        const end = start + run.length
+        builder.add(
+          start,
+          end,
+          Decoration.replace({
+            widget: new GlyphWidget(glyph.repeat(run.length), 'cm-ws-glyph'),
+          }),
+        )
+      }
+      if (crlfLines.has(line.number)) {
+        // Unlike the whitespace runs above, there's no `\r` character left
+        // in `line.text` to replace -- CodeMirror's own line-separator
+        // matching already consumed it while splitting the document into
+        // lines (see findCrlfLineNumbers's doc comment). A zero-width
+        // widget appended right after the line's last character is the
+        // only way left to mark it.
+        builder.add(line.to, line.to, Decoration.widget({ widget: new GlyphWidget(CRLF_GLYPH, 'cm-crlf-glyph'), side: 1 }))
+      }
+      pos = line.to + 1
+    }
+  }
+  return builder.finish()
+}
+
+/** "Show all characters" toggle (Notepad++'s View -> Show Symbol): reveals
+ * whitespace and CRLF-vs-LF line endings as visible glyphs. Relevant given
+ * this tool spans both Linux and Windows sources (CLAUDE.md) -- spotting a
+ * CRLF/LF mismatch or trailing whitespace is a real, recurring forensic
+ * need here, not a generic editor nicety. `content` is the raw fetched
+ * text (needed to detect CRLF before CodeMirror's own parsing consumes the
+ * `\r`, see findCrlfLineNumbers) -- computed once per call, same "captured
+ * at construction time" pattern as severityHighlighting's patterns. A
+ * single ViewPlugin is enough here (unlike severityHighlighting's two):
+ * every decoration is a `Decoration.replace`/`Decoration.widget` over a
+ * distinct, non-overlapping position in one pass, so there's no
+ * ascending-order conflict to split across builders. */
+export function whitespaceHighlighting(content: string) {
+  const crlfLines = findCrlfLineNumbers(content)
+
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet
+      constructor(view: EditorView) {
+        this.decorations = buildWhitespaceDecorations(view, crlfLines)
+      }
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.viewportChanged) {
+          this.decorations = buildWhitespaceDecorations(update.view, crlfLines)
+        }
+      }
+    },
+    { decorations: (v) => v.decorations },
+  )
+}
+
+function buildBookmarkDecorations(view: EditorView, bookmarks: number[]): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>()
+  const marker = Decoration.line({ class: 'cm-line-bookmark' })
+  // RangeSetBuilder requires strictly ascending position order -- sort
+  // defensively rather than relying on the caller to hand these in order.
+  for (const lineNumber of [...bookmarks].sort((a, b) => a - b)) {
+    if (lineNumber < 1 || lineNumber > view.state.doc.lines) continue
+    const line = view.state.doc.line(lineNumber)
+    builder.add(line.from, line.from, marker)
+  }
+  return builder.finish()
+}
+
+/** Pure client-side/session bookmarks (ROADMAP.md: "never written to the
+ * file, doesn't need to be persisted server-side") -- `bookmarks` is a
+ * plain list of 1-indexed line numbers, owned and toggled by Viewer.svelte
+ * per open tab, rendered here the same way severity line-tints are. */
+export function bookmarkHighlighting(bookmarks: number[]) {
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet
+      constructor(view: EditorView) {
+        this.decorations = buildBookmarkDecorations(view, bookmarks)
+      }
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.viewportChanged) {
+          this.decorations = buildBookmarkDecorations(update.view, bookmarks)
+        }
+      }
+    },
+    { decorations: (v) => v.decorations },
+  )
+}
+
+/** Per-file-type syntax highlighting (ROADMAP.md's "Viewer: toward an
+ * advanced editor" section), picked from the open file's own extension
+ * (see file-language.ts) -- `@codemirror/lang-json`/`lang-xml`/
+ * `lang-javascript` were already-installed dependencies, unused anywhere
+ * in the codebase until now. Returns `[]` for anything unrecognized (most
+ * log files), same "highlighting is additive, never required" spirit as
+ * severityHighlighting -- a file with no matching language still opens
+ * and displays exactly as before. */
+export function languageExtension(language: FileLanguage) {
+  switch (language) {
+    case 'json':
+      return [json()]
+    case 'xml':
+      return [xml()]
+    case 'javascript':
+      return [javascript()]
+    default:
+      return []
+  }
+}

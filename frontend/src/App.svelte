@@ -1,35 +1,51 @@
 <script lang="ts">
   import Router, { push } from 'svelte-spa-router'
   import { onMount } from 'svelte'
-  import { authChecked, currentUser, logout, refreshCurrentUser, hasCapability } from './lib/auth'
+  import { authChecked, currentUser, hasCapability, logout, refreshCurrentUser } from './lib/auth'
   import { currentHash } from './lib/hash'
+  import { refreshSystemSettings, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
   import Sources from './routes/Sources.svelte'
   import SourceEditor from './routes/SourceEditor.svelte'
   import Viewer from './routes/Viewer.svelte'
+  import Search from './routes/Search.svelte'
+  import Alerts from './routes/Alerts.svelte'
+  import SettingsIndex from './routes/SettingsIndex.svelte'
   import Roles from './routes/Roles.svelte'
   import RoleEditor from './routes/RoleEditor.svelte'
   import Users from './routes/Users.svelte'
   import SsoSettings from './routes/SsoSettings.svelte'
+  import SystemSettings from './routes/SystemSettings.svelte'
+  import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
+  import SessionsSettings from './routes/SessionsSettings.svelte'
+  import AuditLogSettings from './routes/AuditLogSettings.svelte'
 
   const routes = {
     '/login': Login,
     '/change-password': ChangePassword,
-    '/sources': Sources,
-    '/sources/new': SourceEditor,
-    '/sources/:id': SourceEditor,
     '/viewer': Viewer,
     '/viewer/:sourceId': Viewer,
-    '/roles': Roles,
-    '/roles/new': RoleEditor,
-    '/roles/:id': RoleEditor,
-    '/users': Users,
-    '/sso': SsoSettings,
+    '/search': Search,
+    '/alerts': Alerts,
+    '/settings': SettingsIndex,
+    '/settings/sources': Sources,
+    '/settings/sources/new': SourceEditor,
+    '/settings/sources/:id': SourceEditor,
+    '/settings/roles': Roles,
+    '/settings/roles/new': RoleEditor,
+    '/settings/roles/:id': RoleEditor,
+    '/settings/users': Users,
+    '/settings/sso': SsoSettings,
+    '/settings/system': SystemSettings,
+    '/settings/severity-indicators': SeverityIndicatorsSettings,
+    '/settings/sessions': SessionsSettings,
+    '/settings/audit-log': AuditLogSettings,
   }
 
   onMount(async () => {
     await refreshCurrentUser()
+    await refreshSystemSettings()
   })
 
   $: if ($authChecked && !$currentUser && $currentHash !== '/login') {
@@ -41,6 +57,30 @@
     $currentHash !== '/change-password'
   ) {
     push('/change-password')
+  }
+  // The Search view can be turned off deployment-wide (Settings -> System);
+  // guard the route itself, not just the nav link, so it's actually off for
+  // a bookmarked/typed URL too, not merely unlinked. Alerts rides entirely
+  // on the search index (see ROADMAP.md's alerting notes), so it's gated by
+  // the same toggle -- there'd be nothing for an alert to watch otherwise.
+  $: if (
+    $authChecked &&
+    $currentUser &&
+    !$systemSettings.search_view_enabled &&
+    ($currentHash.startsWith('/search') || $currentHash.startsWith('/alerts'))
+  ) {
+    push('/viewer')
+  }
+  // Same reasoning as the search/alerts guard above, plus a capability
+  // check -- the audit log is gated by view_audit_log (see
+  // auth/models.py's GlobalCapability), not merely unlinked from the nav.
+  $: if (
+    $authChecked &&
+    $currentUser &&
+    (!$systemSettings.audit_view_enabled || !hasCapability($currentUser, 'view_audit_log')) &&
+    $currentHash.startsWith('/settings/audit-log')
+  ) {
+    push('/settings')
   }
 
   const isActive = (prefix: string) => $currentHash === prefix || $currentHash.startsWith(prefix + '/')
@@ -59,16 +99,11 @@
         <span>PerchTail</span>
       </div>
       <a href="#/viewer" class:active={isActive('/viewer')}>Viewer</a>
-      <a href="#/sources" class:active={isActive('/sources')}>Sources</a>
-      {#if hasCapability($currentUser, 'manage_roles')}
-        <a href="#/roles" class:active={isActive('/roles')}>Roles</a>
+      {#if $systemSettings.search_view_enabled}
+        <a href="#/search" class:active={isActive('/search')}>Search</a>
+        <a href="#/alerts" class:active={isActive('/alerts')}>Alerts</a>
       {/if}
-      {#if hasCapability($currentUser, 'manage_users')}
-        <a href="#/users" class:active={isActive('/users')}>Users</a>
-      {/if}
-      {#if hasCapability($currentUser, 'manage_sso')}
-        <a href="#/sso" class:active={isActive('/sso')}>SSO</a>
-      {/if}
+      <a href="#/settings" class:active={isActive('/settings')}>Settings</a>
       <span class="spacer"></span>
       <span class="username">{$currentUser.username}</span>
       <button class="btn btn-ghost" on:click={handleLogout}>Log out</button>

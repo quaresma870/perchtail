@@ -1,11 +1,17 @@
+import hashlib
+import secrets
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
+from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
-from app.auth.models import Capability, GlobalCapability, User
+from app.auth.models import AuditLog, Capability, GlobalCapability, User
 from app.auth.rbac import require_capability, require_global_capability, visible_source_ids
+from app.collectors import agent as agent_collector
 from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
 from app.collectors import ssh as ssh_collector
@@ -25,6 +31,7 @@ _CONNECTORS = {
     Protocol.smb: smb_collector,
     Protocol.winrm: winrm_collector,
     Protocol.local: local_collector,
+    Protocol.agent: agent_collector,
 }
 
 
@@ -34,7 +41,9 @@ class SourcePublic(BaseModel):
     id: int
     name: str
     customer_id: int | None
+    customer_name: str | None
     folder_id: int | None
+    folder_name: str | None
     protocol: Protocol
     host: str
     port: int | None
@@ -43,6 +52,10 @@ class SourcePublic(BaseModel):
     is_system: bool
     rule_count: int
     has_credential: bool
+    has_agent_token: bool
+    agent_connected: bool
+    agent_last_seen_at: datetime | None
+    search_indexing_enabled: bool
 
 
 class SourceCreate(BaseModel):
@@ -57,6 +70,7 @@ class SourceCreate(BaseModel):
     # Per-protocol JSON blob (SSH: username + private_key|password; SMB/WinRM:
     # username + password); omitted entirely for `local`, which needs none.
     credential: dict | None = None
+    search_indexing_enabled: bool = False
 
 
 class SourceUpdate(BaseModel):
@@ -68,6 +82,7 @@ class SourceUpdate(BaseModel):
     base_path: str | None = None
     enabled: bool | None = None
     credential: dict | None = None
+    search_indexing_enabled: bool | None = None
 
 
 class ConnectionCheckResult(BaseModel):
@@ -81,7 +96,9 @@ def _to_public(session: Session, source: Source) -> SourcePublic:
         id=source.id,
         name=source.name,
         customer_id=source.customer_id,
+        customer_name=source.customer.name if source.customer else None,
         folder_id=source.folder_id,
+        folder_name=source.folder.name if source.folder else None,
         protocol=source.protocol,
         host=source.host,
         port=source.port,
@@ -90,6 +107,12 @@ def _to_public(session: Session, source: Source) -> SourcePublic:
         is_system=source.is_system,
         rule_count=rule_count,
         has_credential=source.credential_ref is not None,
+        has_agent_token=source.agent_token_hash is not None,
+        agent_connected=(
+            source.protocol == Protocol.agent and get_agent_registry().is_connected(source.id)
+        ),
+        agent_last_seen_at=source.agent_last_seen_at,
+        search_indexing_enabled=source.search_indexing_enabled,
     )
 
 
@@ -133,6 +156,55 @@ def list_sources(
     return [_to_public(session, s) for s in sources]
 
 
+@router.get("/recent", response_model=list[SourcePublic])
+def list_recent_sources(
+    limit: int = 8,
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    """Sources this user has opened recently (browsed to the root of),
+    most-recent-first and deduped to one entry per source -- powers the
+    connections home page's "Recent" column (see archive.py's browse(),
+    which is what records the underlying `source.open` AuditLog events).
+    Re-checks current visibility so a revoked grant can't leak a source
+    through here even if it was opened before the grant was pulled. Must be
+    registered before GET /{source_id} so "recent" isn't swallowed as a
+    source_id path param.
+    """
+    visible = visible_source_ids(session, user)
+    if visible is not None and not visible:
+        return []
+
+    # A generous but bounded window, not the user's whole history -- same
+    # "safety valve, not a design goal" spirit as the scratch size guard.
+    events = session.exec(
+        select(AuditLog)
+        .where(AuditLog.user_id == user.id, AuditLog.action == "source.open")
+        .order_by(AuditLog.timestamp.desc())
+        .limit(max(limit * 20, 100))
+    ).all()
+
+    ordered_ids: list[int] = []
+    seen: set[int] = set()
+    for event in events:
+        source_id = event.target_id
+        if source_id is None or source_id in seen:
+            continue
+        if visible is not None and source_id not in visible:
+            continue
+        seen.add(source_id)
+        ordered_ids.append(source_id)
+        if len(ordered_ids) >= limit:
+            break
+
+    if not ordered_ids:
+        return []
+    sources_by_id = {
+        s.id: s for s in session.exec(select(Source).where(Source.id.in_(ordered_ids))).all()
+    }
+    return [_to_public(session, sources_by_id[sid]) for sid in ordered_ids if sid in sources_by_id]
+
+
 @router.get("/{source_id}", response_model=SourcePublic)
 def get_source(
     source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
@@ -159,6 +231,7 @@ def create_source(
         base_path=payload.base_path,
         enabled=payload.enabled,
         credential_ref=encrypt_credential(payload.credential) if payload.credential else None,
+        search_indexing_enabled=payload.search_indexing_enabled,
     )
     session.add(source)
     session.flush()
@@ -207,6 +280,8 @@ def update_source(
         source.enabled = payload.enabled
     if payload.credential is not None:
         source.credential_ref = encrypt_credential(payload.credential)
+    if payload.search_indexing_enabled is not None:
+        source.search_indexing_enabled = payload.search_indexing_enabled
 
     session.add(source)
     record_audit_event(
@@ -263,3 +338,42 @@ def check_connection(
         return ConnectionCheckResult(ok=False, detail=str(exc))
 
     return ConnectionCheckResult(ok=True, detail="Connected")
+
+
+class AgentTokenResult(BaseModel):
+    token: str
+
+
+@router.post("/{source_id}/agent-token", response_model=AgentTokenResult)
+def regenerate_agent_token(
+    source_id: int,
+    user: User = Depends(require_manage),
+    session: Session = Depends(get_session),
+):
+    """Issues a fresh enrollment token for an agent-protocol source (see
+    Protocol.agent's docstring in app/models.py). Only the hash is stored —
+    same pattern as auth/sessions.py's session tokens — so the plaintext is
+    returned here once and never again; regenerating invalidates whatever
+    token the agent config was using before, same UX as an admin resetting a
+    user's password."""
+    source = session.get(Source, source_id)
+    if source is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    if source.protocol != Protocol.agent:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only agent-protocol sources have an enrollment token",
+        )
+
+    token = secrets.token_urlsafe(32)
+    source.agent_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    session.add(source)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="source.agent_token_regenerate",
+        target_type="source",
+        target_id=source.id,
+    )
+    session.commit()
+    return AgentTokenResult(token=token)

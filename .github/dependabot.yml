@@ -1,0 +1,31 @@
+version: 2
+updates:
+  # Backend (backend/requirements.txt, backend/requirements-dev.txt)
+  - package-ecosystem: pip
+    directory: /backend
+    target-branch: dev
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - backend
+
+  # Frontend (frontend/package.json)
+  - package-ecosystem: npm
+    directory: /frontend
+    target-branch: dev
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - frontend
+
+  # Push-agent (agent/go.mod)
+  - package-ecosystem: gomod
+    directory: /agent
+    target-branch: dev
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - agent

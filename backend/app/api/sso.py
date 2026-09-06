@@ -6,7 +6,14 @@ from sqlmodel import Session, select
 
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
-from app.auth.models import GlobalCapability, SSOProtocol, SSOProviderConfig, User
+from app.auth.models import (
+    GlobalCapability,
+    Role,
+    SSOGroupRoleMapping,
+    SSOProtocol,
+    SSOProviderConfig,
+    User,
+)
 from app.auth.providers.oidc import fetch_discovery_document, fetch_jwks, parse_oidc_settings
 from app.auth.rbac import require_global_capability
 from app.crypto import decrypt_secret, encrypt_secret
@@ -27,6 +34,10 @@ class SSOProviderPublic(BaseModel):
     issuer: str
     client_id: str
     scopes: str
+    # Name of the ID token claim carrying group memberships, or null if
+    # group-to-role auto-mapping isn't configured for this provider (see
+    # SSOGroupRoleMapping).
+    group_claim: str | None
     # client_secret is deliberately never returned once set.
 
     @classmethod
@@ -40,6 +51,7 @@ class SSOProviderPublic(BaseModel):
             issuer=raw["issuer"],
             client_id=raw["client_id"],
             scopes=raw.get("scopes", "openid email profile"),
+            group_claim=raw.get("group_claim") or None,
         )
 
 
@@ -49,6 +61,7 @@ class SSOProviderCreate(BaseModel):
     client_id: str
     client_secret: str
     scopes: str = "openid email profile"
+    group_claim: str | None = None
     enabled: bool = False
 
 
@@ -60,6 +73,9 @@ class SSOProviderUpdate(BaseModel):
     # existing one, so editing the issuer/name doesn't force re-entering it.
     client_secret: str | None = None
     scopes: str | None = None
+    # Empty string clears it (disables group mapping); omit to leave
+    # whatever's currently configured unchanged.
+    group_claim: str | None = None
     enabled: bool | None = None
 
 
@@ -68,7 +84,9 @@ class ConnectionCheckResult(BaseModel):
     detail: str
 
 
-def _encrypt_config(*, issuer: str, client_id: str, client_secret: str, scopes: str) -> str:
+def _encrypt_config(
+    *, issuer: str, client_id: str, client_secret: str, scopes: str, group_claim: str | None
+) -> str:
     return encrypt_secret(
         json.dumps(
             {
@@ -76,6 +94,7 @@ def _encrypt_config(*, issuer: str, client_id: str, client_secret: str, scopes: 
                 "client_id": client_id,
                 "client_secret": client_secret,
                 "scopes": scopes,
+                "group_claim": group_claim,
             }
         )
     )
@@ -119,6 +138,7 @@ def create_provider(
             client_id=payload.client_id,
             client_secret=payload.client_secret,
             scopes=payload.scopes,
+            group_claim=payload.group_claim,
         ),
         enabled=payload.enabled,
     )
@@ -136,6 +156,143 @@ def create_provider(
     session.commit()
     session.refresh(config)
     return SSOProviderPublic.from_config(config)
+
+
+class GroupRoleMappingPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    order: int
+    group_name: str
+    role_id: int
+    role_name: str
+
+
+class GroupRoleMappingCreate(BaseModel):
+    order: int
+    group_name: str
+    role_id: int
+
+
+class GroupRoleMappingUpdate(BaseModel):
+    order: int | None = None
+    group_name: str | None = None
+    role_id: int | None = None
+
+
+def _mapping_public(mapping: SSOGroupRoleMapping, role_name: str) -> GroupRoleMappingPublic:
+    return GroupRoleMappingPublic(
+        id=mapping.id,
+        order=mapping.order,
+        group_name=mapping.group_name,
+        role_id=mapping.role_id,
+        role_name=role_name,
+    )
+
+
+def _require_role_exists(session: Session, role_id: int) -> Role:
+    role = session.get(Role, role_id)
+    if role is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    return role
+
+
+# Registered before "/{provider_id}" below -- FastAPI/Starlette match routes
+# in registration order, and "/{provider_id}" would otherwise shadow
+# "/group-mappings" (a single path segment matches the dynamic param too),
+# turning every request here into a 422 from trying to parse
+# "group-mappings" as an int.
+@router.get("/group-mappings", response_model=list[GroupRoleMappingPublic])
+def list_group_mappings(
+    user: User = Depends(require_manage), session: Session = Depends(get_session)
+):
+    mappings = session.exec(select(SSOGroupRoleMapping).order_by(SSOGroupRoleMapping.order)).all()
+    roles_by_id = {r.id: r.name for r in session.exec(select(Role)).all()}
+    return [_mapping_public(m, roles_by_id.get(m.role_id, f"#{m.role_id}")) for m in mappings]
+
+
+@router.post(
+    "/group-mappings", response_model=GroupRoleMappingPublic, status_code=status.HTTP_201_CREATED
+)
+def create_group_mapping(
+    payload: GroupRoleMappingCreate,
+    user: User = Depends(require_manage),
+    session: Session = Depends(get_session),
+):
+    role = _require_role_exists(session, payload.role_id)
+    mapping = SSOGroupRoleMapping(
+        order=payload.order, group_name=payload.group_name, role_id=payload.role_id
+    )
+    session.add(mapping)
+    session.flush()
+
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="sso_group_mapping.create",
+        target_type="sso_group_mapping",
+        target_id=mapping.id,
+        metadata={"group_name": payload.group_name, "role_id": payload.role_id},
+    )
+    session.commit()
+    session.refresh(mapping)
+    return _mapping_public(mapping, role.name)
+
+
+def _get_mapping_or_404(session: Session, mapping_id: int) -> SSOGroupRoleMapping:
+    mapping = session.get(SSOGroupRoleMapping, mapping_id)
+    if mapping is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mapping not found")
+    return mapping
+
+
+@router.patch("/group-mappings/{mapping_id}", response_model=GroupRoleMappingPublic)
+def update_group_mapping(
+    mapping_id: int,
+    payload: GroupRoleMappingUpdate,
+    user: User = Depends(require_manage),
+    session: Session = Depends(get_session),
+):
+    mapping = _get_mapping_or_404(session, mapping_id)
+    if payload.order is not None:
+        mapping.order = payload.order
+    if payload.group_name is not None:
+        mapping.group_name = payload.group_name
+    if payload.role_id is not None:
+        _require_role_exists(session, payload.role_id)
+        mapping.role_id = payload.role_id
+    session.add(mapping)
+
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="sso_group_mapping.update",
+        target_type="sso_group_mapping",
+        target_id=mapping.id,
+    )
+    session.commit()
+    session.refresh(mapping)
+    role = _require_role_exists(session, mapping.role_id)
+    return _mapping_public(mapping, role.name)
+
+
+@router.delete("/group-mappings/{mapping_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_group_mapping(
+    mapping_id: int,
+    user: User = Depends(require_manage),
+    session: Session = Depends(get_session),
+):
+    mapping = _get_mapping_or_404(session, mapping_id)
+    session.delete(mapping)
+
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="sso_group_mapping.delete",
+        target_type="sso_group_mapping",
+        target_id=mapping_id,
+    )
+    session.commit()
 
 
 def _get_or_404(session: Session, provider_id: int) -> SSOProviderConfig:
@@ -177,6 +334,8 @@ def update_provider(
         raw["client_secret"] = payload.client_secret
     if payload.scopes is not None:
         raw["scopes"] = payload.scopes
+    if payload.group_claim is not None:
+        raw["group_claim"] = payload.group_claim or None
 
     config.config = encrypt_secret(json.dumps(raw))
     session.add(config)
