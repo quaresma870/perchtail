@@ -150,6 +150,12 @@ _wait_for_port() {
 _wait_for_port 127.0.0.1 2222 sshd
 _wait_for_port 127.0.0.1 1445 smbd
 
+# sshd/smbd (running as root, via sudo above) create their own log files
+# root-owned and not world-readable -- harmless for the servers themselves,
+# but CI's "Upload e2e test server logs" step (.github/workflows/ci.yml)
+# runs as the unprivileged runner user and needs to read them on failure.
+$SUDO chmod 644 "$SSH_ETC/sshd.log" "$SMB_ETC/log.smbd" 2>/dev/null || true
+
 # --- hand off connection details to the Playwright specs -------------------
 # SSH_ROOT/SMB_ROOT are absolute paths under this checkout, so there's no
 # fixed literal frontend/e2e/*.spec.ts could hardcode -- written here, once,

@@ -33,14 +33,28 @@ test('full-text search: indexes a source and deep-links a hit into the viewer', 
   await page.goto('/#/search')
   await page.getByPlaceholder('Search indexed log content…').fill('hello world log line 2')
 
+  // Scoped by this test's own (uniquely timestamped) source name, not just
+  // the content snippet -- a database that still has an earlier attempt's
+  // source (e.g. a prior local run whose cleanup step never got reached)
+  // would otherwise satisfy an unscoped "some result exists" wait before
+  // *this* run's own source is actually indexed.
+  const hit = page
+    .locator('button', { hasText: sourceName })
+    .filter({ hasText: 'hello world log line 2' })
+
   // Poll until the background sweep has indexed it -- generous timeout
   // covers the up-to-2s indexing interval plus read/index time.
+  // exact: true on the button below -- the source name ("E2E Search
+  // Source ...") shows up as its own result once indexed, and contains
+  // "Search" as a substring, which would otherwise match this same query
+  // too. Not "Matching content" -- Search.svelte only renders that heading
+  // when a source's name/host *also* matches the query (which this one
+  // doesn't); a content hit's own .result button still renders without it.
   await expect(async () => {
-    await page.getByRole('button', { name: 'Search' }).click()
-    await expect(page.getByText('Matching content')).toBeVisible()
+    await page.getByRole('button', { name: 'Search', exact: true }).click()
+    await expect(hit).toBeVisible()
   }).toPass({ timeout: 30_000, intervals: [1000] })
 
-  const hit = page.locator('button', { hasText: 'hello world log line 2' }).first()
   await hit.click()
   await expect(page).toHaveURL(new RegExp(`#/viewer/${sourceId}\\?path=`))
   await expect(page.locator('.cm-content')).toContainText('hello world log line 2')
