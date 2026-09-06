@@ -86,17 +86,19 @@ AllowUsers $E2E_SSH_USER
 LogLevel ERROR
 
 # $E2E_SSH_USER's shell is /usr/sbin/nologin (least-privilege -- it has no
-# business getting an interactive shell). sshd validates the account's
-# shell at session-channel setup regardless of request type, so a plain
-# "Subsystem sftp <path>" directive still gets rejected for a nologin
-# shell -- the client sees the rejection text land on the SFTP channel
-# instead of a real SFTP_VERSION packet ("Garbage packet received").
-# ForceCommand bypasses that shell check entirely, which is exactly why
-# it's the standard way to allow SFTP-only access for a nologin account;
-# OpenSSH's own internal-sftp implementation needs no external binary
-# either, so there's no path to detect/hardcode.
-Match User $E2E_SSH_USER
-    ForceCommand internal-sftp
+# business getting an interactive shell). A plain external
+# "Subsystem sftp <path>" directive got rejected for that shell (the
+# client read the rejection text off the channel instead of a real
+# SFTP_VERSION packet -- "Garbage packet received"). ForceCommand was
+# tried next and made it worse (paramiko.ssh_exception.SSHException:
+# Channel closed): ForceCommand invokes its command through the user's
+# own login shell, which nologin refuses outright, closing the channel
+# before internal-sftp ever runs. "Subsystem sftp internal-sftp" is the
+# actual fix -- OpenSSH substitutes its built-in SFTP implementation
+# directly at the subsystem-request layer, with no external binary to
+# locate/hardcode and no shell invocation involved at all, so a nologin
+# shell is a non-issue here.
+Subsystem sftp internal-sftp
 EOF
 
 $SUDO /usr/sbin/sshd -f "$SSH_ETC/sshd_config" -E "$SSH_ETC/sshd.log"

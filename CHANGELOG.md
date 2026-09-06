@@ -300,16 +300,25 @@ release ships (0.x releases may include breaking changes between minors).
   unaffected — the API and built SPA are served from the same FastAPI
   process there, with no path-based proxy split). Found while verifying the
   Settings reorganization in a real browser.
-- SMB connector: `_register_session` left `smbclient`'s `auth_protocol` at
-  its default (`"negotiate"`, which tries Kerberos before falling back to
-  NTLM). `credential_ref` only ever decrypts to a bare username/password —
-  there's no realm/domain/KDC field anywhere in the `Source` model — so a
-  client environment with no Kerberos configuration at all could fail the
-  entire SPNEGO negotiation outright (`pyspnego.exceptions.BadMechanismError:
-  Unable to negotiate common mechanism`) instead of ever reaching the NTLM
-  fallback this app actually authenticates with. Pinned to `auth_protocol=
-  "ntlm"` explicitly. Found via the new Playwright e2e suite's real SMB
-  connector test.
+- SMB connector, two compounding bugs, both only reachable with a real
+  `smbclient`/`smbprotocol` connection (found via the new Playwright e2e
+  suite's real SMB server, not the mocked unit tests): `register_session`
+  was left at `smbclient`'s default `auth_protocol` (`"negotiate"`, which
+  tries Kerberos before falling back to NTLM) — `credential_ref` only ever
+  decrypts to a bare username/password, with no realm/domain/KDC field
+  anywhere in the `Source` model, so a client with no Kerberos
+  configuration at all could fail the entire SPNEGO negotiation outright
+  (`pyspnego.exceptions.BadMechanismError: Unable to negotiate common
+  mechanism`) instead of ever reaching the NTLM this app actually
+  authenticates with; and, once that was fixed, a source on a non-default
+  SMB port still failed every `scandir`/`open_file` call — `smbclient`
+  resolves its *own* session for those via `get_smb_tree(path, port=445,
+  ...)`, defaulting to 445 independently of whatever port
+  `register_session` was called with, so it silently attempted an
+  unauthenticated connection on the wrong port instead of reusing the
+  already-authenticated session. Both `auth_protocol="ntlm"` and the
+  actual configured port are now passed to every `smbclient` call, not
+  just the initial `register_session`.
 
 ## [0.1.1] - 2026-07-30
 

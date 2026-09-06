@@ -13,11 +13,19 @@ from app.rules import is_visible
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 
 
-def _register_session(source: Source) -> None:
-    """smbclient keeps a process-wide session cache keyed by server —
-    registering again with the same credentials is a cheap no-op if already
-    connected, so this can be called before every operation without
-    reconnecting each time.
+def _connect_kwargs(source: Source) -> dict:
+    """Shared connection kwargs for both register_session() and every
+    scandir()/open_file() call below. Both matter, not just
+    register_session(): smbclient's own scandir()/open_file() resolve
+    their *own* session via get_smb_tree(path, port=445, ...) -- port
+    defaults to 445 there too, independent of whatever was passed to
+    register_session() -- so a source on a non-default port (like this
+    project's own e2e test server) would silently look up a session for
+    445 instead of reusing the one actually registered, falling back to an
+    unauthenticated connection attempt on the wrong port entirely. Passing
+    the same port (and credentials, as a defense-in-depth match against
+    the same cache key) to every call, not just register_session(), is
+    what actually keeps them hitting the same cached session.
 
     auth_protocol is pinned to NTLM rather than left at smbclient's default
     of "negotiate" (which tries Kerberos first): credential_ref only ever
@@ -30,13 +38,12 @@ def _register_session(source: Source) -> None:
     mechanism") -- instead of ever falling back to the NTLM this app
     actually authenticates with."""
     creds = decrypt_credential(source.credential_ref)
-    smbclient.register_session(
-        source.host,
-        username=creds["username"],
-        password=creds["password"],
-        port=source.port or 445,
-        auth_protocol="ntlm",
-    )
+    return {
+        "username": creds["username"],
+        "password": creds["password"],
+        "port": source.port or 445,
+        "auth_protocol": "ntlm",
+    }
 
 
 def _unc_path(source: Source, relative_path: str = "") -> str:
@@ -54,10 +61,11 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     are always listed (never filtered) so the tree stays navigable toward
     deeper matches like `**/*.log` — only files are subject to the rule
     chain (see collectors/ssh.py's list_directory for the same rationale)."""
-    _register_session(source)
+    connect_kwargs = _connect_kwargs(source)
+    smbclient.register_session(source.host, **connect_kwargs)
     directory = _unc_path(source, relative_path)
     entries = []
-    for info in smbclient.scandir(directory):
+    for info in smbclient.scandir(directory, **connect_kwargs):
         child_path = f"{relative_path}/{info.name}" if relative_path else info.name
         is_dir = info.is_dir()
         if not is_dir and not is_visible(child_path, rules):
@@ -70,9 +78,13 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
 def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     """Fetch-on-open into `destination` — always a fresh transfer, never
     reused."""
-    _register_session(source)
+    connect_kwargs = _connect_kwargs(source)
+    smbclient.register_session(source.host, **connect_kwargs)
     remote_path = _unc_path(source, relative_path)
-    with smbclient.open_file(remote_path, mode="rb") as src, open(destination, "wb") as dst:
+    with (
+        smbclient.open_file(remote_path, mode="rb", **connect_kwargs) as src,
+        open(destination, "wb") as dst,
+    ):
         shutil.copyfileobj(src, dst)
 
 
