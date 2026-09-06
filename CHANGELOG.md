@@ -284,6 +284,14 @@ release ships (0.x releases may include breaking changes between minors).
   `docs/images/` screenshots (Sources, Viewer, Role editor) are
   regenerated against the new Settings nav; the Quick start walkthrough's
   "Sources → New source" now reads "Settings → Sources → + Add source".
+- README: status section was stale in the other direction — it still
+  listed alerting and IdP group-claim-to-role auto-mapping as not built,
+  when both shipped earlier in this same Unreleased section. Corrected,
+  and added a line on the pre-1.0 security-hardening work that's actually
+  done (login lockout, security headers, CI vulnerability scanning,
+  credential-key rotation, the Sessions page) versus what's still open,
+  and a mention of the new Playwright e2e suite alongside the existing
+  `pytest`/`vitest` coverage.
 
 ### Fixed
 - Viewer: Ctrl/Cmd+F opened the browser's own find bar instead of
