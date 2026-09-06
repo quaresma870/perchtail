@@ -318,7 +318,14 @@ release ships (0.x releases may include breaking changes between minors).
   unauthenticated connection on the wrong port instead of reusing the
   already-authenticated session. Both `auth_protocol="ntlm"` and the
   actual configured port are now passed to every `smbclient` call, not
-  just the initial `register_session`.
+  just the initial `register_session`; and a third, same-shape bug behind
+  those two — `list_directory`'s per-entry `info.stat()` call (to read a
+  file's size) triggers its own fresh `smbclient` connection lookup that
+  forwards none of `_connect_kwargs`' `port`/`auth_protocol`, so it lands
+  on a different, uncredentialed session and fails the same SPNEGO
+  negotiation all over again. Fixed by reading the size straight off
+  `info.smb_info.end_of_file` — data `scandir()` already returned in the
+  original listing — instead of making a second network call at all.
 
 ## [0.1.1] - 2026-07-30
 

@@ -5,22 +5,19 @@ import pytest
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 
 
-class FakeStat:
+class FakeSMBInfo:
     def __init__(self, size: int):
-        self.st_size = size
+        self.end_of_file = size
 
 
 class FakeSMBDirEntry:
     def __init__(self, name: str, is_dir: bool, size: int = 0):
         self.name = name
         self._is_dir = is_dir
-        self._size = size
+        self.smb_info = FakeSMBInfo(size)
 
     def is_dir(self) -> bool:
         return self._is_dir
-
-    def stat(self) -> FakeStat:
-        return FakeStat(self._size)
 
 
 class FakeSMBClient:

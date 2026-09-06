@@ -70,7 +70,19 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         is_dir = info.is_dir()
         if not is_dir and not is_visible(child_path, rules):
             continue
-        size = 0 if is_dir else info.stat().st_size
+        # info.smb_info.end_of_file (not info.stat().st_size) deliberately --
+        # smb_info comes straight off the directory listing this project
+        # already paid for in scandir(), with no further SMB round trip.
+        # info.stat() looks tempting but is a trap: SMBDirEntry.stat()
+        # forwards only connection_cache to a fresh lstat()/stat() call, not
+        # the port/username/auth_protocol this project passes everywhere
+        # else -- get_smb_tree() then falls back to its own port=445 default
+        # and empty credentials, landing on a different cache key than the
+        # one register_session() populated and failing SPNEGO negotiation
+        # outright (spnego.exceptions.BadMechanismError) since there's no
+        # Kerberos ticket cache either. See _connect_kwargs's docstring for
+        # the sibling bugs this same smbclient behavior caused elsewhere.
+        size = 0 if is_dir else info.smb_info.end_of_file
         entries.append(DirEntry(name=info.name, path=child_path, is_dir=is_dir, size=size))
     return entries
 
