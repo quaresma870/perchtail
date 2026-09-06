@@ -78,6 +78,30 @@ release ships (0.x releases may include breaking changes between minors).
   the DNS-rebinding gap between those two points in time.
 
 ### Added
+- A Playwright end-to-end test suite (`frontend/e2e/`, `npm run test:e2e`)
+  covering login (success, failure, and the logged-out redirect); the
+  built-in system log source's viewer and its non-editable sources-list
+  row; the sessions page; source create/edit/delete against all three
+  remote protocols (SSH, SMB, WinRM) including both rule-editor modes
+  (row-based and raw-paste) and last-match-wins, browsing and opening a
+  real file over each; roles (global capabilities, grant add/remove,
+  duplicate) and users (create, reset password, role change,
+  deactivate/reactivate); SSO provider settings, a test-connection
+  failure, and group→role mappings; the deployment-wide search/alerts
+  toggle and monitoring token generation; global severity-indicator
+  patterns; and full-text search (indexing a real source and deep-linking
+  a hit into the viewer) plus alerts (create, test webhook, toggle,
+  delete). SSH and SMB run against real local test servers
+  (`backend/scripts/setup_e2e_test_servers.sh`, plain OS packages, not
+  Docker); WinRM is the one protocol mocked at the connector's session
+  seam (`backend/app/testing/fake_winrm.py`), since a real target needs an
+  actual Windows host. Runs against an isolated backend
+  (`backend/scripts/run_e2e_server.sh`) seeded with a deterministic
+  super-admin account (`backend/app/seed_e2e_admin.py`), on its own port
+  and its own throwaway SQLite DB so it never touches a developer's real
+  dev environment. Wired into CI as a new `e2e` job. See ROADMAP.md's
+  "Frontend E2E testing (Playwright)" section for the design notes and
+  what's deliberately still out of scope.
 - SSO: IdP group-claim-to-role auto-mapping. Configure a "group claim" name
   on the OIDC provider and an ordered list of group → role mappings
   (evaluated last-match-wins, same rule as source Rules); a user's role is
@@ -260,6 +284,14 @@ release ships (0.x releases may include breaking changes between minors).
   `docs/images/` screenshots (Sources, Viewer, Role editor) are
   regenerated against the new Settings nav; the Quick start walkthrough's
   "Sources → New source" now reads "Settings → Sources → + Add source".
+- README: status section was stale in the other direction — it still
+  listed alerting and IdP group-claim-to-role auto-mapping as not built,
+  when both shipped earlier in this same Unreleased section. Corrected,
+  and added a line on the pre-1.0 security-hardening work that's actually
+  done (login lockout, security headers, CI vulnerability scanning,
+  credential-key rotation, the Sessions page) versus what's still open,
+  and a mention of the new Playwright e2e suite alongside the existing
+  `pytest`/`vitest` coverage.
 
 ### Fixed
 - Viewer: Ctrl/Cmd+F opened the browser's own find bar instead of
@@ -276,6 +308,32 @@ release ships (0.x releases may include breaking changes between minors).
   unaffected — the API and built SPA are served from the same FastAPI
   process there, with no path-based proxy split). Found while verifying the
   Settings reorganization in a real browser.
+- SMB connector, two compounding bugs, both only reachable with a real
+  `smbclient`/`smbprotocol` connection (found via the new Playwright e2e
+  suite's real SMB server, not the mocked unit tests): `register_session`
+  was left at `smbclient`'s default `auth_protocol` (`"negotiate"`, which
+  tries Kerberos before falling back to NTLM) — `credential_ref` only ever
+  decrypts to a bare username/password, with no realm/domain/KDC field
+  anywhere in the `Source` model, so a client with no Kerberos
+  configuration at all could fail the entire SPNEGO negotiation outright
+  (`pyspnego.exceptions.BadMechanismError: Unable to negotiate common
+  mechanism`) instead of ever reaching the NTLM this app actually
+  authenticates with; and, once that was fixed, a source on a non-default
+  SMB port still failed every `scandir`/`open_file` call — `smbclient`
+  resolves its *own* session for those via `get_smb_tree(path, port=445,
+  ...)`, defaulting to 445 independently of whatever port
+  `register_session` was called with, so it silently attempted an
+  unauthenticated connection on the wrong port instead of reusing the
+  already-authenticated session. Both `auth_protocol="ntlm"` and the
+  actual configured port are now passed to every `smbclient` call, not
+  just the initial `register_session`; and a third, same-shape bug behind
+  those two — `list_directory`'s per-entry `info.stat()` call (to read a
+  file's size) triggers its own fresh `smbclient` connection lookup that
+  forwards none of `_connect_kwargs`' `port`/`auth_protocol`, so it lands
+  on a different, uncredentialed session and fails the same SPNEGO
+  negotiation all over again. Fixed by reading the size straight off
+  `info.smb_info.end_of_file` — data `scandir()` already returned in the
+  original listing — instead of making a second network call at all.
 
 ## [0.1.1] - 2026-07-30
 

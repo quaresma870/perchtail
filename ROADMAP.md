@@ -1412,6 +1412,131 @@ two:
   real credentials at any scale will want a rotation/re-encrypt tool
   before its next KDF change, not after.
 
+## Frontend E2E testing (Playwright)
+
+Everything on this roadmap so far is covered end-to-end only by backend
+`pytest` and frontend `vitest` unit tests — nothing exercises the real
+browser UI against a real running backend. A Playwright suite closes that
+gap. Started narrow (auth, the viewer, the built-in system source) and was
+then deliberately widened to the rest of the admin surface — RBAC, users,
+SSO settings, the rule engine's two editing modes, system settings,
+severity indicators, search, and alerts — on the principle that backend
+unit-test coverage of a feature doesn't prove the UI actually wires up to
+it correctly; only exercising the real page does that.
+
+- [x] Isolated e2e backend (`backend/scripts/run_e2e_server.sh`): its own
+      SQLite DB/credential-salt/known-hosts/log-dir/scratch-dir under
+      `backend/data/e2e/` (wiped on every run), port 8001 so it can run
+      alongside a developer's own dev backend on the documented port 8000
+- [x] Deterministic super-admin login for tests
+      (`backend/app/seed_e2e_admin.py`) — inserts a known-password user
+      directly before the app's own lifespan runs, so `seed_initial_super_admin`
+      (app/bootstrap.py) naturally no-ops instead of generating a throwaway
+      random password nothing could read back
+- [x] Playwright's "setup project" + `storageState` reuse (`e2e/auth.setup.ts`)
+      so every other spec starts already authenticated, logging in once
+- [x] Real local sshd + smbd test servers
+      (`backend/scripts/setup_e2e_test_servers.sh`, plain OS packages, not
+      Docker) so the ssh and smb connectors are exercised against an actual
+      protocol implementation, not a mocked client — WinRM is the one
+      protocol that stays mocked (`backend/app/testing/fake_winrm.py`),
+      since a real target needs an actual Windows host
+- [x] Specs: unauthenticated redirect + login success/failure
+      (`login.spec.ts`), opening the built-in log source and reading a real
+      file through the CodeMirror pane (`viewer.spec.ts`), the system
+      source's non-editable row (`sources.spec.ts`), the sessions page
+      (`sessions.spec.ts`); source create/edit/delete plus both rule-editor
+      modes (row-based and raw-paste) and last-match-wins, browsing and
+      opening a real file, per protocol (`sources-ssh.spec.ts`,
+      `sources-smb.spec.ts`, `sources-winrm.spec.ts`); roles (global
+      capabilities, grant add/remove, duplicate) and users (create, reset
+      password, role change, deactivate/reactivate) (`roles.spec.ts`,
+      `users.spec.ts`); SSO provider settings, test-connection, and group
+      mappings (`sso.spec.ts`); the system-wide search/alerts toggle and
+      monitoring token generation (`system-settings.spec.ts`); global
+      severity-indicator patterns (`severity-indicators.spec.ts`);
+      full-text search indexing a real source and deep-linking a hit into
+      the viewer, and alert create/test/toggle/delete
+      (`search.spec.ts`, `alerts.spec.ts`)
+- [x] CI job (`.github/workflows/ci.yml`'s `e2e` job) — separate from the
+      existing `backend`/`frontend` jobs since it needs both toolchains
+
+### Notes on decisions made — Playwright E2E setup
+
+- **StrykerJS (mutation testing) was considered alongside Playwright and
+  deliberately not adopted yet.** It's a real tool for a real problem
+  (are the *existing* unit tests actually asserting anything, or just
+  exercising code paths?), but it's premature until the suite it would be
+  mutating has more breadth — better to sequence this new E2E layer in
+  first, once there's more surface for a mutation score to be a meaningful
+  signal about. Revisit later, not as part of this work.
+- **The e2e backend serves the built frontend itself, rather than running
+  against Vite's dev server.** `frontend/vite.config.ts`'s dev proxy has a
+  hardcoded target of `127.0.0.1:8000` and deliberately strips
+  Origin/Referer to look same-origin to `OriginCheckMiddleware` — reusing
+  it for e2e would mean either fighting that hardcoding or reintroducing
+  the exact cross-origin problem it exists to work around. Building the
+  frontend (`npm run build`) and letting the FastAPI backend serve it from
+  `frontend/dist` (already how `app/main.py` behaves in production, per
+  CLAUDE.md's packaging section) sidesteps both: one origin, no proxy, and
+  the suite exercises the same static-serving path production actually
+  uses.
+- **Port 8001, not 8000.** The dev backend's documented port
+  (CONTRIBUTING.md) is 8000; picking a different port for the e2e server
+  means a developer can run `npm run dev` against their own local backend
+  and `npm run test:e2e` at the same time without a collision.
+- **No Alembic migration step needed for the e2e DB.** `app/db.py`'s
+  `init_db()` (called from both the app's own `lifespan` and
+  `seed_e2e_admin.py`) creates the schema directly via
+  `SQLModel.metadata.create_all` — Alembic's migration chain is how an
+  *existing* deployment upgrades in place, not how a fresh schema gets
+  created, so there's nothing for the e2e script to run there.
+- **The sandboxed dev container this suite was built in pre-installs
+  Chromium at a fixed path outside the project.** Deliberately not baked
+  into `playwright.config.ts` or the CI workflow — everywhere else (CI,
+  another contributor's machine) needs its own
+  `npx playwright install --with-deps chromium` first, which the new `e2e`
+  CI job does.
+- **Real sshd/smbd, plain OS packages, not Docker.** The sandbox this suite
+  was developed in has no Docker daemon available, and a CI runner needs
+  no more privilege than `sudo apt-get install openssh-server samba` plus
+  running them as foreground processes on non-privileged ports (2222,
+  1445) — genuinely simpler than a service-container setup, and it
+  exercises real `paramiko`/`smbclient` wire traffic through the actual
+  connector code, not a mocked client. The one exception is WinRM: a real
+  target needs an actual Windows host, which isn't available in CI or a
+  Linux dev sandbox either way, so `app/testing/fake_winrm.py` fakes it
+  at the same `_session()` seam the backend's own unit tests already patch
+  — wired in only via `PERCHTAIL_TEST_PATCH_MODULE`, an env var
+  `run_e2e_server.sh` alone ever sets, never present in a real deployment's
+  `.env`.
+- **The throwaway `e2euser` OS account (and its Samba password) persist
+  across e2e runs; the sshd/smbd config, host key, and fixture files under
+  `backend/data/e2e/` don't.** Recreating a Linux user on every single test
+  run is unnecessary churn — nothing outside this script's own sshd/smbd
+  instances, on ports nothing else binds, ever authenticates against it.
+- **`playwright.config.ts` runs with `workers: 1`, not the Playwright
+  default of parallel workers.** Once the suite grew past the original
+  read-mostly login/viewer/sessions specs into ones that create, edit, and
+  delete shared admin state (sources, roles, users, alerts, the deployment-
+  wide search/alerts toggle) against one backend process, two specs racing
+  on that state stopped being a hypothetical risk — determinism was worth
+  more than the wall-clock savings from parallelism here.
+- **What's deliberately still out of scope**: a real second-user login to
+  prove RBAC grant resolution end-to-end through the browser (the roles
+  spec covers the grant-editing UI, not "does a lower-privileged user
+  actually see less" — that's already the backend's own well-tested
+  `auth/rbac.py` unit-test surface, per CLAUDE.md's "this and the rule
+  engine are the two pieces of logic in the whole project that must be
+  correct before anything else is built on top of them"); a real OIDC IdP
+  round trip for SSO login itself (`sso.spec.ts` covers the settings CRUD
+  and a test-connection failure against a deliberately unreachable issuer,
+  not a real login); and the Go push-agent's own enrollment flow. Each
+  would need its own meaningfully heavier test infrastructure (a second
+  browser session with a different identity, a real IdP container, a real
+  agent binary) — worth revisiting individually if a regression in one of
+  those areas ever slips through, not assumed away permanently.
+
 ## Ideas worth considering (not yet triaged into a phase)
 
 Raised while discussing what else belongs on this roadmap — real candidates,
