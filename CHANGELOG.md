@@ -79,15 +79,29 @@ release ships (0.x releases may include breaking changes between minors).
 
 ### Added
 - A Playwright end-to-end test suite (`frontend/e2e/`, `npm run test:e2e`)
-  covering login (success, failure, and the logged-out redirect), opening
-  and reading a file through the built-in system log source's viewer, the
-  system source's non-editable row in the sources list, and the sessions
-  page. Runs against an isolated backend (`backend/scripts/run_e2e_server.sh`)
-  seeded with a deterministic super-admin account
-  (`backend/app/seed_e2e_admin.py`), on its own port and its own throwaway
-  SQLite DB so it never touches a developer's real dev environment. Wired
-  into CI as a new `e2e` job. See ROADMAP.md's "Frontend E2E testing
-  (Playwright)" section for the design notes.
+  covering login (success, failure, and the logged-out redirect); the
+  built-in system log source's viewer and its non-editable sources-list
+  row; the sessions page; source create/edit/delete against all three
+  remote protocols (SSH, SMB, WinRM) including both rule-editor modes
+  (row-based and raw-paste) and last-match-wins, browsing and opening a
+  real file over each; roles (global capabilities, grant add/remove,
+  duplicate) and users (create, reset password, role change,
+  deactivate/reactivate); SSO provider settings, a test-connection
+  failure, and group→role mappings; the deployment-wide search/alerts
+  toggle and monitoring token generation; global severity-indicator
+  patterns; and full-text search (indexing a real source and deep-linking
+  a hit into the viewer) plus alerts (create, test webhook, toggle,
+  delete). SSH and SMB run against real local test servers
+  (`backend/scripts/setup_e2e_test_servers.sh`, plain OS packages, not
+  Docker); WinRM is the one protocol mocked at the connector's session
+  seam (`backend/app/testing/fake_winrm.py`), since a real target needs an
+  actual Windows host. Runs against an isolated backend
+  (`backend/scripts/run_e2e_server.sh`) seeded with a deterministic
+  super-admin account (`backend/app/seed_e2e_admin.py`), on its own port
+  and its own throwaway SQLite DB so it never touches a developer's real
+  dev environment. Wired into CI as a new `e2e` job. See ROADMAP.md's
+  "Frontend E2E testing (Playwright)" section for the design notes and
+  what's deliberately still out of scope.
 - SSO: IdP group-claim-to-role auto-mapping. Configure a "group claim" name
   on the OIDC provider and an ordered list of group → role mappings
   (evaluated last-match-wins, same rule as source Rules); a user's role is

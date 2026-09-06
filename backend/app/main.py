@@ -1,4 +1,6 @@
 import asyncio
+import importlib
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -45,6 +47,18 @@ from app.version import APP_VERSION
 
 configure_logging()
 logger = get_logger(__name__)
+
+# Opt-in-only test-double hook, never set outside
+# backend/scripts/run_e2e_server.sh (see app/testing/fake_winrm.py): names a
+# module to import once at startup, for wiring in a fake protocol connector
+# where no real target is available (real WinRM needs an actual Windows
+# host, unlike ssh/smb which the e2e suite points at real local test
+# servers). Absent everywhere else -- a normal deployment's .env has no
+# reason to ever set this, and this line does nothing unless it's set.
+_test_patch_module = os.environ.get("PERCHTAIL_TEST_PATCH_MODULE")
+if _test_patch_module:
+    logger.warning("startup.test_patch_module_loaded", module=_test_patch_module)
+    importlib.import_module(_test_patch_module)
 
 # The default a fresh checkout ships with (see app/config.py) -- anyone can
 # derive the encryption key it produces from this project's own public

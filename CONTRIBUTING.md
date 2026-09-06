@@ -40,9 +40,17 @@ npm run test:e2e
 
 This builds the frontend and starts its own isolated backend on port 8001
 with a throwaway SQLite DB (`backend/scripts/run_e2e_server.sh`) — it won't
-touch a `npm run dev` backend you already have running on :8000. See
-`frontend/e2e/` and ROADMAP.md's "Frontend E2E testing (Playwright)" section
-for how it's wired together.
+touch a `npm run dev` backend you already have running on :8000. It also
+provisions real, throwaway sshd/smbd test servers on ports 2222/1445
+(`backend/scripts/setup_e2e_test_servers.sh`, plain `apt-get install
+openssh-server samba`) so the ssh/smb source specs run against a real
+protocol implementation — the first run may prompt for `sudo` if those
+aren't already installed. Set `SKIP_E2E_TEST_SERVERS=1` to skip that step
+for a quick run of everything else without needing `sudo`/those packages
+locally (`sources-ssh.spec.ts`, `sources-smb.spec.ts`, and `search.spec.ts`
+will fail with nothing listening on those ports, everything else is
+unaffected). See `frontend/e2e/` and ROADMAP.md's "Frontend E2E testing
+(Playwright)" section for how it's wired together.
 
 See [CLAUDE.md](CLAUDE.md) for the full architecture and repo layout — it's kept
 up to date as the source of truth for design decisions.

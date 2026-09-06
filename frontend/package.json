@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p tsconfig.e2e.json",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "e2e:server": "npm run build && bash ../backend/scripts/run_e2e_server.sh"
