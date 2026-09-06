@@ -61,7 +61,7 @@ printf 'ssh other log\n' > "$SSH_ROOT/other.log"
 printf 'smb hello world log line 1\nsmb hello world log line 2\n' > "$SMB_ROOT/hello.log"
 printf 'smb other log\n' > "$SMB_ROOT/other.log"
 $SUDO chown -R "$E2E_SSH_USER:$E2E_SSH_USER" "$SSH_ROOT" "$SMB_ROOT"
-chmod 755 "$SSH_ROOT" "$SMB_ROOT"
+$SUDO chmod 755 "$SSH_ROOT" "$SMB_ROOT"
 
 # --- sshd -----------------------------------------------------------------
 SSH_ETC="$E2E_DIR/ssh-etc"
