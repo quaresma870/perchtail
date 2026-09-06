@@ -17,13 +17,25 @@ def _register_session(source: Source) -> None:
     """smbclient keeps a process-wide session cache keyed by server —
     registering again with the same credentials is a cheap no-op if already
     connected, so this can be called before every operation without
-    reconnecting each time."""
+    reconnecting each time.
+
+    auth_protocol is pinned to NTLM rather than left at smbclient's default
+    of "negotiate" (which tries Kerberos first): credential_ref only ever
+    decrypts to a bare username/password (see app/crypto.py), with no
+    realm/domain/KDC anywhere in the Source model, so this app has no way
+    to actually supply Kerberos credentials in the first place. Left at
+    "negotiate", a client environment with no Kerberos configuration at
+    all (no /etc/krb5.conf) can fail the whole SPNEGO negotiation outright
+    -- pyspnego.exceptions.BadMechanismError ("unable to negotiate common
+    mechanism") -- instead of ever falling back to the NTLM this app
+    actually authenticates with."""
     creds = decrypt_credential(source.credential_ref)
     smbclient.register_session(
         source.host,
         username=creds["username"],
         password=creds["password"],
         port=source.port or 445,
+        auth_protocol="ntlm",
     )
 
 

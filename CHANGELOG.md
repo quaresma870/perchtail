@@ -300,6 +300,16 @@ release ships (0.x releases may include breaking changes between minors).
   unaffected — the API and built SPA are served from the same FastAPI
   process there, with no path-based proxy split). Found while verifying the
   Settings reorganization in a real browser.
+- SMB connector: `_register_session` left `smbclient`'s `auth_protocol` at
+  its default (`"negotiate"`, which tries Kerberos before falling back to
+  NTLM). `credential_ref` only ever decrypts to a bare username/password —
+  there's no realm/domain/KDC field anywhere in the `Source` model — so a
+  client environment with no Kerberos configuration at all could fail the
+  entire SPNEGO negotiation outright (`pyspnego.exceptions.BadMechanismError:
+  Unable to negotiate common mechanism`) instead of ever reaching the NTLM
+  fallback this app actually authenticates with. Pinned to `auth_protocol=
+  "ntlm"` explicitly. Found via the new Playwright e2e suite's real SMB
+  connector test.
 
 ## [0.1.1] - 2026-07-30
 

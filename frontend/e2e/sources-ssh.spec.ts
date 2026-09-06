@@ -32,9 +32,13 @@ test('SSH source: create, rule editor (rows + raw paste), browse, delete', async
   await expect(page.locator('.rule-row')).toHaveCount(1)
 
   // Browse over real SFTP and confirm both fixture files are visible/openable.
+  // Generous timeout -- this is a real network round trip (connect,
+  // host-key TOFU, SFTP init, listdir), not instant like the mocked/local
+  // specs, and the first connection to a fresh host pays extra one-time
+  // cost saving its host key.
   await page.goto(`/#/viewer/${sourceId}`)
-  await expect(page.getByRole('button', { name: 'hello.log' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'other.log' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'hello.log' })).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByRole('button', { name: 'other.log' })).toBeVisible({ timeout: 20_000 })
   await page.getByRole('button', { name: 'hello.log' }).click()
   await expect(page.locator('.cm-content')).toContainText('ssh hello world log line 1')
 
@@ -47,7 +51,7 @@ test('SSH source: create, rule editor (rows + raw paste), browse, delete', async
   await expect(page.locator('.rule-row')).toHaveCount(2)
 
   await page.goto(`/#/viewer/${sourceId}`)
-  await expect(page.getByRole('button', { name: 'other.log' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'other.log' })).toBeVisible({ timeout: 20_000 })
   await expect(page.getByRole('button', { name: 'hello.log' })).toHaveCount(0)
 
   // Cleanup.

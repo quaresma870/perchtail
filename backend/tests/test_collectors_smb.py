@@ -30,8 +30,8 @@ class FakeSMBClient:
         self.files: dict[str, bytes] = {}
         self.requested_paths: list[str] = []
 
-    def register_session(self, host, username=None, password=None, port=None):
-        self.sessions.append((host, username, password, port))
+    def register_session(self, host, username=None, password=None, port=None, auth_protocol=None):
+        self.sessions.append((host, username, password, port, auth_protocol))
 
     def scandir(self, path):
         self.requested_paths.append(path)
@@ -91,6 +91,15 @@ def test_list_directory_registers_session_and_filters_files(fake_smbclient):
     assert "app.log" in entries and entries["app.log"].size == 100
     assert "secret.txt" not in entries
     assert fake_smbclient.sessions[0][0] == "fileserver.example.com"
+
+
+def test_register_session_pins_ntlm_auth_protocol(fake_smbclient):
+    """See _register_session's docstring -- credential_ref never carries
+    Kerberos credentials, so leaving smbclient's default "negotiate" in
+    place can fail the whole SPNEGO negotiation on a client with no
+    Kerberos configuration at all, instead of falling back to NTLM."""
+    smb_module._register_session(_source())
+    assert fake_smbclient.sessions[0][4] == "ntlm"
 
 
 def test_list_directory_builds_relative_paths_for_nested_calls(fake_smbclient):
