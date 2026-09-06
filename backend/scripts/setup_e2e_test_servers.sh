@@ -65,10 +65,10 @@ chmod 755 "$SSH_ROOT" "$SMB_ROOT"
 
 # --- sshd -----------------------------------------------------------------
 SSH_ETC="$E2E_DIR/ssh-etc"
-# A prior run's sshd is a real background daemon that outlives this script
-# (see the bottom of this file) -- rm -rf on its pidfile would just orphan
-# it, leaking a process that still holds port 2222 for every run after.
-[ -f "$SSH_ETC/sshd.pid" ] && $SUDO kill "$(cat "$SSH_ETC/sshd.pid")" 2>/dev/null || true
+# run_e2e_server.sh kills a previous run's sshd/smbd by pidfile *before*
+# wiping data/e2e/ (this script always finds a clean slate here) -- doing
+# that check here instead would be too late, since this script only ever
+# runs after that wipe has already deleted the pidfiles it would look for.
 rm -rf "$SSH_ETC"
 mkdir -p "$SSH_ETC"
 ssh-keygen -q -t rsa -b 2048 -f "$SSH_ETC/host_rsa_key" -N ''
@@ -94,7 +94,6 @@ $SUDO /usr/sbin/sshd -f "$SSH_ETC/sshd_config" -E "$SSH_ETC/sshd.log"
 
 # --- smbd -------------------------------------------------------------------
 SMB_ETC="$E2E_DIR/smb-etc"
-[ -f "$SMB_ETC/run/smbd.pid" ] && $SUDO kill "$(cat "$SMB_ETC/run/smbd.pid")" 2>/dev/null || true
 rm -rf "$SMB_ETC"
 mkdir -p "$SMB_ETC/private" "$SMB_ETC/lock" "$SMB_ETC/state" "$SMB_ETC/cache" "$SMB_ETC/run"
 

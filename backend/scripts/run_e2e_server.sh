@@ -44,6 +44,20 @@ export PERCHTAIL_TEST_PATCH_MODULE="app.testing.fake_winrm"
 # uvicorn.
 export SEARCH_INDEX_INTERVAL_SECONDS="2"
 
+# Stop any previous run's sshd/smbd before wiping data/e2e/ below -- they
+# self-daemonize (see setup_e2e_test_servers.sh) and outlive this script, so
+# without this a second consecutive run would leak the first run's servers
+# still bound to ports 2222/1445, and the new ones would fail to start.
+# Must happen *before* the rm -rf: their pidfiles live under data/e2e/ too.
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+else
+  SUDO="sudo"
+fi
+for pidfile in ./data/e2e/ssh-etc/sshd.pid ./data/e2e/smb-etc/run/smbd.pid; do
+  [ -f "$pidfile" ] && $SUDO kill "$(cat "$pidfile")" 2>/dev/null
+done
+
 rm -rf ./data/e2e
 mkdir -p ./data/e2e
 
