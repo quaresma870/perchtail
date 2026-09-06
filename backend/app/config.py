@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     search_index_interval_seconds: int = 300
     search_index_max_file_size_mb: float = 20.0
 
+    # Full audit log viewer (app/audit_purge.py) -- how often the purge
+    # sweep runs. *What* it purges (retention in days, 0 = keep forever) is
+    # admin-configurable from Settings -> System (SystemSetting), not an env
+    # var, per ROADMAP.md's explicit direction; only the sweep cadence
+    # itself is an operational/deployment concern like the other interval
+    # settings above.
+    audit_purge_interval_seconds: int = 86400
+
 
 @lru_cache
 def get_settings() -> Settings:

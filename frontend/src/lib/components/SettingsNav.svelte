@@ -1,6 +1,7 @@
 <script lang="ts">
   import { currentUser, hasCapability } from '../auth'
   import { currentHash } from '../hash'
+  import { systemSettings } from '../settings'
 
   const isActive = (prefix: string) => $currentHash === prefix || $currentHash.startsWith(prefix + '/')
 </script>
@@ -22,6 +23,9 @@
     <a href="#/settings/severity-indicators" class:active={isActive('/settings/severity-indicators')}
       >Severity indicators</a
     >
+  {/if}
+  {#if hasCapability($currentUser, 'view_audit_log') && $systemSettings.audit_view_enabled}
+    <a href="#/settings/audit-log" class:active={isActive('/settings/audit-log')}>Audit log</a>
   {/if}
 </nav>
 

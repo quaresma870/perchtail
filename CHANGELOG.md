@@ -78,6 +78,25 @@ release ships (0.x releases may include breaking changes between minors).
   the DNS-rebinding gap between those two points in time.
 
 ### Added
+- Full audit log viewer: a new "Audit log" page under Settings, gated by a
+  dedicated `view_audit_log` global capability (never implied by any other
+  capability — a role needs it explicitly, same as everything else on this
+  page being a global, not customer/folder/source-scoped, concern). Lists
+  every `AuditLog` entry (login, and every source/rule/role/user/customer/
+  folder/SSO/system-settings/severity-pattern change) paginated newest-first,
+  filterable by target type and action (both built from the distinct values
+  actually in the table right now via `GET /audit/filters`, so a new action
+  namespace shows up automatically instead of the list going stale) and by
+  date range. `GET /audit` also accepts `user_id` and a trailing `.*` on any
+  `action` for a prefix match (e.g. `source.*`), for API consumers, even
+  though the shipped UI only exposes exact-action and target-type controls.
+  A new `audit_retention_days` system setting (default 365, `0` = keep
+  forever), admin-configurable from Settings → System, drives a daily
+  `app/audit_purge.py` sweep that permanently deletes anything older —
+  resolving this roadmap's long-open "keep audit logs forever, or expire
+  after N months?" question. The page itself has its own deployment-wide
+  on/off toggle (`audit_view_enabled`, reusing the same `SystemSetting`
+  mechanism as the Search toggle), separate from who can see it.
 - A Playwright end-to-end test suite (`frontend/e2e/`, `npm run test:e2e`)
   covering login (success, failure, and the logged-out redirect); the
   built-in system log source's viewer and its non-editable sources-list

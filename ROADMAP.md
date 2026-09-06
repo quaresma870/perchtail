@@ -856,29 +856,27 @@ no read endpoint and no admin page, even though CLAUDE.md's "Application
 logging" section always specced it as "a durable, queryable record ...
 read via an admin UI page."
 
-- [ ] `GET /audit` endpoint: paginated, filterable by action/type, user,
+- [x] `GET /audit` endpoint: paginated, filterable by action/type, user,
       target type, and date range
-- [ ] Gated by a dedicated capability (e.g. `view_audit_log`), admin-only
+- [x] Gated by a dedicated capability (`view_audit_log`), admin-only
       per explicit direction — not opened up via the existing customer/
       folder/source grant tree, since audit visibility is a global concern,
       not scoped to what a role can browse
-- [ ] Frontend: new "Audit Log" page under Settings
-  - [ ] Filter controls for action/type (multi-select against the known
+- [x] Frontend: new "Audit Log" page under Settings
+  - [x] Filter controls for action/type (multi-select against the known
         action namespace: `login`, `source.*`, `rule.*`, `role.*`,
         `user.*`, `customer.*`, `folder.*`, `sso.*`, `source.open`,
         `file.download`)
-  - [ ] A retention control — admin-configurable from the frontend, not
+  - [x] A retention control — admin-configurable from the frontend, not
         just an env var
-- [ ] Backend retention enforcement: a scheduled purge job (APScheduler,
+- [x] Backend retention enforcement: a scheduled purge job (APScheduler,
       same shape as the scratch idle-sweep and search-index sweep) driven
       by that configurable setting
-- [ ] Deployment-wide on/off toggle for this page, reusing the
+- [x] Deployment-wide on/off toggle for this page, reusing the
       `SystemSetting` mechanism the connections-home redesign already
       built for the Search view toggle (`app/system_settings.py`,
-      `GET`/`PATCH /system-settings`) — add an `audit_view_enabled` key
-      and a second row on the System settings page once this page exists;
-      not built ahead of time since a toggle with nothing to gate yet
-      would just be dead UI (see that section's notes)
+      `GET`/`PATCH /system-settings`) — added an `audit_view_enabled` key
+      and a second row on the System settings page
 
 ### Notes on decisions made — full audit log viewer
 
@@ -887,17 +885,43 @@ read via an admin UI page."
   policy — keep forever, or expire after N months?" as unresolved since
   Phase 1. Explicit direction: make it admin-configurable from the
   frontend rather than picking a number now — the UI needs a setting
-  (e.g., days), not just a filter on the display.
+  (e.g., days), not just a filter on the display. Landed as
+  `audit_retention_days` (default 365, `0` = keep forever), a plain int
+  `SystemSetting` alongside the existing bool ones — `system_settings.py`
+  now splits `BOOL_DEFAULTS`/`INT_DEFAULTS` into separate dicts (and
+  `get_int`/`set_int` alongside `get_bool`/`set_bool`) so a non-bool value
+  can't silently misread as `False` through the bool helpers.
 - **This is a second, independent retention knob from `LOG_RETENTION_DAYS`.**
   That setting governs the rotated structured *application* log files
   (`logging_config.py`, gzip + `TimedRotatingFileHandler`); `AuditLog` is a
   separate SQLite table with its own lifecycle, so its retention setting
   needs its own storage and its own purge job — the two shouldn't be
-  conflated just because they sound similar.
+  conflated just because they sound similar. `app/audit_purge.py`'s
+  `run_audit_purge_sweep` is its own APScheduler job
+  (`audit_purge_interval_seconds`, default daily), same shape as the
+  scratch idle-sweep/search-index sweep — the *cadence* is an env var like
+  those, since only the retention *count* was the actual open decision.
 - **Type/action filtering is a first-class frontend requirement, not just
   a nice-to-have** — per explicit direction, the audit page's parameters
   need to let an admin narrow by what kind of action happened, not just
-  scroll a flat chronological feed.
+  scroll a flat chronological feed. `GET /audit/filters` returns the
+  distinct `action`/`target_type` values actually present in the table
+  right now, rather than a hardcoded namespace list going stale as new
+  action strings get added later — same "always accurate" reasoning as
+  Search's live source-name matching. The frontend renders `target_type`
+  as a chip-style multi-select ("Type") and the full distinct-actions list
+  as a plain multi-select ("Action"); the backend additionally accepts a
+  trailing `.*` on any `action` value (e.g. `source.*`) as a prefix match,
+  for API consumers that want the coarser grouping even though the
+  shipped UI doesn't expose that specific control.
+- **No user-id filter control in the UI**, even though the backend
+  endpoint accepts `user_id` — the explicit ask only named action/type and
+  retention as frontend requirements, and building a user picker would
+  mean either a raw numeric-id input (bad UX) or a `GET /users` call that
+  a `view_audit_log`-only role (no `manage_users`) can't make. Every row
+  already shows the acting username inline, which covers "who did this"
+  for the common case of scanning the table; revisit if per-user
+  filtering turns out to be a real gap once this is in use.
 
 ## Viewer: find in document
 
@@ -1457,7 +1481,10 @@ it correctly; only exercising the real page does that.
       severity-indicator patterns (`severity-indicators.spec.ts`);
       full-text search indexing a real source and deep-linking a hit into
       the viewer, and alert create/test/toggle/delete
-      (`search.spec.ts`, `alerts.spec.ts`)
+      (`search.spec.ts`, `alerts.spec.ts`); the audit log page's type/action/
+      date-range filters, driven off a real entry the test itself creates
+      via the retention control rather than assuming prior specs left
+      matching rows behind (`audit-log.spec.ts`)
 - [x] CI job (`.github/workflows/ci.yml`'s `e2e` job) — separate from the
       existing `backend`/`frontend` jobs since it needs both toolchains
 
@@ -1626,9 +1653,6 @@ Carried over from CLAUDE.md — revisit as the relevant phase approaches rather
 than deciding speculatively now:
 - Raw-text rule paste mode UX
 - Ephemeral scratch location: plain disk vs tmpfs/ramdisk
-- Audit log retention *number* (the mechanism is decided — admin-configurable
-  from the frontend, its own purge job — see "Full audit log viewer" above;
-  what default/range to offer is still open)
 - Whether SAML is needed at all
 - Whether to index `.zip`/`.tar.gz` archive members for full-text search,
   and how deep (see the Phase 3 full-text search notes above) — deferred,

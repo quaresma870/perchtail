@@ -6,7 +6,11 @@ import type { SystemSettings } from './types'
 // -- needed to decide whether to render the Search nav link at all, for
 // everyone, not just whoever can change it. Defaults keep every feature on
 // until the real value loads, so nothing flashes hidden then visible.
-export const systemSettings = writable<SystemSettings>({ search_view_enabled: true })
+export const systemSettings = writable<SystemSettings>({
+  search_view_enabled: true,
+  audit_view_enabled: true,
+  audit_retention_days: 365,
+})
 
 export async function refreshSystemSettings(): Promise<void> {
   try {

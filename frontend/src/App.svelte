@@ -1,7 +1,7 @@
 <script lang="ts">
   import Router, { push } from 'svelte-spa-router'
   import { onMount } from 'svelte'
-  import { authChecked, currentUser, logout, refreshCurrentUser } from './lib/auth'
+  import { authChecked, currentUser, hasCapability, logout, refreshCurrentUser } from './lib/auth'
   import { currentHash } from './lib/hash'
   import { refreshSystemSettings, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
@@ -19,6 +19,7 @@
   import SystemSettings from './routes/SystemSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
   import SessionsSettings from './routes/SessionsSettings.svelte'
+  import AuditLogSettings from './routes/AuditLogSettings.svelte'
 
   const routes = {
     '/login': Login,
@@ -39,6 +40,7 @@
     '/settings/system': SystemSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
     '/settings/sessions': SessionsSettings,
+    '/settings/audit-log': AuditLogSettings,
   }
 
   onMount(async () => {
@@ -68,6 +70,17 @@
     ($currentHash.startsWith('/search') || $currentHash.startsWith('/alerts'))
   ) {
     push('/viewer')
+  }
+  // Same reasoning as the search/alerts guard above, plus a capability
+  // check -- the audit log is gated by view_audit_log (see
+  // auth/models.py's GlobalCapability), not merely unlinked from the nav.
+  $: if (
+    $authChecked &&
+    $currentUser &&
+    (!$systemSettings.audit_view_enabled || !hasCapability($currentUser, 'view_audit_log')) &&
+    $currentHash.startsWith('/settings/audit-log')
+  ) {
+    push('/settings')
   }
 
   const isActive = (prefix: string) => $currentHash === prefix || $currentHash.startsWith(prefix + '/')

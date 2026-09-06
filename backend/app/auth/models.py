@@ -30,6 +30,13 @@ class GlobalCapability(StrEnum):
     # (users, roles, SSO config, sources). This one gates flipping a switch
     # that changes what every user in the deployment sees.
     manage_system_settings = "manage_system_settings"
+    # Read access to AuditLog (app/api/audit.py). Deliberately its own global
+    # capability rather than folded into the customer/folder/source grant
+    # tree: audit visibility is a global concern (who did what, anywhere in
+    # the deployment), not something scoped to what a role can browse. Never
+    # implied by any other capability above -- a role needs this explicitly,
+    # same as a super-admin needs no capability at all to see everything.
+    view_audit_log = "view_audit_log"
 
 
 class AuthProviderType(StrEnum):
