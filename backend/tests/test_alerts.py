@@ -1,3 +1,4 @@
+import uuid
 from types import SimpleNamespace
 
 from app.alerts import check_alert, evaluate_alerts, send_webhook
@@ -12,11 +13,11 @@ from sqlmodel import Session, SQLModel, create_engine
 
 
 def _user(session, *, is_super_admin=False, active=True) -> User:
-    role = Role(name=f"role-{id(object())}", is_super_admin=is_super_admin)
+    role = Role(name=f"role-{uuid.uuid4().hex}", is_super_admin=is_super_admin)
     session.add(role)
     session.commit()
     session.refresh(role)
-    user = User(username=f"user-{id(object())}@example.com", role_id=role.id, active=active)
+    user = User(username=f"user-{uuid.uuid4().hex}@example.com", role_id=role.id, active=active)
     session.add(user)
     session.commit()
     session.refresh(user)

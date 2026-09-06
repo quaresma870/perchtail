@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from app.api.auth import get_current_active_user
 from app.api.severity_patterns import global_router, source_router
@@ -12,7 +14,7 @@ def _make_role_and_user(
     session, *, is_super_admin=False, global_capabilities=None
 ) -> tuple[Role, User]:
     role = Role(
-        name=f"role-{is_super_admin}-{global_capabilities}-{id(object())}",
+        name=f"role-{is_super_admin}-{global_capabilities}-{uuid.uuid4().hex}",
         is_super_admin=is_super_admin,
         global_capabilities=global_capabilities or [],
     )
@@ -27,7 +29,7 @@ def _make_role_and_user(
 
 
 def _make_source(session) -> Source:
-    customer = Customer(name=f"Vodacom Tanzania {id(object())}")
+    customer = Customer(name=f"Vodacom Tanzania {uuid.uuid4().hex}")
     session.add(customer)
     session.commit()
     session.refresh(customer)

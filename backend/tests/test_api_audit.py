@@ -1,3 +1,4 @@
+import uuid
 from datetime import timedelta
 
 import pytest
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 
 def _make_user(session, *, is_super_admin=False, global_capabilities=None) -> User:
     role = Role(
-        name=f"role-{is_super_admin}-{global_capabilities}-{id(object())}",
+        name=f"role-{is_super_admin}-{global_capabilities}-{uuid.uuid4().hex}",
         is_super_admin=is_super_admin,
         global_capabilities=global_capabilities or [],
     )
