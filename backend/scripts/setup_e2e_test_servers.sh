@@ -8,12 +8,13 @@
 # foreground processes on non-privileged ports, not Docker -- no daemon
 # assumed to be available on the box running this (CI runner or a
 # contributor's machine), and this needs no more privilege than sudo already
-# grants a CI runner user. Everything it creates lives under
-# backend/data/e2e/ and is wiped by run_e2e_server.sh on every run; the one
-# exception is the "e2euser" OS account and its Samba password, which
-# persist across runs (recreating a Linux user is real system state, not
-# something to redo every time) but are inert outside this script's own
-# sshd/smbd instances -- nothing else on the box authenticates against them.
+# grants a CI runner user. Config/logs/host keys live under backend/data/e2e/
+# and the served fixture files under /tmp (see FIXTURE_ROOT below for why) --
+# both wiped on every run; the one exception is the "e2euser" OS account and
+# its Samba password, which persist across runs (recreating a Linux user is
+# real system state, not something to redo every time) but are inert outside
+# this script's own sshd/smbd instances -- nothing else on the box
+# authenticates against them.
 #
 # Usage: called by run_e2e_server.sh, not meant to be run standalone.
 # Requires sudo (passwordless, as on a GitHub Actions runner) when not
@@ -49,8 +50,17 @@ fi
 printf '%s:%s\n' "$E2E_SSH_USER" "$E2E_SSH_PASSWORD" | $SUDO chpasswd
 
 # --- fixture files ---------------------------------------------------------
-SSH_ROOT="$E2E_DIR/ssh-root"
-SMB_ROOT="$E2E_DIR/smb-root"
+# Deliberately under /tmp, not backend/data/e2e/ (everything else here is) --
+# sshd's internal-sftp and smbd both access these *as* e2euser, which needs
+# execute (traversal) permission on every ancestor directory, not just these
+# two themselves. A CI checkout directory is typically owned by the runner
+# user with no "other" access, so a separate account can authenticate fine
+# and still get PermissionError/STATUS_ACCESS_DENIED trying to reach a path
+# nested inside it. /tmp is always world-traversable, sidestepping that
+# entirely.
+FIXTURE_ROOT="/tmp/perchtail-e2e-fixtures"
+SSH_ROOT="$FIXTURE_ROOT/ssh-root"
+SMB_ROOT="$FIXTURE_ROOT/smb-root"
 rm -rf "$SSH_ROOT" "$SMB_ROOT"
 mkdir -p "$SSH_ROOT" "$SMB_ROOT"
 printf 'ssh hello world log line 1\nssh hello world log line 2\n' > "$SSH_ROOT/hello.log"
@@ -174,7 +184,7 @@ _wait_for_port 127.0.0.1 1445 smbd
 $SUDO chmod 644 "$SSH_ETC/sshd.log" "$SMB_ETC/log.smbd" 2>/dev/null || true
 
 # --- hand off connection details to the Playwright specs -------------------
-# SSH_ROOT/SMB_ROOT are absolute paths under this checkout, so there's no
+# SSH_ROOT/SMB_ROOT are under /tmp (see FIXTURE_ROOT above), so there's no
 # fixed literal frontend/e2e/*.spec.ts could hardcode -- written here, once,
 # as the one place that actually knows them, and read directly off disk by
 # the specs (sources-ssh.spec.ts, sources-smb.spec.ts) before this server is
