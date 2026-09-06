@@ -36,9 +36,6 @@ if ! command -v sshd >/dev/null || ! command -v smbd >/dev/null; then
     openssh-server samba samba-common-bin
 fi
 
-SFTP_SERVER_PATH="$(dpkg -L openssh-sftp-server 2>/dev/null | grep -m1 'sftp-server$' || true)"
-SFTP_SERVER_PATH="${SFTP_SERVER_PATH:-/usr/lib/openssh/sftp-server}"
-
 # --- throwaway OS account -------------------------------------------------
 # Real, persisted across runs (unlike everything under data/e2e/) since
 # creating/deleting a Linux user on every test run is unnecessary churn --
@@ -86,8 +83,20 @@ UsePAM no
 PasswordAuthentication yes
 PermitRootLogin no
 AllowUsers $E2E_SSH_USER
-Subsystem sftp $SFTP_SERVER_PATH
 LogLevel ERROR
+
+# $E2E_SSH_USER's shell is /usr/sbin/nologin (least-privilege -- it has no
+# business getting an interactive shell). sshd validates the account's
+# shell at session-channel setup regardless of request type, so a plain
+# "Subsystem sftp <path>" directive still gets rejected for a nologin
+# shell -- the client sees the rejection text land on the SFTP channel
+# instead of a real SFTP_VERSION packet ("Garbage packet received").
+# ForceCommand bypasses that shell check entirely, which is exactly why
+# it's the standard way to allow SFTP-only access for a nologin account;
+# OpenSSH's own internal-sftp implementation needs no external binary
+# either, so there's no path to detect/hardcode.
+Match User $E2E_SSH_USER
+    ForceCommand internal-sftp
 EOF
 
 $SUDO /usr/sbin/sshd -f "$SSH_ETC/sshd_config" -E "$SSH_ETC/sshd.log"
@@ -102,6 +111,12 @@ cat > "$SMB_ETC/smb.conf" <<EOF
 workgroup = WORKGROUP
 server role = standalone server
 security = user
+# smbprotocol/pyspnego (the client app/collectors/smb.py uses) has no
+# system Kerberos to negotiate with, so it needs NTLM -- some distro
+# builds of Samba default this off, which surfaces client-side as
+# spnego.exceptions.BadMechanismError ("Unable to negotiate common
+# mechanism") rather than a clear auth-method error.
+ntlm auth = yes
 map to guest = never
 smb ports = 1445
 bind interfaces only = yes
