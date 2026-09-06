@@ -17,6 +17,7 @@ from app.agent_registry import get_agent_registry
 from app.api.agent_ws import router as agent_ws_router
 from app.api.alerts import router as alerts_router
 from app.api.archive import router as archive_router
+from app.api.audit import router as audit_router
 from app.api.auth import router as auth_router
 from app.api.customers import router as customers_router
 from app.api.folders import router as folders_router
@@ -30,6 +31,7 @@ from app.api.sources import router as sources_router
 from app.api.sso import router as sso_router
 from app.api.system_settings import router as system_settings_router
 from app.api.users import router as users_router
+from app.audit_purge import run_audit_purge_sweep
 from app.bootstrap import (
     seed_initial_super_admin,
     seed_no_access_role,
@@ -213,6 +215,11 @@ async def lifespan(app: FastAPI):
         "interval",
         seconds=settings.search_index_interval_seconds,
     )
+    scheduler.add_job(
+        run_audit_purge_sweep,
+        "interval",
+        seconds=settings.audit_purge_interval_seconds,
+    )
     scheduler.start()
     logger.info("startup.complete")
     yield
@@ -226,6 +233,7 @@ app.add_middleware(RequestIDMiddleware)
 app.include_router(auth_router)
 app.include_router(alerts_router)
 app.include_router(archive_router)
+app.include_router(audit_router)
 app.include_router(customers_router)
 app.include_router(folders_router)
 app.include_router(sources_router)

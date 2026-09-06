@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from app.api.alerts import router as alerts_router
 from app.api.auth import get_current_active_user
@@ -10,11 +12,11 @@ from fastapi.testclient import TestClient
 
 
 def _make_user(session, *, is_super_admin=False) -> User:
-    role = Role(name=f"role-{id(object())}", is_super_admin=is_super_admin)
+    role = Role(name=f"role-{uuid.uuid4().hex}", is_super_admin=is_super_admin)
     session.add(role)
     session.commit()
     session.refresh(role)
-    user = User(username=f"user-{id(object())}@example.com", role_id=role.id)
+    user = User(username=f"user-{uuid.uuid4().hex}@example.com", role_id=role.id)
     session.add(user)
     session.commit()
     session.refresh(user)

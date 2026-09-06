@@ -10,6 +10,7 @@ export type GlobalCapability =
   | 'manage_sso'
   | 'create_source'
   | 'manage_system_settings'
+  | 'view_audit_log'
 
 export interface CurrentUser {
   id: number
@@ -151,6 +152,29 @@ export interface SearchHit {
 
 export interface SystemSettings {
   search_view_enabled: boolean
+  audit_view_enabled: boolean
+  audit_retention_days: number
+}
+
+export interface AuditLogEntry {
+  id: number
+  user_id: number | null
+  username: string | null
+  action: string
+  target_type: string | null
+  target_id: number | null
+  timestamp: string
+  metadata: Record<string, unknown> | null
+}
+
+export interface AuditLogPage {
+  items: AuditLogEntry[]
+  total: number
+}
+
+export interface AuditLogFilterOptions {
+  actions: string[]
+  target_types: string[]
 }
 
 export interface AuthSessionInfo {

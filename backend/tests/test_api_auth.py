@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from app.api.auth import get_current_active_user
 from app.api.auth import router as auth_router
@@ -34,7 +36,7 @@ def client(session, monkeypatch):
 
 
 def _make_user(session, *, username: str = USERNAME, password: str = PASSWORD) -> User:
-    role = Role(name=f"Support-{id(object())}")
+    role = Role(name=f"Support-{uuid.uuid4().hex}")
     session.add(role)
     session.commit()
     session.refresh(role)

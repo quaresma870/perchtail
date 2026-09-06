@@ -10,6 +10,11 @@
   let error = ''
 
   let searchViewEnabled = true
+  let auditViewEnabled = true
+  let auditRetentionDays = 365
+  let retentionInput = '365'
+  let retentionSaving = false
+  let retentionError = ''
 
   let monitoringConfigured = false
   let monitoringToken = ''
@@ -20,6 +25,9 @@
     try {
       const settings = await api.get<SystemSettings>('/system-settings')
       searchViewEnabled = settings.search_view_enabled
+      auditViewEnabled = settings.audit_view_enabled
+      auditRetentionDays = settings.audit_retention_days
+      retentionInput = String(settings.audit_retention_days)
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load system settings'
     } finally {
@@ -64,6 +72,45 @@
       saving = false
     }
   }
+
+  async function toggleAuditView() {
+    const next = !auditViewEnabled
+    saving = true
+    error = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        audit_view_enabled: next,
+      })
+      auditViewEnabled = settings.audit_view_enabled
+      systemSettings.set(settings)
+    } catch (err) {
+      error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
+    } finally {
+      saving = false
+    }
+  }
+
+  async function saveRetention() {
+    const parsed = Number(retentionInput)
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      retentionError = 'Enter a whole number of days (0 = keep forever).'
+      return
+    }
+    retentionError = ''
+    retentionSaving = true
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        audit_retention_days: parsed,
+      })
+      auditRetentionDays = settings.audit_retention_days
+      retentionInput = String(settings.audit_retention_days)
+      systemSettings.set(settings)
+    } catch (err) {
+      retentionError = err instanceof ApiError ? err.detail : 'Failed to update retention'
+    } finally {
+      retentionSaving = false
+    }
+  }
 </script>
 
 <SettingsNav />
@@ -106,12 +153,53 @@
       <div class="setting-row">
         <div>
           <div class="setting-name">Audit log</div>
-          <p class="hint">Coming soon — see ROADMAP.md's "Full audit log viewer" section.</p>
+          <p class="hint">
+            The audit log page under Settings, listing logins and every source/rule/role/user/
+            customer/folder/SSO/system-settings change. Turning this off hides the page and
+            redirects away from it for every user — it doesn't stop new events from being
+            recorded, so re-enabling it later shows the full history again.
+          </p>
         </div>
         <label class="switch">
-          <input type="checkbox" checked={false} disabled />
+          <input
+            type="checkbox"
+            checked={auditViewEnabled}
+            disabled={saving}
+            on:change={toggleAuditView}
+          />
           <span class="switch-track"></span>
         </label>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Audit log retention</div>
+          <p class="hint">
+            Entries older than this are purged automatically on a daily sweep. 0 keeps every entry
+            forever.
+          </p>
+        </div>
+        {#if retentionError}
+          <p class="error">{retentionError}</p>
+        {/if}
+        <div class="retention-row">
+          <input
+            class="input retention-input"
+            type="number"
+            min="0"
+            step="1"
+            bind:value={retentionInput}
+          />
+          <span class="hint">days</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={saveRetention}
+            disabled={retentionSaving || Number(retentionInput) === auditRetentionDays}
+          >
+            {retentionSaving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -200,6 +288,14 @@
   }
   .setting-row.column .btn {
     align-self: flex-start;
+  }
+  .retention-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .retention-input {
+    width: 6rem;
   }
   .token-box {
     display: block;
