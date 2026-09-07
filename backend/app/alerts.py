@@ -15,7 +15,7 @@ from app.logging_config import get_logger
 from app.models import Alert, SearchIndexState, Source
 from app.search_index import SearchHit, search_content_only
 from app.timeutils import utcnow
-from app.webhook_safety import UnsafeWebhookURLError, assert_webhook_url_is_safe
+from app.webhook_safety import UnsafeWebhookURLError, resolve_pinned_webhook_target
 
 logger = get_logger(__name__)
 
@@ -102,12 +102,26 @@ def send_webhook(alert: Alert, hits: list[SearchHit]) -> bool:
         ],
     }
     try:
-        # Re-checked here, not just at alert create/update time (see
-        # app.api.alerts), to close the DNS-rebinding gap: the hostname
-        # could have resolved to a public address when the alert was saved
-        # and to a private one by the time it's actually dispatched.
-        assert_webhook_url_is_safe(alert.webhook_url)
-        response = httpx.post(alert.webhook_url, json=payload, timeout=_WEBHOOK_TIMEOUT_SECONDS)
+        # Resolved and validated here, not just at alert create/update time
+        # (see app.api.alerts) -- and pinned to the specific IP that
+        # validation just saw, not handed off as a plain hostname for httpx
+        # to resolve all over again a moment later. A second call to
+        # assert_webhook_url_is_safe() followed by httpx.post(url) would
+        # look like it closes the DNS-rebinding gap but doesn't: those would
+        # still be two independent resolutions, and an attacker's own
+        # authoritative DNS server can answer them differently. See
+        # webhook_safety.py's module docstring.
+        target = resolve_pinned_webhook_target(alert.webhook_url)
+        # The module-level httpx.post() convenience function doesn't accept
+        # `extensions` (needed to carry sni_hostname through) -- a Client is
+        # required to pass it.
+        with httpx.Client(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
+            response = client.post(
+                target.url,
+                json=payload,
+                headers={"Host": target.host_header},
+                extensions={"sni_hostname": target.sni_hostname},
+            )
         response.raise_for_status()
         logger.info("alert.webhook_sent", alert_id=alert.id, matched_count=len(hits))
         return True
