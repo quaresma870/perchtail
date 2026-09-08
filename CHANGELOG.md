@@ -8,6 +8,27 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-08
+
+Phase 2 (push-agent) and Phase 3 (full-text search, alerting, IdP
+group-claim-to-role auto-mapping, external monitoring) complete, plus a
+full admin audit log viewer, a redesigned connections home page, a set of
+viewer toolbar/editor improvements, and an extensive pre-1.0
+security-hardening pass — login lockout, security response headers,
+CI-blocking dependency and container-image vulnerability scanning,
+`CREDENTIAL_ENCRYPTION_KEY` rotation with a tooled migration path, salted
+PBKDF2 credential-key derivation, persisted SSH host-key pinning, a
+Sessions page for revoking a login remotely, a CSRF review, and two real
+vulnerabilities found and fixed via a full security-review pass: a
+DNS-rebind SSRF gap in outbound alert webhooks and a login-CSRF gap in
+OIDC SSO. Covered end-to-end by a new Playwright e2e suite that drives
+the real browser UI against real SSH/SMB test servers, not just mocks.
+**Breaking for existing deployments**: the credential-encryption key
+derivation change means previously-encrypted credentials need
+`python -m app.rotate_credential_key` (or reconfiguring sources/SSO from
+scratch) after upgrading — see
+[docs/credential-key-rotation.md](docs/credential-key-rotation.md).
+
 ### Security
 - Fixed a residual SSRF gap in the alert webhook safety check (found via a
   full security-review pass over everything merged since v0.1.1, follow-up
