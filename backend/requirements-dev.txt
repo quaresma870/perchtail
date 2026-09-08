@@ -1,4 +1,4 @@
 -r requirements.txt
-ruff>=0.6
+ruff>=0.16.6
 black>=24.8
 pytest>=9.1.1
