@@ -8,7 +8,7 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.1.1%20%28phase%201b%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.2.0%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -19,15 +19,37 @@
 
 ## Status
 
-🟢 **v0.1.1 — Phase 1 (MVP) + Phase 1b (SSO) complete.** Agentless SSH/SFTP, SMB, and
-WinRM browsing, ephemeral fetch (nothing mirrored), rule-scoped RBAC, the
-full admin/viewer UI, and OIDC single sign-on (local accounts still work
-alongside it — see [ROADMAP.md](ROADMAP.md)) all work end-to-end. Still
-pre-1.0: SAML isn't built (OIDC covers Azure AD/Entra ID, Okta, Google
-Workspace, Keycloak/Authentik, so it's only getting built if a real need
-shows up), there's no full-text search yet, and it hasn't seen production
-traffic beyond the maintainer's own use. See [CHANGELOG.md](CHANGELOG.md)
-for what's actually shipped versus planned.
+🟢 **v0.2.0 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
+Phase 3 (full-text search, saved-search webhook alerts, IdP
+group-claim-to-role auto-mapping, a detailed health endpoint) are all
+complete** (see [ROADMAP.md](ROADMAP.md) for the full phase breakdown).
+Agentless SSH/SFTP, SMB, and WinRM browsing, a Go push-agent for hosts
+that can't be reached inbound, ephemeral fetch (nothing mirrored),
+rule-scoped RBAC, OIDC single sign-on (local accounts still work
+alongside it), and opt-in full-text search with alerting over indexed
+sources all work end-to-end. The Viewer's home page is a two-column
+"recent connections / all connections" dashboard with a search box
+(folder/customer/host), and deployment-wide feature toggles live under
+Settings → System, including a full admin audit log (every login and
+source/rule/role/user/customer/folder/SSO/system-settings change, with
+type/action/date filters and an admin-configurable retention window).
+
+Most of a pre-1.0 security-hardening pass is done too — login lockout,
+CSP/security headers, CI-blocking dependency and container-image
+vulnerability scanning, `CREDENTIAL_ENCRYPTION_KEY` rotation with a
+tooled migration path, salted PBKDF2 key derivation, persisted SSH
+host-key pinning, a Sessions page for revoking a login remotely, and a
+DNS-rebind-safe outbound webhook fetcher — see ROADMAP.md's "Security
+hardening" section for what's still open (optional local-account MFA,
+audit-log tamper-evidence, a formal third-party review). Covered
+end-to-end by `pytest` (backend), `vitest` (frontend units), and a
+Playwright suite that drives the real browser UI against real SSH/SMB
+test servers, not just mocks. Still pre-1.0 otherwise: SAML isn't built
+(OIDC already covers Azure AD/Entra ID, Okta, Google Workspace,
+Keycloak/Authentik, so it's only getting built if a real need shows up),
+and it hasn't seen production traffic beyond the maintainer's own use.
+See [CHANGELOG.md](CHANGELOG.md) for what's actually shipped versus
+planned.
 
 ## What it is
 
@@ -122,10 +144,11 @@ docker compose logs perchtail | grep initial_super_admin
 Open `http://localhost:8080`, sign in with that username/password (`admin` by
 default — override with `INITIAL_ADMIN_USERNAME` in `.env` before first
 startup), and you'll be forced to set your own password immediately. From
-there: **Sources → New source** to point PerchTail at a server (see
-[docs/source-setup.md](docs/source-setup.md) for what the source side needs
-configured first), attach a rule so something is actually visible (a source
-with zero rules shows nothing, by design), and open **Viewer** to browse it.
+there: **Settings → Sources → + Add source** to point PerchTail at a server
+(see [docs/source-setup.md](docs/source-setup.md) for what the source side
+needs configured first), attach a rule so something is actually visible (a
+source with zero rules shows nothing, by design), and open **Viewer** to
+browse it.
 
 State (the SQLite database, rotated application logs, and the ephemeral
 scratch cache) lives in the `perchtail-data` Docker volume, so it survives
@@ -137,6 +160,11 @@ scratch cache) lives in the `perchtail-data` Docker volume, so it survives
 - [ROADMAP.md](ROADMAP.md) — phased milestones and what's next
 - [docs/source-setup.md](docs/source-setup.md) — how to prepare a Linux or
   Windows server so PerchTail can reach it over SSH/SFTP, SMB, or WinRM
+- [docs/monitoring.md](docs/monitoring.md) — the detailed health endpoint for
+  external monitoring (Zabbix, Prometheus), and how to generate its token
+- [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — how to
+  rotate `CREDENTIAL_ENCRYPTION_KEY` without losing access to already-
+  encrypted credentials
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
   submit changes
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability

@@ -1,12 +1,14 @@
 # Preparing a source server for PerchTail
 
-PerchTail is agentless in v1 — it never installs anything on the machines it
-reads from. Instead, each source server needs a **dedicated, least-privilege
-account** reachable over one of three protocols (SSH/SFTP, SMB, or WinRM).
-This guide covers what to configure on the *source* side before adding it as a
-source in PerchTail's admin UI. See [CLAUDE.md](../CLAUDE.md) for how the
-`Source` model (`protocol`, `host`, `port`, `credential_ref`, `base_path`)
-maps to this configuration.
+PerchTail is agentless by default — for SSH/SFTP, SMB, and WinRM sources, it
+never installs anything on the machines it reads from. Each of those needs a
+**dedicated, least-privilege account** reachable over the relevant protocol.
+For a host that can't be reached inbound at all, the push-agent (a small Go
+binary that dials *out* instead) covers that case without needing an inbound
+account or firewall rule on the source. This guide covers what to configure
+on the *source* side before adding it as a source in PerchTail's admin UI.
+See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
+`port`, `credential_ref`, `base_path`) maps to this configuration.
 
 ## At a glance
 
@@ -15,6 +17,7 @@ maps to this configuration.
 | SSH/SFTP | Linux | 22 | dedicated OS user, key-based | SFTP-only chroot jail |
 | SMB | Windows shares | 445 | dedicated local/domain user | share + NTFS ACL scoped to one folder |
 | WinRM | Windows (fallback when SMB isn't open) | 5985/5986 | dedicated local/domain user | JEA-constrained, read-only cmdlets |
+| Agent | Any host not reachable inbound | outbound only, no listener | enrollment token, not a login account | `PERCHTAIL_BASE_PATH` scopes what it can read |
 
 ## Principles that apply to every protocol
 
@@ -28,12 +31,11 @@ maps to this configuration.
 - **Read-only, always.** The account only ever needs to list directories and
   read file contents. Never grant write, delete, or execute rights beyond
   what the protocol inherently requires to do that.
-- **Reachability is inbound, from the connector.** PerchTail is agentless in
-  v1, so the connector host needs inbound network access to the source on
-  the relevant port. If a source can't allow inbound (isolated network,
-  strict firewall), it's out of scope for v1 — the Phase 2 push-agent (see
-  [ROADMAP.md](../ROADMAP.md#phase-2)) is being built specifically for that
-  case.
+- **Reachability is inbound, from the connector, for SSH/SMB/WinRM.** Those
+  three need the connector host to have inbound network access to the source
+  on the relevant port. If a source can't allow inbound (isolated network,
+  strict firewall), use the [Agent protocol](#agent-push-agent-for-hosts-not-reachable-inbound)
+  instead — it dials out, so nothing needs to accept an inbound connection.
 - **The credential only ever lives in PerchTail's source config**, where it's
   encrypted at rest (see CLAUDE.md's "Security notes"). Don't reuse it
   anywhere else, and rotate it the same way you'd rotate any service account
@@ -162,8 +164,11 @@ icacls "C:\ProgramData\AppName\Logs" /grant "DOMAIN\svc-perchtail:(OI)(CI)RX"
 
 - Require SMB3+; disable SMBv1 on the host entirely if it's still enabled
   anywhere — it's deprecated and insecure.
-- Prefer Kerberos over NTLM if the source is domain-joined; if NTLM is
-  unavoidable, require NTLMv2 as the minimum.
+- PerchTail's connector authenticates over NTLM regardless of whether the
+  source is domain-joined — `credential_ref` is only ever a bare
+  username/password (see CLAUDE.md's data model), with no way to supply a
+  realm or keytab for Kerberos. Require NTLMv2 as the minimum on the share
+  side.
 - Enable SMB signing.
 
 ### 5. Firewall
@@ -206,6 +211,57 @@ compromised PerchTail credential on a WinRM source has far more reach than
 
 Allow TCP 5985 (HTTP, only if HTTPS genuinely isn't an option) or 5986
 (HTTPS) inbound from the PerchTail connector's IP only.
+
+## Agent (push-agent, for hosts not reachable inbound)
+
+Unlike the other three protocols, the agent doesn't need a dedicated login
+account, an open inbound port, or any credential PerchTail stores and uses to
+connect *to* the host — the host connects *to* PerchTail instead, over a
+single outbound WebSocket connection, and PerchTail relays live `list`/`fetch`
+commands down it exactly as it would call any other connector directly.
+Nothing is synced or pushed ahead of time; the always-fresh, nothing-persisted
+rule applies to agent-mode sources the same as any other. See
+[`agent/README.md`](../agent/README.md) for the full build/config reference.
+
+### 1. Add the source and generate an enrollment token
+
+In PerchTail's admin UI, create a source with protocol `Agent`, then use its
+"Generate token" action (Settings → Sources → the source → Agent enrollment).
+The token is shown once — copy it before navigating away; regenerating it
+invalidates whatever the agent's config file currently has.
+
+### 2. Install the agent binary on the source host
+
+Either build it from `agent/` (`go build .`, or cross-compile — see
+`agent/README.md`) or use a prebuilt binary for the host's OS/architecture,
+and place it wherever you'd normally put a small system service binary
+(e.g. `/usr/local/bin/perchtail-agent` on Linux).
+
+### 3. Configure and run it
+
+Three environment variables, all required:
+
+| Variable | Example | Meaning |
+|---|---|---|
+| `PERCHTAIL_SERVER_URL` | `wss://perchtail.example.com/agent/connect` | PerchTail's agent endpoint |
+| `PERCHTAIL_AGENT_TOKEN` | (from step 1) | The enrollment token |
+| `PERCHTAIL_BASE_PATH` | `/var/log/myapp` | The only local root the agent will read from |
+
+Run it under whatever process supervisor the host already uses (systemd,
+Windows Service, etc.) so it restarts on failure or reboot — it reconnects
+with exponential backoff on its own if the connection drops, but something
+still needs to restart the process itself if it exits. Run it as a
+least-privilege account that only has read access under `PERCHTAIL_BASE_PATH`
+— same read-only, scope-to-what's-needed principle as every other protocol
+here, just enforced by the OS account the agent runs as instead of a
+protocol-level ACL.
+
+### 4. Firewall
+
+None needed on the source host for inbound traffic — the agent only ever
+initiates the connection outbound to `PERCHTAIL_SERVER_URL` over HTTPS/WSS.
+Allow that outbound destination through the source's firewall/proxy if
+outbound traffic is otherwise restricted.
 
 ## Testing a source
 

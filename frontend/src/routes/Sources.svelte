@@ -3,6 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser, hasCapability } from '../lib/auth'
+  import SettingsNav from '../lib/components/SettingsNav.svelte'
   import type { Customer, Protocol, Source } from '../lib/types'
 
   let sources: Source[] = []
@@ -16,10 +17,13 @@
     smb: 'SMB',
     winrm: 'WinRM',
     local: 'Local',
+    agent: 'Agent',
   }
 
   const customerName = (id: number | null) =>
     id === null ? null : (customers.find((c) => c.id === id)?.name ?? `#${id}`)
+
+  const formatLastSeen = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : null)
 
   function checkResultOk(id: number): boolean | null {
     const result = checkResults[id]
@@ -73,11 +77,15 @@
   onMount(load)
 </script>
 
+<SettingsNav />
+
 <div class="page">
   <div class="header">
     <h1>Sources</h1>
     {#if hasCapability($currentUser, 'create_source')}
-      <button class="btn btn-primary" on:click={() => push('/sources/new')}>+ Add source</button>
+      <button class="btn btn-primary" on:click={() => push('/settings/sources/new')}
+        >+ Add source</button
+      >
     {/if}
   </div>
 
@@ -118,7 +126,17 @@
                 <span class="badge protocol-{source.protocol}">{PROTOCOL_LABEL[source.protocol]}</span>
               </td>
               <td>
-                {#if checkResults[source.id] === 'checking'}
+                {#if source.protocol === 'agent'}
+                  {#if source.agent_connected}
+                    <span class="status status-ok">✓ connected</span>
+                  {:else if formatLastSeen(source.agent_last_seen_at)}
+                    <span class="status status-fail" title="Not connected right now"
+                      >✕ last seen {formatLastSeen(source.agent_last_seen_at)}</span
+                    >
+                  {:else}
+                    <span class="status status-pending">never connected</span>
+                  {/if}
+                {:else if checkResults[source.id] === 'checking'}
                   <span class="status status-pending">checking…</span>
                 {:else if checkResultOk(source.id) !== null}
                   {#if checkResultOk(source.id)}
@@ -144,7 +162,9 @@
                   ▶
                 </button>
                 {#if !source.is_system && hasCapability($currentUser, 'create_source')}
-                  <button class="link" on:click={() => push(`/sources/${source.id}`)}>edit</button>
+                  <button class="link" on:click={() => push(`/settings/sources/${source.id}`)}
+                    >edit</button
+                  >
                   <button class="link danger" on:click={() => removeSource(source)}>delete</button>
                 {/if}
               </td>
@@ -238,6 +258,10 @@
   .protocol-local {
     background: var(--protocol-local-bg);
     color: var(--protocol-local-text);
+  }
+  .protocol-agent {
+    background: var(--protocol-agent-bg);
+    color: var(--protocol-agent-text);
   }
   .status {
     font-size: 0.82rem;

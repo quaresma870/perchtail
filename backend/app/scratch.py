@@ -85,6 +85,14 @@ class ScratchStore:
             logger.warning("scratch.idle_sweep", purged=len(stale))
         return len(stale)
 
+    def total_bytes(self) -> int:
+        """Current total scratch usage -- exposed for the detailed health
+        endpoint (app/api/monitoring.py) to report usage against
+        max_bytes, same computation enforce_size_guard already does
+        internally."""
+        with self._lock:
+            return sum(e.path.stat().st_size for e in self._entries.values() if e.path.exists())
+
     def enforce_size_guard(self) -> int:
         """A safety valve for load, not a caching strategy: evicts the
         oldest zero-reference entries first once total scratch usage passes

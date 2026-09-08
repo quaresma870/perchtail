@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from app.api.auth import get_current_active_user
 from app.api.rules import router as rules_router
@@ -9,7 +11,7 @@ from fastapi.testclient import TestClient
 
 
 def _make_role_and_user(session, *, is_super_admin=False) -> tuple[Role, User]:
-    role = Role(name=f"role-{is_super_admin}-{id(object())}", is_super_admin=is_super_admin)
+    role = Role(name=f"role-{is_super_admin}-{uuid.uuid4().hex}", is_super_admin=is_super_admin)
     session.add(role)
     session.commit()
     session.refresh(role)

@@ -1,9 +1,16 @@
-export type Protocol = 'ssh' | 'smb' | 'winrm' | 'local'
+export type Protocol = 'ssh' | 'smb' | 'winrm' | 'local' | 'agent'
 export type RuleType = 'include' | 'exclude'
 export type PatternKind = 'glob' | 'regex'
 export type ScopeType = 'customer' | 'folder' | 'source'
+export type SeverityLevel = 'error' | 'warning' | 'info' | 'debug'
 export type Capability = 'view' | 'download' | 'manage_rules' | 'run_now'
-export type GlobalCapability = 'manage_users' | 'manage_roles' | 'manage_sso' | 'create_source'
+export type GlobalCapability =
+  | 'manage_users'
+  | 'manage_roles'
+  | 'manage_sso'
+  | 'create_source'
+  | 'manage_system_settings'
+  | 'view_audit_log'
 
 export interface CurrentUser {
   id: number
@@ -31,7 +38,9 @@ export interface Source {
   id: number
   name: string
   customer_id: number | null
+  customer_name: string | null
   folder_id: number | null
+  folder_name: string | null
   protocol: Protocol
   host: string
   port: number | null
@@ -40,6 +49,10 @@ export interface Source {
   is_system: boolean
   rule_count: number
   has_credential: boolean
+  has_agent_token: boolean
+  agent_connected: boolean
+  agent_last_seen_at: string | null
+  search_indexing_enabled: boolean
 }
 
 export interface Rule {
@@ -49,6 +62,17 @@ export interface Rule {
   pattern: string
   pattern_kind: PatternKind
   notes: string | null
+}
+
+export interface SeverityPattern {
+  id: number
+  source_id: number | null
+  level: SeverityLevel
+  pattern: string
+  pattern_kind: PatternKind
+  enabled: boolean
+  highlight_line: boolean
+  include_in_navigation: boolean
 }
 
 export interface Role {
@@ -88,6 +112,10 @@ export interface ConnectionCheckResult {
   detail: string
 }
 
+export interface AgentTokenResult {
+  token: string
+}
+
 export interface SSOProvider {
   id: number
   protocol: 'oidc'
@@ -96,9 +124,98 @@ export interface SSOProvider {
   issuer: string
   client_id: string
   scopes: string
+  group_claim: string | null
 }
 
 export interface SSOStatus {
   enabled: boolean
   name: string | null
+}
+
+export interface GroupRoleMapping {
+  id: number
+  order: number
+  group_name: string
+  role_id: number
+  role_name: string
+}
+
+export type SearchMatchedField = 'content' | 'path'
+
+export interface SearchHit {
+  source_id: number
+  file_path: string
+  line_number: number
+  snippet_html: string
+  matched_field: SearchMatchedField
+}
+
+export interface SystemSettings {
+  search_view_enabled: boolean
+  audit_view_enabled: boolean
+  audit_retention_days: number
+}
+
+export interface AuditLogEntry {
+  id: number
+  user_id: number | null
+  username: string | null
+  action: string
+  target_type: string | null
+  target_id: number | null
+  timestamp: string
+  metadata: Record<string, unknown> | null
+}
+
+export interface AuditLogPage {
+  items: AuditLogEntry[]
+  total: number
+}
+
+export interface AuditLogFilterOptions {
+  actions: string[]
+  target_types: string[]
+}
+
+export interface AuthSessionInfo {
+  id: number
+  created_at: string
+  last_seen_at: string | null
+  expires_at: string
+  user_agent: string | null
+  is_current: boolean
+}
+
+export interface Alert {
+  id: number
+  name: string
+  query: string
+  source_id: number | null
+  webhook_url: string
+  enabled: boolean
+  last_checked_at: string | null
+}
+
+export interface AlertCreate {
+  name: string
+  query: string
+  source_id?: number | null
+  webhook_url: string
+  enabled?: boolean
+}
+
+export interface AlertUpdate {
+  name?: string
+  query?: string
+  source_id?: number | null
+  webhook_url?: string
+  enabled?: boolean
+}
+
+export interface MonitoringTokenResult {
+  token: string
+}
+
+export interface MonitoringTokenStatus {
+  configured: boolean
 }

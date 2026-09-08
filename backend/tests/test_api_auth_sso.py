@@ -263,6 +263,55 @@ def test_callback_redirects_to_login_error_for_a_deactivated_account(client, ses
     assert "perchtail_session" not in response.cookies
 
 
+def test_callback_rejects_a_valid_code_and_state_with_no_matching_cookie(
+    client, session, monkeypatch
+):
+    """The login-CSRF regression test (issue #61): a valid code+state pair
+    replayed by a browser that never itself called /auth/sso/login (e.g. an
+    attacker capturing their own successful callback URL and handing it to
+    a victim) must be rejected -- the state cookie set at /auth/sso/login
+    is what proves this browser actually started this flow, and a fresh
+    TestClient here has never received one."""
+    seed_no_access_role(session)
+    _make_enabled_provider(session)
+    state, nonce = _get_state_and_nonce(client, session, monkeypatch)
+    key_set, id_token = _key_set_and_token(nonce=nonce)
+    _patch_token_and_jwks(monkeypatch, key_set=key_set, id_token=id_token)
+
+    # A separate client sharing no cookies with the one that ran
+    # /auth/sso/login -- simulates the victim's own, unrelated browser.
+    client.cookies.clear()
+
+    response = client.get("/auth/sso/callback", params={"code": "the-code", "state": state})
+
+    assert response.status_code == 302
+    assert "sso_error=1" in response.headers["location"]
+    assert "perchtail_session" not in response.cookies
+
+    users = session.exec(select(User).where(User.auth_provider == AuthProviderType.oidc)).all()
+    assert users == []
+
+
+def test_callback_rejects_a_state_that_does_not_match_the_cookie(client, session, monkeypatch):
+    seed_no_access_role(session)
+    _make_enabled_provider(session)
+    _state, nonce = _get_state_and_nonce(client, session, monkeypatch)
+    key_set, id_token = _key_set_and_token(nonce=nonce)
+    _patch_token_and_jwks(monkeypatch, key_set=key_set, id_token=id_token)
+
+    # The cookie from /auth/sso/login is still set on `client`, but the
+    # state param presented here is a different (also validly-encrypted)
+    # one -- e.g. from a second, concurrent flow.
+    other_state, _other_nonce = _get_state_and_nonce(client, session, monkeypatch)
+    assert other_state != _state
+
+    response = client.get("/auth/sso/callback", params={"code": "the-code", "state": _state})
+
+    assert response.status_code == 302
+    assert "sso_error=1" in response.headers["location"]
+    assert "perchtail_session" not in response.cookies
+
+
 def test_callback_redirects_to_login_error_when_sso_disabled_mid_flow(client, session, monkeypatch):
     seed_no_access_role(session)
     provider = _make_enabled_provider(session)

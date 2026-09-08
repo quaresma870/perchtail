@@ -3,6 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser } from '../lib/auth'
+  import SettingsNav from '../lib/components/SettingsNav.svelte'
   import type {
     Customer,
     Folder,
@@ -24,6 +25,8 @@
     { key: 'manage_users', label: 'Manage users' },
     { key: 'manage_roles', label: 'Manage roles' },
     { key: 'manage_sso', label: 'Manage SSO settings' },
+    { key: 'manage_system_settings', label: 'Manage system settings (feature toggles)' },
+    { key: 'view_audit_log', label: 'View audit log' },
   ]
   const ALL_CAPS: Capability[] = ['view', 'download', 'manage_rules', 'run_now']
 
@@ -104,7 +107,7 @@
       }
       if (isNew) {
         const created = await api.post<Role>('/roles', payload)
-        push(`/roles/${created.id}`)
+        push(`/settings/roles/${created.id}`)
       } else {
         await api.patch(`/roles/${roleId}`, payload)
         await loadRole()
@@ -143,10 +146,12 @@
   }
 </script>
 
+<SettingsNav />
+
 <div class="page">
   <div class="header">
     <h1>{isNew ? 'New role' : `Role: ${name}`}</h1>
-    <button class="btn btn-ghost" on:click={() => push('/roles')}>← back to roles</button>
+    <button class="btn btn-ghost" on:click={() => push('/settings/roles')}>← back to roles</button>
   </div>
 
   {#if loading}

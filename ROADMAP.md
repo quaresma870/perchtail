@@ -342,18 +342,1310 @@ they come before any connector or UI work, not after.
 
 ## Phase 2
 
-- [ ] Go push-agent (single static binary, cross-compiled) for sources not
+- [x] Backend agent-link infrastructure: `Protocol.agent`, `AgentRegistry`,
+      the agent's WebSocket endpoint, and the `agent` connector
+- [x] Go push-agent (single static binary, cross-compiled) for sources not
       reachable inbound
+- [x] Frontend: agent source UI (enrollment-token generation, connection
+      status)
 - [ ] `SAMLProvider` (`python3-saml`) — **only if** a real need shows up; see
       the open decision in CLAUDE.md (OIDC already covers Azure AD/Entra ID,
       Okta, Google Workspace, Keycloak/Authentik)
 
+### Notes on decisions made — frontend agent source UI
+
+- **`SourceEditor.svelte`'s `agent` protocol hides Port and the SSH/SMB/WinRM
+  credential fieldset** in favor of an "Agent enrollment" section — there's
+  no host to reach or password to store, only an enrollment token. Host and
+  Base path stay as free-text fields for the admin's own documentation
+  (which physical host, which directory it's supposed to be watching), even
+  though `collectors/agent.py` never actually reads `Source.base_path` for
+  this protocol — the real root is enforced by the agent's own
+  `PERCHTAIL_BASE_PATH` config, not by anything this app sends it.
+- **`has_agent_token` added to `SourcePublic`**, mirroring the existing
+  `has_credential` field — needed so the UI can label the button
+  "Generate token" vs. "Regenerate token" without the backend ever
+  re-exposing the token itself after its one-time display.
+- **Sources.svelte shows agent-protocol sources' live status
+  (`agent_connected`/`agent_last_seen_at`) instead of the manual "check"
+  button** the other protocols use — a `/check` call against an
+  agent-protocol source can only succeed while an agent happens to be
+  connected anyway (it just calls the same `list_directory`), so the
+  already-live registry state the source list returns is a strictly better
+  answer than a manual, one-shot check would be.
+
+### Notes on decisions made — backend agent-link infrastructure
+
+- **The agent dials out; the backend still drives every command live.**
+  CLAUDE.md frames the push-agent purely as a reachability fix ("this is
+  about network reachability, not about the always-fresh rule above, which
+  still applies"), not license for a proactive mirror/sync design. So the
+  agent opens a persistent WebSocket to the connector and then just waits —
+  the connector sends `list`/`fetch` commands down that connection on
+  demand, exactly when a user browses or opens a file, and the agent reads
+  its local disk and replies. Nothing is pushed ahead of time; an agent-mode
+  source is exactly as "always-fresh" as an SSH or SMB one, just reached
+  over a connection the far end initiated instead of one this app dials
+  directly.
+- **WebSocket over HTTP long-polling or gRPC** for that persistent
+  connection — asked the user to weigh in on transport and got no response,
+  so made the call directly: plain `FastAPI`/Starlette WebSocket support
+  needs no extra dependency, cross-compiles trivially from Go
+  (`gorilla/websocket` or `nhooyr.io/websocket`), and a single long-lived
+  duplex connection is a more natural fit for "server pushes a command,
+  agent pushes back a result" than polling or a heavier RPC framework would
+  be for what is, at bottom, a two-message-type protocol.
+- **`AgentRegistry` bridges FastAPI's sync path operations to the one
+  async WebSocket.** Every existing connector (`collectors/ssh.py` etc.) is
+  plain sync code, run in FastAPI's thread pool; the agent's connection,
+  like any WebSocket, only exists on the main asyncio event loop.
+  `agent_registry.py`'s `send_command_sync` bridges the two via
+  `asyncio.run_coroutine_threadsafe` (schedule the send+await onto the
+  bound loop) plus a blocking `Future.result(timeout=...)` on the calling
+  thread — so `collectors/agent.py`'s `list_directory`/`fetch_file` read as
+  plain synchronous calls, same shape as every other connector, with the
+  cross-thread bridging fully contained in one module.
+- **In-memory registry, not a DB table**, for which sources currently have
+  a live connection — same reasoning as `scratch.py`'s `ScratchStore`: a
+  live connection is inherently per-process and can't survive a restart, so
+  persisting it would just be a stale value waiting to be read.
+- **Enrollment token is bearer-auth over the WebSocket handshake**, hashed
+  with SHA-256 before storage (`Source.agent_token_hash`) — same pattern as
+  `auth/sessions.py`'s session tokens. `POST /sources/{id}/agent-token`
+  returns the plaintext exactly once, at generation time, mirroring the
+  existing admin reset-password UX; regenerating invalidates whatever token
+  the agent's config file was using.
+- **`Source.agent_last_seen_at`** is informational only (surfaced in the
+  admin UI), updated on every successful handshake — the actual "is it
+  connected right now" answer always comes from `AgentRegistry.is_connected`,
+  never from this column, so it can't drift out of sync with reality.
+
+### Notes on decisions made — Go push-agent binary
+
+- **`agent/` is its own Go module** (`agent/go.mod`), not folded into the
+  Python backend's structure — CLAUDE.md's suggested repo layout already
+  calls this out as a phase-2 concern with its own tree. Internal packages
+  live under `agent/internal/agent` so `main.go` stays a thin
+  config-load-and-run wrapper, same separation `backend/app/main.py` keeps
+  from the rest of the backend.
+- **`gorilla/websocket`** for the client side of the persistent connection —
+  the de facto standard Go WebSocket client, pairs with the plain
+  Starlette/FastAPI WebSocket server the backend already uses (see the
+  backend agent-link infrastructure notes above), no protocol translation
+  needed on either end.
+- **The wire protocol is a flat JSON envelope** (`{"type", "id", "path"}` in,
+  `{"type", "id", ...}` or `{"type": "..._error", "id", "error"}` out) that
+  mirrors `agent_registry.py`/`collectors/agent.py` exactly — a `list`
+  command returns `{"name", "is_dir", "size"}` entries, a `fetch` command
+  returns base64-encoded content (`content_b64`), matching the existing
+  `collectors/winrm.py` convention for wire-transferring file bytes.
+- **`IsSafeRelativePath` re-implements `rules.is_safe_relative_path`
+  independently in Go**, rather than trusting the backend's own validation —
+  the agent is the last line of defense against a `..`/absolute-path/
+  drive-letter payload actually reaching its local filesystem, so it can't
+  rely solely on a check made on the other end of the wire.
+- **Reconnect with exponential backoff** (1s → 30s cap) rather than a fixed
+  retry interval or giving up — an agent is meant to run unattended for long
+  periods on a host that may itself restart or lose connectivity
+  intermittently.
+- **No file-system watching, no local queue, no persistence of any kind.**
+  The agent answers exactly the command it's given and nothing else —
+  reinforcing, on the agent's own side, the same always-fresh design the
+  backend enforces on its side.
+
 ## Phase 3
 
-- [ ] Full-text search — needs its own indexing design since nothing persists
+- [x] Full-text search — needs its own indexing design since nothing persists
       from the viewing scratch space; design before building, per CLAUDE.md
-- [ ] Alerting
-- [ ] IdP group-claim-to-role auto-mapping
+- [x] Full-text search: match on file path and source host/name too, not just
+      line content, case-insensitive — a source or file whose name matches
+      the query should surface even if none of its lines happen to contain
+      that text (e.g. searching "win-app-02" should find the source, not just
+      lines that literally say "win-app-02")
+- [x] Alerting — notify on new content matching a saved search (see the
+      Alerting design notes below for the working scope decision)
+- [x] IdP group-claim-to-role auto-mapping — see notes below
+- [x] System/operational health endpoint(s) for external monitoring
+      (Zabbix, and ideally Prometheus too) — see notes below
+- [ ] Security hardening pass — see the dedicated section below; called out
+      explicitly rather than left implicit, since this audience holds
+      production credentials and treats security posture as a first-class
+      requirement, not a nice-to-have
+
+### Notes on decisions made — full-text search
+
+- **A genuinely separate index, not a reuse of the viewing scratch space** —
+  exactly as CLAUDE.md flagged this would need. `app/search_index.py`'s
+  background indexer (an APScheduler job, same shape as `scratch.py`'s
+  sweeps) walks each opted-in source's rule-visible files and stores short
+  per-line snippets in a SQLite FTS5 virtual table
+  (`app.db.ensure_search_schema`). This is a deliberately lagging,
+  approximate secondary structure — the live viewer's fetch-fresh behavior
+  is completely unaffected by anything here.
+- **Opt-in per source (`Source.search_indexing_enabled`, off by default)** —
+  the design questions asked about this went unanswered, so the call was
+  made directly: indexing is the one place in this project that stores a
+  form of log content at rest, even reduced to short snippets, so it gets
+  the same conservative "explicit opt-in, not on by default" treatment the
+  rule engine already uses for visibility (a source with zero rules matches
+  nothing).
+- **Short per-line snippets stored, not full extracted text** — same
+  unanswered-question judgment call, made toward the smaller footprint:
+  one FTS5 row per non-empty line (path, line number, snippet ≤500 chars),
+  not the complete text of every indexed file. Search results show the
+  matching line with FTS5's own highlighting; opening a result still
+  re-fetches the live file for the full view, same as clicking it in the
+  tree.
+- **Staleness tracked by file size alone, not size+mtime** —
+  `SearchIndexState` per (source, file_path). None of the five connector
+  protocols report a file's modification time (`collectors/base.py`'s
+  `DirEntry` only has name/path/is_dir/size), so size is the only signal
+  available uniformly across all of them. This under-detects a same-size
+  content edit, an accepted tradeoff for log files that are typically
+  append-only (grow) or rotated (renamed), not edited in place.
+- **The user's search-box input is wrapped as one quoted FTS5 phrase**,
+  not passed through as FTS5's own query syntax — predictable, grep-like
+  substring matching beats exposing AND/OR/NOT/prefix* to a plain search
+  box, and avoids a MATCH syntax error on input like an unbalanced quote.
+- **FTS5's `snippet()` output is HTML-escaped before its `<mark>` highlight
+  tags are spliced back in** (`_escape_snippet`, using control-character
+  placeholders round-tripped through `html.escape`) — `snippet()` inserts
+  its highlight markers into the *raw* stored line with no escaping of its
+  own, and a log line is arbitrary content, so rendering it unescaped via
+  the frontend's `{@html}` would be a stored-XSS hole (a line containing
+  `<script>...</script>` would execute as-is). Caught and fixed during this
+  same pass, with a regression test.
+- **Plain files and transparent `.gz` are indexed; `.zip`/`.tar.gz`
+  containers are not** — decompressing `.gz` first (same as the viewer does
+  on open) is cheap and rotated logs spend most of their life gzipped, but
+  indexing every member of a bulk archive (how deep? every nested archive
+  too?) is a real design question of its own, left for a future pass rather
+  than answered speculatively here.
+- **Binary content is sniffed and skipped** (a null byte in the first 8KB),
+  and files over a configurable size cap (`search_index_max_file_size_mb`,
+  default 20MB) are skipped too — the indexer reads a whole file into memory
+  to index it, so both guards exist for the same reason the scratch store
+  has a size guard: a safety valve for load, not a design goal.
+- **Search UI click-through** (`Search.svelte` → `Viewer.svelte`) passes
+  the target path and line number as a query string
+  (`#/viewer/:id?path=...&line=...`); `CodeMirrorPane` gained an imperative
+  `scrollToLine()` method (called via `bind:this` after the tab opens,
+  rather than a reactive prop) so a search result opens the file and jumps
+  straight to the matched line, not just the source's root.
+
+## UI reorganization: unified Settings navigation
+
+- [x] Collapse Sources/Roles/Users/SSO into a single "Settings" top-nav entry
+      with a shared sub-nav, so the top nav reads Viewer | Search | Settings
+      instead of listing every admin surface individually
+
+### Notes on decisions made
+
+- **Sources moved into Settings wholesale**, even though it was never
+  capability-gated the way Roles/Users/SSO are — any authenticated user
+  could always reach it, mainly to check connection status/rule counts.
+  The Viewer already has its own lighter source picker for "just browse",
+  so Sources' unique remaining value is the admin actions (create/edit/
+  delete); `SettingsNav`'s "Sources" tab stays unconditionally visible
+  (matching its old unconditional nav link) so that read-only use isn't
+  lost, while the "Settings" top-nav entry itself is likewise always shown
+  rather than capability-gated, for the same reason.
+- **A shared `SettingsNav.svelte` component embedded at the top of each
+  page**, not a nested `svelte-spa-router` with a wrapping layout — the
+  simpler option given `svelte-spa-router`'s flat routing model has no
+  built-in layout/outlet concept; each settings page already renders its
+  own `<div class="page">`, so adding one shared sub-nav component above it
+  costs one import + one line per file rather than restructuring routing.
+- **Every route gained a `/settings` prefix**
+  (`/settings/sources`, `/settings/sources/:id`, `/settings/roles`, etc.);
+  a bare `/settings` renders `SettingsIndex.svelte`, which redirects
+  (via `replace`, not `push`, so it doesn't add a spurious history entry)
+  to `/settings/sources` — always reachable, so it's a safe unconditional
+  landing tab for a bookmarked or typed `/settings` URL.
+- **Found and fixed a real bug while verifying this in a browser**: `/sso`
+  was missing from `vite.config.ts`'s dev-proxy prefix list (`/search` had
+  the same gap, caught and fixed during the Phase 3 work). It only affected
+  local `npm run dev` — production serves the API and the built SPA from
+  the same FastAPI process with no path-based reverse-proxy split, so
+  `/sso` always reached its router there regardless.
+
+### Notes on decisions made — full-text search: path/host matching
+
+- **Built, but landed on (2) for host/name, not the (1) it was leaning
+  toward** — actually building both options out surfaced a problem with
+  (1) that wasn't obvious on paper: `search_index_fts` is one row per
+  *line*, so denormalizing a source's host/name into every row means a
+  host/name match is technically true of every single indexed line of that
+  source. For a source with thousands of indexed lines, that's not "the
+  source surfaces in results", it's "every line of that source floods the
+  top 50 results" — the opposite of the intended UX. (2) doesn't have this
+  problem since it's resolved outside the line-granularity index entirely.
+- **File path**: `file_path` is now an indexed FTS5 column (was
+  `UNINDEXED`, storage-only), so one unified MATCH query covers content and
+  path together, ranked by the same `rank`. This has the identical
+  every-line-of-a-matching-file problem host/name would have had under (1)
+  — solved in `search_index.search()` by asking FTS5's `snippet()` against
+  the content and path columns separately per row: a row is a genuine
+  content hit if the content snippet actually got highlighted; otherwise,
+  if the path snippet did, it's a path-only hit, deduplicated down to one
+  representative row per `(source_id, file_path)` before the result list is
+  built. `matched_field` (`"content"` | `"path"`) rides along on
+  `SearchHit`/the API response so the frontend can label a path-only hit
+  distinctly ("filename match") instead of showing a misleadingly
+  unhighlighted line.
+- **Host/source name**: resolved as (2), and it turned out to need *no
+  backend endpoint at all* — `Search.svelte` already fetches every
+  RBAC-visible source (`GET /sources`) to resolve a content hit's
+  `source_id` to a display name, so matching by name/host is just a
+  client-side filter over that same already-fetched list
+  (`lib/source-match.ts`'s `filterSourcesByNameOrHost`), rendered as its
+  own "Sources matching" section above the content-hit results. Always
+  current (it's live source metadata, not an index), no re-index lag, and
+  zero new round-trips.
+- **Schema upgrade for existing deployments**: `app.db.ensure_search_schema`
+  now detects a `search_index_fts` table still carrying the old `file_path
+  UNINDEXED` declaration (FTS5 can't ALTER a column's indexed-ness in
+  place), drops and recreates it, and clears `SearchIndexState` alongside
+  it so previously-indexed files look "new" again and rebuild into the new
+  schema on the next sweep — otherwise they'd stay permanently unsearchable
+  post-upgrade, skipped forever as "unchanged by size" despite the FTS
+  table under them having just been wiped. Runs automatically on startup,
+  same as the table's original creation; no separate Alembic migration,
+  consistent with FTS5 schema already living outside Alembic's management.
+
+### Notes on decisions made — alerting
+
+- **Built as scoped: content-match alerts, not operational health alerts.**
+  "Alerting" in CLAUDE.md's phase list is one word with no further spec;
+  read in context (immediately after full-text search in the same
+  sentence) as "save a search, get notified when new indexed content
+  matches it" — extending the Phase 3 index rather than the separate
+  system-health-alerting concern the monitoring endpoint covers instead.
+- **Rides on the existing FTS5 index and indexer, no parallel structure**:
+  a new `Alert` row (`app/models.py` — owner, saved query, optional source
+  scope, webhook URL, `enabled`, `last_checked_at`) and `app/alerts.py`'s
+  `evaluate_alerts()`, called directly at the end of every
+  `run_indexing_sweep()` rather than registered as its own APScheduler
+  job — it needs that sweep's just-updated `SearchIndexState.indexed_at`
+  timestamps, and chaining them guarantees it never runs concurrently with
+  or ahead of indexing the way two independent interval jobs could.
+  `evaluate_alerts()` only re-checks files whose `indexed_at` advanced past
+  the alert's `last_checked_at`, reusing that timestamp signal rather than
+  depending on FTS5 rowid stability (rowids aren't stable across
+  re-indexes, since a changed file's rows are deleted and reinserted).
+- **Alert matching is content-only, never path/filename** — reuses
+  `search_index.search_content_only()`, a column-filtered sibling of the
+  Search page's `search()` that never matches `file_path`. A file's path
+  doesn't change when a new line is appended to it, so a path match could
+  never be "new content" the way a fresh line is; including path matches
+  here would mean an alert fires forever on every sweep for any file whose
+  name happens to match the query.
+- **Webhook-only notification channel for v1, not email** — no SMTP
+  sending exists anywhere in the project today (temporary passwords are
+  displayed once in the UI, never emailed), so email would be new
+  infrastructure; a generic JSON webhook (`POST` with `alert_id`,
+  `alert_name`, `query`, `matched_count`, and up to 10 `hits`) covers
+  Slack/Teams/PagerDuty/generic consumers with zero new dependencies
+  (`httpx`, already a dependency), matching the project's minimal-infra
+  ethos. A per-alert **Test** button (`POST /alerts/{id}/test`) sends one
+  synthetic hit so the owner can verify the receiver works without waiting
+  for real matching content.
+- **An alert can only ever fire on sources with `search_indexing_enabled`
+  already on** — a hard consequence of riding on the FTS5 index, not a
+  separate opt-in decision to design.
+- **RBAC is re-checked at evaluation time, not just at alert-creation
+  time** — `_resolve_alert_source_ids()` re-runs `visible_source_ids` on
+  every sweep, so revoking the owner's grant silently stops that alert's
+  scope from firing again without needing to remember to also edit or
+  delete it. One refinement beyond the original note: when an alert is
+  *fully* blocked (owner deactivated, grant revoked, nothing indexed in
+  scope), `evaluate_alerts()` deliberately does **not** advance
+  `last_checked_at` — so if access is later restored, the next sweep
+  re-checks everything that was missed while blocked, instead of silently
+  treating the gap as already-seen.
+- **Alerts are owned by the creating user, not RBAC-grant-scoped like
+  sources/folders/customers** — `app/api/alerts.py` is a simple
+  owner-only CRUD surface (list/create/update/delete all scoped to
+  `Alert.user_id == current_user`), not woven into the
+  customer/folder/source grant tree. A saved search and its webhook are
+  personal, like a bookmark, not an org-wide resource; RBAC still governs
+  *which sources* an alert is allowed to watch, just not who can manage
+  the alert row itself.
+- **Frontend**: a new "Alerts" nav entry, gated by the same
+  `search_view_enabled` system-setting toggle as Search (see
+  `App.svelte`) — alerting is meaningless without search-indexed content
+  to watch, so there'd be nothing for the page to do with that toggle
+  off. `Alerts.svelte` covers create/list/enable-toggle/delete/test; full
+  in-place editing of an existing alert's query/webhook/source scope
+  isn't built (delete-and-recreate covers it for v1).
+- **SSRF fix (issue #49)**: `Alert.webhook_url` was validated only for
+  scheme (`http(s)://`), so any authenticated user — including a freshly
+  auto-provisioned "No Access" account, since `source_id` is optional —
+  could point it at an internal address and use `POST /alerts/{id}/test`
+  as a reachability oracle for the server's own network, including cloud
+  metadata endpoints. Fixed with `app/webhook_safety.py`:
+  `assert_webhook_url_is_safe()` resolves the hostname and rejects
+  loopback/link-local/private/reserved/multicast/unspecified addresses.
+  Called twice, not once — at `AlertCreate`/`AlertUpdate` validation time
+  in `app/api/alerts.py` (fast feedback, a `422` instead of a `201`), and
+  again in `app/alerts.py::send_webhook()` immediately before the actual
+  `httpx.post`, to close the DNS-rebinding gap where a hostname resolves
+  publicly at save time and privately by the time it's dispatched.
+  `httpx.post`'s `follow_redirects` already defaults to `False` in this
+  project's installed version, so no separate redirect fix was needed.
+  Deliberately not built (tracked as follow-ups, not required to close
+  the vulnerability): an admin-configurable allowlist/escape-hatch for
+  self-hosted setups that genuinely want an internal webhook receiver,
+  and rate-limiting on `/alerts/{id}/test` (still a reachability oracle
+  for *public* addresses, just no longer an internal one).
+
+### Notes on decisions made — system/operational health endpoint(s)
+
+- **Built as planned, close to the original design.** `GET /monitoring/health`
+  sits alongside the existing plain `GET /healthz`, not replacing it —
+  `/healthz` stays a fast, unauthenticated liveness check; the new endpoint
+  does a real DB round-trip and carries the structured data worth polling
+  and alerting on. Response shape and status-rollup rules (ok / degraded /
+  error) are documented in `docs/monitoring.md`, mirroring
+  `docs/source-setup.md`'s per-integration style.
+- **Contents shipped**: overall status, DB reachability + latency, scratch
+  usage vs `scratch_max_gb`, enabled-source counts by protocol,
+  connected-vs-configured agent-protocol sources (`AgentRegistry.
+  connected_count`), last successful search-indexing sweep time + an
+  overdue flag, and whether every APScheduler job has a live next-run time
+  (`app/scheduler.py`'s shared `scheduler` instance, extracted into its own
+  module so both `app/main.py` and `app/api/monitoring.py` can import it
+  without a circular dependency), app version (`app/version.py`, also now
+  what `app/main.py` passes to `FastAPI(version=...)`), and process uptime
+  (`app/health.py` — in-memory, not persisted, same "per-process state"
+  reasoning as `app.agent_registry`).
+- **Auth**: a single deployment-wide bearer token (`MonitoringToken`,
+  singleton by convention), hashed at rest and shown once on generation —
+  same pattern as `Source.agent_token_hash`. Generated/regenerated from
+  Settings → System (gated by `manage_system_settings`, same capability as
+  the rest of that page), not tied to any single user account.
+- **Zabbix**: `docs/monitoring.md` documents the HTTP-agent-item +
+  JSONPath-preprocessing-per-metric approach for modern Zabbix (≥5.0)
+  against the one JSON endpoint, with a table of the common JSONPath
+  expressions, rather than shipping Zabbix-specific endpoint variants.
+- **Prometheus**: no `/metrics` endpoint yet — the response shape is
+  documented as designed to let a future Prometheus exporter be a thin
+  text-exposition wrapper over the same internals, not a parallel
+  implementation, whenever that's actually needed.
+
+### Notes on decisions made — IdP group-claim-to-role auto-mapping
+
+- **New `SSOGroupRoleMapping` table** (`app/auth/models.py`): `order`,
+  `group_name`, `role_id`. Deliberately global, not scoped to a specific
+  `SSOProviderConfig` — v1 only ever has one active provider at a time
+  (see `_assert_single_enabled` in `api/sso.py`), so there was nothing to
+  disambiguate by adding that scoping now.
+- **Reused Rule's exact "evaluated in order, last match wins" semantics**
+  instead of inventing a new precedence rule (e.g. "most privileged role
+  wins") for what's otherwise the same kind of ordered-precedence problem
+  — this project's admins already know that mental model from rule
+  editing, so a user whose groups match more than one configured mapping
+  just gets whichever mapping is ordered last, exactly like an
+  include/exclude rule chain.
+- **A new `SSOProviderConfig.group_claim` field** (e.g. `"groups"`, or
+  `"roles"` for IdPs that use that name) names the ID token claim to read;
+  null/empty disables auto-mapping entirely, so this is fully backward
+  compatible with existing OIDC configs. `oidc.extract_claim_groups()`
+  normalizes the claim's value to a list of strings, since IdPs vary on
+  whether a single-group claim comes back as a bare string or a
+  one-element list.
+- **Applied on every login, not just first provisioning** — the harder
+  call in this design. First-provisioning-only would mean a user's role
+  never catches up when their IdP group membership changes; re-syncing on
+  every login (`OIDCProvider.complete_login`, via
+  `resolve_group_mapped_role_id`) keeps it current, at the cost of a real
+  gotcha worth flagging loudly (and documented in both
+  `SSOGroupRoleMapping`'s docstring and the SSO settings page's own copy):
+  **an admin's manual role change made directly in PerchTail doesn't
+  survive that user's next SSO login if their groups still match a
+  configured mapping.** Once a mapping exists for a group, the IdP is
+  treated as the source of truth for members of it, same spirit as an
+  IdP-driven SSO relationship generally (this is also how Okta/Google
+  Workspace-style group-sync integrations typically behave). Deleting the
+  mapping, or removing the user from the IdP group, stops the resync.
+  When no mapping matches at all (including for a returning user who was
+  never in any mapped group), the existing role is left untouched — only
+  a brand-new user with no match at all falls back to the no-access
+  default, same as before this feature existed.
+- **`GET /roles` now also accepts the `manage_sso` capability**
+  (`api/roles.py`'s `require_read`), alongside the existing
+  `manage_roles`/`manage_users` — needed so the SSO settings page's
+  mapping editor can populate its role picker for an admin who holds
+  `manage_sso` but neither of the other two. Read-only; creating/editing/
+  deleting roles still requires `manage_roles` specifically.
+- **No frontend change needed beyond the SSO settings page** — the
+  group→role mapping editor lives right below the existing OIDC provider
+  form (`SsoSettings.svelte`): an ordered list with inline delete, plus a
+  small create row (group name + role picker). No separate page, since
+  this is a small, tightly-scoped admin surface that only makes sense in
+  the context of the one OIDC provider it configures.
+
+## Connections home redesign
+
+Inspired by Apache Guacamole's dashboard-style landing page — kept in
+PerchTail's existing theme/design system, no visual-language changes.
+
+- [x] Viewer home page (`#/viewer` with no source selected) becomes a
+      two-column layout: recent connections on the left, all connections
+      on the right — replacing the current flat single list of source cards
+- [x] "All connections" gets a search box matching folder, customer, or
+      host, case-insensitive (`lib/connection-filter.ts`) — not the
+      source's own display name, per spec
+- [x] `Source` list responses carry `customer_name`/`folder_name` so cards
+      can show "Customer / Folder" as subtext without a separate lookup
+- [ ] Folder-tree navigation for browsing sources by customer/folder — the
+      current "All connections" list shows customer/folder as flat subtext
+      per card (enough to search/scan), not an actual expandable tree.
+      `Folder` is fully modeled and RBAC-scoped (unlimited nesting via
+      `parent_folder_id`), but nothing in the frontend renders it as a
+      tree yet; still open.
+- [ ] Dedicated folder/host management admin page (create/rename/move/
+      delete folders, move sources between them) — CLAUDE.md flags this as
+      its own admin surface and it was never built; only inline folder
+      creation from the source editor exists today (both the original gap
+      and this redesign's search box work off that same inline-create
+      flow, not a standalone page)
+
+### Notes on decisions made — connections home redesign
+
+- **"Recent connections" needed new tracking, not just a reorder — built
+  as planned.** `GET /sources/{id}/browse` (root path only, i.e. first
+  hop into a source, not every sub-directory expand) now records a
+  `source.open` `AuditLog` row; `GET /sources/recent` reads the current
+  user's own most-recent-per-source events back, re-checking live
+  visibility so a revoked grant can't leak a source through history.
+  `GET /sources/{id}/download` also now logs `file.download` — this was
+  CLAUDE.md's own stated minimum audit bar ("file download") that had
+  never actually been wired up anywhere.
+- **Recent connections and the full audit log viewer (below) share a data
+  source but stayed two separate features, per explicit direction.** This
+  redesign only writes the new events and reads back the current user's
+  own recent ones (`GET /sources/recent`) — no general-purpose audit
+  filtering/viewing endpoint, which is scoped on its own below.
+- **Deployment-wide feature toggles, needed for both this and the audit
+  viewer, got a small shared mechanism now rather than one bespoke flag
+  each.** A new `SystemSetting` key-value table + `GET`/`PATCH
+  /system-settings` (gated by a new `manage_system_settings` global
+  capability, a new "System" tab under Settings) backs a `search_view_enabled`
+  toggle — off hides the Search nav entry *and* redirects away from the
+  `/search` route itself, not just the link, so it's actually off for a
+  bookmarked/typed URL too. The audit-log toggle described below reuses
+  this same mechanism once that page exists; no dead UI was added for it
+  ahead of time.
+- **Folder-tree navigation and the standalone management page are still
+  open**, deliberately deferred out of this pass — the shipped "flat list
+  with Customer / Folder subtext + search" covers the same real need
+  (find a source by where it's organized) without the added scope of a
+  real expand/collapse tree component or drag-and-drop-style folder
+  management UI. Revisit if the flat-list-with-search approach turns out
+  not to be enough at real scale.
+
+## Full audit log viewer (admin-only)
+
+Flagged as its own feature, separate from the connections home redesign
+above, even though it shares the same `AuditLog` writes that redesign work
+added. `AuditLog` has been write-only since Phase 1 — every write site
+(login, source/rule/role/customer/folder CRUD, and now `source.open`/
+`file.download` from the redesign work) already exists, but there's still
+no read endpoint and no admin page, even though CLAUDE.md's "Application
+logging" section always specced it as "a durable, queryable record ...
+read via an admin UI page."
+
+- [x] `GET /audit` endpoint: paginated, filterable by action/type, user,
+      target type, and date range
+- [x] Gated by a dedicated capability (`view_audit_log`), admin-only
+      per explicit direction — not opened up via the existing customer/
+      folder/source grant tree, since audit visibility is a global concern,
+      not scoped to what a role can browse
+- [x] Frontend: new "Audit Log" page under Settings
+  - [x] Filter controls for action/type (multi-select against the known
+        action namespace: `login`, `source.*`, `rule.*`, `role.*`,
+        `user.*`, `customer.*`, `folder.*`, `sso.*`, `source.open`,
+        `file.download`)
+  - [x] A retention control — admin-configurable from the frontend, not
+        just an env var
+- [x] Backend retention enforcement: a scheduled purge job (APScheduler,
+      same shape as the scratch idle-sweep and search-index sweep) driven
+      by that configurable setting
+- [x] Deployment-wide on/off toggle for this page, reusing the
+      `SystemSetting` mechanism the connections-home redesign already
+      built for the Search view toggle (`app/system_settings.py`,
+      `GET`/`PATCH /system-settings`) — added an `audit_view_enabled` key
+      and a second row on the System settings page
+
+### Notes on decisions made — full audit log viewer
+
+- **Retention becomes a real decision here, not a deferred one.** This
+  roadmap's own "Open decisions" list has carried "Audit log retention
+  policy — keep forever, or expire after N months?" as unresolved since
+  Phase 1. Explicit direction: make it admin-configurable from the
+  frontend rather than picking a number now — the UI needs a setting
+  (e.g., days), not just a filter on the display. Landed as
+  `audit_retention_days` (default 365, `0` = keep forever), a plain int
+  `SystemSetting` alongside the existing bool ones — `system_settings.py`
+  now splits `BOOL_DEFAULTS`/`INT_DEFAULTS` into separate dicts (and
+  `get_int`/`set_int` alongside `get_bool`/`set_bool`) so a non-bool value
+  can't silently misread as `False` through the bool helpers.
+- **This is a second, independent retention knob from `LOG_RETENTION_DAYS`.**
+  That setting governs the rotated structured *application* log files
+  (`logging_config.py`, gzip + `TimedRotatingFileHandler`); `AuditLog` is a
+  separate SQLite table with its own lifecycle, so its retention setting
+  needs its own storage and its own purge job — the two shouldn't be
+  conflated just because they sound similar. `app/audit_purge.py`'s
+  `run_audit_purge_sweep` is its own APScheduler job
+  (`audit_purge_interval_seconds`, default daily), same shape as the
+  scratch idle-sweep/search-index sweep — the *cadence* is an env var like
+  those, since only the retention *count* was the actual open decision.
+- **Type/action filtering is a first-class frontend requirement, not just
+  a nice-to-have** — per explicit direction, the audit page's parameters
+  need to let an admin narrow by what kind of action happened, not just
+  scroll a flat chronological feed. `GET /audit/filters` returns the
+  distinct `action`/`target_type` values actually present in the table
+  right now, rather than a hardcoded namespace list going stale as new
+  action strings get added later — same "always accurate" reasoning as
+  Search's live source-name matching. The frontend renders `target_type`
+  as a chip-style multi-select ("Type") and the full distinct-actions list
+  as a plain multi-select ("Action"); the backend additionally accepts a
+  trailing `.*` on any `action` value (e.g. `source.*`) as a prefix match,
+  for API consumers that want the coarser grouping even though the
+  shipped UI doesn't expose that specific control.
+- **No user-id filter control in the UI**, even though the backend
+  endpoint accepts `user_id` — the explicit ask only named action/type and
+  retention as frontend requirements, and building a user picker would
+  mean either a raw numeric-id input (bad UX) or a `GET /users` call that
+  a `view_audit_log`-only role (no `manage_users`) can't make. Every row
+  already shows the acting username inline, which covers "who did this"
+  for the common case of scanning the table; revisit if per-user
+  filtering turns out to be a real gap once this is in use.
+
+## Viewer: find in document
+
+A Notepad++-style "Find All in Current Document" results panel — a list of
+every match in the currently open file (line number + snippet), click to
+jump — alongside, not instead of, the existing Ctrl+F inline highlight and
+next/previous navigation (`@codemirror/search`, see the earlier Ctrl+F fix
+in CHANGELOG.md).
+
+- [x] Results panel component listing every match with line number + a
+      short snippet of surrounding text, most-natural-order (top to
+      bottom of the document)
+- [x] Click a result to jump to it — reuses `CodeMirrorPane`'s existing
+      `scrollToLine`-style jump, same mechanism the cross-file Search
+      page's results list already uses today
+- [x] Existing inline Ctrl+F panel (highlight + next/previous) stays as
+      is — this is an addition, not a replacement
+- [x] Entry point: a "Find All" toggle button in the pane toolbar (the
+      same stateful-toggle-button pattern used throughout the "toward an
+      advanced editor" section below) — click to open a bottom-docked
+      panel with its own query/case/regex controls, click again to close
+
+### Notes on decisions made — find in document
+
+- **No new dependency needed.** Neither CodeMirror's own search package
+  nor any other editor library (Monaco, Ace) ships a results-list panel
+  like this out of the box — Notepad++, VS Code, etc. all build it as
+  custom UI on top of their editor's basic search primitives, same as
+  we'd be doing.
+- **Built as a pure, unit-tested scan over the tab's own content string
+  (`lib/find-in-document.ts`), not `@codemirror/search`'s `getSearchCursor`
+  / `view.state.doc`.** The tab's fetched content is the same data either
+  way; scanning it directly keeps the matching logic framework-independent
+  and trivially testable without spinning up a CodeMirror view (same
+  "extract the pure function" pattern as `connection-filter.ts`/
+  `tab-key.ts`). A deliberate, separate consequence: the results panel has
+  its own query/case/regex controls, not synced with whatever's currently
+  typed into the inline Ctrl+F panel — two independent inputs rather than
+  coupling their state.
+- **Coexists with the current inline search, doesn't replace it** — per
+  explicit direction. Two complementary tools: quick highlight-and-step-
+  through for a single term, versus "show me everywhere this appears at
+  once" for scanning a large log.
+- **Capped at 5000 matches** (`maxResults`), reporting `truncated: true`
+  rather than silently stopping — a safety valve for a pathological
+  query (e.g. a single common character) against a huge file, not a
+  design goal, same spirit as the scratch store's size guard.
+
+## Viewer: toward an advanced editor (not yet triaged into a phase)
+
+Further steps toward a fuller, Notepad++-like *viewing* experience for the
+CodeMirror-based Viewer. Explicitly **not** going there: editing or saving
+changes back to a source — dropped deliberately, it would contradict
+CLAUDE.md's core "read-only, always" principle for no strong enough
+reason. Everything below stays entirely display-only: none of it ever
+mutates the file being viewed or writes anything back to the source.
+
+**Interaction pattern, decided:** every toggle-able view mode below (wrap,
+show-all-characters, mark-highlighting, tail -f, compare) is a stateful
+toolbar button, not a modal or a settings-page trip — click to turn a mode
+on, click again to turn it off. For anything that needs a second input
+(compare needs a second file), arming the button puts the pane in "pick a
+target" mode; the next file opened/selected from the tree completes the
+action, and clicking the button again clears it and returns to normal
+viewing.
+
+- [x] **Severity indicators become admin-configurable, both globally and
+      per-source, with a dedicated Settings section, plus jump-to-
+      next-problem navigation.**
+  - [x] New backend model, `SeverityPattern` (`level` [error/warning/info/
+        debug], `pattern`, `pattern_kind` [glob|regex, `re:` prefix — same
+        convention as `Rule`], `enabled`, `highlight_line`,
+        `include_in_navigation`, `source_id` nullable — null means the
+        global default, set means a per-source override), seeded with
+        sensible global defaults on first startup so it isn't empty
+        (`app/severity_patterns.py`'s `DEFAULT_GLOBAL_PATTERNS`)
+  - [x] `GET`/`POST`/`PATCH`/`DELETE` endpoints for admin CRUD on the
+        pattern set (global: `/severity-patterns`; per-source:
+        `/sources/{id}/severity-patterns`), plus `GET
+        /sources/{id}/severity-patterns/effective` the Viewer calls to
+        fetch the *effective* set for whatever source is open — a
+        source's own patterns where it has any, falling back to the
+        global set otherwise (override, not merge — same "most specific
+        wins" shape as grant resolution, just at the pattern level)
+  - [x] New "Settings → Severity Indicators" page for the global default
+        set: row-based editor (level, pattern, line-tint toggle,
+        nav-eligible toggle, enabled toggle) — raw-text/gitignore-style
+        paste mode deliberately skipped for this feature (see notes below)
+  - [x] A new section on the source editor (`SourceEditor.svelte`,
+        alongside the existing "Include in full-text search" toggle) to
+        override severity indicators for that specific source — same
+        row-based editor, scoped to just that source
+  - [x] `CodeMirrorPane`/`codemirror-theme.ts` fetch and highlight against
+        this configured (effective) set instead of hardcoded regexes —
+        matching logic lives client-side in
+        `lib/severity-highlighting.ts` (pure, unit-tested), CodeMirror
+        glue (`ViewPlugin`s/decorations) stays in `codemirror-theme.ts`
+  - [x] Next/previous-problem step command, wired to toolbar buttons in
+        the Viewer — steps through lines with a match from a
+        navigation-eligible pattern, wrapping at either end. Resolves the
+        earlier open question in favor of a **per-pattern
+        `include_in_navigation` flag**, not a fixed warn-or-worse
+        severity floor — an admin decides what counts as a "step to"
+        problem instead of it being hardcoded; the seeded defaults enable
+        it for error/warning but not info/debug (routine noise, not
+        "problems")
+  - Gating: global CRUD uses `manage_system_settings` (from the
+    connections-home redesign work); per-source overrides use
+    `manage_rules`, same as `Rule` — consistent with how the rest of the
+    grant model already splits "deployment-wide" from "per-source"
+    concerns
+- [x] **Per-file-type syntax highlighting.** Language picked from the open
+      file's own extension (`lib/file-language.ts`'s `languageForFilename`,
+      pure and unit-tested) — `.json` → `@codemirror/lang-json`, `.xml`/
+      `.html`/`.htm`/`.svg` → `@codemirror/lang-xml`, `.js`/`.mjs`/`.cjs`/
+      `.jsx`/`.ts`/`.tsx` → `@codemirror/lang-javascript` (all three were
+      already-installed dependencies, unused anywhere in the codebase
+      until now). Coexists with severity-pattern highlighting on the same
+      pane; anything unrecognized (most log files) gets no language
+      extension and displays exactly as before — additive, never
+      required. Uses the archive member's own name for files opened
+      inside a `.zip`/`.tar.gz` (same field `FolderTree` already emits on
+      open), not the archive's name.
+- [ ] **Compare files (diff view), as a toggle button.** Arm the "Compare"
+      button, pick a second file from the tree (or another open tab), and
+      it renders a read-only diff against the currently active file in
+      place. `@codemirror/merge` (not yet installed) is the natural fit.
+- [x] **Line-wrap toggle.** `EditorView.lineWrapping`, cheap and directly
+      useful for long log lines.
+- [ ] **Beautify / minify for embedded JSON, XML, and (lower priority) JS.**
+      Display-only reformat, never touches the file on disk.
+- [ ] **Live-follow / "tail -f" mode, as a toggle button.** The
+      architecturally biggest item here — deferred. Two candidate
+      mechanisms: client-side polling (works uniformly but adds
+      round-trips over SSH/SMB/WinRM), or extending the agent-mode
+      WebSocket with a "watch" command (cheaper, agent-only).
+- [x] **Reload/refresh button.** A manual re-fetch of the currently open
+      file's content in place, without closing and reopening the tab.
+- [x] **Copy selected lines (with line numbers).**
+- [x] **"Show all characters" toggle** (whitespace/CRLF-vs-LF), relevant
+      given this tool spans both Linux and Windows sources.
+- [x] **Go-to-line** (Ctrl+G).
+- [x] **Bookmarks.** Pure client-side/session state.
+- [ ] **Multi-pattern "mark" highlighting** (Notepad++'s Mark feature, not
+      to be confused with severity indicators above). Persistently
+      highlight all occurrences of one or more ad hoc patterns at once,
+      each in its own color.
+
+### Notes on decisions made — small toolbar toggles
+
+- **CRLF can't be detected from a live CodeMirror `Line.text`.** CodeMirror's
+  default line-separator matching (`/\r\n?|\n/`) treats a `\r\n` pair as a
+  single separator and consumes the `\r` while splitting the document into
+  lines — by the time a line can be inspected, the `\r` is already gone.
+  `lib/whitespace-highlighting.ts`'s `findCrlfLineNumbers` instead scans the
+  *raw fetched content string* before CodeMirror ever ingests it (same line
+  numbering either way, since a `\r\n` pair collapses to one line break on
+  both sides), and the CRLF glyph is rendered as a zero-width
+  `Decoration.widget` appended after the line's last character rather than
+  a `Decoration.replace` over a character that no longer exists in the
+  document.
+- **"Next/previous problem" and "next/previous bookmark" share one
+  generic stepper** (`lib/line-cycle.ts`'s `nextLine`/`previousLine`) —
+  wrap-around cycling through a sorted list of line numbers relative to a
+  current position is the exact same operation either way; severity
+  navigation's `nextProblemLine`/`previousProblemLine` are now thin
+  aliases over it rather than a second implementation.
+- **Reload releases the old scratch reference, not just fetches fresh.**
+  `archive.py`'s scratch key is deterministic (hash of source id + path +
+  member), so a reload is: call `/open` again (a fresh fetch, acquiring a
+  new reference under the same key), then call `/close` once for the old
+  reference — same "path/member, not the literal scratch key" release
+  call `closeTab` already made, just triggered without closing the tab.
+- **Bookmarks and wrap/show-whitespace live on the `Tab` object in
+  Viewer.svelte, not inside `CodeMirrorPane`.** The pane is a singleton
+  reused across tab switches (`content` changes, the component doesn't
+  remount) — per-tab state has to live above it and flow down as props,
+  the same shape `severityPatterns` already established, or switching
+  tabs would show one tab's bookmarks/toggles against another's content.
+- **Copy-with-line-numbers is additive, not a Ctrl+C replacement.** The
+  browser's native copy already handles a plain-text copy of a selection;
+  this is specifically for the "prefixed with line numbers" case, exposed
+  as its own toolbar action (`CodeMirrorPane.copySelectedLines`) rather
+  than intercepting Ctrl+C.
+
+### Notes on decisions made — severity indicators
+
+- **Rule's path-oriented glob compiler (`app/rules.py`'s `_compile_glob`)
+  is not reused for pattern matching.** It's anchored (`^...$`) and
+  segment-aware (`**/` = path segments, `*` doesn't cross `/`) — built for
+  matching file *paths*, not scanning arbitrary text within a line. A
+  "glob"-kind severity pattern is instead matched as a literal substring
+  anywhere in the line, case-insensitive; a "regex"-kind pattern uses the
+  pattern as-is, also case-insensitive. Both still reuse the same
+  `PatternKind` enum and `re:` prefix admin convention as `Rule`, purely
+  for UI/API consistency — the underlying matching semantics differ.
+- **Raw-text paste mode, deliberately skipped for this feature.** `Rule`'s
+  raw mode earns its keep because a source can have dozens of path rules;
+  severity patterns are typically a handful per level, where a row-based
+  editor is enough and a bulk-paste format would just add parsing
+  complexity (per-line level tagging) for little benefit. Revisit if real
+  usage shows otherwise.
+- **Override, not merge, for per-source patterns** — same simplicity
+  tradeoff as choosing not to invent new fallback rules: a source with any
+  patterns of its own uses only those, full stop, rather than layering on
+  top of the global set.
+
+## Security hardening (pre-1.0)
+
+Called out as its own section, not folded silently into other phases —
+this project holds production credentials by design (CLAUDE.md's own
+framing), and the explicit ask is to treat security posture as a
+first-class, tracked requirement rather than an implicit assumption.
+Everything below is a candidate, not yet triaged into "must-have before
+1.0" versus "nice-to-have" — that pass still needs doing.
+
+- [x] Login rate limiting / brute-force lockout on `/auth/login` — see
+      notes below
+- [x] Security response headers on every response (CSP, X-Frame-Options,
+      X-Content-Type-Options, Referrer-Policy; HSTS is a deployment-level
+      concern wherever TLS actually terminates, per CLAUDE.md's "sit behind
+      a reverse proxy" packaging note) — see notes below
+- [x] Dependency vulnerability scanning in CI, blocking or at minimum
+      reporting: `pip-audit`/`safety` (backend), `npm audit` (frontend),
+      `govulncheck` (the Go agent) — three ecosystems, three tools — see
+      notes below
+- [x] Container image scanning (e.g. Trivy/Grype) for the published Docker
+      image, plus an SBOM published alongside releases — see notes below
+- [x] Automated dependency-update PRs (Dependabot/Renovate) across all
+      three ecosystems — keeping current, not just detecting known-bad —
+      see notes below
+- [x] `CREDENTIAL_ENCRYPTION_KEY` rotation path — currently no documented
+      or tooled way to rotate this key without losing access to every
+      already-encrypted `Source.credential_ref`/`SSOProviderConfig.config`
+      — see notes below
+- [x] Session management UI: list a user's own active sessions
+      (`AuthSession` already exists at the data layer) with the ability to
+      revoke one remotely — useful on its own, and a prerequisite for any
+      "someone else is logged in as me" incident response — see notes below
+- [ ] Optional TOTP/MFA for local accounts — SSO already delegates this to
+      the IdP, but the local break-glass account (and any org that doesn't
+      enable SSO) has no second factor today
+- [ ] Audit log tamper-evidence (e.g. hash-chaining `AuditLog` rows) so a
+      compromised admin account can't quietly edit history without it
+      being detectable
+- [x] CSRF review across every state-changing endpoint — confirm the
+      existing `SameSite=strict` session cookie is sufficient on its own,
+      or add explicit CSRF tokens where it isn't — see notes below
+- [ ] A formal third-party security review or pentest before declaring 1.0
+      — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
+      this is about actively looking for one before external users show up
+
+### Notes on decisions made — response headers and login lockout
+
+- **Security response headers** (`app/main.py`'s `SecurityHeadersMiddleware`,
+  next to the existing `RequestIDMiddleware`) apply globally to every
+  response, API and static frontend build alike — no per-route tuning,
+  since none of the headers restrict anything this app actually needs.
+  `Content-Security-Policy` is `default-src 'self'` plus `script-src
+  'self'` (no `unsafe-inline`/`unsafe-eval` — this is the directive that
+  actually matters against XSS) and `style-src 'self' 'unsafe-inline'`,
+  the one deliberate loosening: CodeMirror 6 (CLAUDE.md's chosen viewer)
+  injects its editor styles via a runtime `<style>` element (the
+  `style-mod` package), not a static stylesheet, and there's no nonce to
+  hand a static SPA build. `frame-ancestors 'none'` in the CSP is the
+  modern equivalent of the `X-Frame-Options: DENY` header sent alongside
+  it — kept both for older browsers/embedded webviews that only honor one
+  or the other. HSTS deliberately isn't set, matching the checklist item's
+  own framing — it's a deployment-level concern wherever TLS terminates.
+- **Login lockout** (`app/login_throttle.py`) is in-memory and
+  per-process, not persisted to the DB or shared across instances — an
+  accepted trade-off for this project's single-container SQLite deployment
+  model, same reasoning CLAUDE.md already gives for running APScheduler
+  in-process rather than as a separate worker. A restart clears every
+  lockout; that's a narrow, self-healing gap (an unauthenticated attacker
+  can't trigger an app restart), not a security regression.
+  **Keyed by the submitted username, not by client IP** — the threat is
+  repeated password guessing against one account, which must be caught
+  regardless of how many source IPs an attacker spreads attempts across;
+  per-IP throttling on top of this is a reasonable future addition if
+  distributed credential-stuffing against many accounts at once becomes a
+  real concern, not required to close the audit item as written. Default
+  thresholds (`login_max_attempts=5`, `login_lockout_seconds=300`,
+  `app/config.py`) return `429` with a `Retry-After` header once tripped;
+  a successful login resets the count. The tracked-username dict is
+  bounded (`_MAX_TRACKED_USERNAMES`, LRU-evicted) since usernames that
+  don't exist are cheap to submit (no password hashing is attempted) and
+  otherwise a flood of distinct nonexistent usernames could grow the dict
+  without limit.
+
+### Notes on decisions made — CI scanning and dependency updates
+
+- **Dependency scanning is blocking, not just reporting** — the checklist
+  item's own preferred option — for all three ecosystems, added as steps
+  in `.github/workflows/ci.yml`'s existing `backend`/`frontend`/`agent`
+  jobs rather than a separate job, since each already has the right
+  toolchain set up: `pip-audit` against both `backend/requirements.txt`
+  and `requirements-dev.txt`, `npm audit --audit-level=high` (capped at
+  high+ to avoid noisy low/moderate transitive-dep churn common in the npm
+  ecosystem), and `golang/govulncheck-action` for the agent (its call-graph
+  analysis only flags vulnerabilities in code actually reachable from the
+  agent's own code, which is inherently more precise than a flat
+  dependency-list scan). Baseline was clean at the time this shipped
+  except one high-severity transitive `nanoid` advisory (via
+  vite→postcss), fixed with a plain `npm audit fix` alongside this work —
+  not a design change, just clearing the slate before turning blocking on.
+- **Container image scanning** is a new `docker-image` job: builds the
+  published `Dockerfile` with `docker/build-push-action` (`push: false,
+  load: true` — never leaves the runner, no registry involved), then
+  `aquasecurity/trivy-action` scans it, blocking on HIGH/CRITICAL with
+  `ignore-unfixed: true` (an unfixable OS-package advisory blocking every
+  build forever isn't actionable, so it's excluded from the gate).
+- **SBOM is a build artifact, not yet attached to a release** — the
+  checklist item says "published alongside releases," but this repo has no
+  release-publishing workflow yet (tags exist, e.g. `v0.1.1`, but nothing
+  automates a GitHub Release or a registry push from one). Trivy generates
+  a CycloneDX SBOM (`sbom.cyclonedx.json`) and it's uploaded via
+  `actions/upload-artifact`, same mechanism already used for the agent's
+  cross-compiled binaries — genuinely useful today (downloadable per CI
+  run), but wiring it onto an actual Release is a follow-up once that
+  pipeline exists, not invented here to avoid scope creep beyond what was
+  asked.
+- **Dependabot** (`.github/dependabot.yml`) covers exactly the three
+  ecosystems named in the checklist item (`pip` for `backend/`, `npm` for
+  `frontend/`, `gomod` for `agent/`), weekly, opening PRs against `dev` —
+  not the repo's actual default branch (`main`), which sits 71 commits
+  behind `dev` and isn't where active development happens; every PR in
+  this project's history targets `dev`, so Dependabot follows the same
+  convention. GitHub Actions itself (a fourth, common Dependabot
+  ecosystem) was deliberately left out — the checklist item asks for
+  "three ecosystems," and adding a fourth wasn't requested.
+
+### Notes on decisions made — session management UI
+
+- **Self-service only, no admin-of-others view** — matches the checklist
+  item's own wording ("a user's own active sessions"). `GET /auth/sessions`
+  and `DELETE /auth/sessions/{id}` are gated by `get_current_user` alone
+  (like `change-password`, not a global capability), and
+  `auth/sessions.py`'s `list_sessions_for_user`/`revoke_session` are scoped
+  to `AuthSession.user_id == <the caller>` at the query level — an admin
+  wanting to force-revoke *another* user's sessions as part of incident
+  response is a real, different feature (closer to `manage_users`) that
+  wasn't asked for here and isn't built.
+- **Added `AuthSession.user_agent`** (new column, captured at login —
+  local and SSO both — straight from the request's own header), even
+  though the checklist item says the data layer "already exists." A
+  session list with nothing to tell rows apart besides timestamps doesn't
+  actually serve the item's own stated purpose ("someone else is logged in
+  as me" — you need *something* to eyeball). Deliberately not IP address:
+  the real client IP behind a reverse proxy means trusting
+  `X-Forwarded-For`, the exact trust question `app/config.py`'s
+  `public_base_url` already sidesteps by not deriving anything from proxy
+  headers (see that setting's own comment) — User-Agent has no such
+  trust-boundary problem, since it comes straight off the request with no
+  proxy involved in choosing its value.
+- **Revoking your own current session goes through the normal `logout()`
+  flow client-side**, not the new `DELETE` endpoint — the frontend
+  (`SessionsSettings.svelte`) special-cases `is_current` to call the
+  existing `POST /auth/logout` + clear-cookie + redirect instead, since
+  the raw revoke endpoint deletes the server-side row but was never meant
+  to also clear the browser's own cookie. Revoking a *different* session
+  is a plain `DELETE /auth/sessions/{id}`; that device simply gets a `401`
+  on its next request and the existing auth guard sends it to `/login` —
+  no live-invalidation push needed.
+- **New "Sessions" tab in Settings**, visible to every authenticated user
+  regardless of role/capability — same as the existing "Sources" tab,
+  unlike every other Settings tab, which is capability-gated. This is a
+  personal-account page, not an admin one.
+- Live-verified end to end with two independent browser contexts (two
+  "devices") signed in as the same user: the session list correctly showed
+  both, exactly one marked "This device"; revoking the other from the
+  first device's UI removed it from the list and the second device's next
+  API call actually got `401` (confirmed via a direct API call in that
+  browser context, not just the UI).
+
+### Notes on decisions made — CREDENTIAL_ENCRYPTION_KEY rotation
+
+- **A standalone script (`app/rotate_credential_key.py`, run via
+  `python -m app.rotate_credential_key`), not an API endpoint.** Rotating
+  this key rewrites every encrypted row in the database in one pass — a
+  destructive-if-interrupted, admin-only, run-with-the-app-stopped
+  operation, not something that belongs behind a web request. Reuses
+  `app/crypto.py`'s existing KDF/salt machinery via a new `build_fernet()`
+  (previously private, now exposed) so the script builds two independent
+  Fernet instances at once — old key, new key — neither of which is what
+  the running app's own cached singleton would give it.
+- **The new key is never accepted as a CLI argument** (`--new-key foo`
+  would land in shell history and any `ps` output any other user on the
+  host could see) — read from `NEW_CREDENTIAL_ENCRYPTION_KEY` in the
+  environment, or prompted for interactively via `getpass` if that's
+  unset.
+- **All-or-nothing, one transaction.** Every `Source` row with a non-null
+  `credential_ref` and every `SSOProviderConfig` row (not just the
+  currently-`enabled` one — a disabled provider's config still needs to
+  stay decryptable) is decrypted under the old key and re-encrypted under
+  the new one; if any row fails to decrypt (wrong old key, or the
+  rotation already ran), nothing is written at all and the script reports
+  exactly which row failed. No partial-recovery logic — simpler, and
+  matches this project's general preference for straightforward
+  all-or-nothing operations over speculative resumability nothing has
+  asked for yet.
+- **`--dry-run`** decrypts everything under the old key and reports what
+  would be rotated without writing anything — lets an operator confirm
+  the old key is actually correct (and see the scope) before committing.
+- **Documented in a new `docs/credential-key-rotation.md`**, linked from
+  the README, rather than folded into the Quick start section — this is
+  an occasional admin procedure, not part of initial setup, matching
+  `docs/monitoring.md`'s precedent for that kind of standalone guide.
+  Live-verified end to end: seeded a real SQLite DB with an encrypted
+  credential, ran `--dry-run` then the real rotation, confirmed the
+  credential decrypts correctly under the new key and raises
+  `InvalidToken` under the old one.
+
+### Notes on decisions made — CSRF review
+
+- **Conclusion: `SameSite=strict` is sufficient on its own; no CSRF tokens
+  added.** Every one of the 44 state-changing endpoints across every
+  router funnels through `get_current_active_user` (directly, or via the
+  `require_capability`/`require_global_capability` dependency factories,
+  which both wrap it) — meaning every mutating action requires the
+  `perchtail_session` cookie, and nothing else grants access to them. That
+  cookie is `SameSite=strict`, the strictest setting: unlike `Lax`, it
+  withholds the cookie on cross-site top-level navigation too, not just
+  cross-site `fetch`/form submissions — so a forged request from another
+  origin arrives with no cookie at all and is rejected as unauthenticated
+  regardless of what parameters it carries. `change-password` is doubly
+  safe regardless, since it requires the current password as a body
+  parameter an attacker can't know. `POST /monitoring/token` (the one
+  action that looked like it might be bearer-token-gated like
+  `GET /monitoring/health` is) is actually cookie-session-gated same as
+  everything else — only the health-check *read* uses the separate
+  deployment-wide bearer token. No `CORSMiddleware` exists anywhere in the
+  app, so there's no cross-origin credentialed-fetch exposure either. The
+  agent WebSocket endpoint (`/agent/connect`) authenticates with a bearer
+  token read from the WebSocket handshake's `Authorization` header, not a
+  cookie, and browsers provide no API to set custom headers on a
+  `new WebSocket(...)` handshake — so a browser page on another origin
+  can't attempt cross-site WebSocket hijacking against it even in
+  principle, independent of the SameSite question entirely.
+- **Added one defense-in-depth layer anyway: `OriginCheckMiddleware`**
+  (`app/main.py`, alongside `SecurityHeadersMiddleware`). Not required by
+  the analysis above, but cheap (no frontend changes needed — browsers
+  attach `Origin`/`Referer` automatically) and closes the one theoretical
+  residual gap: a browser bug or a non-standard client that doesn't honor
+  `SameSite`. For every `POST`/`PUT`/`PATCH`/`DELETE`, it requires the
+  `Origin` header (falling back to `Referer` if `Origin` is absent) to
+  match *the request's own `Host` header* — self-referential rather than
+  compared against a configured value like `public_base_url`, both because
+  that's the standard approach (OWASP's CSRF cheat sheet: compare `Origin`
+  against the origin "as registered with the server," i.e. `Host`) and
+  because it's the only thing that works correctly in every deployment
+  shape this project has: a reverse proxy in front in production (passes
+  `Host` through) and Vite's dev-server proxy locally, where the frontend
+  and backend legitimately sit on different ports. If neither header is
+  present at all, the request is let through to rely on `SameSite` alone —
+  rejecting on a merely absent header would break legitimate non-browser
+  API use (curl, scripts) as a side effect a security *review* shouldn't
+  introduce.
+- **Caught and fixed a real regression before it shipped**: the first
+  version of this compared `Origin` against a fixed `public_base_url`
+  setting, which broke `npm run dev` entirely — Vite's dev server proxies
+  API calls from its own port to the backend's, so the browser's genuine
+  `Origin` (Vite's port) would never match a configured backend URL,
+  403-ing every mutating request in local dev. Fixed two ways together:
+  the middleware compares against the request's own `Host` (see above,
+  correct in both deployment shapes on its own), and `vite.config.ts`'s
+  proxy config now strips `Origin`/`Referer` on proxied requests
+  (`configure(proxy) { proxy.on('proxyReq', ...) }`) so the backend sees
+  no header at all for locally-proxied traffic and falls into the
+  no-header-present case, same as production's single-origin setup has
+  nothing to strip in the first place. Verified live: a real POST through
+  the Vite dev proxy with a realistic `Origin: http://localhost:5173`
+  reached the actual login handler (`401` for a wrong password, not the
+  middleware's `403`), while the same request sent directly to the backend
+  with a forged `Origin: http://evil.example` was blocked with `403` and
+  still carried the standard security headers (confirming the middleware
+  ordering: innermost, wrapped by `SecurityHeadersMiddleware`/
+  `RequestIDMiddleware`, so even a blocked response gets them).
+
+### Notes on decisions made — audit findings fixed
+
+A manual code-level security pass (SAST + live black-box testing against a
+local instance, no external exploitation tools run against anything but
+this project's own local instance) found and fixed three issues, filed as
+GitHub issues (#49, #50, #51). The SSRF fix (#49, in `Alert.webhook_url`)
+shipped alongside the alerting feature itself, since that's the branch the
+vulnerable code lives on — see that feature's own notes for it. The other
+two:
+
+- **#50 — SSH connector trusted any host key, every connection, with no
+  persistence.** `AutoAddPolicy()` alone only governs what happens for a
+  host paramiko has *never* seen; paramiko itself already raises
+  `BadHostKeyException` on a mismatch for a host it *has* on file —
+  independent of policy. The actual bug was that nothing ever loaded or
+  saved a known_hosts file, so every host looked "never seen" on every
+  single connection. Fixed by persisting host keys across connections
+  (`ssh_known_hosts_path`); `AutoAddPolicy()` itself was correct to keep.
+- **#51 — Credential encryption used a single unsalted SHA-256 round (no
+  KDF work factor) and the `"changeme"` default had no startup guard.**
+  Fixed with PBKDF2-HMAC-SHA256 (600k iterations, OWASP's 2023 floor) and
+  a persisted per-install salt (`credential_salt_path`), plus a `lifespan`
+  check that now refuses to start at all if
+  `CREDENTIAL_ENCRYPTION_KEY` is still `"changeme"`. **This changes the
+  derived key for every existing deployment** — anything encrypted under
+  the old derivation (source credentials, SSO client secrets) becomes
+  undecryptable after upgrading. Acceptable pre-1.0 (CHANGELOG.md's own
+  stated policy: "0.x releases may include breaking changes between
+  minors") given this project "hasn't seen production traffic beyond the
+  maintainer's own use" per the README, but this sharpens the existing
+  `CREDENTIAL_ENCRYPTION_KEY` rotation-path item above from "nice to have"
+  toward "actually needed soon" — the next deployment to actually hold
+  real credentials at any scale will want a rotation/re-encrypt tool
+  before its next KDF change, not after.
+
+## Frontend E2E testing (Playwright)
+
+Everything on this roadmap so far is covered end-to-end only by backend
+`pytest` and frontend `vitest` unit tests — nothing exercises the real
+browser UI against a real running backend. A Playwright suite closes that
+gap. Started narrow (auth, the viewer, the built-in system source) and was
+then deliberately widened to the rest of the admin surface — RBAC, users,
+SSO settings, the rule engine's two editing modes, system settings,
+severity indicators, search, and alerts — on the principle that backend
+unit-test coverage of a feature doesn't prove the UI actually wires up to
+it correctly; only exercising the real page does that.
+
+- [x] Isolated e2e backend (`backend/scripts/run_e2e_server.sh`): its own
+      SQLite DB/credential-salt/known-hosts/log-dir/scratch-dir under
+      `backend/data/e2e/` (wiped on every run), port 8001 so it can run
+      alongside a developer's own dev backend on the documented port 8000
+- [x] Deterministic super-admin login for tests
+      (`backend/app/seed_e2e_admin.py`) — inserts a known-password user
+      directly before the app's own lifespan runs, so `seed_initial_super_admin`
+      (app/bootstrap.py) naturally no-ops instead of generating a throwaway
+      random password nothing could read back
+- [x] Playwright's "setup project" + `storageState` reuse (`e2e/auth.setup.ts`)
+      so every other spec starts already authenticated, logging in once
+- [x] Real local sshd + smbd test servers
+      (`backend/scripts/setup_e2e_test_servers.sh`, plain OS packages, not
+      Docker) so the ssh and smb connectors are exercised against an actual
+      protocol implementation, not a mocked client — WinRM is the one
+      protocol that stays mocked (`backend/app/testing/fake_winrm.py`),
+      since a real target needs an actual Windows host
+- [x] Specs: unauthenticated redirect + login success/failure
+      (`login.spec.ts`), opening the built-in log source and reading a real
+      file through the CodeMirror pane (`viewer.spec.ts`), the system
+      source's non-editable row (`sources.spec.ts`), the sessions page
+      (`sessions.spec.ts`); source create/edit/delete plus both rule-editor
+      modes (row-based and raw-paste) and last-match-wins, browsing and
+      opening a real file, per protocol (`sources-ssh.spec.ts`,
+      `sources-smb.spec.ts`, `sources-winrm.spec.ts`); roles (global
+      capabilities, grant add/remove, duplicate) and users (create, reset
+      password, role change, deactivate/reactivate) (`roles.spec.ts`,
+      `users.spec.ts`); SSO provider settings, test-connection, and group
+      mappings (`sso.spec.ts`); the system-wide search/alerts toggle and
+      monitoring token generation (`system-settings.spec.ts`); global
+      severity-indicator patterns (`severity-indicators.spec.ts`);
+      full-text search indexing a real source and deep-linking a hit into
+      the viewer, and alert create/test/toggle/delete
+      (`search.spec.ts`, `alerts.spec.ts`); the audit log page's type/action/
+      date-range filters, driven off a real entry the test itself creates
+      via the retention control rather than assuming prior specs left
+      matching rows behind (`audit-log.spec.ts`)
+- [x] CI job (`.github/workflows/ci.yml`'s `e2e` job) — separate from the
+      existing `backend`/`frontend` jobs since it needs both toolchains
+
+### Notes on decisions made — Playwright E2E setup
+
+- **StrykerJS (mutation testing) was considered alongside Playwright and
+  deliberately not adopted yet.** It's a real tool for a real problem
+  (are the *existing* unit tests actually asserting anything, or just
+  exercising code paths?), but it's premature until the suite it would be
+  mutating has more breadth — better to sequence this new E2E layer in
+  first, once there's more surface for a mutation score to be a meaningful
+  signal about. Revisit later, not as part of this work.
+- **The e2e backend serves the built frontend itself, rather than running
+  against Vite's dev server.** `frontend/vite.config.ts`'s dev proxy has a
+  hardcoded target of `127.0.0.1:8000` and deliberately strips
+  Origin/Referer to look same-origin to `OriginCheckMiddleware` — reusing
+  it for e2e would mean either fighting that hardcoding or reintroducing
+  the exact cross-origin problem it exists to work around. Building the
+  frontend (`npm run build`) and letting the FastAPI backend serve it from
+  `frontend/dist` (already how `app/main.py` behaves in production, per
+  CLAUDE.md's packaging section) sidesteps both: one origin, no proxy, and
+  the suite exercises the same static-serving path production actually
+  uses.
+- **Port 8001, not 8000.** The dev backend's documented port
+  (CONTRIBUTING.md) is 8000; picking a different port for the e2e server
+  means a developer can run `npm run dev` against their own local backend
+  and `npm run test:e2e` at the same time without a collision.
+- **No Alembic migration step needed for the e2e DB.** `app/db.py`'s
+  `init_db()` (called from both the app's own `lifespan` and
+  `seed_e2e_admin.py`) creates the schema directly via
+  `SQLModel.metadata.create_all` — Alembic's migration chain is how an
+  *existing* deployment upgrades in place, not how a fresh schema gets
+  created, so there's nothing for the e2e script to run there.
+- **The sandboxed dev container this suite was built in pre-installs
+  Chromium at a fixed path outside the project.** Deliberately not baked
+  into `playwright.config.ts` or the CI workflow — everywhere else (CI,
+  another contributor's machine) needs its own
+  `npx playwright install --with-deps chromium` first, which the new `e2e`
+  CI job does.
+- **Real sshd/smbd, plain OS packages, not Docker.** The sandbox this suite
+  was developed in has no Docker daemon available, and a CI runner needs
+  no more privilege than `sudo apt-get install openssh-server samba` plus
+  running them as foreground processes on non-privileged ports (2222,
+  1445) — genuinely simpler than a service-container setup, and it
+  exercises real `paramiko`/`smbclient` wire traffic through the actual
+  connector code, not a mocked client. The one exception is WinRM: a real
+  target needs an actual Windows host, which isn't available in CI or a
+  Linux dev sandbox either way, so `app/testing/fake_winrm.py` fakes it
+  at the same `_session()` seam the backend's own unit tests already patch
+  — wired in only via `PERCHTAIL_TEST_PATCH_MODULE`, an env var
+  `run_e2e_server.sh` alone ever sets, never present in a real deployment's
+  `.env`.
+- **The throwaway `e2euser` OS account (and its Samba password) persist
+  across e2e runs; the sshd/smbd config, host key, and fixture files under
+  `backend/data/e2e/` don't.** Recreating a Linux user on every single test
+  run is unnecessary churn — nothing outside this script's own sshd/smbd
+  instances, on ports nothing else binds, ever authenticates against it.
+- **`playwright.config.ts` runs with `workers: 1`, not the Playwright
+  default of parallel workers.** Once the suite grew past the original
+  read-mostly login/viewer/sessions specs into ones that create, edit, and
+  delete shared admin state (sources, roles, users, alerts, the deployment-
+  wide search/alerts toggle) against one backend process, two specs racing
+  on that state stopped being a hypothetical risk — determinism was worth
+  more than the wall-clock savings from parallelism here.
+- **What's deliberately still out of scope**: a real second-user login to
+  prove RBAC grant resolution end-to-end through the browser (the roles
+  spec covers the grant-editing UI, not "does a lower-privileged user
+  actually see less" — that's already the backend's own well-tested
+  `auth/rbac.py` unit-test surface, per CLAUDE.md's "this and the rule
+  engine are the two pieces of logic in the whole project that must be
+  correct before anything else is built on top of them"); a real OIDC IdP
+  round trip for SSO login itself (`sso.spec.ts` covers the settings CRUD
+  and a test-connection failure against a deliberately unreachable issuer,
+  not a real login); and the Go push-agent's own enrollment flow. Each
+  would need its own meaningfully heavier test infrastructure (a second
+  browser session with a different identity, a real IdP container, a real
+  agent binary) — worth revisiting individually if a regression in one of
+  those areas ever slips through, not assumed away permanently.
+
+## Ideas worth considering (not yet triaged into a phase)
+
+Raised while discussing what else belongs on this roadmap — real candidates,
+not commitments, and not yet placed into a specific phase:
+
+- **Bulk source import/export** (CSV or YAML) — CLAUDE.md's own framing
+  ("dozens of customers and dozens of sources each") implies a scale where
+  creating every source one-by-one through the UI becomes the bottleneck;
+  an import/export path (and maybe a documented config-as-code story) is
+  high-value at that scale.
+
+### Notes on decisions made — bulk source import
+
+- **Format: YAML as primary, CSV as a secondary/simple option.** YAML
+  handles the nested rule-list-per-source shape naturally; CSV works fine
+  for the common case of "many sources, same rule set" but gets awkward
+  once rules vary per row. No third (JSON) format aimed at humans — it's
+  the same tree as YAML with worse ergonomics for hand-editing.
+- **Ship a downloadable template** pre-filled with one example source (all
+  fields, comments explaining each), plus a **dry-run/preview** step that
+  validates and shows what would be created/changed before committing —
+  no import applies blind.
+- **Create-vs-update semantics**: keyed on source name within a customer;
+  re-importing the same name updates that source rather than duplicating
+  it, so the same file can be re-run idempotently as config-as-code.
+- **Credentials: split structure from secrets, two separate uploads.**
+  The structural import (protocol, host, base_path, rules, customer/folder
+  placement — no credentials) is safe to commit to a repo, paste into a
+  ticket, or hand to a teammate; it produces source shells plus an import
+  batch id. A **separate, credentials-only upload** then keys credentials
+  to those sources by name and funnels every value through the exact same
+  `encrypt_credential` (Fernet) path the manual per-source UI already
+  uses — no parallel credential-writing code path. The uploaded bytes are
+  discarded immediately after the DB write completes (scratch, not
+  storage, same as fetched log content); the endpoint is excluded from
+  request-body logging; the preview step shows presence only ("SSH key:
+  provided"), never values; `AuditLog` records a count summary ("imported
+  12 sources, 9 with credentials"), never payload. Treat the accept as
+  one-time, same discipline as temporary passwords and agent enrollment
+  tokens.
+- **The gold-standard option: external secret-manager references, not
+  inline values.** Deferred past v1, but worth designing properly since
+  it's the strongest answer to "bulk-import credentials without them ever
+  being typed/pasted into a file a human handles." Row-level credential
+  fields become a reference string instead of a value — e.g.
+  `secretref:kv/data/<customer-slug>/<source-name>#ssh_key` — resolved
+  through a new `SecretResolver` interface, mirroring how `AuthProvider`
+  already abstracts local vs. OIDC vs. SAML in this codebase (concrete
+  implementations: Vault KV first, since it's the common self-hosted
+  choice for this audience; cloud secret managers later if requested).
+  Two tiers, increasing in how much this actually removes from PerchTail's
+  own at-rest footprint:
+  - **Tier 1 — resolve-at-import.** The resolver fetches the referenced
+    value once, at import time, then feeds it straight into the existing
+    `encrypt_credential` (Fernet) path — same storage model as today,
+    the only change is that no human ever handles the raw secret; the
+    import file only ever contains references, safe to commit/share like
+    the structural file.
+  - **Tier 2 — resolve-at-use (live passthrough), the actual gold
+    standard.** PerchTail stores only the reference, never a Fernet blob,
+    for that source; the relevant connector (ssh/smb/winrm) resolves the
+    live value from the external secret manager at connection time and
+    discards it immediately after, same as everything else in the
+    always-fresh model. This shrinks PerchTail's own stored-secret
+    surface to effectively nothing for sources onboarded this way — the
+    one thing still stored is PerchTail's own credential to reach the
+    secret manager, which is a single shared secret rather than one per
+    source, a much smaller blast radius if it were ever compromised.
+    Heavier to build (needs the secret manager reachable at connection
+    time, not just import time, and its own connection-failure handling
+    distinct from a source being unreachable) — worth it only once this
+    audience is actually asking for it.
+
+- **A lightweight, scheduled connectivity-check sweep**, distinct from the
+  existing on-demand manual `/check` — writing a short history of
+  reachability per source. This would double as real data behind the
+  monitoring-endpoint item above ("which sources have been flaky in the
+  last 24h"), not just a point-in-time poke.
+- **API-first admin tooling** (a thin CLI, or simply excellent API docs)
+  for scripting source/rule management — the same target audience
+  (support/DevOps engineers managing many customers) is likely to want
+  GitOps-style, scripted control over sources/rules at some point.
 
 ## Open decisions
 
@@ -361,18 +1653,17 @@ Carried over from CLAUDE.md — revisit as the relevant phase approaches rather
 than deciding speculatively now:
 - Raw-text rule paste mode UX
 - Ephemeral scratch location: plain disk vs tmpfs/ramdisk
-- Audit log retention policy
 - Whether SAML is needed at all
-- Full-text search's content source, given nothing persists
+- Whether to index `.zip`/`.tar.gz` archive members for full-text search,
+  and how deep (see the Phase 3 full-text search notes above) — deferred,
+  not needed for the initial opt-in, plain-files-and-gz version
 - Whether the built-in log viewer filters DEBUG-level files by default
-- `CREDENTIAL_ENCRYPTION_KEY` rotation story (currently: none — rotating it
-  means re-entering every source's credentials)
 
 ## Community, once Phase 1 is real
 
 From CLAUDE.md's "Community & discoverability" — not blocking Phase 1 code,
 but worth doing deliberately once there's something to show:
-- [ ] Screenshots/demo GIF in the README
+- [x] Screenshots/demo GIF in the README (screenshots; no GIF yet)
 - [ ] Submit to `awesome-selfhosted` and similar lists
 - [ ] GitHub topics: `self-hosted`, `log-viewer`, `rbac`, `devops`
 - [ ] Launch: r/selfhosted, r/devops, Hacker News "Show HN"

@@ -1,11 +1,14 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte'
-  import { push } from 'svelte-spa-router'
+  import { onDestroy, onMount, tick } from 'svelte'
+  import { push, router } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
+  import ConnectionCard from '../lib/components/ConnectionCard.svelte'
   import FolderTree from '../lib/components/FolderTree.svelte'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
+  import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
+  import { filterConnections } from '../lib/connection-filter'
   import { tabKey } from '../lib/tab-key'
-  import type { BrowseEntry, Source } from '../lib/types'
+  import type { BrowseEntry, SeverityPattern, Source } from '../lib/types'
 
   export let params: { sourceId?: string } = {}
 
@@ -16,29 +19,59 @@
     name: string
     content: string
     scratchKey: string | null
+    wrapEnabled: boolean
+    showWhitespace: boolean
+    // Pure client-side/session state (ROADMAP.md: never written to the
+    // file, never persisted server-side) -- 1-indexed line numbers, kept
+    // sorted ascending so the bookmark-nav wrap-around cycling and the
+    // CodeMirror decoration builder can both rely on that order.
+    bookmarks: number[]
   }
 
   const sourceId = params.sourceId ? Number(params.sourceId) : null
 
-  let sources: Source[] = []
+  let recentSources: Source[] = []
+  let allSources: Source[] = []
+  let connectionsQuery = ''
   let source: Source | null = null
   let rootEntries: BrowseEntry[] = []
+  let severityPatterns: SeverityPattern[] = []
   let loading = true
   let error = ''
 
   let tabs: Tab[] = []
   let activeKey: string | null = null
+  let paneRef: CodeMirrorPane | null = null
+  // Deliberately not reset on tab switch -- if it's open, it stays open and
+  // re-searches whatever tab becomes active against the same query, rather
+  // than forcing it closed and reopened for every file.
+  let findAllOpen = false
+  let goToLineOpen = false
+  let goToLineValue = ''
+  let goToLineInput: HTMLInputElement | null = null
+  let copyStatus: '' | 'copied' | 'empty' = ''
+  let copyStatusTimer: ReturnType<typeof setTimeout> | null = null
   $: activeTab = tabs.find((t) => t.key === activeKey) ?? null
+
+  $: filteredAllSources = filterConnections(allSources, connectionsQuery)
 
   async function loadSourcePicker() {
     loading = true
+    error = ''
     try {
-      sources = await api.get<Source[]>('/sources')
+      allSources = await api.get<Source[]>('/sources')
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load sources'
-    } finally {
-      loading = false
     }
+    try {
+      // Kept independent of the call above -- an issue fetching recent
+      // history shouldn't block the all-connections column, which is the
+      // more essential of the two lists.
+      recentSources = await api.get<Source[]>('/sources/recent')
+    } catch {
+      recentSources = []
+    }
+    loading = false
   }
 
   async function loadTree() {
@@ -53,35 +86,72 @@
     } finally {
       loading = false
     }
+    try {
+      // Independent of the calls above -- a failure here shouldn't block
+      // browsing/opening files, it just means no highlighting.
+      severityPatterns = await api.get<SeverityPattern[]>(
+        `/sources/${sourceId}/severity-patterns/effective`,
+      )
+    } catch {
+      severityPatterns = []
+    }
   }
 
-  async function handleOpen(event: CustomEvent<{ path: string; member: string | null; name: string }>) {
-    if (sourceId === null) return
-    const { path, member, name } = event.detail
+  async function openFile(path: string, member: string | null, name: string): Promise<boolean> {
+    if (sourceId === null) return false
     const key = tabKey(path, member)
     const existing = tabs.find((t) => t.key === key)
     if (existing) {
       activeKey = key
-      return
+      return true
     }
 
-    const params = new URLSearchParams({ path })
-    if (member) params.set('member', member)
+    const fetchParams = new URLSearchParams({ path })
+    if (member) fetchParams.set('member', member)
     try {
-      const response = await fetch(`/sources/${sourceId}/open?${params.toString()}`, {
+      const response = await fetch(`/sources/${sourceId}/open?${fetchParams.toString()}`, {
         credentials: 'include',
       })
       if (!response.ok) {
         error = `Failed to open ${name}`
-        return
+        return false
       }
       const content = await response.text()
       const scratchKey = response.headers.get('x-scratch-key')
-      const tab: Tab = { key, path, member, name, content, scratchKey }
+      const tab: Tab = {
+        key,
+        path,
+        member,
+        name,
+        content,
+        scratchKey,
+        wrapEnabled: false,
+        showWhitespace: false,
+        bookmarks: [],
+      }
       tabs = [...tabs, tab]
       activeKey = key
+      return true
     } catch {
       error = `Failed to open ${name}`
+      return false
+    }
+  }
+
+  async function handleOpen(event: CustomEvent<{ path: string; member: string | null; name: string }>) {
+    const { path, member, name } = event.detail
+    await openFile(path, member, name)
+  }
+
+  // Search click-through (Search.svelte pushes here with ?path=...&line=...)
+  // — opens the file same as clicking it in the tree, then scrolls the
+  // CodeMirror pane to the matched line once its content has rendered.
+  async function openFromDeepLink(path: string, line: number | null) {
+    const name = path.split('/').pop() ?? path
+    const opened = await openFile(path, null, name)
+    if (opened && line !== null) {
+      await tick()
+      paneRef?.scrollToLine(line)
     }
   }
 
@@ -99,15 +169,122 @@
     }
   }
 
+  function updateActiveTab(patch: Partial<Tab>) {
+    if (!activeTab) return
+    const key = activeTab.key
+    tabs = tabs.map((t) => (t.key === key ? { ...t, ...patch } : t))
+  }
+
+  function toggleWrap() {
+    if (!activeTab) return
+    updateActiveTab({ wrapEnabled: !activeTab.wrapEnabled })
+  }
+
+  function toggleShowWhitespace() {
+    if (!activeTab) return
+    updateActiveTab({ showWhitespace: !activeTab.showWhitespace })
+  }
+
+  function toggleBookmark() {
+    if (!activeTab || !paneRef) return
+    const line = paneRef.currentLine()
+    const bookmarks = activeTab.bookmarks.includes(line)
+      ? activeTab.bookmarks.filter((l) => l !== line)
+      : [...activeTab.bookmarks, line].sort((a, b) => a - b)
+    updateActiveTab({ bookmarks })
+  }
+
+  // Manual re-fetch of the currently open file's content in place, without
+  // closing and reopening the tab -- the always-fresh-fetch model already
+  // exists for a fresh *open*, this just exposes a fetch-again action for a
+  // tab that's already open. Releases the previous scratch reference after
+  // the new one lands, same "path/member, not the scratch key itself"
+  // release call closeTab already makes.
+  async function reloadActiveTab() {
+    if (!activeTab || sourceId === null) return
+    const tab = activeTab
+    const fetchParams = new URLSearchParams({ path: tab.path })
+    if (tab.member) fetchParams.set('member', tab.member)
+    try {
+      const response = await fetch(`/sources/${sourceId}/open?${fetchParams.toString()}`, {
+        credentials: 'include',
+      })
+      if (!response.ok) {
+        error = `Failed to reload ${tab.name}`
+        return
+      }
+      const content = await response.text()
+      const scratchKey = response.headers.get('x-scratch-key')
+      const oldScratchKey = tab.scratchKey
+      tabs = tabs.map((t) => (t.key === tab.key ? { ...t, content, scratchKey } : t))
+      if (oldScratchKey) {
+        api
+          .post(`/sources/${sourceId}/close`, { path: tab.path, member: tab.member })
+          .catch(() => {})
+      }
+    } catch {
+      error = `Failed to reload ${tab.name}`
+    }
+  }
+
+  async function doCopySelectedLines() {
+    if (!paneRef) return
+    const copied = await paneRef.copySelectedLines()
+    copyStatus = copied ? 'copied' : 'empty'
+    if (copyStatusTimer) clearTimeout(copyStatusTimer)
+    copyStatusTimer = setTimeout(() => (copyStatus = ''), 1500)
+  }
+
+  async function openGoToLine() {
+    goToLineOpen = true
+    goToLineValue = ''
+    await tick()
+    goToLineInput?.focus()
+  }
+
+  function submitGoToLine() {
+    const line = Number(goToLineValue)
+    if (Number.isFinite(line) && line > 0) {
+      paneRef?.scrollToLine(line)
+    }
+    goToLineOpen = false
+  }
+
+  // Ctrl/Cmd+F is meant to search the open file via CodeMirror's own search
+  // panel, not the browser's find bar — but a plain keydown on the editor
+  // DOM isn't reliable (see CodeMirrorPane's openSearch doc comment), so
+  // it's intercepted here at the window level instead, while a tab is open.
+  // Ctrl/Cmd+G (go to line) is intercepted the same way and for the same
+  // reason.
+  function handleKeydown(event: KeyboardEvent) {
+    if (!activeTab) return
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+      event.preventDefault()
+      paneRef?.openSearch()
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'g') {
+      event.preventDefault()
+      openGoToLine()
+    }
+  }
+
   onMount(() => {
     if (sourceId === null) {
       loadSourcePicker()
     } else {
       loadTree()
+      const deepLink = new URLSearchParams(router.querystring ?? '')
+      const deepLinkPath = deepLink.get('path')
+      if (deepLinkPath) {
+        const line = deepLink.get('line')
+        openFromDeepLink(deepLinkPath, line ? Number(line) : null)
+      }
     }
+    window.addEventListener('keydown', handleKeydown)
   })
 
   onDestroy(() => {
+    window.removeEventListener('keydown', handleKeydown)
+    if (copyStatusTimer) clearTimeout(copyStatusTimer)
     for (const tab of tabs) {
       if (tab.scratchKey && sourceId !== null) {
         api.post(`/sources/${sourceId}/close`, { path: tab.path, member: tab.member }).catch(() => {})
@@ -118,22 +295,52 @@
 
 {#if sourceId === null}
   <div class="picker page">
-    <h1>Choose a source to browse</h1>
     {#if loading}
       <p class="hint">Loading…</p>
     {:else if error}
       <p class="error">{error}</p>
     {:else}
-      <ul>
-        {#each sources as s (s.id)}
-          <li>
-            <button class="card" on:click={() => push(`/viewer/${s.id}`)}>
-              {s.name}
-              {#if s.is_system}<span class="badge badge-accent">system</span>{/if}
-            </button>
-          </li>
-        {/each}
-      </ul>
+      <div class="picker-columns">
+        <section class="picker-column recent">
+          <h1>Recent</h1>
+          {#if recentSources.length === 0}
+            <p class="hint">Sources you open will show up here.</p>
+          {:else}
+            <ul>
+              {#each recentSources as s (s.id)}
+                <li>
+                  <ConnectionCard source={s} on:click={() => push(`/viewer/${s.id}`)} />
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+
+        <section class="picker-column all">
+          <div class="all-header">
+            <h1>All connections</h1>
+            <input
+              class="input search-box"
+              type="search"
+              placeholder="Search by folder, customer, or host…"
+              bind:value={connectionsQuery}
+            />
+          </div>
+          {#if filteredAllSources.length === 0}
+            <p class="hint">
+              {connectionsQuery.trim() ? 'No connections match that search.' : 'No sources visible to your account.'}
+            </p>
+          {:else}
+            <ul>
+              {#each filteredAllSources as s (s.id)}
+                <li>
+                  <ConnectionCard source={s} on:click={() => push(`/viewer/${s.id}`)} />
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      </div>
     {/if}
   </div>
 {:else}
@@ -178,22 +385,123 @@
       </div>
       {#if activeTab}
         <div class="pane-toolbar">
-          <span class="hint">⌕ Ctrl/Cmd+F to search in file</span>
-          <a
-            class="link"
-            href={`/sources/${sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 3v12" />
-              <path d="m6 11 6 6 6-6" />
-              <path d="M5 21h14" />
-            </svg>
-            Download
-          </a>
+          <div class="toolbar-left">
+            <span class="hint" title="Ctrl/Cmd+F to search, Ctrl/Cmd+G to go to line">⌕ Find</span>
+            <button
+              class="btn-toggle"
+              class:active={findAllOpen}
+              on:click={() => (findAllOpen = !findAllOpen)}
+            >
+              Find All
+            </button>
+            <button
+              class="btn-toggle"
+              class:active={activeTab.wrapEnabled}
+              on:click={toggleWrap}
+            >
+              Wrap
+            </button>
+            <button
+              class="btn-toggle"
+              class:active={activeTab.showWhitespace}
+              on:click={toggleShowWhitespace}
+            >
+              Show chars
+            </button>
+            {#if goToLineOpen}
+              <form class="go-to-line" on:submit|preventDefault={submitGoToLine}>
+                <input
+                  class="input"
+                  type="number"
+                  min="1"
+                  placeholder="Line #"
+                  bind:value={goToLineValue}
+                  bind:this={goToLineInput}
+                  on:keydown={(e) => e.key === 'Escape' && (goToLineOpen = false)}
+                  on:blur={() => (goToLineOpen = false)}
+                />
+              </form>
+            {:else}
+              <button class="btn-toggle" on:click={openGoToLine}>Go to line</button>
+            {/if}
+          </div>
+          <div class="toolbar-right">
+            {#if copyStatus}
+              <span class="hint copy-status">{copyStatus === 'copied' ? 'Copied' : 'Nothing selected'}</span>
+            {/if}
+            <button class="link" title="Copy selected lines with line numbers" on:click={doCopySelectedLines}>
+              Copy lines
+            </button>
+            <button class="link" title="Reload from source" on:click={reloadActiveTab}>
+              ⟳ Reload
+            </button>
+            <button
+              class="link"
+              class:active-marker={activeTab.bookmarks.length > 0}
+              title="Toggle bookmark on current line"
+              on:click={toggleBookmark}
+            >
+              ⚑ Bookmark
+            </button>
+            {#if activeTab.bookmarks.length > 0}
+              <button
+                class="link"
+                title="Previous bookmark"
+                on:click={() => paneRef?.jumpToPreviousBookmark()}
+              >
+                ‹ mark
+              </button>
+              <button class="link" title="Next bookmark" on:click={() => paneRef?.jumpToNextBookmark()}>
+                mark ›
+              </button>
+            {/if}
+            {#if severityPatterns.length > 0}
+              <button
+                class="link"
+                title="Previous problem"
+                on:click={() => paneRef?.jumpToPreviousProblem()}
+              >
+                ‹ problem
+              </button>
+              <button
+                class="link"
+                title="Next problem"
+                on:click={() => paneRef?.jumpToNextProblem()}
+              >
+                problem ›
+              </button>
+            {/if}
+            <a
+              class="link"
+              href={`/sources/${sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 3v12" />
+                <path d="m6 11 6 6 6-6" />
+                <path d="M5 21h14" />
+              </svg>
+              Download
+            </a>
+          </div>
         </div>
-        <CodeMirrorPane content={activeTab.content} />
+        <CodeMirrorPane
+          bind:this={paneRef}
+          content={activeTab.content}
+          {severityPatterns}
+          filename={activeTab.name}
+          wrapEnabled={activeTab.wrapEnabled}
+          showWhitespace={activeTab.showWhitespace}
+          bookmarks={activeTab.bookmarks}
+        />
+        {#if findAllOpen}
+          <FindInDocumentPanel
+            content={activeTab.content}
+            on:jump={(e) => paneRef?.scrollToLine(e.detail.line)}
+            on:close={() => (findAllOpen = false)}
+          />
+        {/if}
       {:else}
         <div class="empty-state">Select a file from the tree to view it.</div>
       {/if}
@@ -205,26 +513,64 @@
   .page {
     padding: 1.75rem 2rem;
   }
-  .picker ul {
+  .picker-columns {
+    display: flex;
+    gap: 2rem;
+    align-items: flex-start;
+  }
+  .picker-column {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    min-width: 0;
+  }
+  .picker-column.recent {
+    flex: 0 0 320px;
+  }
+  .picker-column.all {
+    flex: 1;
+    min-width: 0;
+  }
+  .picker-column h1 {
+    font-size: 1.1rem;
+    margin: 0;
+    color: var(--text);
+  }
+  .all-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .search-box {
+    width: 280px;
+    max-width: 100%;
+  }
+  .picker-column ul {
     list-style: none;
     padding: 0;
     margin: 0;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-    max-width: 480px;
   }
-  .picker button {
-    border: none;
-    padding: 0.75rem 1rem;
-    width: 100%;
-    text-align: left;
-    cursor: pointer;
-    color: var(--text);
-    font-size: 0.92rem;
+  .picker-column :global(.card) {
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
   }
-  .picker button:hover {
+  .picker-column :global(.card:hover) {
     border-color: var(--accent-border);
+  }
+  @media (max-width: 900px) {
+    .picker-columns {
+      flex-direction: column;
+    }
+    .picker-column.recent {
+      flex: 0 0 auto;
+      width: 100%;
+    }
   }
   .viewer {
     flex: 1;
@@ -269,6 +615,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
+    white-space: nowrap;
   }
   .editor-area {
     flex: 1;
@@ -329,18 +676,71 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
     padding: 0.4rem 0.9rem;
     background: var(--bg-elevated);
     border-bottom: 1px solid var(--border-soft);
     font-size: 0.78rem;
   }
+  .toolbar-left {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
+    gap: 0.75rem;
+  }
   .pane-toolbar .hint {
     padding: 0;
     color: var(--text-faint);
+    white-space: nowrap;
+  }
+  .btn-toggle {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    border-radius: 999px;
+    padding: 0.15rem 0.65rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn-toggle:hover {
+    border-color: var(--accent-border);
+    color: var(--text);
+  }
+  .btn-toggle.active {
+    background: var(--accent-soft);
+    border-color: var(--accent-border);
+    color: var(--accent-hover);
   }
   .pane-toolbar .link svg {
     width: 13px;
     height: 13px;
+  }
+  .toolbar-right {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
+    gap: 1rem;
+  }
+  .toolbar-right button.link {
+    font: inherit;
+  }
+  .toolbar-right button.link.active-marker {
+    color: var(--accent-hover);
+  }
+  .copy-status {
+    padding: 0;
+    color: var(--text-faint);
+    font-style: italic;
+  }
+  .go-to-line .input {
+    width: 5.5rem;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.75rem;
   }
   .empty-state {
     flex: 1;

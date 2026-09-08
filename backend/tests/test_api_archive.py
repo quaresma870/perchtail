@@ -8,13 +8,14 @@ import app.collectors.ssh as ssh_module
 import pytest
 from app.api.archive import router as archive_router
 from app.api.auth import get_current_active_user
-from app.auth.models import Capability, Role, RoleGrant, ScopeType, User
+from app.auth.models import AuditLog, Capability, Role, RoleGrant, ScopeType, User
 from app.config import get_settings
 from app.db import get_session
 from app.models import Customer, PatternKind, Protocol, Rule, RuleType, Source
 from app.scratch import get_scratch_store
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlmodel import select
 
 
 class FakeAttr:
@@ -436,3 +437,65 @@ def test_download_zip_of_subfolder_uses_relative_arcnames(app_client, session, t
     assert response.status_code == 200
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
         assert zf.namelist() == ["deep.log"]
+
+
+def test_browse_root_logs_source_open_audit_event(app_client, session, fake_sftp):
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    fake_sftp.listing = [FakeAttr("app.log", is_dir=False, size=1)]
+
+    response = client.get(f"/sources/{source.id}/browse")
+    assert response.status_code == 200
+
+    events = session.exec(select(AuditLog).where(AuditLog.action == "source.open")).all()
+    assert len(events) == 1
+    assert events[0].user_id == user.id
+    assert events[0].target_type == "source"
+    assert events[0].target_id == source.id
+
+
+def test_browse_subdirectory_does_not_log_audit_event(app_client, session, fake_sftp):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    fake_sftp.listing = [FakeAttr("nested.log", is_dir=False, size=1)]
+
+    response = client.get(f"/sources/{source.id}/browse", params={"path": "nested"})
+    assert response.status_code == 200
+
+    events = session.exec(select(AuditLog).where(AuditLog.action == "source.open")).all()
+    assert events == []
+
+
+def test_browse_root_twice_logs_two_events_not_deduped(app_client, session, fake_sftp):
+    # Dedup for the "recent connections" list happens on read (GET
+    # /sources/recent), not on write -- every root browse is a real event.
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    fake_sftp.listing = []
+
+    client.get(f"/sources/{source.id}/browse")
+    client.get(f"/sources/{source.id}/browse")
+
+    events = session.exec(select(AuditLog).where(AuditLog.action == "source.open")).all()
+    assert len(events) == 2
+
+
+def test_download_logs_file_download_audit_event(app_client, session, fake_sftp, scratch_store):
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    _grant_view_and_download(session, user, source)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+    fake_sftp.files["/var/log/appname/app.log"] = b"hello world"
+
+    response = client.get(f"/sources/{source.id}/download", params={"path": "app.log"})
+    assert response.status_code == 200
+
+    events = session.exec(select(AuditLog).where(AuditLog.action == "file.download")).all()
+    assert len(events) == 1
+    assert events[0].user_id == user.id
+    assert events[0].target_id == source.id
+    assert events[0].event_metadata == {"path": "app.log"}
