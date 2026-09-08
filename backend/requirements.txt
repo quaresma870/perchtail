@@ -1,5 +1,5 @@
 fastapi>=0.115
-uvicorn[standard]>=0.30
+uvicorn[standard]>=0.52.4
 sqlmodel>=0.0.22
 structlog>=24.4
 alembic>=1.13
