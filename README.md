@@ -8,7 +8,7 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.1.1%20%28pre--1.0%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.2.0%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -19,31 +19,37 @@
 
 ## Status
 
-🟢 **Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and Phase 3
-(full-text search, saved-search webhook alerts, IdP group-claim-to-role
-auto-mapping, a detailed health endpoint) are all complete** (see
-[ROADMAP.md](ROADMAP.md) for the full phase breakdown). Agentless
-SSH/SFTP, SMB, and WinRM browsing, a Go push-agent for hosts that can't
-be reached inbound, ephemeral fetch (nothing mirrored), rule-scoped RBAC,
-OIDC single sign-on (local accounts still work alongside it), and opt-in
-full-text search with alerting over indexed sources all work end-to-end.
-The Viewer's home page is a two-column "recent connections / all
-connections" dashboard with a search box (folder/customer/host), and
-deployment-wide feature toggles live under Settings → System. Most of a
-pre-1.0 security-hardening pass is done too — login lockout, CSP/security
-headers, CI-blocking dependency and container-image vulnerability
-scanning, `CREDENTIAL_ENCRYPTION_KEY` rotation, and a Sessions page for
-revoking a login remotely — see ROADMAP.md's "Security hardening" section
-for what's still open (optional local-account MFA, audit-log
-tamper-evidence, a formal third-party review). Covered end-to-end by
-`pytest` (backend), `vitest` (frontend units), and a Playwright suite that
-drives the real browser UI against real SSH/SMB test servers, not just
-mocks. Still pre-1.0 otherwise: SAML isn't built (OIDC already covers
-Azure AD/Entra ID, Okta, Google Workspace, Keycloak/Authentik, so it's
-only getting built if a real need shows up), the admin-only full audit
-log viewer isn't built yet, and it hasn't seen production traffic beyond
-the maintainer's own use. See [CHANGELOG.md](CHANGELOG.md) for what's
-actually shipped versus planned.
+🟢 **v0.2.0 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
+Phase 3 (full-text search, saved-search webhook alerts, IdP
+group-claim-to-role auto-mapping, a detailed health endpoint) are all
+complete** (see [ROADMAP.md](ROADMAP.md) for the full phase breakdown).
+Agentless SSH/SFTP, SMB, and WinRM browsing, a Go push-agent for hosts
+that can't be reached inbound, ephemeral fetch (nothing mirrored),
+rule-scoped RBAC, OIDC single sign-on (local accounts still work
+alongside it), and opt-in full-text search with alerting over indexed
+sources all work end-to-end. The Viewer's home page is a two-column
+"recent connections / all connections" dashboard with a search box
+(folder/customer/host), and deployment-wide feature toggles live under
+Settings → System, including a full admin audit log (every login and
+source/rule/role/user/customer/folder/SSO/system-settings change, with
+type/action/date filters and an admin-configurable retention window).
+
+Most of a pre-1.0 security-hardening pass is done too — login lockout,
+CSP/security headers, CI-blocking dependency and container-image
+vulnerability scanning, `CREDENTIAL_ENCRYPTION_KEY` rotation with a
+tooled migration path, salted PBKDF2 key derivation, persisted SSH
+host-key pinning, a Sessions page for revoking a login remotely, and a
+DNS-rebind-safe outbound webhook fetcher — see ROADMAP.md's "Security
+hardening" section for what's still open (optional local-account MFA,
+audit-log tamper-evidence, a formal third-party review). Covered
+end-to-end by `pytest` (backend), `vitest` (frontend units), and a
+Playwright suite that drives the real browser UI against real SSH/SMB
+test servers, not just mocks. Still pre-1.0 otherwise: SAML isn't built
+(OIDC already covers Azure AD/Entra ID, Okta, Google Workspace,
+Keycloak/Authentik, so it's only getting built if a real need shows up),
+and it hasn't seen production traffic beyond the maintainer's own use.
+See [CHANGELOG.md](CHANGELOG.md) for what's actually shipped versus
+planned.
 
 ## What it is
 

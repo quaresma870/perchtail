@@ -66,7 +66,9 @@ up to date as the source of truth for design decisions.
 
 ## Pull requests
 
-1. Fork, branch from `main`, keep the PR focused on one change.
+1. Fork, branch from `dev` (the integration branch everything lands on between
+   releases — `main` only moves forward at a tagged release), keep the PR
+   focused on one change, and open it against `dev`.
 2. Add or update tests for anything behavior-affecting.
 3. Update [CHANGELOG.md](CHANGELOG.md) under `Unreleased`.
 4. Describe what changed and why in the PR description — link the issue if there

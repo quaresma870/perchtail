@@ -1658,14 +1658,12 @@ than deciding speculatively now:
   and how deep (see the Phase 3 full-text search notes above) — deferred,
   not needed for the initial opt-in, plain-files-and-gz version
 - Whether the built-in log viewer filters DEBUG-level files by default
-- `CREDENTIAL_ENCRYPTION_KEY` rotation story (currently: none — rotating it
-  means re-entering every source's credentials)
 
 ## Community, once Phase 1 is real
 
 From CLAUDE.md's "Community & discoverability" — not blocking Phase 1 code,
 but worth doing deliberately once there's something to show:
-- [ ] Screenshots/demo GIF in the README
+- [x] Screenshots/demo GIF in the README (screenshots; no GIF yet)
 - [ ] Submit to `awesome-selfhosted` and similar lists
 - [ ] GitHub topics: `self-hosted`, `log-viewer`, `rbac`, `devops`
 - [ ] Launch: r/selfhosted, r/devops, Hacker News "Show HN"
