@@ -165,14 +165,17 @@ jobs:
           path: agent/dist/
 
       # govulncheck-action installs golang.org/x/vuln@latest, which now
-      # requires Go >= 1.25 to build -- independent of agent/go.mod's own
+      # requires Go >= 1.26 to build -- independent of agent/go.mod's own
       # "go 1.24.7" directive (used for the build/vet/test steps above).
-      # A 1.25 toolchain here only runs the govulncheck tool itself; it
-      # doesn't change what Go version the agent binaries are built for.
+      # This toolchain version here only runs the govulncheck tool itself;
+      # it doesn't change what Go version the agent binaries are built for.
+      # golang.org/x/vuln's own required Go version has moved twice now
+      # (1.25, then 1.26) independent of any change in this repo -- if this
+      # step starts failing with "requires go >= X" again, bump this to X.
       - name: Dependency vulnerability scan (govulncheck)
         uses: golang/govulncheck-action@v1
         with:
-          go-version-input: "1.25"
+          go-version-input: "1.26"
           work-dir: agent
 
   docker-image:
