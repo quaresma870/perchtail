@@ -177,6 +177,12 @@ export interface AuditLogFilterOptions {
   target_types: string[]
 }
 
+export interface AuditIntegrityStatus {
+  status: 'unknown' | 'ok' | 'broken'
+  last_checked_at: string | null
+  broken_row_id: number | null
+}
+
 export interface AuthSessionInfo {
   id: number
   created_at: string

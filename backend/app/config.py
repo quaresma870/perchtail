@@ -67,6 +67,17 @@ class Settings(BaseSettings):
     # settings above.
     audit_purge_interval_seconds: int = 86400
 
+    # Audit log tamper-evidence (app/audit_integrity.py) -- how often the
+    # hash-chain verification job re-walks AuditLog. Deliberately its own
+    # setting, not reused from audit_purge_interval_seconds or
+    # audit_retention_days above -- retention decides what's kept, this
+    # decides how often what's kept gets re-verified, and coupling them
+    # would mean a retention change silently also changing how often
+    # tampering gets caught. In days, not seconds, since a year expressed in
+    # seconds (31536000) is unreadable at a glance and APScheduler's
+    # IntervalTrigger accepts a `days=` kwarg directly.
+    audit_integrity_check_interval_days: int = 365
+
 
 @lru_cache
 def get_settings() -> Settings:

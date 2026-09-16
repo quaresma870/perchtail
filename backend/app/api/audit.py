@@ -1,4 +1,5 @@
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -6,9 +7,12 @@ from sqlalchemy import or_
 from sqlmodel import Session, func, select
 
 from app.api.auth import get_current_active_user
-from app.auth.models import AuditLog, GlobalCapability, User
+from app.audit_integrity import verify_chain
+from app.auth.models import AuditChainState, AuditLog, GlobalCapability, User
 from app.auth.rbac import require_global_capability
+from app.crypto import audit_chain_key
 from app.db import get_session
+from app.timeutils import utcnow
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
@@ -130,3 +134,76 @@ def get_audit_log_filters(
         .order_by(AuditLog.target_type)
     ).all()
     return AuditLogFilterOptions(actions=actions, target_types=target_types)
+
+
+class AuditIntegrityStatus(BaseModel):
+    # "unknown" until the first check ever runs -- see AuditChainState's
+    # docstring in app/auth/models.py.
+    status: str
+    last_checked_at: datetime | None
+    broken_row_id: int | None
+
+
+def _read_integrity_status(session: Session) -> AuditIntegrityStatus:
+    state = session.exec(select(AuditChainState)).first()
+    if state is None:
+        return AuditIntegrityStatus(status="unknown", last_checked_at=None, broken_row_id=None)
+    return AuditIntegrityStatus(
+        status=state.status,
+        last_checked_at=state.last_checked_at,
+        broken_row_id=state.broken_row_id,
+    )
+
+
+@router.get("/integrity", response_model=AuditIntegrityStatus)
+def get_audit_integrity_status(
+    user: User = Depends(require_view),
+    session: Session = Depends(get_session),
+):
+    """Read-only: the result of the most recent verify_chain() pass,
+    whether that ran on its own schedule (app/audit_integrity.py,
+    Settings.audit_integrity_check_interval_days) or via the manual
+    POST below. Backs the Audit Log page's integrity banner."""
+    return _read_integrity_status(session)
+
+
+# A safety valve for load, not a design goal -- same spirit as MAX_LIMIT
+# above: a full verify_chain() pass is an O(n) HMAC recompute over every
+# surviving AuditLog row, and this endpoint's gate (view_audit_log) is a
+# read-level capability, not a manage-level one, so a low-trust viewer
+# role could otherwise script rapid repeated calls into real CPU cost on
+# an install with a large, long-retained log. A trivial re-check within
+# this window just returns the already-current status instead of
+# recomputing it.
+_MANUAL_VERIFY_COOLDOWN_SECONDS = 30
+
+# Guards the check-then-act cooldown below across the whole process, not
+# just within one request -- without it, two concurrent POSTs can both
+# read the same stale last_checked_at, both pass the cooldown check, and
+# both run a full verify_chain() pass at once, defeating the point of the
+# cooldown for exactly the burst-of-requests case it exists for.
+_manual_verify_lock = threading.Lock()
+
+
+@router.post("/integrity/verify", response_model=AuditIntegrityStatus)
+def run_audit_integrity_verification(
+    user: User = Depends(require_view),
+    session: Session = Depends(get_session),
+):
+    """Runs the same check the scheduled job does, on demand -- with a
+    default check interval as long as a year (deliberately decoupled from
+    retention, see Settings.audit_integrity_check_interval_days), an admin
+    who wants to confirm the chain is intact right now shouldn't have to
+    wait for the next scheduled pass. Gated by view_audit_log, not a
+    manage-level capability: this only recomputes and stores a status,
+    never alters AuditLog content itself."""
+    with _manual_verify_lock:
+        state = session.exec(select(AuditChainState)).first()
+        if state is not None and state.last_checked_at is not None:
+            since_last_check = utcnow() - state.last_checked_at
+            if since_last_check < timedelta(seconds=_MANUAL_VERIFY_COOLDOWN_SECONDS):
+                return _read_integrity_status(session)
+
+        verify_chain(audit_chain_key(), session)
+        session.commit()
+        return _read_integrity_status(session)

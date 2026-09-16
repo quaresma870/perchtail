@@ -1164,9 +1164,9 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [ ] Optional TOTP/MFA for local accounts — SSO already delegates this to
       the IdP, but the local break-glass account (and any org that doesn't
       enable SSO) has no second factor today
-- [ ] Audit log tamper-evidence (e.g. hash-chaining `AuditLog` rows) so a
+- [x] Audit log tamper-evidence (e.g. hash-chaining `AuditLog` rows) so a
       compromised admin account can't quietly edit history without it
-      being detectable
+      being detectable — see notes below
 - [x] CSRF review across every state-changing endpoint — confirm the
       existing `SameSite=strict` session cookie is sufficient on its own,
       or add explicit CSRF tokens where it isn't — see notes below
@@ -1436,6 +1436,131 @@ two:
   real credentials at any scale will want a rotation/re-encrypt tool
   before its next KDF change, not after.
 
+### Notes on decisions made — audit log tamper-evidence
+
+- **An HMAC-SHA256 hash chain over `AuditLog` rows** (`app/audit_hash_chain.py`),
+  not a separate append-only store or a full signature scheme — each row's
+  `row_hash` covers its own content plus the previous row's hash, so
+  altering or deleting a row anywhere changes every hash after it.
+  `app/audit_integrity.py`'s `verify_chain()` walks the table in id order
+  recomputing each hash; it stops at the first mismatch rather than
+  continuing past it, since everything after an altered row is
+  unverifiable regardless of whether a later row individually still
+  "looks" consistent on its own. **Keyed, not a bare `hashlib.sha256`** —
+  caught in review: a keyless hash chain over public fields, using the
+  exact algorithm this open-source project ships, is fully reproducible by
+  anyone with only the SQLite file (a stolen backup, or SQL access without
+  server/env access). That attacker could edit a row and simply recompute
+  every hash after it with the same public function, and `verify_chain()`
+  would report `"ok"` — silently defeating the feature against exactly the
+  "compromised admin account" threat it exists for. Fixed by keying the
+  HMAC with `app.crypto.audit_chain_key()`, a second key derived from
+  `CREDENTIAL_ENCRYPTION_KEY` and the existing per-install salt, but
+  domain-separated from the Fernet credential-encryption key by a
+  different KDF input label — not a refactor of `_derive_fernet_key`
+  itself, which must never change or every already-encrypted credential in
+  an existing deployment becomes undecryptable. This raises the bar to
+  "the SQLite file alone is no longer enough to forge a consistent chain"
+  — still not a defense against someone who also has
+  `CREDENTIAL_ENCRYPTION_KEY` (full server compromise), which no purely
+  server-side scheme can fully solve; that would need external anchoring
+  (e.g. periodically publishing the chain tip somewhere outside this
+  system), left as a future enhancement if it's ever actually needed.
+- **Backfilled at startup, not inside the Alembic migration.** The
+  migration itself (`a1c3f6e4b2d7`) only adds the two nullable columns
+  (`prev_hash`/`row_hash`) and the new `audit_chain_state` table — genuine
+  business logic like computing a whole historical hash chain belongs in
+  ordinary, unit-testable Python, not buried in a migration script that's
+  much harder to exercise directly. `app.audit_hash_chain.
+  backfill_chain_if_needed` runs once in `app/main.py`'s lifespan, before
+  any of the `seed_*` calls (none of which currently write an AuditLog row,
+  but the ordering is load-bearing regardless — a fresh, already-hashed row
+  written before backfill runs would get mistaken for the chain's tip
+  ahead of the still-unhashed legacy rows beneath it). Idempotent, so it's
+  cheap to run on every single startup rather than only the first one after
+  upgrading.
+- **A separate verification cadence from both the purge job's cadence and
+  the retention window itself, per explicit direction.** New
+  `Settings.audit_integrity_check_interval_days` (default `365`, i.e. 1
+  year) drives its own APScheduler job (`app.audit_integrity.
+  run_audit_integrity_check`) — deliberately not reusing
+  `audit_purge_interval_seconds` or `audit_retention_days`. Retention
+  decides what's kept; this decides how often what's kept gets
+  re-verified; coupling them would mean a retention change silently also
+  changing how often tampering gets caught. Expressed in days, not
+  seconds, unlike the other interval settings — a year in seconds
+  (31536000) is unreadable at a glance, and APScheduler's `IntervalTrigger`
+  accepts a `days=` kwarg directly.
+- **The purge sweep advances a persisted "chain anchor" before deleting,
+  so retention and tamper-evidence don't fight each other.** A new
+  singleton `AuditChainState` row (same "singleton by convention" pattern
+  as `MonitoringToken`) records the newest purged row's id/hash
+  (`anchor_row_id`/`anchor_hash`); `verify_chain()` treats that hash as
+  what the first surviving row should chain from, instead of expecting
+  `None` and flagging every routine purge as a tamper break. The same row
+  doubles as the last verification result (`status`, `last_checked_at`,
+  `broken_row_id`) for the Audit Log page's banner to read — two related,
+  small pieces of bookkeeping, one row, not two tables.
+- **The purge sweep deletes a genuine id-prefix, not just "whatever
+  matches `timestamp < cutoff`."** Also caught in review: the hash chain
+  links rows by id order, but purge was filtering by timestamp, and a
+  row's timestamp is captured at construction while its id is assigned at
+  commit — under concurrent writes (this app runs FastAPI sync endpoints
+  in a thread pool) those two orderings can, very rarely, diverge. A naive
+  timestamp filter could then delete a row from the *middle* of the id
+  sequence instead of a clean prefix, desyncing the anchor and producing a
+  false `"broken"` verification from routine retention purging, not real
+  tampering. Fixed by computing `first_not_old_id` — `MIN(id)` among rows
+  *not* old enough to purge — and deleting only `id < first_not_old_id`:
+  by that same minimality, everything below it is guaranteed to already be
+  older than cutoff, so this is always a safe prefix even if it
+  conservatively leaves a handful of out-of-order rows for a later sweep
+  instead of purging them now. Fetches only the single newest matching
+  row for the anchor (`ORDER BY id DESC LIMIT 1`), not every row about to
+  be purged — a second review pass caught the first version loading the
+  whole prefix into memory just to read its last element, right before a
+  separate bulk `DELETE` re-applied the same condition anyway.
+- **A manual "Verify now" action, not just the scheduled job.** With a
+  default check interval as long as a year, an admin who wants to confirm
+  the chain is intact right now shouldn't have to wait for the next
+  scheduled pass — `POST /audit/integrity/verify` runs the identical
+  `verify_chain()` the scheduled job does. Gated by `view_audit_log`, not a
+  manage-level capability: it only recomputes and stores a status, never
+  alters `AuditLog` content itself, so the same people who can read the
+  audit log can also ask it to check its own integrity. **A 30-second
+  cooldown guards it** (also from review) — a full `verify_chain()` pass is
+  an O(n) HMAC recompute over every surviving row, and `view_audit_log` is
+  a read-level, not manage-level, capability, so a low-trust viewer role
+  could otherwise script rapid repeated calls into real CPU cost on an
+  install with a large, long-retained log. A call inside the cooldown just
+  returns the already-current status rather than recomputing it. The
+  check-then-act itself is wrapped in a process-wide lock — without it,
+  two concurrent requests could both read the same stale
+  `last_checked_at`, both pass the cooldown check, and both run a full
+  verify pass at once, defeating the point of the cooldown for exactly
+  the burst-of-requests case it exists for.
+- **A known, accepted concurrency gap, documented rather than silently
+  left implicit.** `chain_new_entry` serializes "read the current tip,
+  compute this row's hash" with a process-wide lock, which stops two
+  audit-generating requests from both reading the same stale tip — but it
+  can't extend across each transaction's eventual `commit()` (that would
+  mean holding the lock through a whole request's remaining work, which
+  `record_audit_event`'s callers aren't structured for). A narrow race
+  therefore remains between two writers whose commits interleave after
+  both have already passed through the lock, which could in principle
+  surface as a false `"broken"` result rather than real tampering.
+  Accepted for now given how infrequent concurrent audit-generating writes
+  are for this tool's typical single-team deployment (same "in-memory,
+  per-process, accepted trade-off" reasoning `app/login_throttle.py`
+  already documents for this single-container SQLite model) — a fully
+  airtight fix needs DB-level write serialization (e.g. `BEGIN IMMEDIATE`)
+  across the whole record-and-commit sequence, a larger change deferred
+  unless this proves to be a real operational problem.
+- **`status` starts as `"unknown"`, not `"ok"`, until the first check ever
+  runs** — with the year-long default interval, defaulting to `"ok"` would
+  mean the banner claimed a clean bill of health for up to a year on a
+  chain nobody had actually looked at yet.
+
 ## Frontend E2E testing (Playwright)
 
 Everything on this roadmap so far is covered end-to-end only by backend
@@ -1484,7 +1609,9 @@ it correctly; only exercising the real page does that.
       (`search.spec.ts`, `alerts.spec.ts`); the audit log page's type/action/
       date-range filters, driven off a real entry the test itself creates
       via the retention control rather than assuming prior specs left
-      matching rows behind (`audit-log.spec.ts`)
+      matching rows behind, and its tamper-evidence integrity banner
+      resolving to "chain intact" against a real, unmodified `AuditLog`
+      after clicking "Verify now" (`audit-log.spec.ts`)
 - [x] CI job (`.github/workflows/ci.yml`'s `e2e` job) — separate from the
       existing `backend`/`frontend` jobs since it needs both toolchains
 

@@ -8,6 +8,27 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Security
+- Audit log tamper-evidence: `AuditLog` rows are now HMAC-SHA256
+  hash-chained (`app/audit_hash_chain.py`), keyed by a second key derived
+  from `CREDENTIAL_ENCRYPTION_KEY` (domain-separated from the credential
+  Fernet key, `app.crypto.audit_chain_key`) so the chain can't be silently
+  recomputed by anyone who only has the SQLite file itself. Altering or
+  deleting a row anywhere changes every hash after it. A new periodic
+  verification job (`app/audit_integrity.py`) walks the chain on its own
+  configurable cadence (`audit_integrity_check_interval_days`, default 365
+  — explicitly independent of the retention window and purge cadence), and
+  a manual, cooldown-throttled "Verify now" action on the Audit Log page
+  runs the same check on demand. Existing history is backfilled
+  automatically on first startup after upgrading; the retention purge
+  sweep now deletes only a genuine id-prefix of the table (not just
+  whatever matches the timestamp filter, which could rarely diverge from
+  id order under concurrent writes) and advances a persisted chain anchor,
+  so routine purging doesn't itself look like tampering to the next
+  verification pass. See ROADMAP.md's security-hardening notes for the
+  full design, including its one documented, accepted limitation around a
+  narrow concurrent-write race.
+
 ## [0.2.0] - 2026-09-08
 
 Phase 2 (push-agent) and Phase 3 (full-text search, alerting, IdP
