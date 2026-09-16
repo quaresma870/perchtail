@@ -165,6 +165,9 @@ scratch cache) lives in the `perchtail-data` Docker volume, so it survives
 - [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — how to
   rotate `CREDENTIAL_ENCRYPTION_KEY` without losing access to already-
   encrypted credentials
+- [docs/security-testing.md](docs/security-testing.md) — running the
+  [Strix](https://github.com/usestrix/strix) AI pentesting agent locally
+  against a dev instance
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
   submit changes
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability
