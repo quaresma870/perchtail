@@ -8,6 +8,14 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Fixed
+- CI: the `docker-image` job's Trivy scan was failing on every build (not
+  just feature PRs) because `python:3.12-slim`'s baked-in OS packages had
+  fallen behind Debian's own published security patches between upstream
+  rebuilds. The `Dockerfile`'s backend stage now runs `apt-get update &&
+  apt-get upgrade -y` before installing Python dependencies, pulling
+  current packages from the live Debian security mirror at build time.
+
 ## [0.2.0] - 2026-09-08
 
 Phase 2 (push-agent) and Phase 3 (full-text search, alerting, IdP

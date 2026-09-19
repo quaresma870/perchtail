@@ -13,6 +13,12 @@ FROM python:3.12-slim
 
 WORKDIR /app/backend
 
+# python:3.12-slim's own OS packages lag behind Debian's security patches
+# between upstream rebuilds (see issue #87) — pull current packages from the
+# live Debian security mirror at build time instead of trusting whatever the
+# base image tag happened to bake in.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
