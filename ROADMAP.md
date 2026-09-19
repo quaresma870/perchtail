@@ -1045,19 +1045,18 @@ viewing.
       required. Uses the archive member's own name for files opened
       inside a `.zip`/`.tar.gz` (same field `FolderTree` already emits on
       open), not the archive's name.
-- [ ] **Compare files (diff view), as a toggle button.** Arm the "Compare"
+- [x] **Compare files (diff view), as a toggle button.** Arm the "Compare"
       button, pick a second file from the tree (or another open tab), and
       it renders a read-only diff against the currently active file in
-      place. `@codemirror/merge` (not yet installed) is the natural fit.
+      place. Built with `@codemirror/merge`'s `MergeView`, as planned.
 - [x] **Line-wrap toggle.** `EditorView.lineWrapping`, cheap and directly
       useful for long log lines.
-- [ ] **Beautify / minify for embedded JSON, XML, and (lower priority) JS.**
-      Display-only reformat, never touches the file on disk.
-- [ ] **Live-follow / "tail -f" mode, as a toggle button.** The
-      architecturally biggest item here — deferred. Two candidate
-      mechanisms: client-side polling (works uniformly but adds
-      round-trips over SSH/SMB/WinRM), or extending the agent-mode
-      WebSocket with a "watch" command (cheaper, agent-only).
+- [x] **Beautify / minify for embedded JSON and XML.** Display-only
+      reformat, never touches the file on disk. JS deliberately deferred
+      (see notes below).
+- [x] **Live-follow / "tail -f" mode, as a toggle button.** Built as
+      client-side polling — see notes below for why, over extending the
+      agent-mode WebSocket with a "watch" command.
 - [x] **Reload/refresh button.** A manual re-fetch of the currently open
       file's content in place, without closing and reopening the tab.
 - [x] **Copy selected lines (with line numbers).**
@@ -1065,7 +1064,7 @@ viewing.
       given this tool spans both Linux and Windows sources.
 - [x] **Go-to-line** (Ctrl+G).
 - [x] **Bookmarks.** Pure client-side/session state.
-- [ ] **Multi-pattern "mark" highlighting** (Notepad++'s Mark feature, not
+- [x] **Multi-pattern "mark" highlighting** (Notepad++'s Mark feature, not
       to be confused with severity indicators above). Persistently
       highlight all occurrences of one or more ad hoc patterns at once,
       each in its own color.
@@ -1128,6 +1127,138 @@ viewing.
   tradeoff as choosing not to invent new fallback rules: a source with any
   patterns of its own uses only those, full stop, rather than layering on
   top of the global set.
+
+### Notes on decisions made — compare, beautify/minify, follow, and mark highlighting
+
+The four items left open in "Viewer: toward an advanced editor" above,
+built together in one pass since they touch the same toolbar/tab-state
+surface (`Viewer.svelte`, `CodeMirrorPane.svelte`).
+
+- **Compare (diff view)**: `@codemirror/merge`'s `MergeView` renders two
+  read-only editors side by side (`lib/components/DiffPane.svelte`),
+  wrapped in a new `{#key}` block keyed by an incrementing counter so
+  picking a new comparison target remounts it cleanly rather than trying
+  to reconfigure an existing `MergeView` in place. "Compare" is a toggle
+  that arms a pick-the-next-thing-you-click mode: clicking a file in the
+  tree or another open tab while armed does a one-shot fetch (or reuses an
+  already-open tab's content) instead of opening/switching to it, sets it
+  as the comparison target, and disarms. The comparison state
+  (`compareWith`) isn't part of `Tab` — it's contextual to whichever file
+  is active right now, so switching the active tab clears it (same
+  reasoning as clearing `formatError` on tab switch, folded into the same
+  reactive statement). Both sides always diff **raw** fetched content
+  (`activeTab.content`, not `displayContent`) — an earlier version diffed
+  the left side's possibly-beautified display content against the right
+  side's always-raw one, which would show a whole file as changed purely
+  from indentation differences whenever Beautify was active, even for
+  byte-identical-modulo-formatting JSON.
+- **Beautify/minify**: `lib/format-content.ts`, JSON via
+  `JSON.parse`/`JSON.stringify(…, null, 2)`, XML via a small
+  indent-by-nesting-depth pretty-printer (there's no browser-native XML
+  formatter, and a real one wasn't worth a new dependency for a
+  display-only toggle) plus `DOMParser`-based well-formedness checking
+  before either direction. **JS deliberately excluded**, unlike the
+  checkbox's original "(lower priority)" JSON/XML/JS grouping — a real JS
+  beautifier needs an actual parser (e.g. `prettier/standalone`), a
+  meaningfully heavier dependency than JSON/XML's regex-and-DOM-only
+  approach, for a format this tool's logs rarely embed compared to
+  JSON/XML payloads. Revisit if that turns out wrong in practice. Toggling
+  a mode when the tab's current content doesn't parse leaves the raw
+  content on screen and surfaces `formatError` inline rather than
+  switching to a mode that would immediately need to fall back anyway.
+  Reloading a tab (manual or via Follow) deliberately keeps whatever
+  format was active rather than resetting it — an earlier version of this
+  reset it unconditionally on every reload, which silently fought Follow
+  into uselessness for a beautified tab (every ~2s poll would flip it back
+  to raw). `displayContent`'s own `formatContent(...) ?? content` fallback
+  already degrades gracefully to raw content if a reload's new bytes no
+  longer parse under the active mode, so nothing needs to force it off
+  ahead of that.
+- **Follow (tail -f)**: built as **client-side polling** (every 2s,
+  reusing the existing manual-reload fetch path), not the alternative
+  named in CLAUDE.md/this item's own original wording — extending the
+  agent-mode WebSocket with a "watch" command. That would only work for
+  agent-linked sources; this needs to work uniformly across SSH/SMB/WinRM/
+  local too, and there's no persistent connection to extend for the other
+  three. The accepted cost is a full re-fetch of the whole file on every
+  tick (same always-fresh, no-partial-read architecture as a manual
+  Reload — see CLAUDE.md's ephemeral-fetch rule) rather than a
+  byte-range/tail-only read; a future agent-only "watch" fast path could
+  still be added later as an optimization without changing this uniform
+  fallback. The toggle lives on the `Tab` (`following: boolean`, persists
+  across a tab switch) but the actual `setInterval` only ever runs for
+  whichever tab is both active *and* following, managed by a single
+  reactive block keyed on `activeTab?.following` — a background tab
+  doesn't keep polling, and switching back to a still-following tab
+  resumes it automatically.
+  - **Found and fixed a real bug while building this**: `CodeMirrorPane`
+    rebuilds its entire `EditorState` (`view.setState(...)`) on every
+    content/toggle change, which resets scroll to the top by default —
+    harmless for an occasional manual toggle, but it would have made
+    Follow unusable (yanking the view back to line 1 every 2 seconds
+    instead of tracking new content). Fixed generally, not just for
+    Follow: `syncView` now records whether the view was scrolled to the
+    bottom beforehand and restores either the bottom (if it was there) or
+    the same absolute scroll offset afterward — so an ordinary toggle like
+    Wrap or adding a mark no longer disturbs a reader's place in a large
+    file either, which was a latent, pre-existing UX gap this surfaced.
+- **Mark highlighting**: `lib/mark-highlighting.ts`, deliberately separate
+  from `severity-highlighting.ts` — a mark is ad hoc and session-only
+  (never persisted, same as bookmarks), typed in on the spot rather than
+  admin-configured, and reuses `Rule`'s `re:`-prefix convention
+  (`parsePatternInput`) purely for a consistent glob/regex switch, not
+  because it shares any matching-semantics code with rules. Colors cycle
+  through a fixed 6-entry palette (`nextMarkColorIndex`, least-recently-
+  used first, wrapping once every color is in use) rather than a color
+  picker — this is a quick highlight-and-discard tool, not a persistent
+  configuration surface. The toolbar button reads "Highlight," not "Mark,"
+  to avoid colliding with the existing bookmark-stepper buttons' own
+  "‹ mark / mark ›" labels, even though the underlying module and
+  ROADMAP.md both use "mark" (Notepad++'s own name for the feature).
+  - **Found and fixed a real bug while testing this live**: pressing Enter
+    in the add-mark input fired both the form's `submit` handler and a
+    `blur` (from the input being removed from the DOM once the form
+    closes), and since the second call ran before the input's value was
+    cleared, one Enter press silently added the same mark twice. Fixed by
+    clearing `markInputValue` and closing the form as the *first* thing
+    `submitMarkInput` does, before touching tab state — so the
+    blur-triggered second call sees an empty value and no-ops.
+  - **Live-verified all four together** against the built-in
+    super-admin log-viewer system source (M6) with two ad hoc JSON
+    fixture files: Beautify/Minify round-tripped correctly and toggled
+    off cleanly, Highlight produced exactly one decoration and one
+    toolbar chip per pattern (post-fix), Compare rendered a real
+    `MergeView` diff with correct per-side labels and word-level
+    highlighting and closed cleanly via "Exit compare," and Follow picked
+    up two consecutive appends to a live-growing file within one poll
+    interval each and stopped picking up new content immediately after
+    being toggled off. This exploratory pass is also what caught the
+    Beautify/Follow interaction bug and the Compare-diffs-formatted-content
+    bug above — both fixed and re-verified live before landing.
+  - **New Playwright spec** (`e2e/viewer-editor-features.spec.ts`) covers
+    all four against two small JSON fixture files written directly into
+    `LOG_DIR` (the `local` connector reads straight off disk with no
+    caching, so a file dropped in mid-run shows up on the next browse
+    exactly like production) — timestamped names, removed in `afterAll`.
+    Running the full suite surfaced one more real, if latent, bug: this
+    new spec is the first to open the built-in system source more than
+    once in the same run, so by its second test the source now shows up
+    in *both* the connections-home "Recent" and "All connections"
+    columns, breaking the plain `getByRole('button', { name: ... })`
+    locator `viewer.spec.ts` already used (strict-mode: two matches).
+    Fixed both specs to scope that click to `.picker-column.all`, which
+    always lists every source regardless of visit history — deterministic
+    regardless of what ran before it in the same worker.
+  - **Found, but deliberately not fixed here**: `backend/scripts/
+    run_e2e_server.sh`'s kill-the-previous-run's-daemons step records each
+    daemon's pidfile at the moment `sshd`/`smbd` first forks, not its
+    final post-fork PID, so a second consecutive run's `kill "$(cat
+    pidfile)"` targets an already-exited parent and fails under `set -e`,
+    silently aborting the whole script with no output. Reproduced
+    reliably outside this PR's own diff (pre-existing script, unrelated to
+    anything built here) — filed as issue #89 rather than fixed inline
+    here, same "small, unrelated infra fix gets its own PR" precedent as
+    issue #87's Dockerfile fix.
 
 ## Security hardening (pre-1.0)
 

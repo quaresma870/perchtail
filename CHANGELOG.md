@@ -8,6 +8,18 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Added
+- Viewer: Compare (a read-only side-by-side diff against a second file
+  picked from the tree or another open tab, via `@codemirror/merge`),
+  Beautify/Minify for JSON and XML tabs (display-only, never touches the
+  file on disk), Follow (a `tail -f`-style toggle that polls and re-fetches
+  the open file every few seconds), and multi-pattern "Highlight" (ad hoc,
+  session-only pattern highlighting, Notepad++'s Mark feature, each
+  pattern in its own color). See ROADMAP.md's notes for design decisions,
+  including two real bugs (a scroll-to-top regression on Follow, a
+  double-add on Enter in the highlight input) found and fixed while
+  building these.
+
 ### Security
 - Audit log tamper-evidence: `AuditLog` rows are now HMAC-SHA256
   hash-chained (`app/audit_hash_chain.py`), keyed by a second key derived

@@ -5,8 +5,13 @@
   import ConnectionCard from '../lib/components/ConnectionCard.svelte'
   import FolderTree from '../lib/components/FolderTree.svelte'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
+  import DiffPane from '../lib/components/DiffPane.svelte'
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
   import { filterConnections } from '../lib/connection-filter'
+  import { canFormat, formatContent, type FormatMode } from '../lib/format-content'
+  import { languageForFilename } from '../lib/file-language'
+  import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
+  import { parsePatternInput } from '../lib/rule-format'
   import { tabKey } from '../lib/tab-key'
   import type { BrowseEntry, SeverityPattern, Source } from '../lib/types'
 
@@ -26,7 +31,21 @@
     // sorted ascending so the bookmark-nav wrap-around cycling and the
     // CodeMirror decoration builder can both rely on that order.
     bookmarks: number[]
+    // Notepad++-style "Mark" highlighting (ROADMAP.md): ad hoc patterns the
+    // viewer types in on the spot, each its own color. Same
+    // never-persisted, per-tab-state shape as bookmarks above.
+    markPatterns: MarkPattern[]
+    // Display-only reformat (ROADMAP.md: "never touches the file on disk")
+    // for JSON/XML tabs -- 'none' shows the raw fetched content as-is.
+    format: FormatMode
+    // "Follow" (tail -f, ROADMAP.md): client-side polling, not a
+    // persistent connection -- see the reactive block below for why. Only
+    // ever driven while this tab is the active one; the flag itself
+    // persists on the tab so switching away and back resumes it.
+    following: boolean
   }
+
+  const FOLLOW_INTERVAL_MS = 2000
 
   const sourceId = params.sourceId ? Number(params.sourceId) : null
 
@@ -49,9 +68,33 @@
   let goToLineOpen = false
   let goToLineValue = ''
   let goToLineInput: HTMLInputElement | null = null
+  let markInputOpen = false
+  let markInputValue = ''
+  let markInput: HTMLInputElement | null = null
   let copyStatus: '' | 'copied' | 'empty' = ''
   let copyStatusTimer: ReturnType<typeof setTimeout> | null = null
+  let formatError = ''
+  // "Compare" (ROADMAP.md's diff-view item): `compareArmed` is the
+  // "waiting for a second file/tab to be picked" state; `compareWith` is
+  // the resulting one-shot snapshot (name + already-fetched content) to
+  // diff the active tab against. Neither is part of `Tab` -- a comparison
+  // is contextual to whichever file is active right now, not a persisted
+  // per-tab mode, so it's cleared whenever the active tab itself changes.
+  let compareArmed = false
+  let compareWith: { name: string; content: string } | null = null
+  let compareKey = 0
+  $: activeKey, (formatError = ''), (compareWith = null), (compareArmed = false)
   $: activeTab = tabs.find((t) => t.key === activeKey) ?? null
+  // Display-only reformat (never mutates activeTab.content itself, so
+  // reloading or turning the toggle back off always recovers the exact
+  // raw fetched text) -- falls back to the raw content if formatting the
+  // *current* content fails, which can only happen after a reload changed
+  // the underlying bytes out from under an active 'pretty'/'minified' mode
+  // (setFormat itself refuses to turn the mode on for invalid content).
+  $: displayContent = activeTab
+    ? (formatContent(activeTab.content, languageForFilename(activeTab.name), activeTab.format) ??
+      activeTab.content)
+    : ''
 
   $: filteredAllSources = filterConnections(allSources, connectionsQuery)
 
@@ -128,6 +171,9 @@
         wrapEnabled: false,
         showWhitespace: false,
         bookmarks: [],
+        markPatterns: [],
+        format: 'none',
+        following: false,
       }
       tabs = [...tabs, tab]
       activeKey = key
@@ -140,7 +186,57 @@
 
   async function handleOpen(event: CustomEvent<{ path: string; member: string | null; name: string }>) {
     const { path, member, name } = event.detail
+    if (compareArmed) {
+      await pickCompareTarget(path, member, name)
+      return
+    }
     await openFile(path, member, name)
+  }
+
+  // "Compare" (ROADMAP.md): fetches the picked file fresh, same as opening
+  // it, but doesn't add a tab for it -- it's a one-shot snapshot to diff
+  // against the active tab, not something meant to stay open on its own.
+  // Releases its scratch reference immediately after fetching, same
+  // best-effort close as every other one-shot fetch in this file.
+  async function pickCompareTarget(path: string, member: string | null, name: string) {
+    if (sourceId === null) return
+    const fetchParams = new URLSearchParams({ path })
+    if (member) fetchParams.set('member', member)
+    try {
+      const response = await fetch(`/sources/${sourceId}/open?${fetchParams.toString()}`, {
+        credentials: 'include',
+      })
+      if (!response.ok) {
+        error = `Failed to open ${name} for comparison`
+        compareArmed = false
+        return
+      }
+      const content = await response.text()
+      const scratchKey = response.headers.get('x-scratch-key')
+      compareWith = { name, content }
+      compareArmed = false
+      compareKey += 1
+      if (scratchKey) {
+        api.post(`/sources/${sourceId}/close`, { path, member }).catch(() => {})
+      }
+    } catch {
+      error = `Failed to open ${name} for comparison`
+      compareArmed = false
+    }
+  }
+
+  // Picking another already-open tab as the compare target, instead of
+  // switching to it, while "Compare" is armed.
+  function handleTabClick(tab: Tab) {
+    if (compareArmed) {
+      compareArmed = false
+      if (tab.key !== activeKey) {
+        compareWith = { name: tab.name, content: tab.content }
+        compareKey += 1
+      }
+      return
+    }
+    activeKey = tab.key
   }
 
   // Search click-through (Search.svelte pushes here with ?path=...&line=...)
@@ -194,6 +290,73 @@
     updateActiveTab({ bookmarks })
   }
 
+  // "Mark" highlighting (Notepad++ feature, ROADMAP.md) -- reuses Rule's
+  // `re:`-prefix convention (parsePatternInput) so a viewer can switch a
+  // mark to regex the same way an admin switches a rule, without a
+  // separate glob/regex toggle control cluttering this small inline form.
+  async function openMarkInput() {
+    markInputOpen = true
+    markInputValue = ''
+    await tick()
+    markInput?.focus()
+  }
+
+  function submitMarkInput() {
+    // Closing the form (both branches below) removes the input from the
+    // DOM, which fires its own blur -- and the input's on:blur also calls
+    // this function, so a plain Enter keypress would otherwise run this
+    // twice (submit, then the blur it triggers) and add the same mark
+    // twice. Clearing the value up front before doing anything else makes
+    // that second call a harmless no-op (trimmed === '').
+    const trimmed = markInputValue.trim()
+    markInputValue = ''
+    markInputOpen = false
+    if (trimmed && activeTab) {
+      const { pattern, pattern_kind } = parsePatternInput(trimmed)
+      const colorIndex = nextMarkColorIndex(activeTab.markPatterns)
+      const mark: MarkPattern = { id: crypto.randomUUID(), pattern, pattern_kind, colorIndex }
+      updateActiveTab({ markPatterns: [...activeTab.markPatterns, mark] })
+    }
+  }
+
+  function removeMark(id: string) {
+    if (!activeTab) return
+    updateActiveTab({ markPatterns: activeTab.markPatterns.filter((m) => m.id !== id) })
+  }
+
+  function clearMarks() {
+    updateActiveTab({ markPatterns: [] })
+  }
+
+  // "Beautify"/"Minify" toggle buttons (ROADMAP.md): clicking the active
+  // mode again turns it back off (-> 'none'), same toggle-button UX as
+  // Wrap/Show chars. Validates against the tab's raw content before
+  // switching modes -- a failed beautify/minify (invalid JSON/malformed
+  // XML) leaves the tab exactly as it was and surfaces `formatError`,
+  // rather than silently switching to a mode that immediately falls back
+  // to unformatted content with no explanation.
+  // Bookmarks are 1-indexed *line numbers* against whatever's currently
+  // displayed (codemirror-theme.ts's buildBookmarkDecorations) -- any
+  // format change reflows the document into a different line count, so an
+  // old bookmark's line number no longer points at the same content (or
+  // any content at all). Cleared on every format transition rather than
+  // left to silently drift or vanish out-of-range.
+  function setFormat(mode: 'pretty' | 'minified') {
+    if (!activeTab) return
+    if (activeTab.format === mode) {
+      updateActiveTab({ format: 'none', bookmarks: [] })
+      formatError = ''
+      return
+    }
+    const language = languageForFilename(activeTab.name)
+    if (formatContent(activeTab.content, language, mode) === null) {
+      formatError = `Could not ${mode === 'pretty' ? 'beautify' : 'minify'}: invalid ${language ?? 'file'} content.`
+      return
+    }
+    formatError = ''
+    updateActiveTab({ format: mode, bookmarks: [] })
+  }
+
   // Manual re-fetch of the currently open file's content in place, without
   // closing and reopening the tab -- the always-fresh-fetch model already
   // exists for a fresh *open*, this just exposes a fetch-again action for a
@@ -216,6 +379,13 @@
       const content = await response.text()
       const scratchKey = response.headers.get('x-scratch-key')
       const oldScratchKey = tab.scratchKey
+      // Deliberately keeps whatever `format` was active -- Follow (tail -f)
+      // calls this every couple of seconds, and resetting it on every
+      // fetch would silently fight a Beautify/Minify toggle into
+      // uselessness the moment Follow is also on. `displayContent`'s own
+      // `formatContent(...) ?? content` fallback already degrades
+      // gracefully to raw content if a reload's new bytes no longer parse
+      // under the active mode, so nothing here needs to force it off.
       tabs = tabs.map((t) => (t.key === tab.key ? { ...t, content, scratchKey } : t))
       if (oldScratchKey) {
         api
@@ -224,6 +394,55 @@
       }
     } catch {
       error = `Failed to reload ${tab.name}`
+    }
+  }
+
+  function toggleFollow() {
+    if (!activeTab) return
+    updateActiveTab({ following: !activeTab.following })
+  }
+
+  // "Follow" (tail -f, ROADMAP.md): client-side polling was picked over
+  // extending the agent-mode WebSocket with a "watch" command -- this
+  // needs to work uniformly across every protocol (SSH/SMB/WinRM/local),
+  // not just agent-linked sources, and there's no persistent connection to
+  // extend for the other three. The accepted cost is a full re-fetch of
+  // the whole file on every tick (same always-fresh, no-partial-read
+  // architecture as a manual Reload -- see CLAUDE.md's ephemeral-fetch
+  // rule) rather than a byte-range/tail-only read.
+  let followTimer: ReturnType<typeof setInterval> | null = null
+  let followPolling = false
+
+  function stopFollowTimer() {
+    if (followTimer) {
+      clearInterval(followTimer)
+      followTimer = null
+    }
+  }
+
+  async function followTick() {
+    // Skips a tick rather than queuing it -- if a fetch is still in
+    // flight when the next interval fires (a slow SSH/SMB round trip),
+    // overlapping reloads could land out of order.
+    if (followPolling) return
+    followPolling = true
+    try {
+      await reloadActiveTab()
+    } finally {
+      followPolling = false
+    }
+  }
+
+  // Re-evaluated whenever the active tab (a tab switch swaps in a
+  // different object) or that tab's own `following` flag changes: only
+  // ever one timer running, and only for whichever tab is both active and
+  // following -- switching away pauses it (a background tab doesn't keep
+  // polling), switching back resumes it, since the flag itself lives on
+  // the tab, not on this component.
+  $: {
+    stopFollowTimer()
+    if (activeTab?.following && sourceId !== null) {
+      followTimer = setInterval(followTick, FOLLOW_INTERVAL_MS)
     }
   }
 
@@ -285,6 +504,7 @@
   onDestroy(() => {
     window.removeEventListener('keydown', handleKeydown)
     if (copyStatusTimer) clearTimeout(copyStatusTimer)
+    stopFollowTimer()
     for (const tab of tabs) {
       if (tab.scratchKey && sourceId !== null) {
         api.post(`/sources/${sourceId}/close`, { path: tab.path, member: tab.member }).catch(() => {})
@@ -370,7 +590,7 @@
       <div class="tabs">
         {#each tabs as tab (tab.key)}
           <div class="tab" class:active={tab.key === activeKey}>
-            <button class="tab-label" on:click={() => (activeKey = tab.key)}>
+            <button class="tab-label" on:click={() => handleTabClick(tab)}>
               <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                 <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z" />
                 <path d="M14 2v4a2 2 0 0 0 2 2h4" />
@@ -383,7 +603,26 @@
           </div>
         {/each}
       </div>
-      {#if activeTab}
+      {#if activeTab && compareWith}
+        <div class="pane-toolbar">
+          <div class="toolbar-left">
+            <span class="hint">
+              Comparing <strong>{activeTab.name}</strong> ↔ <strong>{compareWith.name}</strong>
+            </span>
+          </div>
+          <div class="toolbar-right">
+            <button class="link" on:click={() => (compareWith = null)}>✕ Exit compare</button>
+          </div>
+        </div>
+        {#key compareKey}
+          <DiffPane
+            leftContent={activeTab.content}
+            rightContent={compareWith.content}
+            leftLabel={activeTab.name}
+            rightLabel={compareWith.name}
+          />
+        {/key}
+      {:else if activeTab}
         <div class="pane-toolbar">
           <div class="toolbar-left">
             <span class="hint" title="Ctrl/Cmd+F to search, Ctrl/Cmd+G to go to line">⌕ Find</span>
@@ -393,6 +632,25 @@
               on:click={() => (findAllOpen = !findAllOpen)}
             >
               Find All
+            </button>
+            <button
+              class="btn-toggle"
+              class:active={compareArmed}
+              title="Pick a second file (from the tree, or another open tab) to diff against this one"
+              on:click={() => (compareArmed = !compareArmed)}
+            >
+              Compare
+            </button>
+            {#if compareArmed}
+              <span class="hint">Pick a file in the tree or another tab to compare against…</span>
+            {/if}
+            <button
+              class="btn-toggle"
+              class:active={activeTab.following}
+              title="Follow new content like tail -f -- polls and re-fetches the whole file every few seconds"
+              on:click={toggleFollow}
+            >
+              Follow
             </button>
             <button
               class="btn-toggle"
@@ -408,6 +666,59 @@
             >
               Show chars
             </button>
+            {#if canFormat(languageForFilename(activeTab.name))}
+              <button
+                class="btn-toggle"
+                class:active={activeTab.format === 'pretty'}
+                title="Reformat for readability -- display only, never writes to the file"
+                on:click={() => setFormat('pretty')}
+              >
+                Beautify
+              </button>
+              <button
+                class="btn-toggle"
+                class:active={activeTab.format === 'minified'}
+                title="Collapse to a single line -- display only, never writes to the file"
+                on:click={() => setFormat('minified')}
+              >
+                Minify
+              </button>
+              {#if formatError}
+                <span class="hint format-error">{formatError}</span>
+              {/if}
+            {/if}
+            {#if markInputOpen}
+              <form class="mark-input" on:submit|preventDefault={submitMarkInput}>
+                <input
+                  class="input"
+                  type="text"
+                  placeholder="Highlight text (or re:regex)"
+                  bind:value={markInputValue}
+                  bind:this={markInput}
+                  on:keydown={(e) => e.key === 'Escape' && ((markInputValue = ''), (markInputOpen = false))}
+                  on:blur={submitMarkInput}
+                />
+              </form>
+            {:else}
+              <button
+                class="btn-toggle"
+                class:active={activeTab.markPatterns.length > 0}
+                title="Highlight one or more ad hoc patterns, each in its own color"
+                on:click={openMarkInput}
+              >
+                Highlight
+              </button>
+            {/if}
+            {#each activeTab.markPatterns as mark (mark.id)}
+              <span class="mark-chip">
+                <span class="mark-dot" style="background: {MARK_SWATCH_COLORS[mark.colorIndex]}"></span>
+                <span class="mark-text">{mark.pattern}</span>
+                <button class="mark-remove" title="Remove" on:click={() => removeMark(mark.id)}>×</button>
+              </span>
+            {/each}
+            {#if activeTab.markPatterns.length > 0}
+              <button class="link" on:click={clearMarks}>Clear highlights</button>
+            {/if}
             {#if goToLineOpen}
               <form class="go-to-line" on:submit|preventDefault={submitGoToLine}>
                 <input
@@ -488,16 +799,17 @@
         </div>
         <CodeMirrorPane
           bind:this={paneRef}
-          content={activeTab.content}
+          content={displayContent}
           {severityPatterns}
           filename={activeTab.name}
           wrapEnabled={activeTab.wrapEnabled}
           showWhitespace={activeTab.showWhitespace}
           bookmarks={activeTab.bookmarks}
+          markPatterns={activeTab.markPatterns}
         />
         {#if findAllOpen}
           <FindInDocumentPanel
-            content={activeTab.content}
+            content={displayContent}
             on:jump={(e) => paneRef?.scrollToLine(e.detail.line)}
             on:close={() => (findAllOpen = false)}
           />
@@ -741,6 +1053,49 @@
     width: 5.5rem;
     padding: 0.15rem 0.5rem;
     font-size: 0.75rem;
+  }
+  .mark-input .input {
+    width: 11rem;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.75rem;
+  }
+  .mark-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.1rem 0.2rem 0.1rem 0.5rem;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    max-width: 12rem;
+  }
+  .mark-dot {
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+  .mark-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mark-remove {
+    flex: 0 0 auto;
+    border: none;
+    background: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 0 0.35rem;
+    line-height: 1;
+  }
+  .mark-remove:hover {
+    color: var(--danger);
+  }
+  .format-error {
+    color: var(--danger);
   }
   .empty-state {
     flex: 1;
