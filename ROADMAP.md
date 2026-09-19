@@ -158,10 +158,13 @@ they come before any connector or UI work, not after.
 - [x] Access gated purely by `is_super_admin`, no grant can reach it
       (already true structurally since M2 — `resolve_capability`'s
       `is_system` short-circuit — this milestone was really about seeding)
-- [ ] "system" badge in the admin sources list; non-editable, non-deletable
-      — UI concern, deferred to M7 (no source CRUD API/UI exists yet at all,
-      for any source, so "non-editable" isn't meaningfully testable before
-      M7 builds source CRUD in the first place)
+- [x] "system" badge in the admin sources list; non-editable, non-deletable
+      — deferred to M7 as noted below (no source CRUD API/UI existed yet at
+      all, for any source, so "non-editable" wasn't meaningfully testable
+      before M7 built source CRUD in the first place). Landed there
+      (`routes/Sources.svelte`'s `is_system` badge + hidden edit/delete
+      actions, covered by `e2e/sources.spec.ts`) — this checkbox was simply
+      never ticked off afterward; no new code needed to close it now.
 
   Note: seeded with one broad include rule (`**/*`) rather than zero rules —
   zero rules would make the viewer show nothing at all (rules.py's explicit
