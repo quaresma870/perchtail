@@ -5,6 +5,7 @@
   import RuleEditor from '../lib/components/RuleEditor.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import SeverityPatternEditor from '../lib/components/SeverityPatternEditor.svelte'
+  import { nestFoldersFlat } from '../lib/folder-tree'
   import type { AgentTokenResult, Customer, Folder, Protocol, Source } from '../lib/types'
 
   export let params: { id?: string } = {}
@@ -76,29 +77,7 @@
   $: customerId, loadFolders()
   $: customerId, (showNewFolderForm = false)
 
-  // Folders come back flat; nest them depth-first so the select can show
-  // hierarchy (indentation) for arbitrarily deep trees.
-  function folderOptions(all: Folder[]): { folder: Folder; depth: number }[] {
-    const byParent = new Map<number | null, Folder[]>()
-    for (const f of all) {
-      const key = f.parent_folder_id
-      if (!byParent.has(key)) byParent.set(key, [])
-      byParent.get(key)!.push(f)
-    }
-    for (const list of byParent.values()) list.sort((a, b) => a.name.localeCompare(b.name))
-
-    const result: { folder: Folder; depth: number }[] = []
-    function walk(parentId: number | null, depth: number) {
-      for (const f of byParent.get(parentId) ?? []) {
-        result.push({ folder: f, depth })
-        walk(f.id, depth + 1)
-      }
-    }
-    walk(null, 0)
-    return result
-  }
-
-  $: nestedFolders = folderOptions(folders)
+  $: nestedFolders = nestFoldersFlat(folders)
 
   function handleCustomerSelectChange(event: Event) {
     const value = (event.target as HTMLSelectElement).value
