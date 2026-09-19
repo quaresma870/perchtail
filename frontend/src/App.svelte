@@ -8,6 +8,7 @@
   import ChangePassword from './routes/ChangePassword.svelte'
   import Sources from './routes/Sources.svelte'
   import SourceEditor from './routes/SourceEditor.svelte'
+  import Folders from './routes/Folders.svelte'
   import Viewer from './routes/Viewer.svelte'
   import Search from './routes/Search.svelte'
   import Alerts from './routes/Alerts.svelte'
@@ -32,6 +33,7 @@
     '/settings/sources': Sources,
     '/settings/sources/new': SourceEditor,
     '/settings/sources/:id': SourceEditor,
+    '/settings/folders': Folders,
     '/settings/roles': Roles,
     '/settings/roles/new': RoleEditor,
     '/settings/roles/:id': RoleEditor,

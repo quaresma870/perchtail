@@ -798,18 +798,13 @@ PerchTail's existing theme/design system, no visual-language changes.
       source's own display name, per spec
 - [x] `Source` list responses carry `customer_name`/`folder_name` so cards
       can show "Customer / Folder" as subtext without a separate lookup
-- [ ] Folder-tree navigation for browsing sources by customer/folder — the
-      current "All connections" list shows customer/folder as flat subtext
-      per card (enough to search/scan), not an actual expandable tree.
-      `Folder` is fully modeled and RBAC-scoped (unlimited nesting via
-      `parent_folder_id`), but nothing in the frontend renders it as a
-      tree yet; still open.
-- [ ] Dedicated folder/host management admin page (create/rename/move/
-      delete folders, move sources between them) — CLAUDE.md flags this as
-      its own admin surface and it was never built; only inline folder
-      creation from the source editor exists today (both the original gap
-      and this redesign's search box work off that same inline-create
-      flow, not a standalone page)
+- [x] Folder-tree navigation for browsing sources by customer/folder —
+      built as a "List"/"Tree" toggle alongside the existing flat list, not
+      a replacement (see notes below for why), showing the real nested
+      customer → folder → … → source hierarchy.
+- [x] Dedicated folder management admin page (create/rename/move/delete
+      folders) — see notes below for what's covered vs. left to the
+      existing per-source folder picker.
 
 ### Notes on decisions made — connections home redesign
 
@@ -837,13 +832,96 @@ PerchTail's existing theme/design system, no visual-language changes.
   bookmarked/typed URL too. The audit-log toggle described below reuses
   this same mechanism once that page exists; no dead UI was added for it
   ahead of time.
-- **Folder-tree navigation and the standalone management page are still
-  open**, deliberately deferred out of this pass — the shipped "flat list
-  with Customer / Folder subtext + search" covers the same real need
-  (find a source by where it's organized) without the added scope of a
-  real expand/collapse tree component or drag-and-drop-style folder
-  management UI. Revisit if the flat-list-with-search approach turns out
-  not to be enough at real scale.
+### Notes on decisions made — folder-tree navigation and folder management
+
+- **No new admin-gated endpoint for the Viewer's tree — it's built
+  entirely client-side from `GET /sources`**, which every authenticated
+  user (not just admins) can already call and which is already
+  RBAC-filtered via `visible_source_ids`. `SourcePublic` gained
+  `folder_path: list[{id, name}]` (`api/sources.py`), the full ancestor
+  chain root-to-leaf, computed server-side by walking each source's
+  `Folder.parent_folder` chain. This is what actually made a real nested
+  tree possible without adding a parallel RBAC-scoped `/folders` listing
+  (the existing one is admin-gated by `create_source`, per CLAUDE.md's
+  "folder management is its own admin surface"): a source's own visibility
+  already implies the caller is allowed to know what's on its own path,
+  reusing an access check that already exists rather than building a new
+  one — see the RBAC caveat below for the one place this needed more care
+  than "just walk to the top."
+  - **Found and fixed a real information-disclosure bug via `code-review`
+    before this shipped**: an unqualified `folder_path` walking all the
+    way to the top would leak the *names* of ancestor folders above
+    whatever scope actually authorized seeing a given source — e.g. a role
+    granted only at a deeply-nested folder (CLAUDE.md's "most specific
+    scope wins" per-folder grant) would learn its ungranted parent
+    folders' names too, purely as a side effect of the new field, which
+    folder-level RBAC scoping is explicitly meant to prevent. Fixed with
+    `rbac.folder_path_boundary`/`build_folder_visibility_context`: walks
+    up only to whichever scope's grant actually governs that source's
+    visibility (the granting folder itself for a folder-level grant, the
+    source's own immediate folder for a source-level exception grant, no
+    truncation at all for a customer-level grant or super-admin, since
+    those already imply visibility into the whole structure beneath them)
+    — computed once per request (all folders + the role's grants loaded
+    up front), not once per source, which also closes the N+1-query
+    concern a naive per-source lazy-relationship walk would have had on a
+    large source list.
+  - `frontend/src/lib/connection-tree.ts`'s `buildConnectionTree` turns
+    that flat, already-filtered `Source[]` into the tree purely in memory
+    — folder ids are globally unique (not scoped per customer), so one
+    flat `Map` dedupes a folder shared by multiple sources without
+    tracking per-branch lookups. A source with `customer_id: null` (the
+    built-in system source) lands under a shared "No customer" bucket
+    rather than being excluded.
+  - **Additive "List"/"Tree" toggle, not a replacement** for "All
+    connections" — the shipped flat-list-with-search redesign stays the
+    default; Tree is an alternate view over the exact same
+    already-filtered/searched source list (`buildConnectionTree(filteredAllSources)`),
+    so typing in the existing search box also filters the tree, and a
+    non-empty query force-expands every node so a match several folders
+    deep isn't hidden behind a collapsed ancestor the viewer never
+    manually opened. Expand/collapse state is plain session state, not
+    persisted.
+  - Deliberately reused a distinct component name (`ConnectionsTree.svelte`),
+    not `FolderTree.svelte` — that name is already taken by the unrelated
+    per-source *remote directory* browser (SSH/SMB paths inside one
+    source), and reusing it here would have collided both in naming and
+    in what "expand" means.
+- **Folder management admin page (`Settings → Folders`, gated by the same
+  `create_source` capability `/folders` itself already requires)**: a
+  customer picker plus a real expand-free nested tree (every folder always
+  shown, no collapse needed at admin-page scale) with per-row rename,
+  "+ Subfolder", a "move to" `<select>` (re-parent via `PATCH
+  /folders/{id}`), and delete — reusing the exact same nesting logic as
+  `SourceEditor.svelte`'s existing folder picker (refactored into a new
+  shared `lib/folder-tree.ts` rather than staying duplicated). Customer
+  *creation* is deliberately out of scope here (still only possible inline
+  from the source editor, as before) — the ask was specifically folder
+  management, and there's no admin surface for customers themselves yet to
+  extend.
+  - The "move to" picker excludes a folder's own descendants client-side
+    (so the UI doesn't even offer an obviously-cyclic move), but the
+    backend's own `_validate_parent` check in `api/folders.py` remains the
+    actual source of truth — a race against a concurrent move from another
+    session still surfaces as a normal inline error, not a client crash.
+  - **Found and fixed a real bug while writing this page's own e2e
+    coverage**: a folder row's "move to" `<select>` lists every other
+    valid target folder as an `<option>`, and those options' text content
+    counts toward the row's own text even when the dropdown is closed —
+    so a naive text-based row lookup (e.g. "find the row containing 'EU'")
+    could match a *different* row whose own move-picker happens to list
+    "EU" as an option. Not an application bug (purely a test-locator
+    fragility), but real enough to note: both new e2e specs
+    (`folders.spec.ts`, `connections-tree.spec.ts`) scope row lookups to
+    the row's `.name` element specifically, not the row's full text
+    content, to avoid it.
+  - Live-verified end-to-end in a real browser: building a 3-level nested
+    folder structure, renaming, re-parenting, the delete-protection 409
+    when a folder still has children (confirmed the error shows and the
+    folder stays, not silently removed), and the Viewer's Tree view
+    correctly nesting a source 2 folders deep alongside a second source
+    sitting directly under the same customer, with the search box
+    correctly auto-expanding to reveal a folder-name match.
 
 ## Full audit log viewer (admin-only)
 

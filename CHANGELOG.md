@@ -19,6 +19,14 @@ release ships (0.x releases may include breaking changes between minors).
   including two real bugs (a scroll-to-top regression on Follow, a
   double-add on Enter in the highlight input) found and fixed while
   building these.
+- Connections home: a "List"/"Tree" toggle for "All connections", showing
+  the real nested customer → folder → … → source hierarchy (built
+  client-side from a new `folder_path` field on each source), alongside
+  the existing flat list. A new "Folders" admin page (Settings → Folders)
+  covers create/rename/move/delete for folders. See ROADMAP.md's notes,
+  including a real RBAC information-disclosure issue (a narrowly-scoped
+  folder/source grant could leak ancestor folder names above its own
+  scope) found via code review and fixed before this shipped.
 
 ### Security
 - Audit log tamper-evidence: `AuditLog` rows are now HMAC-SHA256

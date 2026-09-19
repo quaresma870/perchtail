@@ -10,7 +10,14 @@ from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import AuditLog, Capability, GlobalCapability, User
-from app.auth.rbac import require_capability, require_global_capability, visible_source_ids
+from app.auth.rbac import (
+    FolderVisibilityContext,
+    build_folder_visibility_context,
+    folder_path_boundary,
+    require_capability,
+    require_global_capability,
+    visible_source_ids,
+)
 from app.collectors import agent as agent_collector
 from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
@@ -35,6 +42,11 @@ _CONNECTORS = {
 }
 
 
+class FolderPathEntry(BaseModel):
+    id: int
+    name: str
+
+
 class SourcePublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -44,6 +56,7 @@ class SourcePublic(BaseModel):
     customer_name: str | None
     folder_id: int | None
     folder_name: str | None
+    folder_path: list[FolderPathEntry]
     protocol: Protocol
     host: str
     port: int | None
@@ -90,8 +103,38 @@ class ConnectionCheckResult(BaseModel):
     detail: str
 
 
-def _to_public(session: Session, source: Source) -> SourcePublic:
+def _folder_path(
+    ctx: FolderVisibilityContext, folder_id: int | None, boundary_folder_id: int | None
+) -> list[FolderPathEntry]:
+    """Ancestor chain for `folder_id`, root-to-leaf, excluding the customer
+    itself -- lets a client reconstruct the nested customer/folder tree for
+    whatever sources it's RBAC-visible for, without a separate admin-gated
+    `/folders` call. Stops at `boundary_folder_id` (see
+    `rbac.folder_path_boundary`) rather than always walking to the very
+    top, so a narrow folder- or source-scoped grant doesn't leak the names
+    of ancestor folders above its own scope. Reads from `ctx.folders_by_id`
+    (built once per request) instead of each folder's lazy-loaded
+    `parent_folder` relationship, so this doesn't cost a DB round trip per
+    ancestor per source when serializing a whole source list."""
+    chain: list[Folder] = []
+    node_id = folder_id
+    while node_id is not None:
+        folder = ctx.folders_by_id.get(node_id)
+        if folder is None:
+            break
+        chain.append(folder)
+        if folder.id == boundary_folder_id:
+            break
+        node_id = folder.parent_folder_id
+    chain.reverse()
+    return [FolderPathEntry(id=f.id, name=f.name) for f in chain]
+
+
+def _to_public(
+    session: Session, source: Source, folder_ctx: FolderVisibilityContext
+) -> SourcePublic:
     rule_count = len(session.exec(select(Rule).where(Rule.source_id == source.id)).all())
+    boundary = folder_path_boundary(folder_ctx, source)
     return SourcePublic(
         id=source.id,
         name=source.name,
@@ -99,6 +142,7 @@ def _to_public(session: Session, source: Source) -> SourcePublic:
         customer_name=source.customer.name if source.customer else None,
         folder_id=source.folder_id,
         folder_name=source.folder.name if source.folder else None,
+        folder_path=_folder_path(folder_ctx, source.folder_id, boundary),
         protocol=source.protocol,
         host=source.host,
         port=source.port,
@@ -153,7 +197,8 @@ def list_sources(
     else:
         query = query.order_by(Source.id)
     sources = session.exec(query).all()
-    return [_to_public(session, s) for s in sources]
+    folder_ctx = build_folder_visibility_context(session, user)
+    return [_to_public(session, s, folder_ctx) for s in sources]
 
 
 @router.get("/recent", response_model=list[SourcePublic])
@@ -202,15 +247,21 @@ def list_recent_sources(
     sources_by_id = {
         s.id: s for s in session.exec(select(Source).where(Source.id.in_(ordered_ids))).all()
     }
-    return [_to_public(session, sources_by_id[sid]) for sid in ordered_ids if sid in sources_by_id]
+    folder_ctx = build_folder_visibility_context(session, user)
+    return [
+        _to_public(session, sources_by_id[sid], folder_ctx)
+        for sid in ordered_ids
+        if sid in sources_by_id
+    ]
 
 
 @router.get("/{source_id}", response_model=SourcePublic)
 def get_source(
     source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
+    user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
-    return _to_public(session, source)
+    return _to_public(session, source, build_folder_visibility_context(session, user))
 
 
 @router.post("", response_model=SourcePublic, status_code=status.HTTP_201_CREATED)
@@ -245,7 +296,7 @@ def create_source(
     )
     session.commit()
     session.refresh(source)
-    return _to_public(session, source)
+    return _to_public(session, source, build_folder_visibility_context(session, user))
 
 
 @router.patch("/{source_id}", response_model=SourcePublic)
@@ -293,7 +344,7 @@ def update_source(
     )
     session.commit()
     session.refresh(source)
-    return _to_public(session, source)
+    return _to_public(session, source, build_folder_visibility_context(session, user))
 
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -3,10 +3,12 @@
   import { push, router } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import ConnectionCard from '../lib/components/ConnectionCard.svelte'
+  import ConnectionsTree from '../lib/components/ConnectionsTree.svelte'
   import FolderTree from '../lib/components/FolderTree.svelte'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
   import DiffPane from '../lib/components/DiffPane.svelte'
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
+  import { buildConnectionTree } from '../lib/connection-tree'
   import { filterConnections } from '../lib/connection-filter'
   import { canFormat, formatContent, type FormatMode } from '../lib/format-content'
   import { languageForFilename } from '../lib/file-language'
@@ -97,6 +99,27 @@
     : ''
 
   $: filteredAllSources = filterConnections(allSources, connectionsQuery)
+
+  // "All connections" view toggle (ROADMAP.md's folder-tree navigation
+  // item): additive alongside the existing flat list + search, not a
+  // replacement -- List stays the default so nothing about the shipped
+  // connections-home redesign regresses. `expandedTreeIds` is plain
+  // session state (never persisted); a non-empty search query forces
+  // every node open regardless of it, so a match several folders deep
+  // isn't hidden behind a collapsed ancestor.
+  let connectionsView: 'list' | 'tree' = 'list'
+  let expandedTreeIds = new Set<string>()
+  $: connectionTree = buildConnectionTree(filteredAllSources)
+
+  function toggleTreeNode(id: string) {
+    const next = new Set(expandedTreeIds)
+    if (next.has(id)) {
+      next.delete(id)
+    } else {
+      next.add(id)
+    }
+    expandedTreeIds = next
+  }
 
   async function loadSourcePicker() {
     loading = true
@@ -539,17 +562,47 @@
         <section class="picker-column all">
           <div class="all-header">
             <h1>All connections</h1>
-            <input
-              class="input search-box"
-              type="search"
-              placeholder="Search by folder, customer, or host…"
-              bind:value={connectionsQuery}
-            />
+            <div class="all-header-controls">
+              <input
+                class="input search-box"
+                type="search"
+                placeholder="Search by folder, customer, or host…"
+                bind:value={connectionsQuery}
+              />
+              <div class="view-toggle" role="group" aria-label="View">
+                <button
+                  class="view-toggle-btn"
+                  class:active={connectionsView === 'list'}
+                  on:click={() => (connectionsView = 'list')}
+                >
+                  List
+                </button>
+                <button
+                  class="view-toggle-btn"
+                  class:active={connectionsView === 'tree'}
+                  on:click={() => (connectionsView = 'tree')}
+                >
+                  Tree
+                </button>
+              </div>
+            </div>
           </div>
           {#if filteredAllSources.length === 0}
             <p class="hint">
               {connectionsQuery.trim() ? 'No connections match that search.' : 'No sources visible to your account.'}
             </p>
+          {:else if connectionsView === 'tree'}
+            <div class="connections-tree-body">
+              {#each connectionTree as node (node.id)}
+                <ConnectionsTree
+                  {node}
+                  expandedIds={expandedTreeIds}
+                  forceExpand={connectionsQuery.trim().length > 0}
+                  on:toggle={(e) => toggleTreeNode(e.detail.id)}
+                  on:open={(e) => push(`/viewer/${e.detail.source.id}`)}
+                />
+              {/each}
+            </div>
           {:else}
             <ul>
               {#each filteredAllSources as s (s.id)}
@@ -855,9 +908,40 @@
     gap: 1rem;
     flex-wrap: wrap;
   }
+  .all-header-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
   .search-box {
     width: 280px;
     max-width: 100%;
+  }
+  .view-toggle {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.1rem;
+  }
+  .view-toggle-btn {
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    padding: 0.2rem 0.7rem;
+    font-size: 0.76rem;
+    font-weight: 600;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .view-toggle-btn.active {
+    background: var(--accent-soft);
+    color: var(--accent-hover);
+  }
+  .connections-tree-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
   }
   .picker-column ul {
     list-style: none;

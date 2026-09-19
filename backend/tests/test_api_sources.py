@@ -505,6 +505,210 @@ def test_source_public_names_are_null_without_customer_or_folder(session, admin_
     body = response.json()
     assert body["customer_name"] is None
     assert body["folder_name"] is None
+    assert body["folder_path"] == []
+
+
+def test_source_public_folder_path_is_root_to_leaf_for_nested_folders(session, admin_client):
+    customer = _make_customer(session, "Acme Corp")
+    grandparent = Folder(name="EU", customer_id=customer.id)
+    session.add(grandparent)
+    session.commit()
+    session.refresh(grandparent)
+    parent = Folder(name="Production", customer_id=customer.id, parent_folder_id=grandparent.id)
+    session.add(parent)
+    session.commit()
+    session.refresh(parent)
+    leaf = Folder(name="App1", customer_id=customer.id, parent_folder_id=parent.id)
+    session.add(leaf)
+    session.commit()
+    session.refresh(leaf)
+    source = Source(
+        name="app01",
+        customer_id=customer.id,
+        folder_id=leaf.id,
+        protocol=Protocol.ssh,
+        host="h1",
+        base_path="/var/log",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    response = admin_client.get(f"/sources/{source.id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["folder_name"] == "App1"
+    assert [entry["name"] for entry in body["folder_path"]] == ["EU", "Production", "App1"]
+    assert [entry["id"] for entry in body["folder_path"]] == [grandparent.id, parent.id, leaf.id]
+
+
+def test_source_public_folder_path_is_single_entry_for_top_level_folder(session, admin_client):
+    customer = _make_customer(session, "Acme Corp")
+    folder = Folder(name="Production", customer_id=customer.id)
+    session.add(folder)
+    session.commit()
+    session.refresh(folder)
+    source = Source(
+        name="app01",
+        customer_id=customer.id,
+        folder_id=folder.id,
+        protocol=Protocol.ssh,
+        host="h1",
+        base_path="/var/log",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    response = admin_client.get(f"/sources/{source.id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert [entry["name"] for entry in body["folder_path"]] == ["Production"]
+
+
+def _make_nested_folders(session, customer):
+    """EU -> Production -> App1, three levels deep under `customer`."""
+    grandparent = Folder(name="EU", customer_id=customer.id)
+    session.add(grandparent)
+    session.commit()
+    session.refresh(grandparent)
+    parent = Folder(name="Production", customer_id=customer.id, parent_folder_id=grandparent.id)
+    session.add(parent)
+    session.commit()
+    session.refresh(parent)
+    leaf = Folder(name="App1", customer_id=customer.id, parent_folder_id=parent.id)
+    session.add(leaf)
+    session.commit()
+    session.refresh(leaf)
+    return grandparent, parent, leaf
+
+
+def test_folder_path_truncated_above_a_folder_scoped_grant(session, client_for):
+    # A role granted only at "Production" (the middle folder) shouldn't
+    # learn that "EU" (its ungranted ancestor) even exists -- the grant
+    # authorizes Production and everything beneath it, not above it.
+    customer = _make_customer(session, "Acme Corp")
+    grandparent, parent, leaf = _make_nested_folders(session, customer)
+    source = Source(
+        name="app01",
+        customer_id=customer.id,
+        folder_id=leaf.id,
+        protocol=Protocol.ssh,
+        host="h1",
+        base_path="/var/log",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    role = Role(name="folder-scoped-role")
+    session.add(role)
+    session.commit()
+    session.refresh(role)
+    session.add(
+        RoleGrant(
+            role_id=role.id,
+            scope_type=ScopeType.folder,
+            scope_id=parent.id,
+            capabilities=[Capability.view],
+        )
+    )
+    session.commit()
+    user = User(username="folder-scoped@example.com", role_id=role.id)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    response = client_for(user).get(f"/sources/{source.id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert [entry["name"] for entry in body["folder_path"]] == ["Production", "App1"]
+
+
+def test_folder_path_truncated_to_immediate_folder_for_source_scoped_grant(session, client_for):
+    # A source-level exception grant says nothing about that source's
+    # folder ancestry beyond the immediate folder it happens to sit in --
+    # same information `folder_name` alone already exposed before
+    # `folder_path` existed.
+    customer = _make_customer(session, "Acme Corp")
+    _grandparent, parent, leaf = _make_nested_folders(session, customer)
+    source = Source(
+        name="app01",
+        customer_id=customer.id,
+        folder_id=leaf.id,
+        protocol=Protocol.ssh,
+        host="h1",
+        base_path="/var/log",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    role = Role(name="source-scoped-role")
+    session.add(role)
+    session.commit()
+    session.refresh(role)
+    session.add(
+        RoleGrant(
+            role_id=role.id,
+            scope_type=ScopeType.source,
+            scope_id=source.id,
+            capabilities=[Capability.view],
+        )
+    )
+    session.commit()
+    user = User(username="source-scoped@example.com", role_id=role.id)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    response = client_for(user).get(f"/sources/{source.id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert [entry["name"] for entry in body["folder_path"]] == ["App1"]
+    assert parent.name not in [entry["name"] for entry in body["folder_path"]]
+
+
+def test_folder_path_not_truncated_for_customer_scoped_grant(session, client_for):
+    # A customer-level grant already implies visibility into the whole
+    # customer's structure, so the full ancestor chain is shown, same as
+    # for a super-admin.
+    customer = _make_customer(session, "Acme Corp")
+    grandparent, parent, leaf = _make_nested_folders(session, customer)
+    source = Source(
+        name="app01",
+        customer_id=customer.id,
+        folder_id=leaf.id,
+        protocol=Protocol.ssh,
+        host="h1",
+        base_path="/var/log",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+
+    role = Role(name="customer-scoped-role")
+    session.add(role)
+    session.commit()
+    session.refresh(role)
+    session.add(
+        RoleGrant(
+            role_id=role.id,
+            scope_type=ScopeType.customer,
+            scope_id=customer.id,
+            capabilities=[Capability.view],
+        )
+    )
+    session.commit()
+    user = User(username="customer-scoped@example.com", role_id=role.id)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    response = client_for(user).get(f"/sources/{source.id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert [entry["name"] for entry in body["folder_path"]] == ["EU", "Production", "App1"]
 
 
 def test_recent_sources_orders_most_recent_first_and_dedupes(session, client_for):
