@@ -8,7 +8,12 @@ const SYSTEM_SOURCE_NAME = 'PerchTail application logs'
 test('opening the built-in log source lists and displays its own log file', async ({ page }) => {
   await page.goto('/#/viewer')
 
-  await page.getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
+  // "All connections" always lists every source regardless of visit
+  // history; "Recent" only gains an entry once a source has actually been
+  // opened, so scoping to "All connections" stays a single match
+  // regardless of whether an earlier spec in this run already opened this
+  // same built-in source.
+  await page.locator('.picker-column.all').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
   await expect(page).toHaveURL(/#\/viewer\/\d+$/)
 
   // TimedRotatingFileHandler (app/logging_config.py) opens perchtail.log
