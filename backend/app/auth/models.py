@@ -169,3 +169,36 @@ class AuditLog(SQLModel, table=True):
     target_id: int | None = None
     timestamp: datetime = Field(default_factory=utcnow)
     event_metadata: dict | None = Field(default=None, sa_column=Column("metadata", JSON))
+    # Tamper-evidence hash chain (see app/audit_hash_chain.py) -- row_hash
+    # covers this row's own fields plus prev_hash, so altering or deleting a
+    # row anywhere breaks every hash after it. Both nullable: a row written
+    # before this feature existed has neither until
+    # audit_hash_chain.backfill_chain_if_needed runs once at startup.
+    prev_hash: str | None = None
+    row_hash: str | None = None
+
+
+class AuditChainState(SQLModel, table=True):
+    """Singleton bookkeeping row for the AuditLog hash chain -- two
+    independent concerns share it: (1) the chain anchor (anchor_row_id/
+    anchor_hash), the newest row purged under retention so far, so
+    app.audit_purge.run_audit_purge_sweep deleting old rows doesn't look
+    like a tamper break to verification -- the first surviving row is
+    expected to chain from this hash, not from None; and (2) the result of
+    the most recent app.audit_integrity.verify_chain() pass, read by the
+    Audit Log page's integrity banner. Singleton by convention, same as
+    MonitoringToken -- there is exactly one chain, so exactly one state
+    row."""
+
+    __tablename__ = "audit_chain_state"
+
+    id: int | None = Field(default=None, primary_key=True)
+    anchor_row_id: int | None = None
+    anchor_hash: str | None = None
+    last_checked_at: datetime | None = None
+    # "unknown" until the first verify_chain() call ever runs -- with this
+    # feature's very long default check interval (see
+    # Settings.audit_integrity_check_interval_days), that could otherwise be
+    # up to a year after upgrade with nothing to show on the banner.
+    status: str = "unknown"
+    broken_row_id: int | None = None

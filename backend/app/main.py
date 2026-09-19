@@ -31,6 +31,8 @@ from app.api.sources import router as sources_router
 from app.api.sso import router as sso_router
 from app.api.system_settings import router as system_settings_router
 from app.api.users import router as users_router
+from app.audit_hash_chain import backfill_chain_if_needed
+from app.audit_integrity import run_audit_integrity_check
 from app.audit_purge import run_audit_purge_sweep
 from app.bootstrap import (
     seed_initial_super_admin,
@@ -39,6 +41,7 @@ from app.bootstrap import (
     seed_system_log_source,
 )
 from app.config import get_settings
+from app.crypto import audit_chain_key
 from app.db import engine, init_db
 from app.health import mark_started
 from app.logging_config import configure_logging, get_logger
@@ -193,6 +196,13 @@ async def lifespan(app: FastAPI):
     mark_started()
     get_agent_registry().bind_loop(asyncio.get_running_loop())
     with Session(engine) as session:
+        # Must run before anything below that could write an AuditLog row --
+        # see backfill_chain_if_needed's own docstring for why order matters
+        # here.
+        backfilled = backfill_chain_if_needed(audit_chain_key(), session)
+        if backfilled:
+            logger.info("audit_hash_chain.backfill_complete", rows=backfilled)
+        session.commit()
         seed_system_log_source(session)
         seed_initial_super_admin(session)
         seed_no_access_role(session)
@@ -219,6 +229,11 @@ async def lifespan(app: FastAPI):
         run_audit_purge_sweep,
         "interval",
         seconds=settings.audit_purge_interval_seconds,
+    )
+    scheduler.add_job(
+        run_audit_integrity_check,
+        "interval",
+        days=settings.audit_integrity_check_interval_days,
     )
     scheduler.start()
     logger.info("startup.complete")

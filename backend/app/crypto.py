@@ -44,6 +44,37 @@ def _derive_fernet_key(secret: str) -> bytes:
     return base64.urlsafe_b64encode(kdf.derive(secret.encode("utf-8")))
 
 
+def _derive_audit_chain_key(secret: str) -> bytes:
+    """A second key derived from the same root secret
+    (CREDENTIAL_ENCRYPTION_KEY) and the same per-install salt as the Fernet
+    key above, but domain-separated from it by folding a fixed,
+    purpose-specific label into the KDF's input material rather than by
+    using a different salt. This is deliberately NOT a refactor of
+    _derive_fernet_key -- that derivation must never change, or every
+    already-encrypted credential in an existing deployment becomes
+    undecryptable (see its own "breaking for existing deployments"
+    history). Used to key app/audit_hash_chain.py's HMAC so the audit-log
+    hash chain can't be recomputed by anyone who only has the SQLite file
+    (a stolen backup, or limited SQL access) -- a bare, keyless hash chain
+    is fully reproducible from public data with the same public algorithm
+    this project ships, which would make tampering silently undetectable
+    against exactly the "compromised admin account" threat this feature
+    exists for."""
+    salt = _load_or_create_salt(Path(get_settings().credential_salt_path))
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=_KEY_LENGTH_BYTES,
+        salt=salt,
+        iterations=_PBKDF2_ITERATIONS,
+    )
+    return kdf.derive(f"perchtail-audit-chain-hmac:{secret}".encode())
+
+
+@lru_cache
+def audit_chain_key() -> bytes:
+    return _derive_audit_chain_key(get_settings().credential_encryption_key)
+
+
 def build_fernet(secret: str) -> Fernet:
     """Exposed (not just the cached singleton below) for
     app/rotate_credential_key.py, which needs two independent Fernet

@@ -1,8 +1,10 @@
 import pytest
 from app.config import get_settings
 from app.crypto import (
+    _derive_audit_chain_key,
     _derive_fernet_key,
     _fernet,
+    audit_chain_key,
     decrypt_credential,
     decrypt_secret,
     encrypt_credential,
@@ -14,6 +16,7 @@ from cryptography.fernet import InvalidToken
 def _reset_caches():
     get_settings.cache_clear()
     _fernet.cache_clear()
+    audit_chain_key.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -123,3 +126,57 @@ def test_derive_fernet_key_is_not_a_bare_sha256_digest(monkeypatch, tmp_path):
 
     naive_sha256 = base64.urlsafe_b64encode(hashlib.sha256(b"a-key").digest())
     assert derived != naive_sha256
+
+
+# --- audit chain HMAC key (app/audit_hash_chain.py) ---------------------------
+
+
+def test_audit_chain_key_differs_from_the_fernet_key(monkeypatch, tmp_path):
+    # Same root secret, same salt file, but domain-separated by a different
+    # KDF input label -- see _derive_audit_chain_key's own docstring for
+    # why these must never be the same value (or trivially derivable from
+    # each other).
+    _configure(monkeypatch, tmp_path, key="a-key")
+
+    fernet_key = _derive_fernet_key("a-key")
+    chain_key = _derive_audit_chain_key("a-key")
+
+    assert chain_key != fernet_key
+
+
+def test_audit_chain_key_is_stable_across_calls(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path, key="a-key")
+
+    first = _derive_audit_chain_key("a-key")
+    second = _derive_audit_chain_key("a-key")
+
+    assert first == second
+
+
+def test_audit_chain_key_reuses_the_persisted_salt_not_a_fresh_one(monkeypatch, tmp_path):
+    """Same real-world scenario as _derive_fernet_key's equivalent test: a
+    restart must derive the *same* key, or every AuditLog row written
+    before it becomes permanently unverifiable."""
+    _configure(monkeypatch, tmp_path, key="a-key")
+    first = _derive_audit_chain_key("a-key")
+
+    _reset_caches()
+    second = _derive_audit_chain_key("a-key")
+
+    assert first == second
+
+
+def test_audit_chain_key_differs_across_installs_with_different_salts(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path, key="same-passphrase", salt_subdir="install-a")
+    key_a = _derive_audit_chain_key("same-passphrase")
+
+    _configure(monkeypatch, tmp_path, key="same-passphrase", salt_subdir="install-b")
+    key_b = _derive_audit_chain_key("same-passphrase")
+
+    assert key_a != key_b
+
+
+def test_audit_chain_key_singleton_reads_from_settings(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path, key="a-key")
+
+    assert audit_chain_key() == _derive_audit_chain_key("a-key")
