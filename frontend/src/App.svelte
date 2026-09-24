@@ -20,6 +20,7 @@
   import SystemSettings from './routes/SystemSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
   import SessionsSettings from './routes/SessionsSettings.svelte'
+  import SecuritySettings from './routes/SecuritySettings.svelte'
   import AuditLogSettings from './routes/AuditLogSettings.svelte'
 
   const routes = {
@@ -42,6 +43,7 @@
     '/settings/system': SystemSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
     '/settings/sessions': SessionsSettings,
+    '/settings/security': SecuritySettings,
     '/settings/audit-log': AuditLogSettings,
   }
 

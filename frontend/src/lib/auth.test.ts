@@ -18,6 +18,7 @@ function user(overrides: Partial<CurrentUser> = {}): CurrentUser {
     role_id: 2,
     active: true,
     must_change_password: false,
+    mfa_enabled: false,
     is_super_admin: false,
     global_capabilities: [],
     ...overrides,
@@ -58,6 +59,28 @@ describe('login/logout/refreshCurrentUser', () => {
     const result = await login('alice', 'hunter2')
     expect(result).toEqual(u)
     expect(get(currentUser)).toEqual(u)
+    expect(api.post).toHaveBeenCalledWith('/auth/login', {
+      username: 'alice',
+      password: 'hunter2',
+      mfa_code: undefined,
+    })
+  })
+
+  it('login forwards an mfa_code when given one', async () => {
+    const u = user({ mfa_enabled: true })
+    vi.mocked(api.post).mockResolvedValue(u)
+    await login('alice', 'hunter2', '123456')
+    expect(api.post).toHaveBeenCalledWith('/auth/login', {
+      username: 'alice',
+      password: 'hunter2',
+      mfa_code: '123456',
+    })
+  })
+
+  it('login rejects without setting currentUser when MFA is required', async () => {
+    vi.mocked(api.post).mockRejectedValue(new ApiError(401, 'Authentication code required', 'mfa_required'))
+    await expect(login('alice', 'hunter2')).rejects.toMatchObject({ errorCode: 'mfa_required' })
+    expect(get(currentUser)).toBeNull()
   })
 
   it('logout clears currentUser', async () => {

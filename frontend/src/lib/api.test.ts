@@ -52,6 +52,32 @@ describe('api.get', () => {
     })
   })
 
+  it('parses a structured detail object into message + errorCode', async () => {
+    mockFetchOnce({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+      json: async () => ({
+        detail: { message: 'Authentication code required', error_code: 'mfa_required' },
+      }),
+    })
+    await expect(api.get('/auth/login')).rejects.toMatchObject({
+      status: 401,
+      detail: 'Authentication code required',
+      errorCode: 'mfa_required',
+    })
+  })
+
+  it('leaves errorCode undefined for a plain-string detail', async () => {
+    mockFetchOnce({
+      ok: false,
+      status: 403,
+      statusText: 'Forbidden',
+      json: async () => ({ detail: 'nope' }),
+    })
+    await expect(api.get('/sources/1')).rejects.toMatchObject({ detail: 'nope', errorCode: undefined })
+  })
+
   it('falls back to statusText when the error response has no JSON body', async () => {
     mockFetchOnce({
       ok: false,

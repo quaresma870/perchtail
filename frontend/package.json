@@ -17,6 +17,7 @@
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tsconfig/svelte": "^5.0.8",
     "@types/node": "^26.4.1",
+    "@types/qrcode": "^1.5.6",
     "jsdom": "^30.0.1",
     "svelte": "^5.57.0",
     "svelte-check": "^4.7.6",
@@ -36,6 +37,7 @@
     "@codemirror/state": "^6.7.4",
     "@codemirror/view": "^6.43.11",
     "codemirror": "^6.0.2",
+    "qrcode": "^1.5.4",
     "svelte-spa-router": "^5.1.1"
   }
 }

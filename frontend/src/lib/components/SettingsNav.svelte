@@ -12,6 +12,7 @@
     <a href="#/settings/folders" class:active={isActive('/settings/folders')}>Folders</a>
   {/if}
   <a href="#/settings/sessions" class:active={isActive('/settings/sessions')}>Sessions</a>
+  <a href="#/settings/security" class:active={isActive('/settings/security')}>Security</a>
   {#if hasCapability($currentUser, 'manage_roles')}
     <a href="#/settings/roles" class:active={isActive('/settings/roles')}>Roles</a>
   {/if}

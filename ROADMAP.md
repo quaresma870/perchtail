@@ -1373,9 +1373,9 @@ Everything below is a candidate, not yet triaged into "must-have before
       (`AuthSession` already exists at the data layer) with the ability to
       revoke one remotely — useful on its own, and a prerequisite for any
       "someone else is logged in as me" incident response — see notes below
-- [ ] Optional TOTP/MFA for local accounts — SSO already delegates this to
+- [x] Optional TOTP/MFA for local accounts — SSO already delegates this to
       the IdP, but the local break-glass account (and any org that doesn't
-      enable SSO) has no second factor today
+      enable SSO) has no second factor today — see notes below
 - [x] Audit log tamper-evidence (e.g. hash-chaining `AuditLog` rows) so a
       compromised admin account can't quietly edit history without it
       being detectable — see notes below
@@ -1773,6 +1773,141 @@ two:
   mean the banner claimed a clean bill of health for up to a year on a
   chain nobody had actually looked at yet.
 
+### Notes on decisions made — optional TOTP/MFA for local accounts
+
+- **`pyotp` for the TOTP algorithm itself, not a hand-rolled HMAC
+  implementation** — this is a place where getting a subtle detail wrong
+  (padding, time-step rounding, constant-time comparison) silently breaks
+  security rather than throwing, and `pyotp` is small, unmaintained-risk-free
+  in the sense that TOTP (RFC 6238) hasn't changed, and already MIT-licensed
+  like the rest of this project's dependency choices.
+- **Two-phase enrollment, not "generate a secret and flip `mfa_enabled` in
+  one call."** `start_enrollment` persists a pending, Fernet-encrypted
+  secret but leaves `mfa_enabled = False`; `confirm_enrollment` only flips
+  it once the caller proves they can produce a valid code from what they
+  actually scanned. Without this split, a QR-scan typo or a wrong app would
+  silently brick the account's next login with no way back in short of
+  break-glass DB surgery.
+- **The TOTP secret is reversibly encrypted (`app.crypto.encrypt_secret`,
+  the same Fernet scheme as `Source.credential_ref`); the 10 backup codes
+  are one-way argon2 hashes**, not the other way around — the secret has to
+  be fed back into the TOTP algorithm on every login, so it must be
+  recoverable; a backup code only ever needs an equality check against what
+  the user typed, so it never needs to be decrypted back to plaintext, and
+  hashing it is strictly the safer choice.
+- **Backup codes are shown exactly once, at confirm time, and never
+  again** — `MfaBackupCode` stores only the hash, so even an admin
+  inspecting the database can't recover a lost set; the only path back is
+  `/auth/mfa/backup-codes/regenerate`, which invalidates the old set
+  entirely rather than appending to it.
+- **`LocalPasswordProvider.authenticate()` no longer finalizes a login on
+  its own.** Before MFA existed, a correct password immediately set
+  `last_login_at` and wrote a `user.login` audit event. Left unchanged,
+  that would mean a password-correct-but-MFA-still-pending attempt already
+  looked like a completed, audited sign-in — wrong for a tool whose audit
+  log is meant to be a trustworthy record (see the tamper-evidence work
+  above). Split into `authenticate()` (credentials only) and a new
+  `complete_login()`, called only after every required factor — password,
+  and MFA if enabled — has actually succeeded.
+- **A missing MFA code doesn't count against the login throttle; a
+  wrong one does.** The first `POST /auth/login` after a correct password
+  legitimately omits `mfa_code` — that's the client correctly stopping to
+  ask the user for one, not a guess that failed, so it shouldn't move
+  `login_throttle`'s counter. A present-but-wrong code is a real guess and
+  does count, closing off using the MFA code field itself as an
+  unthrottled brute-force surface.
+- **A structured `detail` on the 401s that need it** (`{"message": ...,
+  "error_code": "mfa_required" | "mfa_invalid_code"}`), not a new response
+  shape or a different status code — FastAPI's `HTTPException.detail`
+  already accepts a dict, every other endpoint's plain-string `detail`
+  keeps working unchanged, and the frontend's `ApiError` gained an optional
+  `errorCode` that's simply `undefined` for the plain-string case.
+- **MFA setup is entirely self-service in v1 — there's no admin
+  "reset this other user's MFA" capability.** An admin can already
+  deactivate an account or reset its password (`/users/{id}/reset-password`);
+  there's no equivalent "clear this user's MFA" endpoint yet. Accepted as a
+  real gap for now (a lost phone plus lost backup codes means the affected
+  user is locked out until an admin resets their password *and* the account
+  happens to still be reachable some other way, or a break-glass DB edit) —
+  deferred rather than guessed at, since the right shape for an admin-reset
+  capability (its own audit action, whether it should require re-confirming
+  the admin's own password, whether it belongs on the Users page or a new
+  per-user detail view) deserves its own design pass instead of being bolted
+  on here.
+- **The Security settings page (`/settings/security`) is ungated and
+  listed for every logged-in user**, unlike most of the settings nav which
+  is capability-gated — MFA is a property of *your own* account, the same
+  reasoning `/settings/sessions` already uses for the exact same "always
+  visible, self-service only" placement.
+- **The login page's second step lives entirely inside `Login.svelte` /
+  `lib/auth.ts`, not `App.svelte`'s existing `must_change_password`
+  redirect.** That redirect only works post-session (`$currentUser` is
+  only populated after a successful login), but a password-correct,
+  MFA-pending attempt has no session yet — so the "enter your code" step
+  has to be client-side state inside the login form itself, re-submitting
+  the same username/password alongside the code once the user has one.
+- **The e2e spec (`e2e/mfa.spec.ts`) runs its throwaway user's entire
+  login/enroll/disable flow in a separate `browser.newContext()`, not the
+  shared `page` fixture.** The `page` fixture starts already authenticated
+  from `e2e/.auth/admin.json`, which every other spec's storageState is
+  seeded from — clicking "Log out" on it deletes that session row
+  server-side (`auth/sessions.py`'s `delete_session`), which would
+  permanently break every spec that runs after it in the same worker. A
+  second, independently-logged-in context avoids ever touching that
+  session; the admin `page` is only used to create and later deactivate the
+  throwaway user. A hand-rolled RFC 6238 TOTP generator
+  (`e2e/totp.ts`, Node's built-in `crypto`) computes real codes against the
+  secret `/auth/mfa/enroll` returns, rather than pulling in an otplib-style
+  dependency for one test file — cross-checked against `pyotp`'s own output
+  for the same secret/timestamp before trusting it.
+
+**Four real issues found via code review and fixed before this shipped:**
+- **A live TOTP code was replayable within its own ~90s acceptance
+  window.** `pyotp`'s own `verify()` only checks whether a code is
+  currently valid, not whether it's already been used — a backup code was
+  already single-use via `MfaBackupCode.used_at`, but nothing gave a live
+  code the same property. Fixed by adding `User.mfa_last_used_step` and a
+  new `_consume_totp_code`, which only accepts a code whose time-step
+  counter is strictly newer than the last one this user successfully used.
+  Implementing this surfaced a real bug of its own: `pyotp.TOTP.at()` takes
+  a *timestamp*, not a raw counter — an initial version passed the counter
+  value straight to `.at()`, which silently computed the wrong code every
+  time (interpreting a counter like `59676303` as a Unix timestamp from
+  1972) rather than raising, so it looked plausible until a test actually
+  exercised it. Fixed by using `.at(now, counter_offset=offset)`, which
+  `pyotp` already provides for exactly this "N steps from now" case.
+- **`/auth/mfa/enroll` required only an active session, no password.**
+  Unlike `/disable` and `/backup-codes/regenerate`, which already required
+  re-confirming the password given "the stakes are higher," enroll had no
+  such check and didn't reject re-enrolling while MFA was already on. A
+  stolen session token (XSS, a shared browser) was therefore enough to
+  silently replace a victim's confirmed secret and backup codes with ones
+  only the attacker controls, while `mfa_enabled` stayed `true` and looked
+  intact. Fixed by requiring password re-confirmation on enroll too (a
+  shared `MfaPasswordConfirmRequest` / `_require_password_reconfirmation`
+  now backs all three self-service endpoints) and rejecting enrollment
+  outright while already enabled — disable first, then re-enroll.
+- **The state change and its audit event weren't atomic.**
+  `confirm_enrollment`/`disable_mfa`/`regenerate_backup_codes`/the backup-
+  code half of `verify_mfa_code` each committed on their own, separately
+  from the calling endpoint's later `record_audit_event` + commit — a crash
+  in between would leave MFA enabled/disabled/rotated with no matching
+  `AuditLog` row, the exact gap the audit log's tamper-evidence work above
+  exists to avoid. Fixed by having none of `app/auth/mfa.py`'s functions
+  commit on their own (`start_enrollment` is the one exception, since it
+  has no paired audit event); each endpoint's own single `session.commit()`
+  now covers the state change and its audit write together, matching
+  `app/audit.py`'s own "callers include this in their own transaction"
+  convention.
+- **The password re-check on `/disable` and `/backup-codes/regenerate` had
+  no rate limit.** A stolen session token could otherwise brute-force the
+  account password through either endpoint at argon2id-timing speed, with
+  none of `/auth/login`'s own lockout protecting it. Fixed by having
+  `_require_password_reconfirmation` reuse `app.login_throttle` directly,
+  keyed by the same username — the same "repeated password guessing
+  against one account" threat model already covers this, whichever
+  endpoint the guesses come through.
+
 ## Frontend E2E testing (Playwright)
 
 Everything on this roadmap so far is covered end-to-end only by backend
@@ -1823,7 +1958,10 @@ it correctly; only exercising the real page does that.
       via the retention control rather than assuming prior specs left
       matching rows behind, and its tamper-evidence integrity banner
       resolving to "chain intact" against a real, unmodified `AuditLog`
-      after clicking "Verify now" (`audit-log.spec.ts`)
+      after clicking "Verify now" (`audit-log.spec.ts`); TOTP/MFA
+      enroll-confirm-login-disable against a throwaway user, using a
+      hand-rolled TOTP code generator rather than a new dependency
+      (`mfa.spec.ts`)
 - [x] CI job (`.github/workflows/ci.yml`'s `e2e` job) — separate from the
       existing `backend`/`frontend` jobs since it needs both toolchains
 

@@ -1,11 +1,16 @@
 export class ApiError extends Error {
   status: number
   detail: string
+  // Set only for endpoints that send a structured `detail` object (e.g.
+  // login's mfa_required/mfa_invalid_code) instead of the usual plain
+  // string — callers that don't care can ignore it.
+  errorCode?: string
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, errorCode?: string) {
     super(detail)
     this.status = status
     this.detail = detail
+    this.errorCode = errorCode
   }
 }
 
@@ -18,13 +23,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     let detail = response.statusText
+    let errorCode: string | undefined
     try {
       const body = await response.json()
-      detail = body.detail ?? detail
+      if (body.detail && typeof body.detail === 'object') {
+        detail = body.detail.message ?? detail
+        errorCode = body.detail.error_code
+      } else {
+        detail = body.detail ?? detail
+      }
     } catch {
       // no JSON body — keep the status text
     }
-    throw new ApiError(response.status, detail)
+    throw new ApiError(response.status, detail, errorCode)
   }
 
   if (response.status === 204) {

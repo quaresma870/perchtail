@@ -18,6 +18,7 @@ export interface CurrentUser {
   role_id: number
   active: boolean
   must_change_password: boolean
+  mfa_enabled: boolean
   is_super_admin: boolean
   global_capabilities: GlobalCapability[]
 }
@@ -200,6 +201,15 @@ export interface AuthSessionInfo {
   expires_at: string
   user_agent: string | null
   is_current: boolean
+}
+
+export interface MfaEnrollResponse {
+  secret: string
+  otpauth_uri: string
+}
+
+export interface MfaBackupCodesResponse {
+  backup_codes: string[]
 }
 
 export interface Alert {
