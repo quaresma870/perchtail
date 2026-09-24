@@ -38,10 +38,11 @@ Most of a pre-1.0 security-hardening pass is done too — login lockout,
 CSP/security headers, CI-blocking dependency and container-image
 vulnerability scanning, `CREDENTIAL_ENCRYPTION_KEY` rotation with a
 tooled migration path, salted PBKDF2 key derivation, persisted SSH
-host-key pinning, a Sessions page for revoking a login remotely, and a
-DNS-rebind-safe outbound webhook fetcher — see ROADMAP.md's "Security
-hardening" section for what's still open (optional local-account MFA,
-audit-log tamper-evidence, a formal third-party review). Covered
+host-key pinning, a Sessions page for revoking a login remotely, a
+DNS-rebind-safe outbound webhook fetcher, optional TOTP/MFA for local
+accounts, and audit-log tamper-evidence (HMAC hash-chained, periodically
+verified) — see ROADMAP.md's "Security hardening" section for what's
+still open (mainly a formal third-party review). Covered
 end-to-end by `pytest` (backend), `vitest` (frontend units), and a
 Playwright suite that drives the real browser UI against real SSH/SMB
 test servers, not just mocks. Still pre-1.0 otherwise: SAML isn't built

@@ -74,6 +74,11 @@ class LocalPasswordProvider:
     super-admin path (see CLAUDE.md's Access control section)."""
 
     def authenticate(self, session: Session, username: str, password: str) -> User | None:
+        """Verifies credentials only — does NOT finalize the sign-in (see
+        complete_login below). A user with MFA enabled still has to clear a
+        second factor before this counts as a successful login; committing
+        last_login_at or a user.login audit event here would misrepresent
+        an only-half-completed attempt as a real one."""
         user = session.exec(select(User).where(User.username == username)).first()
         if user is None or not user.active:
             return None
@@ -83,17 +88,27 @@ class LocalPasswordProvider:
 
         if _hasher.check_needs_rehash(user.password_hash):
             user.password_hash = _hasher.hash(password)
+            session.add(user)
+            session.commit()
+            session.refresh(user)
 
-        user.last_login_at = utcnow()
-        session.add(user)
-
-        record_audit_event(
-            session,
-            user_id=user.id,
-            action="user.login",
-            target_type="user",
-            target_id=user.id,
-        )
-        session.commit()
-        session.refresh(user)
         return user
+
+
+def complete_login(session: Session, user: User) -> None:
+    """Finalizes a successful sign-in — sets last_login_at and records the
+    user.login audit event. Called once every required factor (password,
+    and MFA if user.mfa_enabled) has verified; see api/auth.py's login
+    endpoint for where this sits in the flow."""
+    user.last_login_at = utcnow()
+    session.add(user)
+
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="user.login",
+        target_type="user",
+        target_id=user.id,
+    )
+    session.commit()
+    session.refresh(user)

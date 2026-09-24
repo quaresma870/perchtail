@@ -29,6 +29,23 @@ release ships (0.x releases may include breaking changes between minors).
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- Optional TOTP/MFA for local accounts (`pyotp`). Self-service only, via a
+  new Settings → Security page: enroll by scanning a QR code (or entering
+  the secret manually), confirm with a live code before it's actually
+  turned on, and get 10 one-time backup codes shown exactly once. Once
+  enabled, `/auth/login` requires a second factor (a live TOTP code or an
+  unused backup code) after the password; a wrong code counts against the
+  existing login-throttle lockout, a missing one doesn't. A live TOTP code
+  is single-use, not just time-limited — replaying an already-accepted code
+  within its normal validity window is rejected. Enrolling, disabling, and
+  regenerating backup codes all require re-confirming the current password,
+  throttled the same way as login itself, so a stolen session token alone
+  isn't enough to take over an account's second factor. The TOTP secret
+  is Fernet-encrypted at rest (like `Source.credential_ref`); backup codes
+  are one-way argon2 hashes. See ROADMAP.md's security-hardening notes for
+  the full design, including why login finalization (`last_login_at` /
+  the `user.login` audit event) had to move behind the MFA check rather
+  than firing on password-correct alone.
 - Audit log tamper-evidence: `AuditLog` rows are now HMAC-SHA256
   hash-chained (`app/audit_hash_chain.py`), keyed by a second key derived
   from `CREDENTIAL_ENCRYPTION_KEY` (domain-separated from the credential
