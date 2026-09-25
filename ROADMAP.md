@@ -1612,6 +1612,28 @@ Everything below is a candidate, not yet triaged into "must-have before
   still carried the standard security headers (confirming the middleware
   ordering: innermost, wrapped by `SecurityHeadersMiddleware`/
   `RequestIDMiddleware`, so even a blocked response gets them).
+- **Follow-up fix: dropped scheme from the comparison entirely, comparing
+  `host[:port]` only.** Found while writing the nginx reverse-proxy
+  deployment docs: `docker-entrypoint.sh` runs uvicorn with no
+  `--proxy-headers`/`--forwarded-allow-ips` trust configured, so
+  `request.url.scheme` is always `"http"` as uvicorn sees a request
+  proxied by nginx, even when the real client connected over `https` and
+  its `Origin` header correctly says so. The original scheme-sensitive
+  comparison therefore 403'd *every* state-changing request — including
+  login — on exactly the TLS-terminating reverse-proxy setup this project
+  recommends. Reproduced directly against the middleware before fixing:
+  `POST` with `Origin: https://yourdomain.com` against a request whose
+  `scope["scheme"]` was `"http"` came back `403 "Cross-site request
+  blocked"`. Fixed by comparing only `host[:port]`, which doesn't
+  meaningfully weaken the defense — `SameSite=Strict` above is the actual
+  primary defense, this is only a fallback for a non-compliant client, and
+  a same-host request that merely differs in scheme was never the
+  cross-site attack this exists to stop. The alternative (trusting
+  `X-Forwarded-Proto` via `--forwarded-allow-ips`) was rejected: it needs
+  the reverse-proxy's address explicitly trusted, and `docker-compose.yml`
+  maps the app's port straight to the host alongside any reverse proxy a
+  deployer adds in front, so a wildcard trust would let a request that
+  bypasses the proxy entirely spoof the header instead.
 
 ### Notes on decisions made — audit findings fixed
 
