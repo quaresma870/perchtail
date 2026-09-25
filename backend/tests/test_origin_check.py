@@ -9,20 +9,22 @@ EXPECTED_ORIGIN = "http://testserver"
 
 
 @pytest.mark.parametrize(
-    "candidate,expected_origin,same",
+    "candidate,expected_netloc,same",
     [
-        ("http://localhost:8080", "http://localhost:8080", True),
-        ("http://localhost:8080/", "http://localhost:8080", True),  # trailing slash, path ignored
-        ("http://localhost:8080/settings/sources", "http://localhost:8080", True),  # Referer-style
-        ("https://localhost:8080", "http://localhost:8080", False),  # scheme differs
-        ("http://localhost:9999", "http://localhost:8080", False),  # port differs
-        ("http://evil.example", "http://localhost:8080", False),
-        ("not-a-url", "http://localhost:8080", False),
-        ("", "http://localhost:8080", False),
+        ("http://localhost:8080", "localhost:8080", True),
+        ("http://localhost:8080/", "localhost:8080", True),  # trailing slash, path ignored
+        ("http://localhost:8080/settings/sources", "localhost:8080", True),  # Referer-style
+        # Scheme deliberately ignored -- see OriginCheckMiddleware's docstring
+        # for why (uvicorn always sees "http" behind a TLS-terminating nginx).
+        ("https://localhost:8080", "localhost:8080", True),
+        ("http://localhost:9999", "localhost:8080", False),  # port differs
+        ("http://evil.example", "localhost:8080", False),
+        ("not-a-url", "localhost:8080", False),
+        ("", "localhost:8080", False),
     ],
 )
-def test_is_same_origin(candidate, expected_origin, same):
-    assert _is_same_origin(candidate, expected_origin) is same
+def test_is_same_origin(candidate, expected_netloc, same):
+    assert _is_same_origin(candidate, expected_netloc) is same
 
 
 @pytest.fixture()
@@ -84,6 +86,18 @@ def test_origin_takes_precedence_over_a_mismatched_referer(client):
         "/thing",
         headers={"origin": EXPECTED_ORIGIN, "referer": "http://evil.example/attack"},
     )
+    assert response.status_code == 200
+
+
+def test_a_TLS_terminating_reverse_proxy_is_not_blocked(client):
+    # The standard production shape: nginx terminates TLS and proxies plain
+    # HTTP to uvicorn (docker-entrypoint.sh runs it with no --proxy-headers/
+    # --forwarded-allow-ips trust), so request.url.scheme is always "http"
+    # here even though the real client's Origin is correctly "https". A
+    # scheme-sensitive comparison would 403 every login on exactly the
+    # deployment this project's docs recommend -- see
+    # OriginCheckMiddleware's docstring.
+    response = client.post("/thing", headers={"origin": "https://testserver"})
     assert response.status_code == 200
 
 

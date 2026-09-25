@@ -127,14 +127,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 _ORIGIN_CHECKED_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
-def _is_same_origin(candidate: str, expected_origin: str) -> bool:
+def _is_same_origin(candidate: str, expected_netloc: str) -> bool:
     """candidate is a raw Origin header value, or a full Referer URL -- both
-    get reduced to scheme://host[:port] before comparing, since Referer
-    carries a path/query Origin never does."""
+    get reduced to host[:port] before comparing, since Referer carries a
+    path/query Origin never does. Deliberately host-only, not
+    scheme+host -- see OriginCheckMiddleware's docstring for why comparing
+    scheme would break the standard reverse-proxy deployment this project
+    is actually meant to run behind."""
     parsed = urlsplit(candidate)
     if not parsed.scheme or not parsed.netloc:
         return False
-    return f"{parsed.scheme}://{parsed.netloc}" == expected_origin
+    return parsed.netloc == expected_netloc
 
 
 class OriginCheckMiddleware(BaseHTTPMiddleware):
@@ -162,6 +165,21 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
     backend on a different one -- see vite.config.ts, which strips
     Origin/Referer on the way through so this falls to the no-header case
     below rather than comparing two ports that are legitimately different).
+
+    Host-only, deliberately not scheme+host: uvicorn runs with no
+    --proxy-headers/--forwarded-allow-ips trust configured (see
+    docker-entrypoint.sh), so request.url.scheme is always "http" as seen
+    from nginx's plain-HTTP proxy connection, even when the real client
+    connected over https and its Origin header correctly says so. Comparing
+    scheme too would 403 every state-changing request -- including
+    login -- on exactly the TLS-terminating-reverse-proxy setup this
+    project's docs recommend (docs/source-setup.md's "reachability" note
+    and the README's deployment section). Dropping scheme from the
+    comparison doesn't meaningfully weaken this: SameSite=Strict above is
+    already the real defense; this only guards a non-compliant client, and
+    a same-host, different-scheme request is not a cross-site one in the
+    threat model CSRF checks exist for.
+
     If neither header is present at all, the request is let through to
     rely on SameSite alone -- rejecting on a merely absent header would
     also break legitimate non-browser API use (curl, scripts) that a
@@ -171,8 +189,7 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
         if request.method in _ORIGIN_CHECKED_METHODS:
             candidate = request.headers.get("origin") or request.headers.get("referer")
             if candidate is not None:
-                expected = f"{request.url.scheme}://{request.url.netloc}"
-                if not _is_same_origin(candidate, expected):
+                if not _is_same_origin(candidate, request.url.netloc):
                     return JSONResponse(
                         status_code=403, content={"detail": "Cross-site request blocked"}
                     )

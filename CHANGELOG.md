@@ -67,6 +67,16 @@ release ships (0.x releases may include breaking changes between minors).
   narrow concurrent-write race.
 
 ### Fixed
+- `OriginCheckMiddleware`'s CSRF defense-in-depth check was blocking every
+  state-changing request — including login — when deployed behind a
+  TLS-terminating reverse proxy (the standard, documented setup): uvicorn
+  runs with no proxy-header trust configured, so it always saw the
+  proxied connection's scheme as `http`, while a real browser's `Origin`
+  header correctly said `https`, and the check compared both. It now
+  compares only `host[:port]`, matching what the middleware's own
+  docstring already claimed it did. Found and verified while writing the
+  reverse-proxy deployment docs, before anyone hit it in production — see
+  ROADMAP.md's CSRF-review notes for the full reproduction and rationale.
 - CI: the `docker-image` job's Trivy scan was failing on every build (not
   just feature PRs) because `python:3.12-slim`'s baked-in OS packages had
   fallen behind Debian's own published security patches between upstream
