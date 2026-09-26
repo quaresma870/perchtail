@@ -261,6 +261,9 @@ publish in `docker-compose.yml` entirely rather than binding it to loopback.
 - [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — how to
   rotate `CREDENTIAL_ENCRYPTION_KEY` without losing access to already-
   encrypted credentials
+- [docs/high-availability.md](docs/high-availability.md) — whether/how to run
+  PerchTail behind a load balancer or in a multi-replica k3s/Kubernetes
+  deployment, broken down by solution and load-balancing type
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
   submit changes
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability

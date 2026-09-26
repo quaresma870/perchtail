@@ -1930,6 +1930,32 @@ two:
   against one account" threat model already covers this, whichever
   endpoint the guesses come through.
 
+## High availability & horizontal scaling
+
+Raised while evaluating whether PerchTail can run behind a load balancer, or
+in a multi-replica k3s/Kubernetes deployment, for real high availability
+rather than just a single self-healing pod. The honest answer today is no —
+the current architecture (SQLite with a raw FTS5 virtual table for search,
+an in-process APScheduler running five background jobs, in-memory
+login-throttle and push-agent connection state) is deliberately
+single-instance, per CLAUDE.md's own tech-stack rationale. See
+[docs/high-availability.md](docs/high-availability.md) for the full
+breakdown, organized by solution and load-balancing type, before picking a
+direction.
+
+- [x] Document today's real ceiling (single-replica k3s/Kubernetes with
+      orchestrator-level self-healing) and exactly what four independent
+      pieces of work true active-active horizontal scaling would require —
+      see the doc above
+- [ ] Ship the actual k3s manifests (Deployment/PVC/Service/Ingress) as a
+      maintained example under a new `deploy/k3s/` directory, once someone
+      is actually running this in a cluster rather than only documenting how
+      to
+- [ ] Revisit which further solution tier (warm standby vs. true
+      multi-replica) is worth building once a real deployment's uptime
+      requirement or measured load ceiling actually demands it — not ahead
+      of that demand
+
 ## Frontend E2E testing (Playwright)
 
 Everything on this roadmap so far is covered end-to-end only by backend
