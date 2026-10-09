@@ -28,6 +28,16 @@ See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
   (include/exclude, glob or regex) decides what's *visible in the UI* — it is
   not a substitute for the source itself only granting read access to what
   should be reachable in the first place. Scope both.
+- **Rule matching follows the source's filesystem.** Rules are matched
+  case-insensitively for SMB and WinRM sources, since Windows treats `Logs`
+  and `logs` as the same folder, and case-sensitively everywhere else.
+  Requests for a non-canonical path (`./x`, `a//b`, backslashes, and on
+  Windows trailing dots/spaces or 8.3 short names like `PROGRA~1`) are
+  rejected outright, so an exclude rule can't be sidestepped by spelling
+  the same file differently. One gap remains: rules for an **Agent** source
+  are case-sensitive even when the agent runs on Windows, because the
+  backend doesn't know the agent's OS. Write case-insensitive excludes for
+  those as regex, e.g. `re:(?i)^secret/`.
 - **Read-only, always.** The account only ever needs to list directories and
   read file contents. Never grant write, delete, or execute rights beyond
   what the protocol inherently requires to do that.

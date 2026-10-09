@@ -27,7 +27,12 @@ from app.collectors import ssh as ssh_collector
 from app.collectors import winrm as winrm_collector
 from app.db import get_session
 from app.models import Protocol, Rule, Source
-from app.rules import is_safe_relative_path, is_visible
+from app.rules import (
+    is_safe_relative_path,
+    is_safe_windows_relative_path,
+    is_visible,
+    rules_case_insensitive,
+)
 from app.scratch import get_scratch_store
 
 router = APIRouter(prefix="/sources/{source_id}", tags=["archive"])
@@ -67,9 +72,19 @@ def _scratch_key(source_id: int, path: str, member: str | None) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _require_safe_path(path: str) -> None:
-    if not is_safe_relative_path(path):
+def _require_safe_path(source: Source, path: str) -> None:
+    """Rejects anything but a canonical path (see rules.is_safe_relative_path)
+    -- rules are matched against the path as written, so a non-canonical
+    spelling of an excluded file must never get as far as a rule check."""
+    safe = is_safe_relative_path(path)
+    if safe and rules_case_insensitive(source):
+        safe = is_safe_windows_relative_path(path)
+    if not safe:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid path")
+
+
+def _visible(source: Source, path: str, rules: list[Rule]) -> bool:
+    return is_visible(path, rules, case_insensitive=rules_case_insensitive(source))
 
 
 def _materialize(
@@ -79,7 +94,7 @@ def _materialize(
     `destination`, applying transparent .gz decompression. Returns the
     filename to present to the client. Every call is a fresh fetch — see
     CLAUDE.md's "Live browsing & ephemeral fetch behavior"."""
-    if not is_visible(path, rules):
+    if not _visible(source, path, rules):
         # Rules gate which files are reachable independent of RBAC — a user
         # may have view/download on the source overall but not on this
         # specific path.
@@ -96,7 +111,7 @@ def _materialize(
         # combined virtual path, same convention /browse uses), and a client
         # calling /open or /download directly bypasses whatever the browse
         # listing filtered out, so this has to be checked again here.
-        if not is_visible(f"{path}/{member}", rules):
+        if not _visible(source, f"{path}/{member}", rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         with connector.local_copy(source, path) as archive_local:
             extract_member(archive_local, filename, member, destination)
@@ -118,7 +133,7 @@ def browse(
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> list[BrowseEntry]:
-    _require_safe_path(path)
+    _require_safe_path(source, path)
     if path == "":
         # Root browse == "opened this source" -- the connections home page's
         # Recent column (GET /sources/recent) reads this back. Deliberately
@@ -138,7 +153,7 @@ def browse(
 
     filename = path.rsplit("/", 1)[-1] if path else ""
     if path and is_archive(filename):
-        if not is_visible(path, rules):
+        if not _visible(source, path, rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         with connector.local_copy(source, path) as archive_local:
             members = list_members(archive_local, filename)
@@ -155,7 +170,7 @@ def browse(
             # directories are always shown so the tree stays navigable, only
             # files are subject to the rule chain. Without this, a rule scoped
             # to show just the archive itself would leak every file inside it.
-            if member.is_dir or is_visible(f"{path}/{member.name}", rules)
+            if member.is_dir or _visible(source, f"{path}/{member.name}", rules)
         ]
 
     entries = connector.list_directory(source, rules, path)
@@ -182,7 +197,7 @@ def _resolve_content(
     inherently zero-latency and always fresh"). Everything else (remote
     protocols always; local .gz/archive-member, since those produce derived
     bytes that must live somewhere) goes through the scratch store."""
-    if not is_visible(path, rules):
+    if not _visible(source, path, rules):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
 
     filename = path.rsplit("/", 1)[-1]
@@ -214,7 +229,7 @@ def open_file(
     """Fetches into scratch and holds it (refcounted) until a matching
     /close call — for a persistent viewer session, not a one-shot download.
     (Local plain files skip scratch entirely — see _resolve_content.)"""
-    _require_safe_path(path)
+    _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     served_path, filename, key = _resolve_content(source, path, member, rules)
     headers = {"X-Scratch-Key": key} if key else {}
@@ -234,7 +249,7 @@ def close_file(
     # The scratch key is a hash, not a filesystem path, so an unsafe path
     # here can't actually escape anywhere — checked anyway for consistency
     # with every other endpoint that takes a client-supplied path.
-    _require_safe_path(payload.path)
+    _require_safe_path(source, payload.path)
     store = get_scratch_store()
     key = _scratch_key(source.id, payload.path, payload.member)
     store.release(key)
@@ -250,7 +265,7 @@ def download_file(
 ) -> FileResponse:
     """One-shot: fetches, streams, and releases within the same request —
     no persistent session, so no /close call is needed afterward."""
-    _require_safe_path(path)
+    _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     served_path, filename, key = _resolve_content(source, path, member, rules)
     # CLAUDE.md's Application logging section names file download as one of
@@ -290,7 +305,7 @@ def _zip_directory(
         if entry.is_dir:
             _zip_directory(connector, source, rules, request_root, entry.path, zf, tmp_dir)
             continue
-        if not is_visible(entry.path, rules):
+        if not _visible(source, entry.path, rules):
             continue
         arcname = entry.path[len(request_root) + 1 :] if request_root else entry.path
         with tempfile.NamedTemporaryFile(dir=tmp_dir, delete=False) as tmp_file:
@@ -309,7 +324,7 @@ def download_folder_zip(
     """Zips an entire folder for download (CLAUDE.md's Viewer section:
     download "single file or a zipped folder"), fetching each contained
     file fresh — no different from any other read here, just batched."""
-    _require_safe_path(path)
+    _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     connector = _connector(source)
 
