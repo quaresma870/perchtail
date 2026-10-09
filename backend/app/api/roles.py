@@ -3,8 +3,15 @@ from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
 from app.api.auth import get_current_active_user
+from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, Role, RoleGrant, ScopeType, User
-from app.auth.rbac import create_role, create_role_grant, require_global_capability
+from app.auth.rbac import (
+    create_role,
+    create_role_grant,
+    require_capabilities_within_authority,
+    require_global_capability,
+    require_role_within_authority,
+)
 from app.db import get_session
 from app.models import Customer, Folder, Source
 
@@ -87,6 +94,23 @@ def _require_super_admin_for_super_admin_flag(user: User, is_super_admin: bool) 
         )
 
 
+def _get_editable_role(session: Session, user: User, role_id: int) -> Role:
+    """The role must exist, be within the caller's own authority (see
+    rbac.role_within_authority), and not be built-in. Built-in roles are
+    immutable: "No Access" is what every newly SSO-provisioned user lands
+    on, so quietly granting it anything would hand that to anyone with an
+    IdP account, and "Super Admin" is the break-glass role."""
+    role = session.get(Role, role_id)
+    if role is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    if role.is_builtin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Built-in roles cannot be modified"
+        )
+    require_role_within_authority(user, role)
+    return role
+
+
 def _validate_scope_exists(session: Session, *, scope_type: ScopeType, scope_id: int) -> None:
     model = {
         ScopeType.customer: Customer,
@@ -123,6 +147,7 @@ def create_role_endpoint(
     session: Session = Depends(get_session),
 ):
     _require_super_admin_for_super_admin_flag(user, payload.is_super_admin)
+    require_capabilities_within_authority(user, payload.global_capabilities)
     if session.exec(select(Role).where(Role.name == payload.name)).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Name already in use")
 
@@ -142,14 +167,14 @@ def update_role(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    role = session.get(Role, role_id)
-    if role is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    role = _get_editable_role(session, user, role_id)
 
     target_super_admin = (
         payload.is_super_admin if payload.is_super_admin is not None else role.is_super_admin
     )
     _require_super_admin_for_super_admin_flag(user, target_super_admin)
+    if payload.global_capabilities is not None:
+        require_capabilities_within_authority(user, payload.global_capabilities)
 
     if payload.name is not None:
         role.name = payload.name
@@ -159,6 +184,18 @@ def update_role(
         role.global_capabilities = payload.global_capabilities
 
     session.add(role)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="role.update",
+        target_type="role",
+        target_id=role.id,
+        metadata={
+            "name": role.name,
+            "is_super_admin": role.is_super_admin,
+            "global_capabilities": list(role.global_capabilities),
+        },
+    )
     session.commit()
     session.refresh(role)
     return role
@@ -177,6 +214,7 @@ def delete_role(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Cannot delete a built-in role"
         )
+    require_role_within_authority(user, role)
 
     if session.exec(select(User).where(User.role_id == role_id)).first() is not None:
         raise HTTPException(
@@ -185,6 +223,14 @@ def delete_role(
         )
 
     session.delete(role)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="role.delete",
+        target_type="role",
+        target_id=role_id,
+        metadata={"name": role.name},
+    )
     session.commit()
 
 
@@ -198,7 +244,7 @@ def duplicate_role(
     source_role = session.get(Role, role_id)
     if source_role is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
-    _require_super_admin_for_super_admin_flag(user, source_role.is_super_admin)
+    require_role_within_authority(user, source_role)
 
     new_name = payload.name or f"{source_role.name} (copy)"
     if session.exec(select(Role).where(Role.name == new_name)).first() is not None:
@@ -245,8 +291,7 @@ def create_grant(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    if session.get(Role, role_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    _get_editable_role(session, user, role_id)
     _validate_scope_exists(session, scope_type=payload.scope_type, scope_id=payload.scope_id)
 
     return create_role_grant(
@@ -270,9 +315,18 @@ def update_grant(
     grant = session.get(RoleGrant, grant_id)
     if grant is None or grant.role_id != role_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Grant not found")
+    _get_editable_role(session, user, role_id)
 
     grant.capabilities = payload.capabilities
     session.add(grant)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="role_grant.update",
+        target_type="role_grant",
+        target_id=grant.id,
+        metadata={"role_id": role_id, "capabilities": list(grant.capabilities)},
+    )
     session.commit()
     session.refresh(grant)
     return grant
@@ -288,6 +342,19 @@ def delete_grant(
     grant = session.get(RoleGrant, grant_id)
     if grant is None or grant.role_id != role_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Grant not found")
+    _get_editable_role(session, user, role_id)
 
     session.delete(grant)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="role_grant.delete",
+        target_type="role_grant",
+        target_id=grant_id,
+        metadata={
+            "role_id": role_id,
+            "scope_type": grant.scope_type,
+            "scope_id": grant.scope_id,
+        },
+    )
     session.commit()

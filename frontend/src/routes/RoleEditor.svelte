@@ -32,6 +32,7 @@
 
   let name = ''
   let isSuperAdmin = false
+  let isBuiltin = false
   let globalCaps = new Set<GlobalCapability>()
   let loading = !isNew
   let saving = false
@@ -60,6 +61,7 @@
     const role = await api.get<Role>(`/roles/${roleId}`)
     name = role.name
     isSuperAdmin = role.is_super_admin
+    isBuiltin = role.is_builtin
     globalCaps = new Set(role.global_capabilities)
     grants = await api.get<RoleGrant[]>(`/roles/${roleId}/grants`)
   }
@@ -161,6 +163,10 @@
       <p class="error">{error}</p>
     {/if}
 
+    {#if isBuiltin}
+      <p class="hint">Built-in role — its name, capabilities and grants can't be changed.</p>
+    {/if}
+
     <form class="card" on:submit|preventDefault={handleSubmit}>
       <label>
         Name
@@ -195,7 +201,7 @@
         {/each}
       </fieldset>
 
-      <button class="btn btn-primary" type="submit" disabled={saving}>
+      <button class="btn btn-primary" type="submit" disabled={saving || isBuiltin}>
         {saving ? 'Saving…' : 'Save'}
       </button>
     </form>
@@ -228,7 +234,9 @@
                   {#if grant.capabilities.length === 0}—{/if}
                 </td>
                 <td>
-                  <button class="link danger" on:click={() => removeGrant(grant)}>remove</button>
+                  {#if !isBuiltin}
+                    <button class="link danger" on:click={() => removeGrant(grant)}>remove</button>
+                  {/if}
                 </td>
               </tr>
             {/each}
@@ -240,6 +248,7 @@
           </tbody>
         </table>
 
+        {#if !isBuiltin}
         <form class="add-grant" on:submit|preventDefault={addGrant}>
           <select class="input" bind:value={newScopeType} on:change={() => (newScopeId = null)}>
             <option value="customer">customer</option>
@@ -266,6 +275,7 @@
           </div>
           <button class="btn btn-primary" type="submit">Add grant</button>
         </form>
+        {/if}
       </div>
     {/if}
   {/if}
