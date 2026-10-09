@@ -35,6 +35,7 @@ from app.audit_hash_chain import backfill_chain_if_needed
 from app.audit_integrity import run_audit_integrity_check
 from app.audit_purge import run_audit_purge_sweep
 from app.bootstrap import (
+    assert_credential_salt_present,
     seed_initial_super_admin,
     seed_no_access_role,
     seed_severity_patterns,
@@ -213,6 +214,7 @@ async def lifespan(app: FastAPI):
     mark_started()
     get_agent_registry().bind_loop(asyncio.get_running_loop())
     with Session(engine) as session:
+        assert_credential_salt_present(session)
         # Must run before anything below that could write an AuditLog row --
         # see backfill_chain_if_needed's own docstring for why order matters
         # here.

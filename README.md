@@ -166,6 +166,14 @@ State (the SQLite database, rotated application logs, and the ephemeral
 scratch cache) lives in the `perchtail-data` Docker volume, so it survives
 `docker compose down`/`up` — only `docker compose down -v` discards it.
 
+**Backups and upgrades.** Everything stateful lives on the `perchtail-data`
+volume (`/data` in the container): the SQLite database, the
+credential-encryption salt (`credential_salt`), SSH `known_hosts`, and the
+app's own logs. Back up the database and `credential_salt` together. Either
+one is useless without the other, and so is the salt without your
+`CREDENTIAL_ENCRYPTION_KEY`. Upgrading from a release before the salt moved
+onto the volume needs one extra step first; see the CHANGELOG.
+
 ## Deployment: reverse proxy (nginx) + TLS
 
 **Never expose PerchTail's admin/viewer UI to the public internet without
