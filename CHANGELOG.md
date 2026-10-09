@@ -29,6 +29,14 @@ release ships (0.x releases may include breaking changes between minors).
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- Admin-created "Local disk" sources are now off by default and can only
+  point under directories the server operator lists in the new
+  `LOCAL_SOURCE_ROOTS` environment setting. Previously anyone with
+  `create_source` could choose any base path on the PerchTail host itself.
+  Local reads are also confined to the source's base path, so a symlink
+  can't lead outside it. **Upgrade note:** existing local-disk sources stop
+  working (403) until `LOCAL_SOURCE_ROOTS` covers their base path. The
+  built-in application-log source is unaffected.
 - Optional TOTP/MFA for local accounts (`pyotp`). Self-service only, via a
   new Settings → Security page: enroll by scanning a QR code (or entering
   the secret manually), confirm with a live code before it's actually

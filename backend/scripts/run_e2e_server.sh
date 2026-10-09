@@ -43,6 +43,10 @@ export PERCHTAIL_TEST_PATCH_MODULE="app.testing.fake_winrm"
 # without being so short it starves other requests on a single-process
 # uvicorn.
 export SEARCH_INDEX_INTERVAL_SECONDS="2"
+# frontend/e2e/search.spec.ts points a local-disk source at the ssh fixture
+# tree (setup_e2e_test_servers.sh's FIXTURE_ROOT) -- see LOCAL_SOURCE_ROOTS
+# in .env.example.
+export LOCAL_SOURCE_ROOTS="/tmp/perchtail-e2e-fixtures"
 
 # Stop any previous run's sshd/smbd before wiping data/e2e/ below -- they
 # self-daemonize (see setup_e2e_test_servers.sh) and outlive this script, so

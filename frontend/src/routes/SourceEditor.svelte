@@ -400,6 +400,12 @@
             : '/var/log/appname'}
         />
       </label>
+      {#if protocol === 'local'}
+        <p class="hint">
+          Must be under a directory the server operator allows via <code>LOCAL_SOURCE_ROOTS</code> —
+          see docs/source-setup.md.
+        </p>
+      {/if}
 
       <label class="checkbox">
         <input type="checkbox" bind:checked={enabled} />
