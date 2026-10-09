@@ -29,6 +29,15 @@ release ships (0.x releases may include breaking changes between minors).
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- Deleting a customer, folder, source or role can no longer hand its access
+  to whatever gets created next. SQLite reused the highest deleted id, and
+  the role grants, search-index snippets, alerts and severity patterns left
+  pointing at the old row silently attached to the new one, potentially
+  under a different customer. Those tables now use `AUTOINCREMENT`,
+  deletes remove everything that pointed at the deleted row, a role can't
+  be deleted while an SSO group mapping still targets it, and a migration
+  cleans up rows already orphaned this way and starts every id sequence
+  past any id the audit log has ever recorded.
 - Optional TOTP/MFA for local accounts (`pyotp`). Self-service only, via a
   new Settings → Security page: enroll by scanning a QR code (or entering
   the secret manually), confirm with a live code before it's actually

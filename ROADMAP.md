@@ -1385,6 +1385,9 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [ ] A formal third-party security review or pentest before declaring 1.0
       — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
       this is about actively looking for one before external users show up
+- [x] Deleted customer/folder/source/role ids are never reused, and
+      nothing that pointed at a deleted row survives it — found in the
+      October 2026 internal review, see notes below
 
 ### Notes on decisions made — response headers and login lockout
 
@@ -1929,6 +1932,33 @@ two:
   keyed by the same username — the same "repeated password guessing
   against one account" threat model already covers this, whichever
   endpoint the guesses come through.
+
+### Notes on decisions made — no id reuse after delete
+
+Found during the October 2026 internal review. Plain SQLite `INTEGER PRIMARY
+KEY` assigns `max(id) + 1`, so deleting the newest row and creating another
+reused its id. `RoleGrant.scope_id` can't carry an FK (it points at one of
+three tables), and nothing cleaned up grants, search-index rows, alerts or
+severity patterns when a source was deleted. A brand-new source could
+therefore inherit a deleted source's grants and its indexed log lines.
+
+- **Both halves, not one.** `AUTOINCREMENT` (`app.models.NO_ID_REUSE`) stops
+  ids from being reused. Deleting dependents on delete
+  (`rbac.delete_scope_grants`, `search_index.delete_source_index`) stops
+  stale rows existing at all. Either alone would leave a gap: cleanup alone
+  still lets audit history and `/sources/recent` confuse two different
+  sources sharing an id, and AUTOINCREMENT alone leaves dead rows around.
+- **Alerts scoped to a deleted source are deleted, not unscoped.** A null
+  `source_id` means "every source the owner can view", which is broader.
+- **Roles mapped from an SSO group can't be deleted (409)**, the same as
+  roles that still have users, rather than silently dropping the mapping.
+- **The migration** (`47c9d392f28f`) removes rows already orphaned this
+  way, rebuilds the four tables with AUTOINCREMENT, and seeds each
+  `sqlite_sequence` with the larger of the current max id and the highest
+  `target_id` the audit log recorded for that table. That way an id
+  deleted before the upgrade isn't handed out once more either. Verified
+  with upgrade, downgrade and re-upgrade on a real SQLite file with
+  planted orphans; indexes and FKs survive the rebuild.
 
 ## High availability & horizontal scaling
 

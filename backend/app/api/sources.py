@@ -9,10 +9,11 @@ from sqlmodel import Session, select
 from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
-from app.auth.models import AuditLog, Capability, GlobalCapability, User
+from app.auth.models import AuditLog, Capability, GlobalCapability, ScopeType, User
 from app.auth.rbac import (
     FolderVisibilityContext,
     build_folder_visibility_context,
+    delete_scope_grants,
     folder_path_boundary,
     require_capability,
     require_global_capability,
@@ -26,7 +27,16 @@ from app.collectors import winrm as winrm_collector
 from app.crypto import encrypt_credential
 from app.db import get_session
 from app.logging_config import get_logger
-from app.models import Customer, Folder, Protocol, Rule, Source
+from app.models import (
+    Alert,
+    Customer,
+    Folder,
+    Protocol,
+    Rule,
+    SeverityPattern,
+    Source,
+)
+from app.search_index import delete_source_index
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 logger = get_logger(__name__)
@@ -358,6 +368,13 @@ def delete_source(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
     _require_not_system(source)
 
+    # Everything that points at this source by id goes with it -- nothing may
+    # outlive it and resurface under a later source (see app.models.NO_ID_REUSE).
+    delete_scope_grants(session, ScopeType.source, source_id)
+    delete_source_index(session, source_id)
+    for model in (Alert, SeverityPattern):
+        for row in session.exec(select(model).where(model.source_id == source_id)).all():
+            session.delete(row)
     session.delete(source)
     record_audit_event(
         session,

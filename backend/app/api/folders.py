@@ -4,8 +4,8 @@ from sqlmodel import Session, select
 
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
-from app.auth.models import GlobalCapability, User
-from app.auth.rbac import require_global_capability
+from app.auth.models import GlobalCapability, ScopeType, User
+from app.auth.rbac import delete_scope_grants, require_global_capability
 from app.db import get_session
 from app.models import Customer, Folder, Source
 
@@ -165,6 +165,7 @@ def delete_folder(
             detail="Folder still has sub-folders or sources; remove them first",
         )
 
+    delete_scope_grants(session, ScopeType.folder, folder_id)
     session.delete(folder)
     record_audit_event(
         session,

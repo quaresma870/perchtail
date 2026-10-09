@@ -37,7 +37,16 @@ class SeverityLevel(StrEnum):
     debug = "debug"
 
 
+# AUTOINCREMENT on every table a RoleGrant (or another row) can point at by
+# id: plain SQLite INTEGER PRIMARY KEY reuses the highest id after a delete,
+# so a stale grant, index row or alert left behind for a deleted row would
+# silently attach to whatever row got that id next.
+NO_ID_REUSE = {"sqlite_autoincrement": True}
+
+
 class Customer(SQLModel, table=True):
+    __table_args__ = NO_ID_REUSE
+
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(unique=True, index=True)
 
@@ -51,6 +60,8 @@ class Folder(SQLModel, table=True):
     scoping (see auth/rbac.py). A folder always belongs to exactly one
     customer — folders don't span customers — and nests only within that
     same customer (see CLAUDE.md's "Access control" section)."""
+
+    __table_args__ = NO_ID_REUSE
 
     id: int | None = Field(default=None, primary_key=True)
     name: str
@@ -67,6 +78,8 @@ class Folder(SQLModel, table=True):
 
 
 class Source(SQLModel, table=True):
+    __table_args__ = NO_ID_REUSE
+
     id: int | None = Field(default=None, primary_key=True)
     name: str
     customer_id: int | None = Field(default=None, foreign_key="customer.id")
