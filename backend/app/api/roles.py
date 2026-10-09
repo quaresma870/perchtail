@@ -3,7 +3,15 @@ from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
 from app.api.auth import get_current_active_user
-from app.auth.models import Capability, GlobalCapability, Role, RoleGrant, ScopeType, User
+from app.auth.models import (
+    Capability,
+    GlobalCapability,
+    Role,
+    RoleGrant,
+    ScopeType,
+    SSOGroupRoleMapping,
+    User,
+)
 from app.auth.rbac import create_role, create_role_grant, require_global_capability
 from app.db import get_session
 from app.models import Customer, Folder, Source
@@ -182,6 +190,14 @@ def delete_role(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Role still has users assigned; reassign them first",
+        )
+    mapped = session.exec(
+        select(SSOGroupRoleMapping).where(SSOGroupRoleMapping.role_id == role_id)
+    ).first()
+    if mapped is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Role is still the target of an SSO group mapping; remove the mapping first",
         )
 
     session.delete(role)
