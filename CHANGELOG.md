@@ -29,6 +29,11 @@ release ships (0.x releases may include breaking changes between minors).
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- WinRM sources now escape every character PowerShell accepts as a
+  single-quote string delimiter (the ASCII apostrophe and the Unicode
+  curly-quote variants U+2018–U+201B) when embedding a path in a command.
+  Previously only the ASCII apostrophe was escaped, so a crafted path could
+  end the quoted string early on the Windows host.
 - Optional TOTP/MFA for local accounts (`pyotp`). Self-service only, via a
   new Settings → Security page: enroll by scanning a QR code (or entering
   the secret manually), confirm with a live code before it's actually
