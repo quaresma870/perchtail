@@ -1385,6 +1385,11 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [ ] A formal third-party security review or pentest before declaring 1.0
       — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
       this is about actively looking for one before external users show up
+- [x] WinRM command quoting covers every PowerShell single-quote character,
+      not just the ASCII apostrophe — found in the October 2026 internal
+      review. JEA (docs/source-setup.md) remains the real boundary on the
+      Windows side; this keeps a path from ever being read as anything but
+      a string literal.
 
 ### Notes on decisions made — response headers and login lockout
 
