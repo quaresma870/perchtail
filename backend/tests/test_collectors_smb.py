@@ -147,3 +147,17 @@ def test_local_copy_fetches_into_a_temp_path(fake_smbclient):
 
     with smb_module.local_copy(_source(), "app.log") as path:
         assert path.read_bytes() == b"hello world"
+
+
+def test_list_directory_applies_rules_case_insensitively(fake_smbclient):
+    fake_smbclient.listing = [
+        FakeSMBDirEntry("SECRET.TXT", is_dir=False, size=3),
+        FakeSMBDirEntry("App.Log", is_dir=False, size=3),
+    ]
+    rules = [
+        Rule(source_id=1, order=0, type=RuleType.include, pattern="*.log"),
+        Rule(source_id=1, order=1, type=RuleType.include, pattern="*.txt"),
+        Rule(source_id=1, order=2, type=RuleType.exclude, pattern="secret.txt"),
+    ]
+    names = [e.name for e in smb_module.list_directory(_source(), rules)]
+    assert names == ["App.Log"]

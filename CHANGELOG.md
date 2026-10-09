@@ -29,6 +29,13 @@ release ships (0.x releases may include breaking changes between minors).
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- Exclude rules can no longer be sidestepped by requesting a
+  non-canonical spelling of the same path. Browse/open/download/close now
+  reject `.` and empty path segments, backslashes, `:` and control
+  characters. SMB and WinRM sources also reject trailing dots/spaces and
+  8.3 short names, and match rules case-insensitively, as Windows does.
+  **Behavior change** for SMB/WinRM sources: rules that previously relied
+  on case to tell files apart now match regardless of case.
 - Optional TOTP/MFA for local accounts (`pyotp`). Self-service only, via a
   new Settings → Security page: enroll by scanning a QR code (or entering
   the secret manually), confirm with a live code before it's actually

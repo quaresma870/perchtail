@@ -67,7 +67,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         name = item["Name"]
         is_dir = bool(item["PSIsContainer"])
         child_path = f"{relative_path}/{name}" if relative_path else name
-        if not is_dir and not is_visible(child_path, rules):
+        if not is_dir and not is_visible(child_path, rules, case_insensitive=True):
             continue
         size = 0 if is_dir else int(item.get("Length") or 0)
         entries.append(DirEntry(name=name, path=child_path, is_dir=is_dir, size=size))
