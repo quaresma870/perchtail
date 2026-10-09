@@ -18,6 +18,7 @@ See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
 | SMB | Windows shares | 445 | dedicated local/domain user | share + NTFS ACL scoped to one folder |
 | WinRM | Windows (fallback when SMB isn't open) | 5985/5986 | dedicated local/domain user | JEA-constrained, read-only cmdlets |
 | Agent | Any host not reachable inbound | outbound only, no listener | enrollment token, not a login account | `PERCHTAIL_BASE_PATH` scopes what it can read |
+| Local disk | Directories on the PerchTail host (e.g. a read-only bind mount) | n/a | none | off unless the operator sets `LOCAL_SOURCE_ROOTS` |
 
 ## Principles that apply to every protocol
 
@@ -262,6 +263,30 @@ None needed on the source host for inbound traffic — the agent only ever
 initiates the connection outbound to `PERCHTAIL_SERVER_URL` over HTTPS/WSS.
 Allow that outbound destination through the source's firewall/proxy if
 outbound traffic is otherwise restricted.
+
+## Local disk (directories on the PerchTail host itself)
+
+For logs that are already on the machine running PerchTail, typically a
+host directory bind-mounted read-only into the container:
+
+```yaml
+# docker-compose.yml
+services:
+  perchtail:
+    volumes:
+      - perchtail-data:/data
+      - /var/log/myapp:/mnt/host-logs/myapp:ro
+```
+
+Local-disk sources are **off by default**. The server operator enables them
+by listing the allowed parent directories in `LOCAL_SOURCE_ROOTS`
+(comma-separated, absolute) in `.env`, for example
+`LOCAL_SOURCE_ROOTS=/mnt/host-logs`. A source's base path must sit at or
+under one of those directories, and reads never follow a symlink out of the
+source's base path. This is deliberately an environment setting rather than
+something an admin can change from the web UI: otherwise anyone allowed to
+create sources could point one at PerchTail's own database or secrets.
+Mount only what you mean to expose, and mount it read-only.
 
 ## Testing a source
 
