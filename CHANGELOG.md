@@ -67,6 +67,23 @@ release ships (0.x releases may include breaking changes between minors).
   narrow concurrent-write race.
 
 ### Fixed
+- The Docker image now keeps the credential-encryption salt and SSH
+  `known_hosts` on the `/data` volume (`CREDENTIAL_SALT_PATH`,
+  `SSH_KNOWN_HOSTS_PATH`). Previously both defaulted to a path inside the
+  container's own filesystem, so recreating or upgrading the container
+  silently generated a new salt, which made every stored credential, SSO
+  client secret and MFA secret undecryptable, made the audit-log integrity
+  check report the whole chain as broken, and reset SSH host-key pinning.
+  Startup now also refuses to generate a fresh salt while the database
+  already holds data encrypted under the old one, instead of failing later
+  (`CREDENTIAL_SALT_ALLOW_REGENERATE=true` overrides this if the original
+  is permanently lost). **Upgrade step for Docker deployments:** while the
+  *old* container is still running, copy both files onto the volume first,
+  then upgrade as usual:
+
+  ```sh
+  docker compose exec perchtail sh -c 'cp -n /app/backend/data/credential_salt /data/ 2>/dev/null; cp -n /app/backend/data/ssh_known_hosts /data/ 2>/dev/null; ls -l /data/credential_salt'
+  ```
 - `OriginCheckMiddleware`'s CSRF defense-in-depth check was blocking every
   state-changing request — including login — when deployed behind a
   TLS-terminating reverse proxy (the standard, documented setup): uvicorn

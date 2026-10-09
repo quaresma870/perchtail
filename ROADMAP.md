@@ -1385,6 +1385,9 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [ ] A formal third-party security review or pentest before declaring 1.0
       — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
       this is about actively looking for one before external users show up
+- [x] Credential salt and SSH `known_hosts` kept on the persistent volume
+      in Docker, with a startup guard against silently regenerating the
+      salt — found in the October 2026 internal review, see notes below
 
 ### Notes on decisions made — response headers and login lockout
 
@@ -1929,6 +1932,30 @@ two:
   keyed by the same username — the same "repeated password guessing
   against one account" threat model already covers this, whichever
   endpoint the guesses come through.
+
+### Notes on decisions made — credential salt persistence
+
+Found during the October 2026 internal review. `CREDENTIAL_SALT_PATH` and
+`SSH_KNOWN_HOSTS_PATH` default to `./data/...` relative to the working
+directory, and the Dockerfile only redirected `LOG_DIR`, `DATABASE_URL` and
+`SCRATCH_DIR` onto `/data`. In the image both files therefore landed in the
+container's own writable layer. Any recreate (upgrade, `docker compose up
+--build`, `down`/`up`) generated a new salt, which broke decryption of every
+stored secret and every audit-chain HMAC, and silently reset SSH
+trust-on-first-use pinning.
+
+- **The Dockerfile now sets both paths under `/data`.** The app defaults are
+  unchanged for non-Docker setups, where `./data` is already persistent.
+- **Startup refuses to mint a new salt over existing encrypted data**
+  (`bootstrap.assert_credential_salt_present`, run before anything derives
+  a key). Failing loudly at boot keeps the original salt recoverable;
+  failing later, one decryption at a time, doesn't.
+  `CREDENTIAL_SALT_ALLOW_REGENERATE=true` is the explicit escape hatch when
+  the original is truly gone.
+- **No automatic migration from the old location.** By the time a new
+  image starts, the old container layer, and the salt with it, is already
+  gone. The upgrade step has to run in the old container, so it's documented
+  in the CHANGELOG rather than attempted by the new entrypoint.
 
 ## High availability & horizontal scaling
 
