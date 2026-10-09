@@ -99,3 +99,15 @@ test('roles: create, global capabilities, grants (add + remove), duplicate, dele
     .click()
   await expect(page.getByRole('row', { name: new RegExp(roleName) })).toHaveCount(0)
 })
+
+test('roles: built-in roles open read-only in the editor', async ({ page }) => {
+  await page.goto('/#/settings/roles')
+  const row = page.locator('tr', { has: page.locator('.role-name', { hasText: /^No Access$/ }) })
+  await row.getByRole('button', { name: 'edit' }).click()
+
+  await expect(
+    page.getByText("Built-in role — its name, capabilities and grants can't be changed."),
+  ).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Save' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Add grant' })).toHaveCount(0)
+})

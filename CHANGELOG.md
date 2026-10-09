@@ -29,6 +29,14 @@ release ships (0.x releases may include breaking changes between minors).
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- Delegated admin capabilities can no longer be used to reach
+  super-admin. A non-super-admin can now only assign, edit, grant on, or
+  map an SSO group to a role that isn't super-admin and carries no global
+  capability they don't hold themselves, and can't reset the password of,
+  deactivate, or edit a user more privileged than themselves. Built-in
+  roles ("Super Admin", "No Access") are now immutable, the last active
+  super-admin can't be deactivated or demoted, and role/grant updates and
+  deletions are now recorded in the audit log.
 - Optional TOTP/MFA for local accounts (`pyotp`). Self-service only, via a
   new Settings → Security page: enroll by scanning a QR code (or entering
   the secret manually), confirm with a live code before it's actually

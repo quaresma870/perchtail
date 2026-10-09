@@ -222,6 +222,42 @@ def require_global_capability(capability: GlobalCapability, get_current_user: Ca
     return dependency
 
 
+def role_within_authority(actor: User, role: Role) -> bool:
+    """Whether `actor` may assign, edit, or act on users holding `role`
+    without that being a privilege escalation. A delegated admin
+    (manage_users / manage_roles / manage_sso, short of super-admin) can
+    only work with roles that are no more powerful than their own: never a
+    super-admin role, and never one carrying a global capability the actor
+    doesn't hold themselves. Without this, any of those capabilities is a
+    path to full super-admin -- e.g. manage_users assigning itself the
+    Super Admin role, or resetting a super-admin's password."""
+    if actor.role.is_super_admin:
+        return True
+    if role.is_super_admin:
+        return False
+    return set(role.global_capabilities) <= set(actor.role.global_capabilities)
+
+
+def require_role_within_authority(actor: User, role: Role) -> None:
+    if not role_within_authority(actor, role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not permitted: that role has privileges beyond your own",
+        )
+
+
+def require_capabilities_within_authority(
+    actor: User, global_capabilities: list[GlobalCapability]
+) -> None:
+    if actor.role.is_super_admin:
+        return
+    if not set(global_capabilities) <= set(actor.role.global_capabilities):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not permitted: you can only grant global capabilities you hold yourself",
+        )
+
+
 def create_role(
     session: Session,
     *,
