@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     # and persisted here, not stored in the DB, since crypto.py has no DB
     # session and needs this before any request touches the database.
     credential_salt_path: str = "./data/credential_salt"
+    # Escape hatch for a deployment whose original salt is permanently lost:
+    # by default startup refuses to generate a fresh salt while the database
+    # already holds data encrypted under the old one (see
+    # bootstrap.assert_credential_salt_present). Setting this lets it start
+    # anyway -- every stored credential, SSO secret and MFA secret then has
+    # to be re-entered, and older audit rows will fail integrity checks.
+    credential_salt_allow_regenerate: bool = False
     # Persisted across connections so paramiko can detect a host key that
     # changed since the last connection (see app/collectors/ssh.py) — a
     # fresh SSHClient is created per call with no persistence otherwise,
