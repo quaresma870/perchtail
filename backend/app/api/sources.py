@@ -169,6 +169,20 @@ def _require_not_system(source: Source) -> None:
         )
 
 
+def _require_allowed_local_base_path(base_path: str) -> None:
+    """See Settings.local_source_roots: an admin-created local-disk source
+    may only point under a directory the server operator has explicitly
+    allowed via the environment -- never anywhere else on this host."""
+    if not local_collector.base_path_allowed(base_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Local-disk sources must point under a directory the server operator "
+                "has allowed via LOCAL_SOURCE_ROOTS"
+            ),
+        )
+
+
 def _validate_scope(session: Session, *, customer_id: int | None, folder_id: int | None) -> None:
     if folder_id is not None:
         folder = session.get(Folder, folder_id)
@@ -271,6 +285,8 @@ def create_source(
     session: Session = Depends(get_session),
 ):
     _validate_scope(session, customer_id=payload.customer_id, folder_id=payload.folder_id)
+    if payload.protocol == Protocol.local:
+        _require_allowed_local_base_path(payload.base_path)
 
     source = Source(
         name=payload.name,
@@ -326,6 +342,8 @@ def update_source(
     if "port" in fields_set:
         source.port = payload.port
     if payload.base_path is not None:
+        if source.protocol == Protocol.local:
+            _require_allowed_local_base_path(payload.base_path)
         source.base_path = payload.base_path
     if payload.enabled is not None:
         source.enabled = payload.enabled

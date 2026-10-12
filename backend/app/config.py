@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     login_max_attempts: int = 5
     login_lockout_seconds: int = 300
 
+    # Comma-separated absolute directories that admin-created `local`
+    # (local-disk) sources may point at -- e.g. a host log directory mounted
+    # read-only into the container. Empty by default, which disables
+    # user-created local sources entirely: a web admin choosing an
+    # arbitrary base_path would otherwise expose this server's own files
+    # (database, secrets). Only the operator, via the environment, decides.
+    # The built-in system log source is exempt (see collectors/local.py).
+    local_source_roots: str = ""
+
     scratch_dir: str = "./data/scratch"
     scratch_max_gb: float = 5.0
     # Backstop for crashed/disconnected clients that never send a close

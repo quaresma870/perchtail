@@ -1389,6 +1389,9 @@ Everything below is a candidate, not yet triaged into "must-have before
       `manage_sso`) can't be used to reach super-admin, and built-in roles
       are immutable — found in the October 2026 internal review, see notes
       below
+- [x] Admin-created local-disk sources gated by an operator-set
+      `LOCAL_SOURCE_ROOTS` allowlist — found in the October 2026 internal
+      review, see notes below
 
 ### Notes on decisions made — response headers and login lockout
 
@@ -1974,6 +1977,27 @@ could map an IdP group to a super-admin role; `manage_roles` could add
   whoever holds it effectively controls who can sign in as an existing SSO
   user. Treat `manage_sso` as a high-trust capability until SSO identities
   are bound to their issuer (needs a schema change and a migration).
+### Notes on decisions made — local-disk sources
+
+Found during the October 2026 internal review: the `local` protocol exists
+for the built-in application-log source, but the source editor also offered
+"Local disk" for ordinary sources with no restriction on `base_path`, so
+anyone holding `create_source` could expose any directory on the PerchTail
+host, including its database and secrets.
+
+- **Operator allowlist, not removal.** Local-disk sources have a legitimate
+  use (a host log directory bind-mounted into the container, and the e2e
+  search spec relies on one), so they stay, but only under directories
+  listed in `LOCAL_SOURCE_ROOTS`. It's empty by default, which disables
+  them. It's an environment setting on purpose: whoever controls the
+  container's mounts decides what's reachable, and no web-UI role can widen it.
+- **Checked on every read, not just on save** (`collectors/local.py`'s
+  `resolve_path`), so a source created before this existed, or after the
+  allowlist was narrowed, can't keep reading. The archive endpoints return
+  a clean 403 for those.
+- **Reads are confined to the source's own base path after resolving
+  symlinks**, and symlinks pointing outside it are left out of listings.
+  This applies to the system source too.
 
 ## High availability & horizontal scaling
 
