@@ -37,6 +37,18 @@ def _stub_dns_for_webhook_safety(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _allow_local_sources_under_pytest_tmp(monkeypatch, tmp_path_factory):
+    # Connector/search/archive tests point non-system local sources at
+    # tmp_path; LOCAL_SOURCE_ROOTS (empty by default) would refuse them all.
+    # Set both: some fixtures rebuild Settings via get_settings.cache_clear().
+    from app.config import get_settings
+
+    root = str(tmp_path_factory.getbasetemp())
+    monkeypatch.setenv("LOCAL_SOURCE_ROOTS", root)
+    monkeypatch.setattr(get_settings(), "local_source_roots", root)
+
+
+@pytest.fixture(autouse=True)
 def _reset_login_throttle():
     # app.login_throttle keeps its state in a module-level dict (see its
     # docstring), so one test's failed-login attempts would otherwise bleed

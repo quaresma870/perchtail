@@ -29,6 +29,29 @@ release ships (0.x releases may include breaking changes between minors).
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- Delegated admin capabilities can no longer be used to reach
+  super-admin. A non-super-admin can now only assign, edit, grant on, or
+  map an SSO group to a role that isn't super-admin and carries no global
+  capability they don't hold themselves, and can't reset the password of,
+  deactivate, or edit a user more privileged than themselves. Built-in
+  roles ("Super Admin", "No Access") are now immutable, the last active
+  super-admin can't be deactivated or demoted, and role/grant updates and
+  deletions are now recorded in the audit log.
+- Admin-created "Local disk" sources are now off by default and can only
+  point under directories the server operator lists in the new
+  `LOCAL_SOURCE_ROOTS` environment setting. Previously anyone with
+  `create_source` could choose any base path on the PerchTail host itself.
+  Local reads are also confined to the source's base path, so a symlink
+  can't lead outside it. **Upgrade note:** existing local-disk sources stop
+  working (403) until `LOCAL_SOURCE_ROOTS` covers their base path. The
+  built-in application-log source is unaffected.
+- Exclude rules can no longer be sidestepped by requesting a
+  non-canonical spelling of the same path. Browse/open/download/close now
+  reject `.` and empty path segments, backslashes, `:` and control
+  characters. SMB and WinRM sources also reject trailing dots/spaces and
+  8.3 short names, and match rules case-insensitively, as Windows does.
+  **Behavior change** for SMB/WinRM sources: rules that previously relied
+  on case to tell files apart now match regardless of case.
 - Deleting a customer, folder, source or role can no longer hand its access
   to whatever gets created next. SQLite reused the highest deleted id, and
   the role grants, search-index snippets, alerts and severity patterns left
@@ -76,6 +99,23 @@ release ships (0.x releases may include breaking changes between minors).
   narrow concurrent-write race.
 
 ### Fixed
+- The Docker image now keeps the credential-encryption salt and SSH
+  `known_hosts` on the `/data` volume (`CREDENTIAL_SALT_PATH`,
+  `SSH_KNOWN_HOSTS_PATH`). Previously both defaulted to a path inside the
+  container's own filesystem, so recreating or upgrading the container
+  silently generated a new salt, which made every stored credential, SSO
+  client secret and MFA secret undecryptable, made the audit-log integrity
+  check report the whole chain as broken, and reset SSH host-key pinning.
+  Startup now also refuses to generate a fresh salt while the database
+  already holds data encrypted under the old one, instead of failing later
+  (`CREDENTIAL_SALT_ALLOW_REGENERATE=true` overrides this if the original
+  is permanently lost). **Upgrade step for Docker deployments:** while the
+  *old* container is still running, copy both files onto the volume first,
+  then upgrade as usual:
+
+  ```sh
+  docker compose exec perchtail sh -c 'cp -n /app/backend/data/credential_salt /data/ 2>/dev/null; cp -n /app/backend/data/ssh_known_hosts /data/ 2>/dev/null; ls -l /data/credential_salt'
+  ```
 - `OriginCheckMiddleware`'s CSRF defense-in-depth check was blocking every
   state-changing request — including login — when deployed behind a
   TLS-terminating reverse proxy (the standard, documented setup): uvicorn

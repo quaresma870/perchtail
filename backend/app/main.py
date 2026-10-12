@@ -35,11 +35,13 @@ from app.audit_hash_chain import backfill_chain_if_needed
 from app.audit_integrity import run_audit_integrity_check
 from app.audit_purge import run_audit_purge_sweep
 from app.bootstrap import (
+    assert_credential_salt_present,
     seed_initial_super_admin,
     seed_no_access_role,
     seed_severity_patterns,
     seed_system_log_source,
 )
+from app.collectors.local import LocalPathNotAllowedError
 from app.config import get_settings
 from app.crypto import audit_chain_key
 from app.db import engine, init_db
@@ -213,6 +215,7 @@ async def lifespan(app: FastAPI):
     mark_started()
     get_agent_registry().bind_loop(asyncio.get_running_loop())
     with Session(engine) as session:
+        assert_credential_salt_present(session)
         # Must run before anything below that could write an AuditLog row --
         # see backfill_chain_if_needed's own docstring for why order matters
         # here.
@@ -279,6 +282,11 @@ app.include_router(system_settings_router)
 app.include_router(severity_patterns_global_router)
 app.include_router(severity_patterns_source_router)
 app.include_router(monitoring_router)
+
+
+@app.exception_handler(LocalPathNotAllowedError)
+async def local_path_not_allowed(request: Request, exc: LocalPathNotAllowedError):
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 
 @app.get("/healthz")
