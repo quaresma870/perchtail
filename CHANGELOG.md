@@ -61,6 +61,11 @@ release ships (0.x releases may include breaking changes between minors).
   be deleted while an SSO group mapping still targets it, and a migration
   cleans up rows already orphaned this way and starts every id sequence
   past any id the audit log has ever recorded.
+- WinRM sources now escape every character PowerShell accepts as a
+  single-quote string delimiter (the ASCII apostrophe and the Unicode
+  curly-quote variants U+2018–U+201B) when embedding a path in a command.
+  Previously only the ASCII apostrophe was escaped, so a crafted path could
+  end the quoted string early on the Windows host.
 - Optional TOTP/MFA for local accounts (`pyotp`). Self-service only, via a
   new Settings → Security page: enroll by scanning a QR code (or entering
   the secret manually), confirm with a live code before it's actually

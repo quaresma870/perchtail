@@ -14,10 +14,18 @@ from app.rules import is_visible
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 
 
+# PowerShell accepts any of these as a single-quote string delimiter, not just
+# the ASCII apostrophe -- escaping only "'" would leave the others free to end
+# the quoted string early.
+_PS_SINGLE_QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
 def _ps_quote(value: str) -> str:
-    """Escapes a value for embedding in a PowerShell single-quoted string
-    (double the single quotes)."""
-    return "'" + value.replace("'", "''") + "'"
+    """Escapes a value for embedding in a PowerShell single-quoted string by
+    doubling every single-quote character it contains."""
+    for quote in _PS_SINGLE_QUOTES:
+        value = value.replace(quote, quote * 2)
+    return "'" + value + "'"
 
 
 def _session(source: Source) -> winrm.Session:

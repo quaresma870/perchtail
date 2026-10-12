@@ -1401,6 +1401,11 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [x] Deleted customer/folder/source/role ids are never reused, and
       nothing that pointed at a deleted row survives it — found in the
       October 2026 internal review, see notes below
+- [x] WinRM command quoting covers every PowerShell single-quote character,
+      not just the ASCII apostrophe — found in the October 2026 internal
+      review. JEA (docs/source-setup.md) remains the real boundary on the
+      Windows side; this keeps a path from ever being read as anything but
+      a string literal.
 
 ### Notes on decisions made — response headers and login lockout
 
