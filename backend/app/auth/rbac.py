@@ -185,6 +185,17 @@ def folder_path_boundary(ctx: FolderVisibilityContext, source: Source) -> int | 
     return None
 
 
+def delete_scope_grants(session: Session, scope_type: ScopeType, scope_id: int) -> None:
+    """RoleGrant.scope_id has no FK (it can point at three tables), so the
+    database won't clean these up itself when a customer/folder/source is
+    deleted -- callers deleting one of those must call this in the same
+    transaction."""
+    for grant in session.exec(
+        select(RoleGrant).where(RoleGrant.scope_type == scope_type, RoleGrant.scope_id == scope_id)
+    ).all():
+        session.delete(grant)
+
+
 def require_capability(capability: Capability, get_current_user: Callable[..., User]):
     """FastAPI dependency factory wrapping grant resolution. `get_current_user`
     is injected by the caller rather than hardcoded here, since session/token

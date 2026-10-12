@@ -51,6 +51,10 @@ class SSOProtocol(StrEnum):
 
 
 class Role(SQLModel, table=True):
+    # See app.models.NO_ID_REUSE -- RoleGrant and SSOGroupRoleMapping point
+    # at roles by id.
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(unique=True, index=True)
     is_builtin: bool = False
