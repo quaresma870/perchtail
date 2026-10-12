@@ -351,8 +351,8 @@ def test_search_indexing_enabled_defaults_false_and_can_be_toggled(session, admi
         json={
             "name": "app01",
             "customer_id": customer.id,
-            "protocol": "local",
-            "host": "localhost",
+            "protocol": "ssh",
+            "host": "app01.example.com",
             "base_path": "/var/log",
         },
     ).json()
