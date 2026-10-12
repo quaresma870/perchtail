@@ -68,7 +68,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     for info in smbclient.scandir(directory, **connect_kwargs):
         child_path = f"{relative_path}/{info.name}" if relative_path else info.name
         is_dir = info.is_dir()
-        if not is_dir and not is_visible(child_path, rules):
+        if not is_dir and not is_visible(child_path, rules, case_insensitive=True):
             continue
         # info.smb_info.end_of_file (not info.stat().st_size) deliberately --
         # smb_info comes straight off the directory listing this project

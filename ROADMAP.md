@@ -1395,6 +1395,9 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [x] Credential salt and SSH `known_hosts` kept on the persistent volume
       in Docker, with a startup guard against silently regenerating the
       salt — found in the October 2026 internal review, see notes below
+- [x] Rule checks run only on canonical paths, case-insensitively for
+      Windows protocols — found in the October 2026 internal review, see
+      notes below
 
 ### Notes on decisions made — response headers and login lockout
 
@@ -2024,6 +2027,30 @@ trust-on-first-use pinning.
   image starts, the old container layer, and the salt with it, is already
   gone. The upgrade step has to run in the old container, so it's documented
   in the CHANGELOG rather than attempted by the new entrypoint.
+### Notes on decisions made — canonical paths for rule checks
+
+Found during the October 2026 internal review. Rules are matched against the
+client-supplied path *as written*, and `is_safe_relative_path` only blocked
+traversal (`..`), absolute paths and `:`. Other spellings of the same file
+therefore slipped past exclude rules on direct `/open` or `/download` calls:
+`./secret/x` or `secret//x`; `secret\x` on SMB/WinRM, where a backslash is a
+separator; `SECRET/x` on a case-insensitive Windows filesystem; and Windows
+name normalization (`secret./x`, `SECRE~1/x`).
+
+- **Reject rather than normalize.** Every path a listing produces is already
+  canonical, so the UI never sends any of these. Rejecting them (400) is
+  simpler and leaves no gap between how the backend normalizes a path and
+  how the remote OS does.
+- **Case-insensitive rules for SMB/WinRM, case-sensitive elsewhere.**
+  `is_visible(..., case_insensitive=True)` is used by the SMB/WinRM
+  listings and by the archive endpoints for those sources. Making every
+  protocol case-insensitive would quietly broaden include rules on Linux,
+  where `App.log` and `app.log` really are different files.
+- **Known gap: Agent sources on Windows.** The backend doesn't know the
+  agent's OS, so their rules stay case-sensitive. docs/source-setup.md
+  documents the regex workaround. Fixing it properly means the agent
+  reporting its OS, or refusing a path whose case doesn't match what's on
+  disk.
 
 ## High availability & horizontal scaling
 
