@@ -9,10 +9,11 @@ from sqlmodel import Session, select
 from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
-from app.auth.models import AuditLog, Capability, GlobalCapability, User
+from app.auth.models import AuditLog, Capability, GlobalCapability, ScopeType, User
 from app.auth.rbac import (
     FolderVisibilityContext,
     build_folder_visibility_context,
+    delete_scope_grants,
     folder_path_boundary,
     require_capability,
     require_global_capability,
@@ -26,7 +27,16 @@ from app.collectors import winrm as winrm_collector
 from app.crypto import encrypt_credential
 from app.db import get_session
 from app.logging_config import get_logger
-from app.models import Customer, Folder, Protocol, Rule, Source
+from app.models import (
+    Alert,
+    Customer,
+    Folder,
+    Protocol,
+    Rule,
+    SeverityPattern,
+    Source,
+)
+from app.search_index import delete_source_index
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 logger = get_logger(__name__)
@@ -169,6 +179,20 @@ def _require_not_system(source: Source) -> None:
         )
 
 
+def _require_allowed_local_base_path(base_path: str) -> None:
+    """See Settings.local_source_roots: an admin-created local-disk source
+    may only point under a directory the server operator has explicitly
+    allowed via the environment -- never anywhere else on this host."""
+    if not local_collector.base_path_allowed(base_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Local-disk sources must point under a directory the server operator "
+                "has allowed via LOCAL_SOURCE_ROOTS"
+            ),
+        )
+
+
 def _validate_scope(session: Session, *, customer_id: int | None, folder_id: int | None) -> None:
     if folder_id is not None:
         folder = session.get(Folder, folder_id)
@@ -271,6 +295,8 @@ def create_source(
     session: Session = Depends(get_session),
 ):
     _validate_scope(session, customer_id=payload.customer_id, folder_id=payload.folder_id)
+    if payload.protocol == Protocol.local:
+        _require_allowed_local_base_path(payload.base_path)
 
     source = Source(
         name=payload.name,
@@ -326,6 +352,8 @@ def update_source(
     if "port" in fields_set:
         source.port = payload.port
     if payload.base_path is not None:
+        if source.protocol == Protocol.local:
+            _require_allowed_local_base_path(payload.base_path)
         source.base_path = payload.base_path
     if payload.enabled is not None:
         source.enabled = payload.enabled
@@ -358,6 +386,13 @@ def delete_source(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
     _require_not_system(source)
 
+    # Everything that points at this source by id goes with it -- nothing may
+    # outlive it and resurface under a later source (see app.models.NO_ID_REUSE).
+    delete_scope_grants(session, ScopeType.source, source_id)
+    delete_source_index(session, source_id)
+    for model in (Alert, SeverityPattern):
+        for row in session.exec(select(model).where(model.source_id == source_id)).all():
+            session.delete(row)
     session.delete(source)
     record_audit_event(
         session,

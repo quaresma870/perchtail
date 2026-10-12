@@ -1385,6 +1385,22 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [ ] A formal third-party security review or pentest before declaring 1.0
       — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
       this is about actively looking for one before external users show up
+- [x] Delegated admin capabilities (`manage_users`, `manage_roles`,
+      `manage_sso`) can't be used to reach super-admin, and built-in roles
+      are immutable — found in the October 2026 internal review, see notes
+      below
+- [x] Admin-created local-disk sources gated by an operator-set
+      `LOCAL_SOURCE_ROOTS` allowlist — found in the October 2026 internal
+      review, see notes below
+- [x] Credential salt and SSH `known_hosts` kept on the persistent volume
+      in Docker, with a startup guard against silently regenerating the
+      salt — found in the October 2026 internal review, see notes below
+- [x] Rule checks run only on canonical paths, case-insensitively for
+      Windows protocols — found in the October 2026 internal review, see
+      notes below
+- [x] Deleted customer/folder/source/role ids are never reused, and
+      nothing that pointed at a deleted row survives it — found in the
+      October 2026 internal review, see notes below
 - [x] WinRM command quoting covers every PowerShell single-quote character,
       not just the ASCII apostrophe — found in the October 2026 internal
       review. JEA (docs/source-setup.md) remains the real boundary on the
@@ -1934,6 +1950,141 @@ two:
   keyed by the same username — the same "repeated password guessing
   against one account" threat model already covers this, whichever
   endpoint the guesses come through.
+
+### Notes on decisions made — delegated-admin authority
+
+Found during an internal code review of `dev` (October 2026). Each of the
+three delegated admin capabilities had its own direct path to super-admin,
+even though `api/roles.py` already stated the intended invariant ("only a
+super-admin can mint a super-admin"): `manage_users` could assign an
+existing super-admin role or reset a super-admin's password; `manage_sso`
+could map an IdP group to a super-admin role; `manage_roles` could add
+`manage_users` to its own role and then take the first path.
+
+- **One rule, applied everywhere a role changes hands:**
+  `rbac.role_within_authority(actor, role)` — a non-super-admin may only
+  assign, edit, duplicate, grant on, map a group to, or act on a user
+  holding a role that is not super-admin and whose global capabilities are
+  a subset of the actor's own. "You can't hand out more than you hold" is
+  the standard delegation rule, and it closes the chains above as well as
+  the direct paths.
+- **Acting on a more-privileged *account* is blocked too**, not just
+  assigning a more-privileged role — a password reset is an account
+  takeover, so `reset-password`, deactivate, and PATCH all check the
+  target user's current role.
+- **Data-access grants are deliberately not capped the same way.** A
+  `manage_roles` admin can still give a role (including its own) grants on
+  any customer/folder/source — administering grants is exactly what that
+  capability is for, and it never reaches super-admin or system sources.
+- **Built-in roles are immutable**, including for super-admins: no rename,
+  capability change, or grant change. "No Access" is what every newly
+  SSO-provisioned user lands on, so anything granted to it would go to
+  anyone with an account at the IdP; "Super Admin" is the break-glass role.
+  The role editor now shows built-in roles read-only.
+- **The last active super-admin can't be deactivated or demoted**, so the
+  break-glass account can't be removed by accident.
+- **Role update/delete and grant update/delete now write AuditLog
+  entries** — previously only role and grant *creation* did, which fell
+  short of CLAUDE.md's "role/grant changes" audit minimum.
+- **Known remaining gap, deliberately not closed here:** `manage_sso` also
+  controls the issuer URL, and SSO users are matched by `sub` alone, so
+  whoever holds it effectively controls who can sign in as an existing SSO
+  user. Treat `manage_sso` as a high-trust capability until SSO identities
+  are bound to their issuer (needs a schema change and a migration).
+### Notes on decisions made — local-disk sources
+
+Found during the October 2026 internal review: the `local` protocol exists
+for the built-in application-log source, but the source editor also offered
+"Local disk" for ordinary sources with no restriction on `base_path`, so
+anyone holding `create_source` could expose any directory on the PerchTail
+host, including its database and secrets.
+
+- **Operator allowlist, not removal.** Local-disk sources have a legitimate
+  use (a host log directory bind-mounted into the container, and the e2e
+  search spec relies on one), so they stay, but only under directories
+  listed in `LOCAL_SOURCE_ROOTS`. It's empty by default, which disables
+  them. It's an environment setting on purpose: whoever controls the
+  container's mounts decides what's reachable, and no web-UI role can widen it.
+- **Checked on every read, not just on save** (`collectors/local.py`'s
+  `resolve_path`), so a source created before this existed, or after the
+  allowlist was narrowed, can't keep reading. The archive endpoints return
+  a clean 403 for those.
+- **Reads are confined to the source's own base path after resolving
+  symlinks**, and symlinks pointing outside it are left out of listings.
+  This applies to the system source too.
+### Notes on decisions made — credential salt persistence
+
+Found during the October 2026 internal review. `CREDENTIAL_SALT_PATH` and
+`SSH_KNOWN_HOSTS_PATH` default to `./data/...` relative to the working
+directory, and the Dockerfile only redirected `LOG_DIR`, `DATABASE_URL` and
+`SCRATCH_DIR` onto `/data`. In the image both files therefore landed in the
+container's own writable layer. Any recreate (upgrade, `docker compose up
+--build`, `down`/`up`) generated a new salt, which broke decryption of every
+stored secret and every audit-chain HMAC, and silently reset SSH
+trust-on-first-use pinning.
+
+- **The Dockerfile now sets both paths under `/data`.** The app defaults are
+  unchanged for non-Docker setups, where `./data` is already persistent.
+- **Startup refuses to mint a new salt over existing encrypted data**
+  (`bootstrap.assert_credential_salt_present`, run before anything derives
+  a key). Failing loudly at boot keeps the original salt recoverable;
+  failing later, one decryption at a time, doesn't.
+  `CREDENTIAL_SALT_ALLOW_REGENERATE=true` is the explicit escape hatch when
+  the original is truly gone.
+- **No automatic migration from the old location.** By the time a new
+  image starts, the old container layer, and the salt with it, is already
+  gone. The upgrade step has to run in the old container, so it's documented
+  in the CHANGELOG rather than attempted by the new entrypoint.
+### Notes on decisions made — canonical paths for rule checks
+
+Found during the October 2026 internal review. Rules are matched against the
+client-supplied path *as written*, and `is_safe_relative_path` only blocked
+traversal (`..`), absolute paths and `:`. Other spellings of the same file
+therefore slipped past exclude rules on direct `/open` or `/download` calls:
+`./secret/x` or `secret//x`; `secret\x` on SMB/WinRM, where a backslash is a
+separator; `SECRET/x` on a case-insensitive Windows filesystem; and Windows
+name normalization (`secret./x`, `SECRE~1/x`).
+
+- **Reject rather than normalize.** Every path a listing produces is already
+  canonical, so the UI never sends any of these. Rejecting them (400) is
+  simpler and leaves no gap between how the backend normalizes a path and
+  how the remote OS does.
+- **Case-insensitive rules for SMB/WinRM, case-sensitive elsewhere.**
+  `is_visible(..., case_insensitive=True)` is used by the SMB/WinRM
+  listings and by the archive endpoints for those sources. Making every
+  protocol case-insensitive would quietly broaden include rules on Linux,
+  where `App.log` and `app.log` really are different files.
+- **Known gap: Agent sources on Windows.** The backend doesn't know the
+  agent's OS, so their rules stay case-sensitive. docs/source-setup.md
+  documents the regex workaround. Fixing it properly means the agent
+  reporting its OS, or refusing a path whose case doesn't match what's on
+  disk.
+### Notes on decisions made — no id reuse after delete
+
+Found during the October 2026 internal review. Plain SQLite `INTEGER PRIMARY
+KEY` assigns `max(id) + 1`, so deleting the newest row and creating another
+reused its id. `RoleGrant.scope_id` can't carry an FK (it points at one of
+three tables), and nothing cleaned up grants, search-index rows, alerts or
+severity patterns when a source was deleted. A brand-new source could
+therefore inherit a deleted source's grants and its indexed log lines.
+
+- **Both halves, not one.** `AUTOINCREMENT` (`app.models.NO_ID_REUSE`) stops
+  ids from being reused. Deleting dependents on delete
+  (`rbac.delete_scope_grants`, `search_index.delete_source_index`) stops
+  stale rows existing at all. Either alone would leave a gap: cleanup alone
+  still lets audit history and `/sources/recent` confuse two different
+  sources sharing an id, and AUTOINCREMENT alone leaves dead rows around.
+- **Alerts scoped to a deleted source are deleted, not unscoped.** A null
+  `source_id` means "every source the owner can view", which is broader.
+- **Roles mapped from an SSO group can't be deleted (409)**, the same as
+  roles that still have users, rather than silently dropping the mapping.
+- **The migration** (`47c9d392f28f`) removes rows already orphaned this
+  way, rebuilds the four tables with AUTOINCREMENT, and seeds each
+  `sqlite_sequence` with the larger of the current max id and the highest
+  `target_id` the audit log recorded for that table. That way an id
+  deleted before the upgrade isn't handed out once more either. Verified
+  with upgrade, downgrade and re-upgrade on a real SQLite file with
+  planted orphans; indexes and FKs survive the rebuild.
 
 ## High availability & horizontal scaling
 

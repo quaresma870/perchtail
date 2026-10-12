@@ -147,6 +147,19 @@ def _insert_fts_rows(session: Session, source_id: int, file_path: str, content: 
         )
 
 
+def delete_source_index(session: Session, source_id: int) -> None:
+    """Drops everything indexed for a source -- its FTS rows and per-file
+    state. Doesn't commit."""
+    session.execute(
+        text("DELETE FROM search_index_fts WHERE source_id = :source_id"),
+        {"source_id": source_id},
+    )
+    for state in session.exec(
+        select(SearchIndexState).where(SearchIndexState.source_id == source_id)
+    ).all():
+        session.delete(state)
+
+
 def index_source(session: Session, source: Source) -> IndexStats:
     """Indexes (or re-indexes) every rule-visible file in `source`. Safe to
     call repeatedly — unchanged files (by size, see SearchIndexState's

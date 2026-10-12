@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     # and persisted here, not stored in the DB, since crypto.py has no DB
     # session and needs this before any request touches the database.
     credential_salt_path: str = "./data/credential_salt"
+    # Escape hatch for a deployment whose original salt is permanently lost:
+    # by default startup refuses to generate a fresh salt while the database
+    # already holds data encrypted under the old one (see
+    # bootstrap.assert_credential_salt_present). Setting this lets it start
+    # anyway -- every stored credential, SSO secret and MFA secret then has
+    # to be re-entered, and older audit rows will fail integrity checks.
+    credential_salt_allow_regenerate: bool = False
     # Persisted across connections so paramiko can detect a host key that
     # changed since the last connection (see app/collectors/ssh.py) — a
     # fresh SSHClient is created per call with no persistence otherwise,
@@ -44,6 +51,15 @@ class Settings(BaseSettings):
     # lockout lasts once triggered.
     login_max_attempts: int = 5
     login_lockout_seconds: int = 300
+
+    # Comma-separated absolute directories that admin-created `local`
+    # (local-disk) sources may point at -- e.g. a host log directory mounted
+    # read-only into the container. Empty by default, which disables
+    # user-created local sources entirely: a web admin choosing an
+    # arbitrary base_path would otherwise expose this server's own files
+    # (database, secrets). Only the operator, via the environment, decides.
+    # The built-in system log source is exempt (see collectors/local.py).
+    local_source_roots: str = ""
 
     scratch_dir: str = "./data/scratch"
     scratch_max_gb: float = 5.0
