@@ -1385,6 +1385,13 @@ Everything below is a candidate, not yet triaged into "must-have before
 - [ ] A formal third-party security review or pentest before declaring 1.0
       — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
       this is about actively looking for one before external users show up
+- [x] Delegated admin capabilities (`manage_users`, `manage_roles`,
+      `manage_sso`) can't be used to reach super-admin, and built-in roles
+      are immutable — found in the October 2026 internal review, see notes
+      below
+- [x] Admin-created local-disk sources gated by an operator-set
+      `LOCAL_SOURCE_ROOTS` allowlist — found in the October 2026 internal
+      review, see notes below
 - [x] Credential salt and SSH `known_hosts` kept on the persistent volume
       in Docker, with a startup guard against silently regenerating the
       salt — found in the October 2026 internal review, see notes below
@@ -1933,6 +1940,67 @@ two:
   against one account" threat model already covers this, whichever
   endpoint the guesses come through.
 
+### Notes on decisions made — delegated-admin authority
+
+Found during an internal code review of `dev` (October 2026). Each of the
+three delegated admin capabilities had its own direct path to super-admin,
+even though `api/roles.py` already stated the intended invariant ("only a
+super-admin can mint a super-admin"): `manage_users` could assign an
+existing super-admin role or reset a super-admin's password; `manage_sso`
+could map an IdP group to a super-admin role; `manage_roles` could add
+`manage_users` to its own role and then take the first path.
+
+- **One rule, applied everywhere a role changes hands:**
+  `rbac.role_within_authority(actor, role)` — a non-super-admin may only
+  assign, edit, duplicate, grant on, map a group to, or act on a user
+  holding a role that is not super-admin and whose global capabilities are
+  a subset of the actor's own. "You can't hand out more than you hold" is
+  the standard delegation rule, and it closes the chains above as well as
+  the direct paths.
+- **Acting on a more-privileged *account* is blocked too**, not just
+  assigning a more-privileged role — a password reset is an account
+  takeover, so `reset-password`, deactivate, and PATCH all check the
+  target user's current role.
+- **Data-access grants are deliberately not capped the same way.** A
+  `manage_roles` admin can still give a role (including its own) grants on
+  any customer/folder/source — administering grants is exactly what that
+  capability is for, and it never reaches super-admin or system sources.
+- **Built-in roles are immutable**, including for super-admins: no rename,
+  capability change, or grant change. "No Access" is what every newly
+  SSO-provisioned user lands on, so anything granted to it would go to
+  anyone with an account at the IdP; "Super Admin" is the break-glass role.
+  The role editor now shows built-in roles read-only.
+- **The last active super-admin can't be deactivated or demoted**, so the
+  break-glass account can't be removed by accident.
+- **Role update/delete and grant update/delete now write AuditLog
+  entries** — previously only role and grant *creation* did, which fell
+  short of CLAUDE.md's "role/grant changes" audit minimum.
+- **Known remaining gap, deliberately not closed here:** `manage_sso` also
+  controls the issuer URL, and SSO users are matched by `sub` alone, so
+  whoever holds it effectively controls who can sign in as an existing SSO
+  user. Treat `manage_sso` as a high-trust capability until SSO identities
+  are bound to their issuer (needs a schema change and a migration).
+### Notes on decisions made — local-disk sources
+
+Found during the October 2026 internal review: the `local` protocol exists
+for the built-in application-log source, but the source editor also offered
+"Local disk" for ordinary sources with no restriction on `base_path`, so
+anyone holding `create_source` could expose any directory on the PerchTail
+host, including its database and secrets.
+
+- **Operator allowlist, not removal.** Local-disk sources have a legitimate
+  use (a host log directory bind-mounted into the container, and the e2e
+  search spec relies on one), so they stay, but only under directories
+  listed in `LOCAL_SOURCE_ROOTS`. It's empty by default, which disables
+  them. It's an environment setting on purpose: whoever controls the
+  container's mounts decides what's reachable, and no web-UI role can widen it.
+- **Checked on every read, not just on save** (`collectors/local.py`'s
+  `resolve_path`), so a source created before this existed, or after the
+  allowlist was narrowed, can't keep reading. The archive endpoints return
+  a clean 403 for those.
+- **Reads are confined to the source's own base path after resolving
+  symlinks**, and symlinks pointing outside it are left out of listings.
+  This applies to the system source too.
 ### Notes on decisions made — credential salt persistence
 
 Found during the October 2026 internal review. `CREDENTIAL_SALT_PATH` and

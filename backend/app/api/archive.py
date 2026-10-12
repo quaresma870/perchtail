@@ -49,6 +49,7 @@ class BrowseEntry(BaseModel):
 
 
 def _connector(source: Source):
+    _require_local_source_allowed(source)
     connector = _CONNECTORS.get(source.protocol)
     if connector is None:
         raise HTTPException(
@@ -56,6 +57,20 @@ def _connector(source: Source):
             detail=f"protocol {source.protocol} not yet supported",
         )
     return connector
+
+
+def _require_local_source_allowed(source: Source) -> None:
+    """See Settings.local_source_roots -- refused up front with a clean 403
+    rather than surfacing as a connector error mid-request."""
+    if (
+        source.protocol == Protocol.local
+        and not source.is_system
+        and not local_collector.base_path_allowed(source.base_path)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This local-disk source is outside the server's allowed directories",
+        )
 
 
 def _rules_for(session: Session, source_id: int) -> list[Rule]:
@@ -191,6 +206,7 @@ def _resolve_content(
     )
 
     if not needs_scratch:
+        _require_local_source_allowed(source)
         return local_collector.resolve_path(source, path), filename, None
 
     store = get_scratch_store()
