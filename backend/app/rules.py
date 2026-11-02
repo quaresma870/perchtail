@@ -1,7 +1,10 @@
 import re
 from functools import lru_cache
 
+from app.logging_config import get_logger
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
+
+logger = get_logger(__name__)
 
 # Protocols whose remote filesystem treats paths case-insensitively and
 # normalizes some spellings of the same name (Windows: SMB shares and WinRM).
@@ -12,11 +15,22 @@ _WINDOWS_PROTOCOLS = frozenset({Protocol.smb, Protocol.winrm})
 _SHORT_NAME_ALIAS = re.compile(r"^[^~]{1,8}~\d+(\.[^.]*)?$")
 
 
+class InvalidPatternError(ValueError):
+    pass
+
+
 def parse_pattern(raw: str) -> tuple[str, PatternKind]:
     """Splits the admin-facing `re:` prefix convention (CLAUDE.md's rule
-    matching semantics) from the pattern itself."""
+    matching semantics) from the pattern itself. Raises InvalidPatternError
+    for a regex that doesn't compile, so a typo is rejected when it's saved
+    instead of breaking every browse of the source afterward."""
     if raw.startswith("re:"):
-        return raw[len("re:") :], PatternKind.regex
+        pattern = raw[len("re:") :]
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise InvalidPatternError(f"invalid regex {pattern!r}: {exc}") from exc
+        return pattern, PatternKind.regex
     return raw, PatternKind.glob
 
 
@@ -50,10 +64,25 @@ def _compile_glob(pattern: str, ignore_case: bool = False) -> re.Pattern[str]:
     return re.compile(f"^{''.join(out)}$", re.IGNORECASE if ignore_case else 0)
 
 
+@lru_cache(maxsize=2048)
+def _compile_regex(pattern: str, ignore_case: bool = False) -> re.Pattern[str] | None:
+    try:
+        return re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+    except re.error as exc:
+        # Only reachable for rules saved before parse_pattern validated
+        # regexes; logged once per pattern thanks to the cache.
+        logger.error("rules.invalid_regex", pattern=pattern, error=str(exc))
+        return None
+
+
 def _rule_matches(path: str, rule: Rule, ignore_case: bool) -> bool:
     if rule.pattern_kind == PatternKind.regex:
-        flags = re.IGNORECASE if ignore_case else 0
-        return re.search(rule.pattern, path, flags) is not None
+        compiled = _compile_regex(rule.pattern, ignore_case)
+        if compiled is None:
+            # Fail closed: a broken include shows nothing, a broken exclude
+            # hides everything it might have been written to cover.
+            return rule.type == RuleType.exclude
+        return compiled.search(path) is not None
     return _compile_glob(rule.pattern, ignore_case).match(path) is not None
 
 

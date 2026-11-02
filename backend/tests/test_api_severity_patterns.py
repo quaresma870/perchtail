@@ -211,3 +211,13 @@ def test_cannot_patch_another_sources_pattern(session, client_for):
         f"/sources/{source_b.id}/severity-patterns/{pattern_id}", json={"enabled": False}
     )
     assert cross.status_code == 404
+
+
+def test_invalid_regex_severity_pattern_is_a_400(session, client_for):
+    _, user = _make_role_and_user(
+        session, global_capabilities=[GlobalCapability.manage_system_settings]
+    )
+    client = client_for(user)
+    response = client.post("/severity-patterns", json={"level": "error", "pattern": "re:("})
+    assert response.status_code == 400
+    assert client.get("/severity-patterns").json() == []
