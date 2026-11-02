@@ -137,3 +137,14 @@ def test_symlink_out_of_base_path_is_not_followed(allowed_root, tmp_path):
     assert names == ["real.log"]
     with pytest.raises(local_collector.LocalPathNotAllowedError):
         local_collector.resolve_path(source, "link.log")
+
+
+def test_filesystem_root_as_allowed_root_still_matches_paths_under_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(get_settings(), "local_source_roots", "/")
+    assert local_collector.base_path_allowed(str(tmp_path))
+
+
+def test_sibling_directory_sharing_a_name_prefix_is_not_inside_the_root(allowed_root, tmp_path):
+    sibling = tmp_path / "allowed-but-not-really"
+    sibling.mkdir()
+    assert not local_collector.base_path_allowed(str(sibling))

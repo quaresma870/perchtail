@@ -29,6 +29,18 @@ release ships (0.x releases may include breaking changes between minors).
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- The Go push-agent now reads through `os.Root`, so a symlink inside its
+  watched folder can no longer point a list or fetch at any other file on
+  that machine. The lexical `..` check stays as the first line of
+  defence. Found by CodeQL (`go/path-injection`).
+- The CI workflow's `GITHUB_TOKEN` is limited to `contents: read`
+  (CodeQL `actions/missing-workflow-permissions`).
+- Local-disk path containment uses `os.path.realpath` and a
+  separator-terminated prefix check, which static analysis recognises.
+  The behaviour is the same, and an allowlist entry of `/` still works.
+  Opening or downloading with an empty path is now a 400. Before, an
+  empty path named the source's base directory itself and failed with a
+  500.
 - Opening a `.gz` file or a `.zip`/`.tar.gz` member is now capped at
   `MAX_DECOMPRESSED_MB` of decompressed output (default 2048). Previously a
   small crafted archive (a "zip bomb") could expand without limit and

@@ -1,3 +1,4 @@
+import os
 import shutil
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,6 +11,7 @@ from app.rules import is_visible
 __all__ = [
     "DirEntry",
     "LocalPathNotAllowedError",
+    "base_dir",
     "base_path_allowed",
     "fetch_file",
     "list_directory",
@@ -22,47 +24,54 @@ class LocalPathNotAllowedError(PermissionError):
     pass
 
 
-def _allowed_roots() -> list[Path]:
+def _allowed_roots() -> list[str]:
     raw = get_settings().local_source_roots
-    return [Path(part.strip()).resolve() for part in raw.split(",") if part.strip()]
+    return [os.path.realpath(part.strip()) for part in raw.split(",") if part.strip()]
 
 
 def base_path_allowed(base_path: str) -> bool:
     """Whether a non-system local source may use `base_path` -- it must
     resolve (symlinks included) to one of Settings.local_source_roots or
     somewhere beneath one."""
-    base = Path(base_path).resolve()
-    return any(base == root or base.is_relative_to(root) for root in _allowed_roots())
+    base = os.path.realpath(base_path)
+    return any(base == root or base.startswith(os.path.join(root, "")) for root in _allowed_roots())
 
 
-def resolve_path(source: Source, relative_path: str = "") -> Path:
+def base_dir(source: Source) -> Path:
+    """The source's base directory, resolved. Non-system sources must sit
+    under an operator-allowed root (see Settings.local_source_roots) --
+    re-checked here on every access, not just when the source is saved, so
+    a source created before that setting existed (or after it was narrowed)
+    can't keep reading."""
+    if not source.is_system and not base_path_allowed(source.base_path):
+        raise LocalPathNotAllowedError(
+            "local sources must sit under a directory listed in LOCAL_SOURCE_ROOTS"
+        )
+    return Path(os.path.realpath(source.base_path))
+
+
+def resolve_path(source: Source, relative_path: str) -> Path:
     """No ephemeral scratch needed for local sources — a file already on the
     same machine as the app is inherently zero-latency and always fresh
     (CLAUDE.md's "Built-in log viewer" section). api/archive.py uses this to
     serve plain files directly, skipping the scratch store entirely.
 
-    The result is resolved and must stay inside the source's own base path,
-    so a symlink under it can't point a read anywhere else on this host.
-    Non-system sources must also sit under an operator-allowed root (see
-    Settings.local_source_roots) -- re-checked here on every access, not
-    just when the source is saved, so a source created before that setting
-    existed (or after it was narrowed) can't keep reading."""
-    if not source.is_system and not base_path_allowed(source.base_path):
-        raise LocalPathNotAllowedError(
-            "local sources must sit under a directory listed in LOCAL_SOURCE_ROOTS"
-        )
-    base = Path(source.base_path).resolve()
-    if not relative_path:
-        return base
-    target = (base / relative_path).resolve()
-    if not target.is_relative_to(base):
+    The result is resolved and must stay strictly inside the source's base
+    path, so a symlink under it can't point a read anywhere else on this
+    host, and an empty path can't name the base directory itself."""
+    base = str(base_dir(source))
+    # realpath + a prefix check on the separator-terminated base (rather
+    # than Path.is_relative_to) is the containment pattern static analysis
+    # recognizes; behaviour is the same.
+    target = os.path.realpath(os.path.join(base, relative_path))
+    if not target.startswith(os.path.join(base, "")):
         raise LocalPathNotAllowedError("path resolves outside the source's base path")
-    return target
+    return Path(target)
 
 
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:
-    directory = resolve_path(source, relative_path)
-    base = resolve_path(source)
+    base = base_dir(source)
+    directory = resolve_path(source, relative_path) if relative_path else base
     entries = []
     for child in sorted(directory.iterdir(), key=lambda p: p.name):
         if child.is_symlink() and not child.resolve().is_relative_to(base):

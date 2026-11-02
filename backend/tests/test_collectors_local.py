@@ -1,3 +1,4 @@
+import pytest
 from app.collectors import local as local_module
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 
@@ -20,7 +21,12 @@ def _rule(order, type_, pattern, kind=PatternKind.glob) -> Rule:
 def test_resolve_path_joins_base_and_relative(tmp_path):
     source = _source(tmp_path)
     assert local_module.resolve_path(source, "app.log") == tmp_path / "app.log"
-    assert local_module.resolve_path(source, "") == tmp_path
+    assert local_module.base_dir(source) == tmp_path
+
+
+def test_resolve_path_never_names_the_base_directory_itself(tmp_path):
+    with pytest.raises(local_module.LocalPathNotAllowedError):
+        local_module.resolve_path(_source(tmp_path), "")
 
 
 def test_list_directory_always_shows_dirs_but_filters_files(tmp_path):

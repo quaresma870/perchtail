@@ -374,6 +374,18 @@ def test_open_local_plain_file_skips_scratch_entirely(app_client, session, scrat
     assert len(scratch_store._entries) == 0
 
 
+def test_open_with_an_empty_path_is_a_400_not_the_base_directory(
+    app_client, session, scratch_store, tmp_path
+):
+    app, client = app_client
+    source = _make_local_source(session, tmp_path)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+
+    assert client.get(f"/sources/{source.id}/open", params={"path": ""}).status_code == 400
+    assert client.get(f"/sources/{source.id}/download", params={"path": ""}).status_code == 400
+
+
 def test_open_local_gz_file_still_uses_scratch(app_client, session, scratch_store, tmp_path):
     app, client = app_client
     (tmp_path / "app.log.gz").write_bytes(gzip.compress(b"hello world"))
