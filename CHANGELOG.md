@@ -119,6 +119,11 @@ release ships (0.x releases may include breaking changes between minors).
   last line that alert already reported. A rotated or rewritten file
   reports from the top. Adds the `alert_file_state` table (migration
   `c5e1a7d93b20`).
+- Two viewers opening the same file at the same moment could corrupt each
+  other's view. Both fetches wrote into one shared scratch file, so the
+  second fetch truncated and rewrote it while the first response was
+  still streaming. Each fetch now gets its own scratch file, and the
+  reference-counted purge removes them all once the last viewer closes.
 - A rule (or severity pattern) with an invalid regex, such as an
   unbalanced `(`, used to save fine and then make every browse, open and
   download of that source fail with a server error. Invalid regexes are

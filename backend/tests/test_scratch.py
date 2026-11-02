@@ -113,3 +113,29 @@ def test_size_guard_is_a_noop_under_the_cap(tmp_path):
 
     assert store.enforce_size_guard() == 0
     assert path.exists()
+
+
+def test_concurrent_opens_of_the_same_file_never_share_bytes(tmp_path):
+    # Two viewers opening the same file at once each get their own fresh
+    # fetch: the second fetch must not truncate or rewrite the file the
+    # first response may still be streaming from.
+    store = _store(tmp_path)
+    first = store.acquire("key1")
+    first.write_text("first fetch")
+    second = store.acquire("key1")
+    second.write_text("second, longer fetch")
+
+    assert first != second
+    assert first.read_text() == "first fetch"
+
+    store.release("key1")
+    store.release("key1")
+    assert not first.exists()
+    assert not second.exists()
+
+
+def test_size_accounting_counts_every_fetch_of_a_key(tmp_path):
+    store = _store(tmp_path, max_bytes=1000)
+    store.acquire("key1").write_bytes(b"x" * 10)
+    store.acquire("key1").write_bytes(b"x" * 20)
+    assert store.total_bytes() == 30
