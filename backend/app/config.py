@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # signal — deletes anything untouched past this, regardless of refcount.
     scratch_idle_seconds: int = 300
     scratch_sweep_interval_seconds: int = 60
+    # Largest output one .gz file or one .zip/.tar.gz member may decompress
+    # to before the fetch is refused -- a tiny crafted archive could
+    # otherwise expand to fill the scratch disk.
+    max_decompressed_mb: float = 2048.0
 
     # Phase 3 full-text search (app/search_index.py) — how often the
     # background indexer sweeps opted-in sources, and the largest single

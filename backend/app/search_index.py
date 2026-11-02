@@ -19,7 +19,12 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlmodel import Session, select
 
-from app.archives import decompress_gzip, is_archive, is_transparent_gzip
+from app.archives import (
+    DecompressionLimitError,
+    decompress_gzip,
+    is_archive,
+    is_transparent_gzip,
+)
 from app.collectors import agent as agent_collector
 from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
@@ -103,8 +108,8 @@ def _read_text(connector, source: Source, entry: DirEntry, max_bytes: int) -> st
             with tempfile.TemporaryDirectory() as tmp:
                 decompressed = Path(tmp) / "decompressed"
                 try:
-                    decompress_gzip(local_path, decompressed)
-                except OSError:
+                    decompress_gzip(local_path, decompressed, max_bytes)
+                except (OSError, DecompressionLimitError):
                     return None
                 if decompressed.stat().st_size > max_bytes:
                     return None

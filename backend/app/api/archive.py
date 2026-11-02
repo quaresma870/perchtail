@@ -12,6 +12,7 @@ from starlette.background import BackgroundTask
 
 from app.api.auth import get_current_active_user
 from app.archives import (
+    DecompressionLimitError,
     decompress_gzip,
     extract_member,
     is_archive,
@@ -25,7 +26,9 @@ from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
 from app.collectors import ssh as ssh_collector
 from app.collectors import winrm as winrm_collector
+from app.config import get_settings
 from app.db import get_session
+from app.logging_config import get_logger
 from app.models import Protocol, Rule, Source
 from app.rules import (
     is_safe_relative_path,
@@ -36,6 +39,7 @@ from app.rules import (
 from app.scratch import get_scratch_store
 
 router = APIRouter(prefix="/sources/{source_id}", tags=["archive"])
+logger = get_logger(__name__)
 
 _CONNECTORS = {
     Protocol.ssh: ssh_collector,
@@ -102,6 +106,18 @@ def _visible(source: Source, path: str, rules: list[Rule]) -> bool:
     return is_visible(path, rules, case_insensitive=rules_case_insensitive(source))
 
 
+def _max_decompressed_bytes() -> int:
+    return int(get_settings().max_decompressed_mb * 1024**2)
+
+
+def _too_large(exc: DecompressionLimitError) -> HTTPException:
+    logger.warning("archive.decompression_limit", error=str(exc))
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail="File is too large once decompressed (MAX_DECOMPRESSED_MB)",
+    )
+
+
 def _materialize(
     source: Source, path: str, member: str | None, rules: list[Rule], destination: Path
 ) -> str:
@@ -128,13 +144,21 @@ def _materialize(
         # listing filtered out, so this has to be checked again here.
         if not _visible(source, f"{path}/{member}", rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
-        with connector.local_copy(source, path) as archive_local:
-            extract_member(archive_local, filename, member, destination)
+        try:
+            with connector.local_copy(source, path) as archive_local:
+                extract_member(
+                    archive_local, filename, member, destination, _max_decompressed_bytes()
+                )
+        except DecompressionLimitError as exc:
+            raise _too_large(exc) from exc
         return member.rsplit("/", 1)[-1]
 
     if is_transparent_gzip(filename):
-        with connector.local_copy(source, path) as raw_local:
-            decompress_gzip(raw_local, destination)
+        try:
+            with connector.local_copy(source, path) as raw_local:
+                decompress_gzip(raw_local, destination, _max_decompressed_bytes())
+        except DecompressionLimitError as exc:
+            raise _too_large(exc) from exc
         return filename[: -len(".gz")]
 
     connector.fetch_file(source, path, destination)

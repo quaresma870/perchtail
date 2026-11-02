@@ -238,6 +238,21 @@ def test_open_transparently_decompresses_gz(app_client, session, fake_sftp, scra
     assert response.content == b"hello world"
 
 
+def test_open_gz_over_the_decompression_limit_is_a_413(
+    app_client, session, fake_sftp, scratch_store, monkeypatch
+):
+    monkeypatch.setattr(get_settings(), "max_decompressed_mb", 0.001)  # ~1 KB
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log.gz")
+    fake_sftp.files["/var/log/appname/app.log.gz"] = gzip.compress(b"A" * 100_000)
+
+    response = client.get(f"/sources/{source.id}/open", params={"path": "app.log.gz"})
+    assert response.status_code == 413
+    assert list(scratch_store.root.iterdir()) == []
+
+
 def test_open_extracts_archive_member(app_client, session, fake_sftp, scratch_store):
     app, client = app_client
     source = _make_source(session)
