@@ -411,3 +411,95 @@ def test_evaluate_alerts_skips_disabled_alerts(tmp_path, monkeypatch):
     evaluate_alerts()
 
     assert posted == []
+
+
+def _capture_posts(monkeypatch) -> list[dict]:
+    posted: list[dict] = []
+
+    def fake_post(url, json, headers, extensions):
+        posted.append(json)
+        return SimpleNamespace(raise_for_status=lambda: None)
+
+    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
+    return posted
+
+
+def _reindex(engine, source_id):
+    with Session(engine) as session:
+        index_source(session, session.get(Source, source_id))
+
+
+def test_evaluate_alerts_does_not_repeat_lines_already_reported(tmp_path, monkeypatch):
+    engine = _throwaway_engine(monkeypatch)
+    posted = _capture_posts(monkeypatch)
+    log_path = tmp_path / "app.log"
+
+    with Session(engine) as session:
+        user = _user(session, is_super_admin=True)
+        source = _source(session, tmp_path)
+        _rule(session, source.id)
+        log_path.write_text("connection refused by upstream\n")
+        index_source(session, source)
+        _alert(session, user, query="refused")
+        source_id = source.id
+
+    evaluate_alerts()
+    assert posted[-1]["matched_count"] == 1
+
+    log_path.write_text("connection refused by upstream\nrefused again\n")
+    _reindex(engine, source_id)
+    evaluate_alerts()
+
+    assert len(posted) == 2
+    assert posted[-1]["matched_count"] == 1
+    assert [hit["line_number"] for hit in posted[-1]["hits"]] == [2]
+
+
+def test_new_match_is_found_behind_many_better_ranked_old_ones(tmp_path, monkeypatch):
+    engine = _throwaway_engine(monkeypatch)
+    posted = _capture_posts(monkeypatch)
+
+    with Session(engine) as session:
+        user = _user(session, is_super_admin=True)
+        source = _source(session, tmp_path)
+        _rule(session, source.id)
+        (tmp_path / "old.log").write_text("refused refused refused\n" * 250)
+        index_source(session, source)
+        _alert(session, user, query="refused")
+        source_id = source.id
+
+    evaluate_alerts()
+    assert len(posted) == 1
+
+    (tmp_path / "new.log").write_text(
+        "after a long and otherwise unremarkable line the upstream refused it\n"
+    )
+    _reindex(engine, source_id)
+    evaluate_alerts()
+
+    assert len(posted) == 2
+    assert {hit["file_path"] for hit in posted[-1]["hits"]} == {"new.log"}
+
+
+def test_a_rotated_file_reports_its_new_content_from_the_top(tmp_path, monkeypatch):
+    engine = _throwaway_engine(monkeypatch)
+    posted = _capture_posts(monkeypatch)
+    log_path = tmp_path / "app.log"
+
+    with Session(engine) as session:
+        user = _user(session, is_super_admin=True)
+        source = _source(session, tmp_path)
+        _rule(session, source.id)
+        log_path.write_text("refused one\nok\nok\nok\n")
+        index_source(session, source)
+        _alert(session, user, query="refused")
+        source_id = source.id
+
+    evaluate_alerts()
+
+    log_path.write_text("refused after rotation\n")
+    _reindex(engine, source_id)
+    evaluate_alerts()
+
+    assert len(posted) == 2
+    assert [hit["line_number"] for hit in posted[-1]["hits"]] == [1]

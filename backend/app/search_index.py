@@ -19,7 +19,12 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlmodel import Session, select
 
-from app.archives import decompress_gzip, is_archive, is_transparent_gzip
+from app.archives import (
+    DecompressionLimitError,
+    decompress_gzip,
+    is_archive,
+    is_transparent_gzip,
+)
 from app.collectors import agent as agent_collector
 from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
@@ -29,7 +34,7 @@ from app.collectors.base import DirEntry
 from app.config import get_settings
 from app.health import record_search_sweep
 from app.logging_config import get_logger
-from app.models import Protocol, Rule, SearchIndexState, Source
+from app.models import AlertFileState, Protocol, Rule, SearchIndexState, Source
 from app.timeutils import utcnow
 
 logger = get_logger(__name__)
@@ -103,8 +108,8 @@ def _read_text(connector, source: Source, entry: DirEntry, max_bytes: int) -> st
             with tempfile.TemporaryDirectory() as tmp:
                 decompressed = Path(tmp) / "decompressed"
                 try:
-                    decompress_gzip(local_path, decompressed)
-                except OSError:
+                    decompress_gzip(local_path, decompressed, max_bytes)
+                except (OSError, DecompressionLimitError):
                     return None
                 if decompressed.stat().st_size > max_bytes:
                     return None
@@ -147,6 +152,14 @@ def _insert_fts_rows(session: Session, source_id: int, file_path: str, content: 
         )
 
 
+def _delete_alert_file_states(session: Session, source_id: int, file_path: str | None = None):
+    query = select(AlertFileState).where(AlertFileState.source_id == source_id)
+    if file_path is not None:
+        query = query.where(AlertFileState.file_path == file_path)
+    for state in session.exec(query).all():
+        session.delete(state)
+
+
 def delete_source_index(session: Session, source_id: int) -> None:
     """Drops everything indexed for a source -- its FTS rows and per-file
     state. Doesn't commit."""
@@ -158,6 +171,7 @@ def delete_source_index(session: Session, source_id: int) -> None:
         select(SearchIndexState).where(SearchIndexState.source_id == source_id)
     ).all():
         session.delete(state)
+    _delete_alert_file_states(session, source_id)
 
 
 def index_source(session: Session, source: Source) -> IndexStats:
@@ -213,6 +227,7 @@ def index_source(session: Session, source: Source) -> IndexStats:
     for path, state in existing_by_path.items():
         if path not in seen_paths:
             _delete_fts_rows(session, source.id, path)
+            _delete_alert_file_states(session, source.id, path)
             session.delete(state)
             stats.removed += 1
 
@@ -363,35 +378,44 @@ def search(
     return hits
 
 
-def search_content_only(
-    session: Session, query: str, source_ids: set[int], limit: int = 200
+def last_indexed_line(session: Session, source_id: int, file_path: str) -> int:
+    """Highest line number currently indexed for a file (0 if none)."""
+    row = session.execute(
+        text(
+            "SELECT MAX(line_number) FROM search_index_fts "
+            "WHERE source_id = :source_id AND file_path = :file_path"
+        ),
+        {"source_id": source_id, "file_path": file_path},
+    ).first()
+    return int(row[0] or 0) if row else 0
+
+
+def search_file_content_after(
+    session: Session, query: str, source_id: int, file_path: str, after_line: int, limit: int
 ) -> list[SearchHit]:
-    """Same MATCH-query shape as search(), but column-filtered to `snippet`
-    only, never `file_path` — used by app.alerts to check for newly
-    appeared content matching a saved query. A path match wouldn't make
-    sense there: a file's path doesn't change just because a new line got
-    appended to it, so it could never be "new" the way a fresh line is."""
-    if not source_ids:
-        return []
-
+    """Content matches in one file past `after_line`, in line order -- what
+    app.alerts needs to find new lines, with no global top-N cut that could
+    push a new match out behind better-ranked old ones."""
     match_query = 'snippet:"' + query.replace('"', '""') + '"'
-    placeholders = ", ".join(f":sid{i}" for i in range(len(source_ids)))
-    sql = (
-        "SELECT source_id, file_path, line_number, "
-        "snippet(search_index_fts, 3, :highlight_start, :highlight_end, '…', 12) "
-        "AS content_highlighted "
-        "FROM search_index_fts WHERE search_index_fts MATCH :query "
-        f"AND source_id IN ({placeholders}) ORDER BY rank LIMIT :limit"
-    )
-    params: dict[str, object] = {
-        "query": match_query,
-        "limit": limit,
-        "highlight_start": _HIGHLIGHT_START,
-        "highlight_end": _HIGHLIGHT_END,
-    }
-    params.update({f"sid{i}": sid for i, sid in enumerate(source_ids)})
-
-    rows = session.execute(text(sql), params).all()
+    rows = session.execute(
+        text(
+            "SELECT source_id, file_path, line_number, "
+            "snippet(search_index_fts, 3, :highlight_start, :highlight_end, '…', 12) "
+            "AS content_highlighted "
+            "FROM search_index_fts WHERE search_index_fts MATCH :query "
+            "AND source_id = :source_id AND file_path = :file_path "
+            "AND line_number > :after_line ORDER BY line_number LIMIT :limit"
+        ),
+        {
+            "query": match_query,
+            "source_id": source_id,
+            "file_path": file_path,
+            "after_line": after_line,
+            "limit": limit,
+            "highlight_start": _HIGHLIGHT_START,
+            "highlight_end": _HIGHLIGHT_END,
+        },
+    ).all()
     return [
         SearchHit(
             source_id=row.source_id,

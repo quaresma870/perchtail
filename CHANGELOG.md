@@ -29,6 +29,13 @@ release ships (0.x releases may include breaking changes between minors).
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- Opening a `.gz` file or a `.zip`/`.tar.gz` member is now capped at
+  `MAX_DECOMPRESSED_MB` of decompressed output (default 2048). Previously a
+  small crafted archive (a "zip bomb") could expand without limit and
+  fill the scratch disk. The cap counts the bytes actually produced, not
+  the size the archive header claims. Going over it returns HTTP 413 and
+  deletes the partial file. The search indexer now stops decompressing at
+  its own per-file limit instead of decompressing in full first.
 - Delegated admin capabilities can no longer be used to reach
   super-admin. A non-super-admin can now only assign, edit, grant on, or
   map an SSO group to a role that isn't super-admin and carries no global
@@ -104,6 +111,14 @@ release ships (0.x releases may include breaking changes between minors).
   narrow concurrent-write race.
 
 ### Fixed
+- Alerts missed new matches and repeated old ones. A new matching line
+  could be missed when more than 200 older matches ranked above it,
+  because only one top-200 search across the whole index was checked.
+  Every append to a file also re-sent all of that file's old matching
+  lines. Each changed file is now searched on its own, starting after the
+  last line that alert already reported. A rotated or rewritten file
+  reports from the top. Adds the `alert_file_state` table (migration
+  `c5e1a7d93b20`).
 - A rule (or severity pattern) with an invalid regex, such as an
   unbalanced `(`, used to save fine and then make every browse, open and
   download of that source fail with a server error. Invalid regexes are
