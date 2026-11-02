@@ -7,7 +7,7 @@ from app.api.auth import get_current_active_user
 from app.auth.models import Capability, User
 from app.auth.rbac import visible_source_ids
 from app.db import get_session
-from app.models import Alert
+from app.models import Alert, AlertFileState
 from app.search_index import SearchHit
 from app.timeutils import utcnow
 from app.webhook_safety import UnsafeWebhookURLError, assert_webhook_url_is_safe
@@ -155,6 +155,12 @@ def delete_alert(
     session: Session = Depends(get_session),
 ):
     alert = _get_owned_alert(session, user, alert_id)
+    # Alert ids can be reused after a delete, so its per-file progress must
+    # not outlive it and silence a later alert's first matches.
+    for state in session.exec(
+        select(AlertFileState).where(AlertFileState.alert_id == alert.id)
+    ).all():
+        session.delete(state)
     session.delete(alert)
     session.commit()
 
