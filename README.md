@@ -8,7 +8,7 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.2.0%20%28pre--1.0%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.3.0%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -20,7 +20,7 @@
 
 ## Status
 
-🟢 **v0.2.0 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
+🟢 **v0.3.0 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
 Phase 3 (full-text search, saved-search webhook alerts, IdP
 group-claim-to-role auto-mapping, a detailed health endpoint) are all
 complete** (see [ROADMAP.md](ROADMAP.md) for the full phase breakdown).
@@ -41,9 +41,11 @@ vulnerability scanning, `CREDENTIAL_ENCRYPTION_KEY` rotation with a
 tooled migration path, salted PBKDF2 key derivation, persisted SSH
 host-key pinning, a Sessions page for revoking a login remotely, a
 DNS-rebind-safe outbound webhook fetcher, optional TOTP/MFA for local
-accounts, and audit-log tamper-evidence (HMAC hash-chained, periodically
-verified) — see ROADMAP.md's "Security hardening" section for what's
-still open (mainly a formal third-party review). Covered
+accounts, audit-log tamper-evidence (HMAC hash-chained, periodically
+verified), an operator allowlist for local-disk sources, decompression
+limits, and the fixes from a full code review and CodeQL scan in v0.3.0.
+See ROADMAP.md's "Security hardening" section for what's still open
+(mainly a formal third-party review). Covered
 end-to-end by `pytest` (backend), `vitest` (frontend units), and a
 Playwright suite that drives the real browser UI against real SSH/SMB
 test servers, not just mocks. Still pre-1.0 otherwise: SAML isn't built
