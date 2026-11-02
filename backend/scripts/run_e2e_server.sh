@@ -43,20 +43,35 @@ export PERCHTAIL_TEST_PATCH_MODULE="app.testing.fake_winrm"
 # without being so short it starves other requests on a single-process
 # uvicorn.
 export SEARCH_INDEX_INTERVAL_SECONDS="2"
+# frontend/e2e/search.spec.ts points a local-disk source at the ssh fixture
+# tree (setup_e2e_test_servers.sh's FIXTURE_ROOT) -- see LOCAL_SOURCE_ROOTS
+# in .env.example.
+export LOCAL_SOURCE_ROOTS="/tmp/perchtail-e2e-fixtures"
 
 # Stop any previous run's sshd/smbd before wiping data/e2e/ below -- they
 # self-daemonize (see setup_e2e_test_servers.sh) and outlive this script, so
 # without this a second consecutive run would leak the first run's servers
 # still bound to ports 2222/1445, and the new ones would fail to start.
 # Must happen *before* the rm -rf: their pidfiles live under data/e2e/ too.
+#
+# The pidfile PID isn't trustworthy: sshd/smbd daemonize (fork) after
+# writing it, so it can name the pre-fork/intermediate process rather than
+# the actual long-lived daemon (see issue #89). A `kill` on that stale PID
+# fails, and under `set -e` an unguarded failure here would abort the whole
+# script with no explanation -- so the pidfile kill is `|| true` (best
+# effort only), backed up by a cmdline-based `pkill -f` that finds the real
+# daemon by the absolute config path setup_e2e_test_servers.sh launched it
+# with, regardless of what PID it's actually running as.
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
 else
   SUDO="sudo"
 fi
 for pidfile in ./data/e2e/ssh-etc/sshd.pid ./data/e2e/smb-etc/run/smbd.pid; do
-  [ -f "$pidfile" ] && $SUDO kill "$(cat "$pidfile")" 2>/dev/null
+  [ -f "$pidfile" ] && $SUDO kill "$(cat "$pidfile")" 2>/dev/null || true
 done
+$SUDO pkill -f "$(pwd)/data/e2e/ssh-etc/sshd_config" 2>/dev/null || true
+$SUDO pkill -f "$(pwd)/data/e2e/smb-etc/smb.conf" 2>/dev/null || true
 
 rm -rf ./data/e2e
 mkdir -p ./data/e2e

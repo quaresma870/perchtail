@@ -18,6 +18,7 @@ export interface CurrentUser {
   role_id: number
   active: boolean
   must_change_password: boolean
+  mfa_enabled: boolean
   is_super_admin: boolean
   global_capabilities: GlobalCapability[]
 }
@@ -34,6 +35,11 @@ export interface Folder {
   parent_folder_id: number | null
 }
 
+export interface FolderPathEntry {
+  id: number
+  name: string
+}
+
 export interface Source {
   id: number
   name: string
@@ -41,6 +47,11 @@ export interface Source {
   customer_name: string | null
   folder_id: number | null
   folder_name: string | null
+  // Full ancestor chain, root-to-leaf, excluding the customer itself --
+  // lets the Viewer's connections-home tree reconstruct the whole nested
+  // customer/folder hierarchy client-side without a separate (admin-gated)
+  // /folders call. Empty when the source sits directly under its customer.
+  folder_path: FolderPathEntry[]
   protocol: Protocol
   host: string
   port: number | null
@@ -177,6 +188,12 @@ export interface AuditLogFilterOptions {
   target_types: string[]
 }
 
+export interface AuditIntegrityStatus {
+  status: 'unknown' | 'ok' | 'broken'
+  last_checked_at: string | null
+  broken_row_id: number | null
+}
+
 export interface AuthSessionInfo {
   id: number
   created_at: string
@@ -184,6 +201,15 @@ export interface AuthSessionInfo {
   expires_at: string
   user_agent: string | null
   is_current: boolean
+}
+
+export interface MfaEnrollResponse {
+  secret: string
+  otpauth_uri: string
+}
+
+export interface MfaBackupCodesResponse {
+  backup_codes: string[]
 }
 
 export interface Alert {

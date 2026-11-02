@@ -2,7 +2,12 @@
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
-  import type { AuditLogEntry, AuditLogFilterOptions, AuditLogPage } from '../lib/types'
+  import type {
+    AuditIntegrityStatus,
+    AuditLogEntry,
+    AuditLogFilterOptions,
+    AuditLogPage,
+  } from '../lib/types'
 
   const PAGE_SIZE = 50
 
@@ -22,6 +27,9 @@
   let selectedActions = new Set<string>()
   let since = ''
   let until = ''
+
+  let integrity: AuditIntegrityStatus = { status: 'unknown', last_checked_at: null, broken_row_id: null }
+  let verifying = false
 
   function buildQuery(): string {
     const params = new URLSearchParams()
@@ -54,6 +62,26 @@
     } catch {
       // Non-fatal -- filter checkboxes just start empty; the table itself
       // still loads unfiltered.
+    }
+  }
+
+  async function loadIntegrityStatus() {
+    try {
+      integrity = await api.get<AuditIntegrityStatus>('/audit/integrity')
+    } catch {
+      // Non-fatal -- the banner just doesn't render; the table itself still
+      // loads unaffected.
+    }
+  }
+
+  async function verifyIntegrityNow() {
+    verifying = true
+    try {
+      integrity = await api.post<AuditIntegrityStatus>('/audit/integrity/verify')
+    } catch (err) {
+      error = err instanceof ApiError ? err.detail : 'Failed to verify audit log integrity'
+    } finally {
+      verifying = false
     }
   }
 
@@ -109,7 +137,7 @@
     metadata ? JSON.stringify(metadata) : ''
 
   onMount(async () => {
-    await Promise.all([loadFilterOptions(), load()])
+    await Promise.all([loadFilterOptions(), loadIntegrityStatus(), load()])
   })
 </script>
 
@@ -121,6 +149,32 @@
     Every login, and every source/rule/role/user/customer/folder/SSO/system-settings change --
     see Settings → System for how long entries are kept before being purged automatically.
   </p>
+
+  <div
+    class="integrity-banner"
+    class:broken={integrity.status === 'broken'}
+    class:unknown={integrity.status === 'unknown'}
+  >
+    {#if integrity.status === 'broken'}
+      <span class="integrity-text">
+        ⚠ Tampering detected: the audit log's hash chain breaks at row {integrity.broken_row_id}.
+        Everything from that row onward can no longer be trusted as an unaltered record.
+      </span>
+    {:else if integrity.status === 'ok'}
+      <span class="integrity-text">
+        ✓ Audit log integrity verified -- chain intact as of
+        {integrity.last_checked_at ? formatTimestamp(integrity.last_checked_at) : 'unknown'}.
+      </span>
+    {:else}
+      <span class="integrity-text">
+        Audit log integrity has not been checked yet -- it runs automatically on its own
+        schedule (Settings → System), or verify it now.
+      </span>
+    {/if}
+    <button type="button" class="btn btn-ghost" on:click={verifyIntegrityNow} disabled={verifying}>
+      {verifying ? 'Verifying…' : 'Verify now'}
+    </button>
+  </div>
 
   <div class="filters card">
     {#if filterOptions.target_types.length > 0}
@@ -240,6 +294,26 @@
     color: var(--text-faint);
     margin: 0;
     line-height: 1.5;
+  }
+  .integrity-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.7rem 1rem;
+    border-radius: 8px;
+    background: var(--success-soft);
+    font-size: 0.85rem;
+  }
+  .integrity-banner.broken {
+    background: var(--danger-soft);
+  }
+  .integrity-banner.unknown {
+    background: var(--border-soft);
+  }
+  .integrity-text {
+    color: var(--text);
+    line-height: 1.4;
   }
   .filters {
     display: flex;

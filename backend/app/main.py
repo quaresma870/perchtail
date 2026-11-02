@@ -31,14 +31,19 @@ from app.api.sources import router as sources_router
 from app.api.sso import router as sso_router
 from app.api.system_settings import router as system_settings_router
 from app.api.users import router as users_router
+from app.audit_hash_chain import backfill_chain_if_needed
+from app.audit_integrity import run_audit_integrity_check
 from app.audit_purge import run_audit_purge_sweep
 from app.bootstrap import (
+    assert_credential_salt_present,
     seed_initial_super_admin,
     seed_no_access_role,
     seed_severity_patterns,
     seed_system_log_source,
 )
+from app.collectors.local import LocalPathNotAllowedError
 from app.config import get_settings
+from app.crypto import audit_chain_key
 from app.db import engine, init_db
 from app.health import mark_started
 from app.logging_config import configure_logging, get_logger
@@ -124,14 +129,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 _ORIGIN_CHECKED_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
-def _is_same_origin(candidate: str, expected_origin: str) -> bool:
+def _is_same_origin(candidate: str, expected_netloc: str) -> bool:
     """candidate is a raw Origin header value, or a full Referer URL -- both
-    get reduced to scheme://host[:port] before comparing, since Referer
-    carries a path/query Origin never does."""
+    get reduced to host[:port] before comparing, since Referer carries a
+    path/query Origin never does. Deliberately host-only, not
+    scheme+host -- see OriginCheckMiddleware's docstring for why comparing
+    scheme would break the standard reverse-proxy deployment this project
+    is actually meant to run behind."""
     parsed = urlsplit(candidate)
     if not parsed.scheme or not parsed.netloc:
         return False
-    return f"{parsed.scheme}://{parsed.netloc}" == expected_origin
+    return parsed.netloc == expected_netloc
 
 
 class OriginCheckMiddleware(BaseHTTPMiddleware):
@@ -159,6 +167,21 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
     backend on a different one -- see vite.config.ts, which strips
     Origin/Referer on the way through so this falls to the no-header case
     below rather than comparing two ports that are legitimately different).
+
+    Host-only, deliberately not scheme+host: uvicorn runs with no
+    --proxy-headers/--forwarded-allow-ips trust configured (see
+    docker-entrypoint.sh), so request.url.scheme is always "http" as seen
+    from nginx's plain-HTTP proxy connection, even when the real client
+    connected over https and its Origin header correctly says so. Comparing
+    scheme too would 403 every state-changing request -- including
+    login -- on exactly the TLS-terminating-reverse-proxy setup this
+    project's docs recommend (docs/source-setup.md's "reachability" note
+    and the README's deployment section). Dropping scheme from the
+    comparison doesn't meaningfully weaken this: SameSite=Strict above is
+    already the real defense; this only guards a non-compliant client, and
+    a same-host, different-scheme request is not a cross-site one in the
+    threat model CSRF checks exist for.
+
     If neither header is present at all, the request is let through to
     rely on SameSite alone -- rejecting on a merely absent header would
     also break legitimate non-browser API use (curl, scripts) that a
@@ -168,8 +191,7 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
         if request.method in _ORIGIN_CHECKED_METHODS:
             candidate = request.headers.get("origin") or request.headers.get("referer")
             if candidate is not None:
-                expected = f"{request.url.scheme}://{request.url.netloc}"
-                if not _is_same_origin(candidate, expected):
+                if not _is_same_origin(candidate, request.url.netloc):
                     return JSONResponse(
                         status_code=403, content={"detail": "Cross-site request blocked"}
                     )
@@ -193,6 +215,14 @@ async def lifespan(app: FastAPI):
     mark_started()
     get_agent_registry().bind_loop(asyncio.get_running_loop())
     with Session(engine) as session:
+        assert_credential_salt_present(session)
+        # Must run before anything below that could write an AuditLog row --
+        # see backfill_chain_if_needed's own docstring for why order matters
+        # here.
+        backfilled = backfill_chain_if_needed(audit_chain_key(), session)
+        if backfilled:
+            logger.info("audit_hash_chain.backfill_complete", rows=backfilled)
+        session.commit()
         seed_system_log_source(session)
         seed_initial_super_admin(session)
         seed_no_access_role(session)
@@ -219,6 +249,11 @@ async def lifespan(app: FastAPI):
         run_audit_purge_sweep,
         "interval",
         seconds=settings.audit_purge_interval_seconds,
+    )
+    scheduler.add_job(
+        run_audit_integrity_check,
+        "interval",
+        days=settings.audit_integrity_check_interval_days,
     )
     scheduler.start()
     logger.info("startup.complete")
@@ -247,6 +282,11 @@ app.include_router(system_settings_router)
 app.include_router(severity_patterns_global_router)
 app.include_router(severity_patterns_source_router)
 app.include_router(monitoring_router)
+
+
+@app.exception_handler(LocalPathNotAllowedError)
+async def local_path_not_allowed(request: Request, exc: LocalPathNotAllowedError):
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 
 @app.get("/healthz")

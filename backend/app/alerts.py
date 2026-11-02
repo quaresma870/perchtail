@@ -12,8 +12,8 @@ from sqlmodel import Session, select
 from app.auth.models import Capability, User
 from app.auth.rbac import visible_source_ids
 from app.logging_config import get_logger
-from app.models import Alert, SearchIndexState, Source
-from app.search_index import SearchHit, search_content_only
+from app.models import Alert, AlertFileState, SearchIndexState, Source
+from app.search_index import SearchHit, last_indexed_line, search_file_content_after
 from app.timeutils import utcnow
 from app.webhook_safety import UnsafeWebhookURLError, resolve_pinned_webhook_target
 
@@ -21,6 +21,9 @@ logger = get_logger(__name__)
 
 _WEBHOOK_TIMEOUT_SECONDS = 10.0
 _MAX_HITS_PER_WEBHOOK = 10
+# Bounds memory for a file that suddenly gains a huge number of matching
+# lines; matched_count in the webhook stops counting there.
+_MAX_HITS_PER_FILE = 500
 
 
 def _resolve_alert_source_ids(session: Session, owner: User, alert: Alert) -> set[int]:
@@ -60,14 +63,55 @@ def _changed_files_since(session: Session, source_ids: set[int], since) -> set[t
 
 def _new_hits_for_source_ids(
     session: Session, alert: Alert, source_ids: set[int]
-) -> list[SearchHit]:
+) -> tuple[list[SearchHit], dict[tuple[int, str], int]]:
+    """Returns (new hits, per-file line each changed file is now reported
+    through). Each changed file is searched on its own, past the line this
+    alert already reported up to -- the indexer re-reads a changed file in
+    full, so without that cut every old match would fire again."""
     if not source_ids:
-        return []
+        return [], {}
     changed = _changed_files_since(session, source_ids, alert.last_checked_at)
     if not changed:
-        return []
-    hits = search_content_only(session, alert.query, source_ids)
-    return [hit for hit in hits if (hit.source_id, hit.file_path) in changed]
+        return [], {}
+
+    reported = {
+        (state.source_id, state.file_path): state.reported_through_line
+        for state in session.exec(
+            select(AlertFileState).where(AlertFileState.alert_id == alert.id)
+        ).all()
+    }
+    hits: list[SearchHit] = []
+    watermarks: dict[tuple[int, str], int] = {}
+    for source_id, file_path in sorted(changed):
+        last_line = last_indexed_line(session, source_id, file_path)
+        after_line = reported.get((source_id, file_path), 0)
+        if last_line < after_line:
+            # The file now ends before where we'd got to: rotated or
+            # rewritten, so all of it is new content.
+            after_line = 0
+        hits.extend(
+            search_file_content_after(
+                session, alert.query, source_id, file_path, after_line, _MAX_HITS_PER_FILE
+            )
+        )
+        watermarks[(source_id, file_path)] = last_line
+    return hits, watermarks
+
+
+def _record_watermarks(
+    session: Session, alert: Alert, watermarks: dict[tuple[int, str], int]
+) -> None:
+    for (source_id, file_path), line in watermarks.items():
+        state = session.get(AlertFileState, (alert.id, source_id, file_path))
+        if state is None:
+            state = AlertFileState(
+                alert_id=alert.id,
+                source_id=source_id,
+                file_path=file_path,
+                reported_through_line=line,
+            )
+        state.reported_through_line = line
+        session.add(state)
 
 
 def check_alert(session: Session, alert: Alert) -> list[SearchHit]:
@@ -82,7 +126,8 @@ def check_alert(session: Session, alert: Alert) -> list[SearchHit]:
     if owner is None or not owner.active:
         return []
     source_ids = _resolve_alert_source_ids(session, owner, alert)
-    return _new_hits_for_source_ids(session, alert, source_ids)
+    hits, _ = _new_hits_for_source_ids(session, alert, source_ids)
+    return hits
 
 
 def send_webhook(alert: Alert, hits: list[SearchHit]) -> bool:
@@ -150,7 +195,7 @@ def evaluate_alerts() -> None:
                     if owner is not None and owner.active
                     else set()
                 )
-                hits = _new_hits_for_source_ids(session, alert, source_ids)
+                hits, watermarks = _new_hits_for_source_ids(session, alert, source_ids)
                 if hits:
                     send_webhook(alert, hits)
                 # Only advance the watermark when this alert actually had
@@ -160,6 +205,7 @@ def evaluate_alerts() -> None:
                 # everything missed in between, instead of silently
                 # skipping it.
                 if source_ids:
+                    _record_watermarks(session, alert, watermarks)
                     alert.last_checked_at = utcnow()
                     session.add(alert)
                     session.commit()

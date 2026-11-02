@@ -1,5 +1,12 @@
 from app.auth.models import Capability, Role, RoleGrant, ScopeType, User
-from app.auth.rbac import create_role, create_role_grant, require_capability, resolve_capability
+from app.auth.rbac import (
+    build_folder_visibility_context,
+    create_role,
+    create_role_grant,
+    folder_path_boundary,
+    require_capability,
+    resolve_capability,
+)
 from app.db import get_session
 from app.models import Customer, Folder, Protocol, Source
 from fastapi import Depends, FastAPI
@@ -335,3 +342,82 @@ def test_create_role_and_grant_write_audit_log(session):
     assert "role.create" in actions
     assert "role_grant.create" in actions
     assert grant.role_id == role.id
+
+
+def test_folder_path_boundary_none_for_super_admin(session):
+    role = _make_role(session, is_super_admin=True)
+    user = _make_user(session, role)
+    customer, source = _make_customer_source(session)
+    folders = _make_folder_chain(session, customer, depth=3)
+    source.folder_id = folders[-1].id
+    session.add(source)
+    session.commit()
+
+    ctx = build_folder_visibility_context(session, user)
+    assert folder_path_boundary(ctx, source) is None
+
+
+def test_folder_path_boundary_is_the_granted_folder_for_a_folder_scoped_grant(session):
+    role = _make_role(session)
+    user = _make_user(session, role)
+    customer, source = _make_customer_source(session)
+    folders = _make_folder_chain(session, customer, depth=3)
+    source.folder_id = folders[-1].id
+    session.add(source)
+    session.commit()
+
+    create_role_grant(
+        session,
+        actor_user_id=None,
+        role_id=role.id,
+        scope_type=ScopeType.folder,
+        scope_id=folders[1].id,
+        capabilities=[Capability.view],
+    )
+
+    ctx = build_folder_visibility_context(session, user)
+    assert folder_path_boundary(ctx, source) == folders[1].id
+
+
+def test_folder_path_boundary_is_the_immediate_folder_for_a_source_scoped_grant(session):
+    role = _make_role(session)
+    user = _make_user(session, role)
+    customer, source = _make_customer_source(session)
+    folders = _make_folder_chain(session, customer, depth=3)
+    source.folder_id = folders[-1].id
+    session.add(source)
+    session.commit()
+
+    create_role_grant(
+        session,
+        actor_user_id=None,
+        role_id=role.id,
+        scope_type=ScopeType.source,
+        scope_id=source.id,
+        capabilities=[Capability.view],
+    )
+
+    ctx = build_folder_visibility_context(session, user)
+    assert folder_path_boundary(ctx, source) == source.folder_id == folders[-1].id
+
+
+def test_folder_path_boundary_none_for_a_customer_scoped_grant(session):
+    role = _make_role(session)
+    user = _make_user(session, role)
+    customer, source = _make_customer_source(session)
+    folders = _make_folder_chain(session, customer, depth=3)
+    source.folder_id = folders[-1].id
+    session.add(source)
+    session.commit()
+
+    create_role_grant(
+        session,
+        actor_user_id=None,
+        role_id=role.id,
+        scope_type=ScopeType.customer,
+        scope_id=customer.id,
+        capabilities=[Capability.view],
+    )
+
+    ctx = build_folder_visibility_context(session, user)
+    assert folder_path_boundary(ctx, source) is None

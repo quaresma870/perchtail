@@ -8,6 +8,7 @@
   import ChangePassword from './routes/ChangePassword.svelte'
   import Sources from './routes/Sources.svelte'
   import SourceEditor from './routes/SourceEditor.svelte'
+  import Folders from './routes/Folders.svelte'
   import Viewer from './routes/Viewer.svelte'
   import Search from './routes/Search.svelte'
   import Alerts from './routes/Alerts.svelte'
@@ -19,6 +20,7 @@
   import SystemSettings from './routes/SystemSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
   import SessionsSettings from './routes/SessionsSettings.svelte'
+  import SecuritySettings from './routes/SecuritySettings.svelte'
   import AuditLogSettings from './routes/AuditLogSettings.svelte'
 
   const routes = {
@@ -32,6 +34,7 @@
     '/settings/sources': Sources,
     '/settings/sources/new': SourceEditor,
     '/settings/sources/:id': SourceEditor,
+    '/settings/folders': Folders,
     '/settings/roles': Roles,
     '/settings/roles/new': RoleEditor,
     '/settings/roles/:id': RoleEditor,
@@ -40,6 +43,7 @@
     '/settings/system': SystemSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
     '/settings/sessions': SessionsSettings,
+    '/settings/security': SecuritySettings,
     '/settings/audit-log': AuditLogSettings,
   }
 

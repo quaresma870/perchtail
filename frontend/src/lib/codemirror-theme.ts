@@ -11,6 +11,7 @@ import {
   WidgetType,
 } from '@codemirror/view'
 import type { FileLanguage } from './file-language'
+import { findMarkMatches, type MarkPattern } from './mark-highlighting'
 import { findMatchesInLine, LEVEL_CLASS } from './severity-highlighting'
 import { findCrlfLineNumbers, findWhitespaceRuns } from './whitespace-highlighting'
 import type { SeverityPattern } from './types'
@@ -70,6 +71,16 @@ export const darkTheme = EditorView.theme(
       fontSize: '0.75em',
       verticalAlign: 'middle',
     },
+    // "Mark" highlighting palette (Notepad++-style ad hoc pattern
+    // highlighting, see mark-highlighting.ts) -- a fixed set of visually
+    // distinct colors cycled through as marks are added, separate from
+    // severity's level-based classes above.
+    '.cm-mark-0': { backgroundColor: 'rgba(56, 189, 248, 0.32)' },
+    '.cm-mark-1': { backgroundColor: 'rgba(244, 114, 182, 0.32)' },
+    '.cm-mark-2': { backgroundColor: 'rgba(163, 230, 53, 0.32)' },
+    '.cm-mark-3': { backgroundColor: 'rgba(192, 132, 252, 0.32)' },
+    '.cm-mark-4': { backgroundColor: 'rgba(251, 146, 60, 0.32)' },
+    '.cm-mark-5': { backgroundColor: 'rgba(94, 234, 212, 0.32)' },
   },
   { dark: true },
 )
@@ -155,6 +166,48 @@ export function severityHighlighting(patterns: SeverityPattern[]) {
   )
 
   return [lines, tokens]
+}
+
+function buildMarkDecorations(view: EditorView, marks: MarkPattern[]): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>()
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from
+    while (pos <= to) {
+      const line = view.state.doc.lineAt(pos)
+      const matches = findMarkMatches(line.text, marks).sort((a, b) => a.matchStart - b.matchStart)
+      for (const match of matches) {
+        const start = line.from + match.matchStart
+        const end = start + match.matchLength
+        builder.add(start, end, Decoration.mark({ class: `cm-mark-${match.colorIndex}` }))
+      }
+      pos = line.to + 1
+    }
+  }
+  return builder.finish()
+}
+
+/** Notepad++'s "Mark" feature: one or more ad hoc, session-only patterns
+ * highlighted at once, each in its own color (mark-highlighting.ts) --
+ * distinct from severityHighlighting's admin-configured, level-based set.
+ * Same single-ViewPlugin/token-only shape as severityHighlighting's `tokens`
+ * plugin (marks never tint a whole line), rebuilt whenever the active mark
+ * list changes, same "captured at construction time" convention as every
+ * other content-dependent extension here. */
+export function markHighlighting(marks: MarkPattern[]) {
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet
+      constructor(view: EditorView) {
+        this.decorations = buildMarkDecorations(view, marks)
+      }
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.viewportChanged) {
+          this.decorations = buildMarkDecorations(update.view, marks)
+        }
+      }
+    },
+    { decorations: (v) => v.decorations },
+  )
 }
 
 class GlyphWidget extends WidgetType {

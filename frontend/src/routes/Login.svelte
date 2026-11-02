@@ -7,9 +7,14 @@
 
   let username = ''
   let password = ''
+  let mfaCode = ''
   let error = ''
   let submitting = false
   let sso: SSOStatus = { enabled: false, name: null }
+  // Set once the password step succeeds but the account needs a second
+  // factor -- switches the form to asking for the TOTP/backup code instead
+  // of restarting from username/password (see lib/auth.ts's login()).
+  let awaitingMfaCode = false
 
   onMount(async () => {
     if (window.location.hash.includes('sso_error=1')) {
@@ -22,13 +27,31 @@
     error = ''
     submitting = true
     try {
-      await login(username, password)
+      await login(username, password, awaitingMfaCode ? mfaCode : undefined)
       push('/viewer')
     } catch (err) {
-      error = err instanceof ApiError ? err.detail : 'Login failed'
+      if (err instanceof ApiError && err.errorCode === 'mfa_required') {
+        awaitingMfaCode = true
+      } else if (err instanceof ApiError && err.errorCode === 'mfa_invalid_code') {
+        awaitingMfaCode = true
+        mfaCode = ''
+        error = err.detail
+      } else {
+        error = err instanceof ApiError ? err.detail : 'Login failed'
+      }
     } finally {
       submitting = false
     }
+  }
+
+  function backToPassword() {
+    awaitingMfaCode = false
+    mfaCode = ''
+    error = ''
+  }
+
+  function autofocus(node: HTMLElement) {
+    node.focus()
   }
 </script>
 
@@ -38,32 +61,57 @@
       <img src="/favicon.svg" alt="" width="40" height="40" />
       <h1>PerchTail</h1>
     </div>
-    <label>
-      Username
-      <input class="input" type="text" bind:value={username} autocomplete="username" required />
-    </label>
-    <label>
-      Password
-      <input
-        class="input"
-        type="password"
-        bind:value={password}
-        autocomplete="current-password"
-        required
-      />
-    </label>
-    {#if error}
-      <p class="error">{error}</p>
-    {/if}
-    <button class="btn btn-primary" type="submit" disabled={submitting}>
-      {submitting ? 'Signing in…' : 'Sign in'}
-    </button>
+    {#if awaitingMfaCode}
+      <p class="hint">Enter the 6-digit code from your authenticator app, or a backup code.</p>
+      <label>
+        Authentication code
+        <input
+          class="input"
+          type="text"
+          bind:value={mfaCode}
+          autocomplete="one-time-code"
+          inputmode="numeric"
+          use:autofocus
+          required
+        />
+      </label>
+      {#if error}
+        <p class="error">{error}</p>
+      {/if}
+      <button class="btn btn-primary" type="submit" disabled={submitting}>
+        {submitting ? 'Verifying…' : 'Verify'}
+      </button>
+      <button class="btn btn-ghost" type="button" on:click={backToPassword}>
+        Back
+      </button>
+    {:else}
+      <label>
+        Username
+        <input class="input" type="text" bind:value={username} autocomplete="username" required />
+      </label>
+      <label>
+        Password
+        <input
+          class="input"
+          type="password"
+          bind:value={password}
+          autocomplete="current-password"
+          required
+        />
+      </label>
+      {#if error}
+        <p class="error">{error}</p>
+      {/if}
+      <button class="btn btn-primary" type="submit" disabled={submitting}>
+        {submitting ? 'Signing in…' : 'Sign in'}
+      </button>
 
-    {#if sso.enabled}
-      <div class="divider"><span>or</span></div>
-      <a class="btn btn-ghost sso-btn" href="/auth/sso/login">
-        Sign in with {sso.name}
-      </a>
+      {#if sso.enabled}
+        <div class="divider"><span>or</span></div>
+        <a class="btn btn-ghost sso-btn" href="/auth/sso/login">
+          Sign in with {sso.name}
+        </a>
+      {/if}
     {/if}
   </form>
 </div>
@@ -114,6 +162,12 @@
     color: var(--danger);
     font-size: 0.85rem;
     margin: 0;
+  }
+  .hint {
+    color: var(--text-faint);
+    font-size: 0.8rem;
+    margin: -0.4rem 0 0;
+    line-height: 1.4;
   }
   .divider {
     display: flex;

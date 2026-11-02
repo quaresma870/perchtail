@@ -51,6 +51,10 @@ class SSOProtocol(StrEnum):
 
 
 class Role(SQLModel, table=True):
+    # See app.models.NO_ID_REUSE -- RoleGrant and SSOGroupRoleMapping point
+    # at roles by id.
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(unique=True, index=True)
     is_builtin: bool = False
@@ -92,8 +96,50 @@ class User(SQLModel, table=True):
     # Set on admin-created local accounts (see CLAUDE.md's Security notes);
     # cleared once the user picks their own password.
     must_change_password: bool = False
+    # Optional TOTP second factor for local accounts (ROADMAP.md's Security
+    # hardening section) -- SSO accounts delegate MFA to the IdP instead, so
+    # this is only ever meaningful for auth_provider=local. mfa_enabled is
+    # False both before enrollment starts and while a pending secret hasn't
+    # been confirmed yet (see auth/mfa.py's start_enrollment/
+    # confirm_enrollment) -- a half-finished enrollment never gates login.
+    mfa_enabled: bool = False
+    # Encrypted at rest via app.crypto (same Fernet primitive as
+    # Source.credential_ref) -- unlike a password hash, this has to be
+    # decryptable, since verifying a live code means feeding the secret back
+    # into the TOTP algorithm.
+    mfa_secret_encrypted: str | None = None
+    mfa_enrolled_at: datetime | None = None
+    # Anti-replay: the TOTP time-step counter last accepted for this user.
+    # pyotp's own verify() only checks a code's validity within a window, not
+    # whether it's been used before -- without tracking this, a single
+    # observed code (shoulder-surfed, logged by a proxy) could be replayed
+    # again within its ~90s acceptance window. A login/confirm is only
+    # accepted if its counter is strictly greater than this value (see
+    # auth/mfa.py's _consume_totp_code), mirroring MfaBackupCode.used_at's
+    # single-use guarantee for the TOTP path instead of just the backup-code
+    # path.
+    mfa_last_used_step: int | None = None
 
     role: Role = Relationship(back_populates="users")
+
+
+class MfaBackupCode(SQLModel, table=True):
+    """One-time recovery codes issued alongside TOTP enrollment (see
+    auth/mfa.py's confirm_enrollment) -- lets a user sign in if they lose
+    their authenticator device. Only the argon2 hash is stored, same
+    rationale as User.password_hash: unlike the TOTP secret above, a backup
+    code never needs to be read back in plaintext, only compared against on
+    use, so a one-way hash is the tighter choice here."""
+
+    __tablename__ = "mfa_backup_code"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    code_hash: str
+    created_at: datetime = Field(default_factory=utcnow)
+    # Consumed codes are kept (not deleted) as a record of use rather than
+    # silently vanishing -- null means still usable.
+    used_at: datetime | None = None
 
 
 class SSOProviderConfig(SQLModel, table=True):
@@ -169,3 +215,36 @@ class AuditLog(SQLModel, table=True):
     target_id: int | None = None
     timestamp: datetime = Field(default_factory=utcnow)
     event_metadata: dict | None = Field(default=None, sa_column=Column("metadata", JSON))
+    # Tamper-evidence hash chain (see app/audit_hash_chain.py) -- row_hash
+    # covers this row's own fields plus prev_hash, so altering or deleting a
+    # row anywhere breaks every hash after it. Both nullable: a row written
+    # before this feature existed has neither until
+    # audit_hash_chain.backfill_chain_if_needed runs once at startup.
+    prev_hash: str | None = None
+    row_hash: str | None = None
+
+
+class AuditChainState(SQLModel, table=True):
+    """Singleton bookkeeping row for the AuditLog hash chain -- two
+    independent concerns share it: (1) the chain anchor (anchor_row_id/
+    anchor_hash), the newest row purged under retention so far, so
+    app.audit_purge.run_audit_purge_sweep deleting old rows doesn't look
+    like a tamper break to verification -- the first surviving row is
+    expected to chain from this hash, not from None; and (2) the result of
+    the most recent app.audit_integrity.verify_chain() pass, read by the
+    Audit Log page's integrity banner. Singleton by convention, same as
+    MonitoringToken -- there is exactly one chain, so exactly one state
+    row."""
+
+    __tablename__ = "audit_chain_state"
+
+    id: int | None = Field(default=None, primary_key=True)
+    anchor_row_id: int | None = None
+    anchor_hash: str | None = None
+    last_checked_at: datetime | None = None
+    # "unknown" until the first verify_chain() call ever runs -- with this
+    # feature's very long default check interval (see
+    # Settings.audit_integrity_check_interval_days), that could otherwise be
+    # up to a year after upgrade with nothing to show on the banner.
+    status: str = "unknown"
+    broken_row_id: int | None = None

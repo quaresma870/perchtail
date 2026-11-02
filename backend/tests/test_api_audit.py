@@ -215,3 +215,84 @@ def test_metadata_is_returned(session, client_for):
 
     response = client.get("/audit")
     assert response.json()["items"][0]["metadata"] == {"name": "app01"}
+
+
+def test_integrity_status_unknown_before_any_check_has_run(session, client_for):
+    user = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    _seed(session, user.id, count=1)
+    client = client_for(user)
+
+    response = client.get("/audit/integrity")
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"status": "unknown", "last_checked_at": None, "broken_row_id": None}
+
+
+def test_plain_user_cannot_read_integrity_status(session, client_for):
+    user = _make_user(session)
+    client = client_for(user)
+
+    response = client.get("/audit/integrity")
+    assert response.status_code == 403
+
+
+def test_manual_verify_reports_ok_for_an_intact_chain(session, client_for):
+    user = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    _seed(session, user.id, count=3)
+    client = client_for(user)
+
+    response = client.post("/audit/integrity/verify")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["broken_row_id"] is None
+    assert body["last_checked_at"] is not None
+
+    # And the status persists for a plain GET afterward.
+    follow_up = client.get("/audit/integrity")
+    assert follow_up.json()["status"] == "ok"
+
+
+def test_manual_verify_detects_a_tampered_row(session, client_for):
+    user = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    entries = _seed(session, user.id, count=3)
+    tampered_id = entries[1].id
+    entries[1].action = "tampered"
+    session.add(entries[1])
+    session.commit()
+    client = client_for(user)
+
+    response = client.post("/audit/integrity/verify")
+    body = response.json()
+    assert body["status"] == "broken"
+    assert body["broken_row_id"] == tampered_id
+
+
+def test_plain_user_cannot_trigger_manual_verify(session, client_for):
+    user = _make_user(session)
+    client = client_for(user)
+
+    response = client.post("/audit/integrity/verify")
+    assert response.status_code == 403
+
+
+def test_manual_verify_is_cooldown_throttled(session, client_for):
+    # A safety valve for load: a low-trust view_audit_log-only role could
+    # otherwise script rapid repeated calls into real recompute cost on a
+    # large log (see the endpoint's own cooldown comment). Tampering
+    # *between* two calls made within the cooldown window must still read
+    # back the first call's "ok" -- proving the second call actually
+    # skipped recomputing, not just that it happened to agree.
+    user = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    entries = _seed(session, user.id, count=2)
+    client = client_for(user)
+
+    first = client.post("/audit/integrity/verify")
+    assert first.json()["status"] == "ok"
+
+    entries[0].action = "tampered"
+    session.add(entries[0])
+    session.commit()
+
+    second = client.post("/audit/integrity/verify")
+    assert second.json()["status"] == "ok"

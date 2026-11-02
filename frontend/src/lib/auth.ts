@@ -21,8 +21,21 @@ export async function refreshCurrentUser(): Promise<CurrentUser | null> {
   }
 }
 
-export async function login(username: string, password: string): Promise<CurrentUser> {
-  const user = await api.post<CurrentUser>('/auth/login', { username, password })
+export async function login(
+  username: string,
+  password: string,
+  mfaCode?: string,
+): Promise<CurrentUser> {
+  // A password-correct-but-MFA-pending attempt throws (ApiError with
+  // errorCode 'mfa_required' or 'mfa_invalid_code', see api.ts) rather than
+  // resolving — no session cookie is set yet, so there's nothing to store
+  // in currentUser. The caller (Login.svelte) catches that and re-calls
+  // this with the code once the user has one.
+  const user = await api.post<CurrentUser>('/auth/login', {
+    username,
+    password,
+    mfa_code: mfaCode,
+  })
   currentUser.set(user)
   return user
 }

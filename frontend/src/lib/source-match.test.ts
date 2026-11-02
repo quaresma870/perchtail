@@ -10,6 +10,7 @@ function makeSource(overrides: Partial<Source>): Source {
     customer_name: null,
     folder_id: null,
     folder_name: null,
+    folder_path: [],
     protocol: 'ssh',
     host: 'host.example.com',
     port: null,

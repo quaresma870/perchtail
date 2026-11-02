@@ -6,9 +6,10 @@ from app.api.auth import get_current_active_user
 from app.auth.models import Capability, Role, ScopeType, User
 from app.auth.rbac import create_role_grant
 from app.db import get_session
-from app.models import Alert, Customer, Protocol, Source
+from app.models import Alert, AlertFileState, Customer, Protocol, Source
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlmodel import select
 
 
 def _make_user(session, *, is_super_admin=False) -> User:
@@ -225,6 +226,27 @@ def test_delete_alert_requires_ownership(session, client_for):
     assert other_client.delete(f"/alerts/{created['id']}").status_code == 404
     assert owner_client.delete(f"/alerts/{created['id']}").status_code == 204
     assert session.get(Alert, created["id"]) is None
+
+
+def test_delete_alert_drops_its_per_file_progress(session, client_for):
+    owner = _make_user(session)
+    source = _make_source(session)
+    client = client_for(owner)
+    created = client.post(
+        "/alerts", json={"name": "a", "query": "q", "webhook_url": "https://example.com/hook"}
+    ).json()
+    session.add(
+        AlertFileState(
+            alert_id=created["id"],
+            source_id=source.id,
+            file_path="app.log",
+            reported_through_line=10,
+        )
+    )
+    session.commit()
+
+    assert client.delete(f"/alerts/{created['id']}").status_code == 204
+    assert session.exec(select(AlertFileState)).all() == []
 
 
 def test_test_endpoint_sends_a_synthetic_webhook(session, client_for, monkeypatch):

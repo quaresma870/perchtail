@@ -70,3 +70,15 @@ test('audit log: action multi-select and date-range filters narrow the table', a
   await page.getByRole('button', { name: 'Clear filters' }).click()
   await expect(page.locator('tbody tr').first()).toBeVisible()
 })
+
+test('audit log: integrity banner verifies the hash chain on demand', async ({ page }) => {
+  await page.goto('/#/settings/audit-log')
+
+  // Whatever the banner already says (unknown on a fresh e2e backend, or ok
+  // if a prior spec run in this same process already checked it -- see
+  // playwright.config.ts's workers: 1), clicking "Verify now" against a
+  // real, unmodified AuditLog must always resolve to "intact."
+  await page.getByRole('button', { name: 'Verify now' }).click()
+  await expect(page.locator('.integrity-banner')).toContainText('chain intact')
+  await expect(page.locator('.integrity-banner')).not.toHaveClass(/broken/)
+})

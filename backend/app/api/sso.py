@@ -15,7 +15,7 @@ from app.auth.models import (
     User,
 )
 from app.auth.providers.oidc import fetch_discovery_document, fetch_jwks, parse_oidc_settings
-from app.auth.rbac import require_global_capability
+from app.auth.rbac import require_global_capability, require_role_within_authority
 from app.crypto import decrypt_secret, encrypt_secret
 from app.db import get_session
 
@@ -197,6 +197,16 @@ def _require_role_exists(session: Session, role_id: int) -> Role:
     return role
 
 
+def _require_mappable_role(session: Session, user: User, role_id: int) -> Role:
+    """A group mapping hands its role to everyone in that IdP group on their
+    next login, so it's held to the same rule as assigning a role directly
+    (see rbac.role_within_authority) -- otherwise manage_sso alone could
+    map a group to Super Admin."""
+    role = _require_role_exists(session, role_id)
+    require_role_within_authority(user, role)
+    return role
+
+
 # Registered before "/{provider_id}" below -- FastAPI/Starlette match routes
 # in registration order, and "/{provider_id}" would otherwise shadow
 # "/group-mappings" (a single path segment matches the dynamic param too),
@@ -219,7 +229,7 @@ def create_group_mapping(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    role = _require_role_exists(session, payload.role_id)
+    role = _require_mappable_role(session, user, payload.role_id)
     mapping = SSOGroupRoleMapping(
         order=payload.order, group_name=payload.group_name, role_id=payload.role_id
     )
@@ -254,12 +264,15 @@ def update_group_mapping(
     session: Session = Depends(get_session),
 ):
     mapping = _get_mapping_or_404(session, mapping_id)
+    current_role = session.get(Role, mapping.role_id)
+    if current_role is not None:
+        require_role_within_authority(user, current_role)
     if payload.order is not None:
         mapping.order = payload.order
     if payload.group_name is not None:
         mapping.group_name = payload.group_name
     if payload.role_id is not None:
-        _require_role_exists(session, payload.role_id)
+        _require_mappable_role(session, user, payload.role_id)
         mapping.role_id = payload.role_id
     session.add(mapping)
 

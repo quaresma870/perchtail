@@ -53,6 +53,18 @@ def test_ps_quote_escapes_single_quotes():
     assert winrm_module._ps_quote("it's a test") == "'it''s a test'"
 
 
+@pytest.mark.parametrize("quote", ["\u2018", "\u2019", "\u201a", "\u201b"])
+def test_ps_quote_escapes_unicode_single_quotes(quote):
+    assert winrm_module._ps_quote(f"a{quote}b") == f"'a{quote}{quote}b'"
+
+
+def test_ps_quote_leaves_no_unpaired_quote_inside_the_string():
+    value = "x'\u2018\u2019\u201a\u201b'y"
+    inner = winrm_module._ps_quote(value)[1:-1]
+    for quote in ("'", "\u2018", "\u2019", "\u201a", "\u201b"):
+        assert quote not in inner.replace(quote * 2, ""), quote
+
+
 def test_remote_path_joins_base_and_relative():
     source = _source()
     assert winrm_module._remote_path(source) == "C:\\Logs\\AppName"

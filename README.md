@@ -8,18 +8,19 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.2.0%20%28pre--1.0%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.3.0%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
 [Why not just use X](#why-not-just-use-x) ·
 [Feature comparison](#feature-comparison) · [Screenshots](#screenshots) ·
-[Quick start](#quick-start) · [Documentation](#documentation) ·
-[License](#license)
+[Quick start](#quick-start) ·
+[Deployment: reverse proxy + TLS](#deployment-reverse-proxy-nginx--tls) ·
+[Documentation](#documentation) · [License](#license)
 
 ## Status
 
-🟢 **v0.2.0 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
+🟢 **v0.3.0 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
 Phase 3 (full-text search, saved-search webhook alerts, IdP
 group-claim-to-role auto-mapping, a detailed health endpoint) are all
 complete** (see [ROADMAP.md](ROADMAP.md) for the full phase breakdown).
@@ -38,10 +39,13 @@ Most of a pre-1.0 security-hardening pass is done too — login lockout,
 CSP/security headers, CI-blocking dependency and container-image
 vulnerability scanning, `CREDENTIAL_ENCRYPTION_KEY` rotation with a
 tooled migration path, salted PBKDF2 key derivation, persisted SSH
-host-key pinning, a Sessions page for revoking a login remotely, and a
-DNS-rebind-safe outbound webhook fetcher — see ROADMAP.md's "Security
-hardening" section for what's still open (optional local-account MFA,
-audit-log tamper-evidence, a formal third-party review). Covered
+host-key pinning, a Sessions page for revoking a login remotely, a
+DNS-rebind-safe outbound webhook fetcher, optional TOTP/MFA for local
+accounts, audit-log tamper-evidence (HMAC hash-chained, periodically
+verified), an operator allowlist for local-disk sources, decompression
+limits, and the fixes from a full code review and CodeQL scan in v0.3.0.
+See ROADMAP.md's "Security hardening" section for what's still open
+(mainly a formal third-party review). Covered
 end-to-end by `pytest` (backend), `vitest` (frontend units), and a
 Playwright suite that drives the real browser UI against real SSH/SMB
 test servers, not just mocks. Still pre-1.0 otherwise: SAML isn't built
@@ -127,6 +131,16 @@ WinRM credentials at rest, so don't ship the placeholder:
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
+This walkthrough browses PerchTail over plain `http://localhost:8080` to get
+you looking at the UI quickly — for that to work, also set
+`SESSION_COOKIE_SECURE=false` in `.env` first. Leave it at its default
+(`true`) for any real deployment: browsers silently drop a `Secure` session
+cookie over plain HTTP, so with the default left on, login would appear to
+just bounce back to the login page with no error. See
+[Deployment: reverse proxy + TLS](#deployment-reverse-proxy-nginx--tls)
+below for how to run this for real, with `SESSION_COOKIE_SECURE` left at its
+secure default.
+
 Then bring it up:
 
 ```bash
@@ -154,17 +168,112 @@ State (the SQLite database, rotated application logs, and the ephemeral
 scratch cache) lives in the `perchtail-data` Docker volume, so it survives
 `docker compose down`/`up` — only `docker compose down -v` discards it.
 
+**Backups and upgrades.** Everything stateful lives on the `perchtail-data`
+volume (`/data` in the container): the SQLite database, the
+credential-encryption salt (`credential_salt`), SSH `known_hosts`, and the
+app's own logs. Back up the database and `credential_salt` together. Either
+one is useless without the other, and so is the salt without your
+`CREDENTIAL_ENCRYPTION_KEY`. Upgrading from a release before the salt moved
+onto the volume needs one extra step first; see the CHANGELOG.
+
+## Deployment: reverse proxy (nginx) + TLS
+
+**Never expose PerchTail's admin/viewer UI to the public internet without
+TLS termination and something in front of it** — it's the entry point to
+every source's credentials and every source's log content across every
+customer configured, gated only by the session cookie. `docker-compose.yml`
+publishes the app directly on `8080` for the [Quick start](#quick-start)
+above; for anything beyond your own machine, put a reverse proxy in front
+of it and stop publishing that port to anything but `localhost`.
+
+1. Bind the published port to loopback only, so it's reachable through
+   nginx but not directly from outside the host — edit `docker-compose.yml`:
+
+   ```diff
+   -      - "8080:8000"
+   +      - "127.0.0.1:8080:8000"
+   ```
+
+2. Set `PUBLIC_BASE_URL` in `.env` to the real external `https://` URL
+   you're about to configure below (used to build the OIDC `redirect_uri`
+   if you set up [SSO](docs/sso-setup.md), and by the agent protocol's
+   `wss://` endpoint if you use [push-agent sources](docs/source-setup.md#agent-push-agent-for-hosts-not-reachable-inbound)).
+   Leave `SESSION_COOKIE_SECURE` at its default (`true`) — nginx is about
+   to terminate real TLS, so the browser will actually have an `https://`
+   origin to set that cookie on.
+
+3. An nginx server block terminating TLS and proxying everything to the
+   app:
+
+   ```nginx
+   server {
+       listen 80;
+       server_name perchtail.example.com;
+       return 301 https://$host$request_uri;
+   }
+
+   server {
+       listen 443 ssl http2;
+       server_name perchtail.example.com;
+
+       ssl_certificate     /etc/letsencrypt/live/perchtail.example.com/fullchain.pem;
+       ssl_certificate_key /etc/letsencrypt/live/perchtail.example.com/privkey.pem;
+
+       location / {
+           proxy_pass http://127.0.0.1:8080;
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+
+           # Needed for the agent protocol's persistent WebSocket connections
+           # (wss://.../agent/connect) -- harmless no-ops for ordinary HTTP
+           # requests, which never carry an Upgrade header in the first
+           # place. Without proxy_read_timeout raised, nginx's 60s default
+           # would silently drop an agent's otherwise-idle connection every
+           # minute (it reconnects on its own, but there's no reason to make
+           # it); skip this whole block if you don't use the Agent protocol.
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection "upgrade";
+           proxy_read_timeout 3600s;
+       }
+   }
+   ```
+
+   PerchTail doesn't need `X-Forwarded-Proto` trusted to behave correctly —
+   its CSRF Origin-check only ever compares `Host`, deliberately never
+   scheme, precisely so it works the same whether or not a proxy sits in
+   front (see ROADMAP.md's CSRF-review notes if you're curious why). It's
+   sent above anyway since it's a generally useful signal for nginx's own
+   access logs.
+
+4. `docker compose up -d` to pick up the port-binding change, then reload
+   nginx. Sign in at `https://perchtail.example.com` — the break-glass
+   account created on first startup still works exactly as in the Quick
+   start above.
+
+Running nginx in its own container instead of on the host works the same
+way — attach it to a shared Docker network with the `perchtail` service and
+`proxy_pass` to `http://perchtail:8000` directly, and drop the host port
+publish in `docker-compose.yml` entirely rather than binding it to loopback.
+
 ## Documentation
 
 - [CLAUDE.md](CLAUDE.md) — full design/architecture reference and build plan
 - [ROADMAP.md](ROADMAP.md) — phased milestones and what's next
 - [docs/source-setup.md](docs/source-setup.md) — how to prepare a Linux or
   Windows server so PerchTail can reach it over SSH/SFTP, SMB, or WinRM
+- [docs/sso-setup.md](docs/sso-setup.md) — registering PerchTail as an OIDC
+  client and setting up group-to-role mapping, with per-provider notes for
+  Azure AD/Entra ID, Okta, Google Workspace, and Keycloak/Authentik
 - [docs/monitoring.md](docs/monitoring.md) — the detailed health endpoint for
   external monitoring (Zabbix, Prometheus), and how to generate its token
 - [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — how to
   rotate `CREDENTIAL_ENCRYPTION_KEY` without losing access to already-
   encrypted credentials
+- [docs/high-availability.md](docs/high-availability.md) — whether/how to run
+  PerchTail behind a load balancer or in a multi-replica k3s/Kubernetes
+  deployment, broken down by solution and load-balancing type
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
   submit changes
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability

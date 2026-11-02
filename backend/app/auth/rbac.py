@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from fastapi import Depends, HTTPException, status
 from sqlmodel import Session, select
@@ -122,6 +123,79 @@ def visible_customer_ids(session: Session, user: User) -> set[int] | None:
     return ids
 
 
+@dataclass
+class FolderVisibilityContext:
+    """Precomputed, request-scoped state for `folder_path_boundary` below —
+    built once per request (via `build_folder_visibility_context`), not
+    once per source, so serializing a whole `GET /sources` list doesn't
+    cost a folder/grant lookup per source per ancestor level."""
+
+    is_super_admin: bool
+    folders_by_id: dict[int, Folder] = field(default_factory=dict)
+    source_grant_ids: set[int] = field(default_factory=set)
+    folder_grant_ids: set[int] = field(default_factory=set)
+
+
+def build_folder_visibility_context(session: Session, user: User) -> FolderVisibilityContext:
+    folders_by_id = {f.id: f for f in session.exec(select(Folder)).all()}
+    if user.role.is_super_admin:
+        return FolderVisibilityContext(is_super_admin=True, folders_by_id=folders_by_id)
+
+    grants = session.exec(select(RoleGrant).where(RoleGrant.role_id == user.role_id)).all()
+    return FolderVisibilityContext(
+        is_super_admin=False,
+        folders_by_id=folders_by_id,
+        source_grant_ids={g.scope_id for g in grants if g.scope_type == ScopeType.source},
+        folder_grant_ids={g.scope_id for g in grants if g.scope_type == ScopeType.folder},
+    )
+
+
+def folder_path_boundary(ctx: FolderVisibilityContext, source: Source) -> int | None:
+    """Returns the folder id at which a source's displayed folder ancestor
+    chain (api/sources.py's `folder_path`) should stop walking upward, or
+    None for "no boundary" (show the whole chain up to the top). A grant
+    scoped to a specific folder or source authorizes visibility into that
+    scope and everything beneath it, not its own ancestors — so revealing
+    folder names above the grant's own scope would leak organizational
+    structure a narrower grant was never meant to disclose (CLAUDE.md's
+    per-folder/per-source RBAC scoping: "most specific scope wins"). A
+    customer-level grant (or super-admin) already implies visibility into
+    the customer's whole structure, so nothing is truncated there.
+
+    Assumes `source` is already known to be visible to the context's user
+    (e.g. via `visible_source_ids`) — it only determines which scope
+    governs that visibility, it doesn't re-check the `view` capability
+    itself. That's safe because `resolve_capability` never falls through
+    to a broader scope once a more specific one has any grant recorded, so
+    a source that's actually visible can't have an intervening ungranted
+    scope between it and whichever scope this finds.
+    """
+    if ctx.is_super_admin:
+        return None
+    if source.id in ctx.source_grant_ids:
+        return source.folder_id
+
+    folder_id = source.folder_id
+    while folder_id is not None:
+        if folder_id in ctx.folder_grant_ids:
+            return folder_id
+        folder = ctx.folders_by_id.get(folder_id)
+        folder_id = folder.parent_folder_id if folder else None
+
+    return None
+
+
+def delete_scope_grants(session: Session, scope_type: ScopeType, scope_id: int) -> None:
+    """RoleGrant.scope_id has no FK (it can point at three tables), so the
+    database won't clean these up itself when a customer/folder/source is
+    deleted -- callers deleting one of those must call this in the same
+    transaction."""
+    for grant in session.exec(
+        select(RoleGrant).where(RoleGrant.scope_type == scope_type, RoleGrant.scope_id == scope_id)
+    ).all():
+        session.delete(grant)
+
+
 def require_capability(capability: Capability, get_current_user: Callable[..., User]):
     """FastAPI dependency factory wrapping grant resolution. `get_current_user`
     is injected by the caller rather than hardcoded here, since session/token
@@ -157,6 +231,42 @@ def require_global_capability(capability: GlobalCapability, get_current_user: Ca
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted")
 
     return dependency
+
+
+def role_within_authority(actor: User, role: Role) -> bool:
+    """Whether `actor` may assign, edit, or act on users holding `role`
+    without that being a privilege escalation. A delegated admin
+    (manage_users / manage_roles / manage_sso, short of super-admin) can
+    only work with roles that are no more powerful than their own: never a
+    super-admin role, and never one carrying a global capability the actor
+    doesn't hold themselves. Without this, any of those capabilities is a
+    path to full super-admin -- e.g. manage_users assigning itself the
+    Super Admin role, or resetting a super-admin's password."""
+    if actor.role.is_super_admin:
+        return True
+    if role.is_super_admin:
+        return False
+    return set(role.global_capabilities) <= set(actor.role.global_capabilities)
+
+
+def require_role_within_authority(actor: User, role: Role) -> None:
+    if not role_within_authority(actor, role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not permitted: that role has privileges beyond your own",
+        )
+
+
+def require_capabilities_within_authority(
+    actor: User, global_capabilities: list[GlobalCapability]
+) -> None:
+    if actor.role.is_super_admin:
+        return
+    if not set(global_capabilities) <= set(actor.role.global_capabilities):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not permitted: you can only grant global capabilities you hold yourself",
+        )
 
 
 def create_role(

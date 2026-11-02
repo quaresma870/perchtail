@@ -14,10 +14,18 @@ from app.rules import is_visible
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 
 
+# PowerShell accepts any of these as a single-quote string delimiter, not just
+# the ASCII apostrophe -- escaping only "'" would leave the others free to end
+# the quoted string early.
+_PS_SINGLE_QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
 def _ps_quote(value: str) -> str:
-    """Escapes a value for embedding in a PowerShell single-quoted string
-    (double the single quotes)."""
-    return "'" + value.replace("'", "''") + "'"
+    """Escapes a value for embedding in a PowerShell single-quoted string by
+    doubling every single-quote character it contains."""
+    for quote in _PS_SINGLE_QUOTES:
+        value = value.replace(quote, quote * 2)
+    return "'" + value + "'"
 
 
 def _session(source: Source) -> winrm.Session:
@@ -67,7 +75,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         name = item["Name"]
         is_dir = bool(item["PSIsContainer"])
         child_path = f"{relative_path}/{name}" if relative_path else name
-        if not is_dir and not is_visible(child_path, rules):
+        if not is_dir and not is_visible(child_path, rules, case_insensitive=True):
             continue
         size = 0 if is_dir else int(item.get("Length") or 0)
         entries.append(DirEntry(name=name, path=child_path, is_dir=is_dir, size=size))

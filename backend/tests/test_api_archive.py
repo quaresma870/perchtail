@@ -238,6 +238,21 @@ def test_open_transparently_decompresses_gz(app_client, session, fake_sftp, scra
     assert response.content == b"hello world"
 
 
+def test_open_gz_over_the_decompression_limit_is_a_413(
+    app_client, session, fake_sftp, scratch_store, monkeypatch
+):
+    monkeypatch.setattr(get_settings(), "max_decompressed_mb", 0.001)  # ~1 KB
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log.gz")
+    fake_sftp.files["/var/log/appname/app.log.gz"] = gzip.compress(b"A" * 100_000)
+
+    response = client.get(f"/sources/{source.id}/open", params={"path": "app.log.gz"})
+    assert response.status_code == 413
+    assert list(scratch_store.root.iterdir()) == []
+
+
 def test_open_extracts_archive_member(app_client, session, fake_sftp, scratch_store):
     app, client = app_client
     source = _make_source(session)
@@ -357,6 +372,18 @@ def test_open_local_plain_file_skips_scratch_entirely(app_client, session, scrat
     assert response.content == b"hello world"
     assert "x-scratch-key" not in response.headers
     assert len(scratch_store._entries) == 0
+
+
+def test_open_with_an_empty_path_is_a_400_not_the_base_directory(
+    app_client, session, scratch_store, tmp_path
+):
+    app, client = app_client
+    source = _make_local_source(session, tmp_path)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+
+    assert client.get(f"/sources/{source.id}/open", params={"path": ""}).status_code == 400
+    assert client.get(f"/sources/{source.id}/download", params={"path": ""}).status_code == 400
 
 
 def test_open_local_gz_file_still_uses_scratch(app_client, session, scratch_store, tmp_path):

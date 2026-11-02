@@ -1,5 +1,6 @@
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -13,9 +14,14 @@ logger = get_logger(__name__)
 @dataclass
 class ScratchEntry:
     key: str
-    path: Path
+    # One file per acquire(), never shared: a second viewer's fresh fetch
+    # must not truncate a file an earlier response is still streaming.
+    paths: list[Path] = field(default_factory=list)
     refcount: int = 0
     last_accessed: float = field(default_factory=time.monotonic)
+
+    def size(self) -> int:
+        return sum(p.stat().st_size for p in self.paths if p.exists())
 
 
 class ScratchStore:
@@ -32,23 +38,22 @@ class ScratchStore:
         self._lock = threading.Lock()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def path_for(self, key: str) -> Path:
-        return self.root / key
-
     def acquire(self, key: str) -> Path:
-        """Marks key as in-use (refcount += 1) and returns its scratch path.
-        Every open is a fresh fetch — the caller must (re)write the file's
-        content into this path itself; acquire() never reuses a prior
-        fetch's bytes even if the path already exists from a still-open
-        session."""
+        """Marks key as in-use (refcount += 1) and returns a new, unique
+        scratch path for this fetch. Every open is a fresh fetch — the
+        caller writes the file's content into this path itself. Concurrent
+        opens of the same file get separate paths, so one fetch never
+        rewrites bytes another response is still serving."""
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
-                entry = ScratchEntry(key=key, path=self.path_for(key))
+                entry = ScratchEntry(key=key)
                 self._entries[key] = entry
+            path = self.root / f"{key}-{uuid.uuid4().hex}"
+            entry.paths.append(path)
             entry.refcount += 1
             entry.last_accessed = time.monotonic()
-            return entry.path
+            return path
 
     def release(self, key: str) -> None:
         """Reference-counted purge — delete only when the last viewer closes
@@ -68,7 +73,8 @@ class ScratchStore:
                 entry.last_accessed = time.monotonic()
 
     def _delete(self, entry: ScratchEntry) -> None:
-        entry.path.unlink(missing_ok=True)
+        for path in entry.paths:
+            path.unlink(missing_ok=True)
         del self._entries[entry.key]
         logger.info("scratch.purge", key=entry.key)
 
@@ -91,7 +97,7 @@ class ScratchStore:
         max_bytes, same computation enforce_size_guard already does
         internally."""
         with self._lock:
-            return sum(e.path.stat().st_size for e in self._entries.values() if e.path.exists())
+            return sum(e.size() for e in self._entries.values())
 
     def enforce_size_guard(self) -> int:
         """A safety valve for load, not a caching strategy: evicts the
@@ -99,7 +105,7 @@ class ScratchStore:
         max_bytes. Never touches an entry with refcount > 0, so a file a
         viewer currently has open is never pulled out from under them."""
         with self._lock:
-            total = sum(e.path.stat().st_size for e in self._entries.values() if e.path.exists())
+            total = sum(e.size() for e in self._entries.values())
             if total <= self.max_bytes:
                 return 0
 
@@ -111,7 +117,7 @@ class ScratchStore:
             for entry in candidates:
                 if total <= self.max_bytes:
                     break
-                size = entry.path.stat().st_size if entry.path.exists() else 0
+                size = entry.size()
                 self._delete(entry)
                 total -= size
                 evicted += 1

@@ -2,8 +2,9 @@ package agent
 
 import (
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
+	"path"
 )
 
 // HandleList lists the immediate children of relPath under basePath. Rule
@@ -16,8 +17,17 @@ func HandleList(basePath, relPath string) ([]DirEntryWire, error) {
 	if !IsSafeRelativePath(relPath) {
 		return nil, fmt.Errorf("unsafe path: %q", relPath)
 	}
-	dir := filepath.Join(basePath, filepath.FromSlash(relPath))
-	entries, err := os.ReadDir(dir)
+	root, err := os.OpenRoot(basePath)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	dir, err := root.Open(rootName(relPath))
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return nil, err
 	}
@@ -45,6 +55,26 @@ func HandleFetch(basePath, relPath string) ([]byte, error) {
 	if !IsSafeRelativePath(relPath) {
 		return nil, fmt.Errorf("unsafe path: %q", relPath)
 	}
-	path := filepath.Join(basePath, filepath.FromSlash(relPath))
-	return os.ReadFile(path)
+	root, err := os.OpenRoot(basePath)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	f, err := root.Open(rootName(relPath))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+// rootName turns a backend-supplied relative path into a name for os.Root,
+// which resolves it -- symlinks included -- without ever leaving basePath.
+// IsSafeRelativePath stays as the first, lexical check; os.Root is what
+// stops a symlink under basePath from pointing a read anywhere else.
+func rootName(relPath string) string {
+	if relPath == "" {
+		return "."
+	}
+	return path.Clean(relPath)
 }

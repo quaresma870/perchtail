@@ -158,10 +158,13 @@ they come before any connector or UI work, not after.
 - [x] Access gated purely by `is_super_admin`, no grant can reach it
       (already true structurally since M2 — `resolve_capability`'s
       `is_system` short-circuit — this milestone was really about seeding)
-- [ ] "system" badge in the admin sources list; non-editable, non-deletable
-      — UI concern, deferred to M7 (no source CRUD API/UI exists yet at all,
-      for any source, so "non-editable" isn't meaningfully testable before
-      M7 builds source CRUD in the first place)
+- [x] "system" badge in the admin sources list; non-editable, non-deletable
+      — deferred to M7 as noted below (no source CRUD API/UI existed yet at
+      all, for any source, so "non-editable" wasn't meaningfully testable
+      before M7 built source CRUD in the first place). Landed there
+      (`routes/Sources.svelte`'s `is_system` badge + hidden edit/delete
+      actions, covered by `e2e/sources.spec.ts`) — this checkbox was simply
+      never ticked off afterward; no new code needed to close it now.
 
   Note: seeded with one broad include rule (`**/*`) rather than zero rules —
   zero rules would make the viewer show nothing at all (rules.py's explicit
@@ -633,9 +636,18 @@ they come before any connector or UI work, not after.
   the alert's `last_checked_at`, reusing that timestamp signal rather than
   depending on FTS5 rowid stability (rowids aren't stable across
   re-indexes, since a changed file's rows are deleted and reinserted).
-- **Alert matching is content-only, never path/filename** — reuses
-  `search_index.search_content_only()`, a column-filtered sibling of the
-  Search page's `search()` that never matches `file_path`. A file's path
+- **Each changed file is searched on its own, past the line the alert
+  already reported up to** (`AlertFileState.reported_through_line`). Fixed
+  after the first version shipped with two real bugs: it filtered a single
+  top-200 search across the whole index, so a new match ranked below 200
+  older ones was silently missed; and because the indexer re-reads a
+  changed file in full, every old matching line in it fired again on each
+  append. A file that now ends before the recorded line was rotated or
+  rewritten, so all of it counts as new. Known limit: a file rewritten to
+  *more* lines than before between two sweeps looks like an append.
+- **Alert matching is content-only, never path/filename** — uses
+  `search_index.search_file_content_after()`, a column-filtered query that
+  never matches `file_path`. A file's path
   doesn't change when a new line is appended to it, so a path match could
   never be "new content" the way a fresh line is; including path matches
   here would mean an alert fires forever on every sweep for any file whose
@@ -798,18 +810,13 @@ PerchTail's existing theme/design system, no visual-language changes.
       source's own display name, per spec
 - [x] `Source` list responses carry `customer_name`/`folder_name` so cards
       can show "Customer / Folder" as subtext without a separate lookup
-- [ ] Folder-tree navigation for browsing sources by customer/folder — the
-      current "All connections" list shows customer/folder as flat subtext
-      per card (enough to search/scan), not an actual expandable tree.
-      `Folder` is fully modeled and RBAC-scoped (unlimited nesting via
-      `parent_folder_id`), but nothing in the frontend renders it as a
-      tree yet; still open.
-- [ ] Dedicated folder/host management admin page (create/rename/move/
-      delete folders, move sources between them) — CLAUDE.md flags this as
-      its own admin surface and it was never built; only inline folder
-      creation from the source editor exists today (both the original gap
-      and this redesign's search box work off that same inline-create
-      flow, not a standalone page)
+- [x] Folder-tree navigation for browsing sources by customer/folder —
+      built as a "List"/"Tree" toggle alongside the existing flat list, not
+      a replacement (see notes below for why), showing the real nested
+      customer → folder → … → source hierarchy.
+- [x] Dedicated folder management admin page (create/rename/move/delete
+      folders) — see notes below for what's covered vs. left to the
+      existing per-source folder picker.
 
 ### Notes on decisions made — connections home redesign
 
@@ -837,13 +844,96 @@ PerchTail's existing theme/design system, no visual-language changes.
   bookmarked/typed URL too. The audit-log toggle described below reuses
   this same mechanism once that page exists; no dead UI was added for it
   ahead of time.
-- **Folder-tree navigation and the standalone management page are still
-  open**, deliberately deferred out of this pass — the shipped "flat list
-  with Customer / Folder subtext + search" covers the same real need
-  (find a source by where it's organized) without the added scope of a
-  real expand/collapse tree component or drag-and-drop-style folder
-  management UI. Revisit if the flat-list-with-search approach turns out
-  not to be enough at real scale.
+### Notes on decisions made — folder-tree navigation and folder management
+
+- **No new admin-gated endpoint for the Viewer's tree — it's built
+  entirely client-side from `GET /sources`**, which every authenticated
+  user (not just admins) can already call and which is already
+  RBAC-filtered via `visible_source_ids`. `SourcePublic` gained
+  `folder_path: list[{id, name}]` (`api/sources.py`), the full ancestor
+  chain root-to-leaf, computed server-side by walking each source's
+  `Folder.parent_folder` chain. This is what actually made a real nested
+  tree possible without adding a parallel RBAC-scoped `/folders` listing
+  (the existing one is admin-gated by `create_source`, per CLAUDE.md's
+  "folder management is its own admin surface"): a source's own visibility
+  already implies the caller is allowed to know what's on its own path,
+  reusing an access check that already exists rather than building a new
+  one — see the RBAC caveat below for the one place this needed more care
+  than "just walk to the top."
+  - **Found and fixed a real information-disclosure bug via `code-review`
+    before this shipped**: an unqualified `folder_path` walking all the
+    way to the top would leak the *names* of ancestor folders above
+    whatever scope actually authorized seeing a given source — e.g. a role
+    granted only at a deeply-nested folder (CLAUDE.md's "most specific
+    scope wins" per-folder grant) would learn its ungranted parent
+    folders' names too, purely as a side effect of the new field, which
+    folder-level RBAC scoping is explicitly meant to prevent. Fixed with
+    `rbac.folder_path_boundary`/`build_folder_visibility_context`: walks
+    up only to whichever scope's grant actually governs that source's
+    visibility (the granting folder itself for a folder-level grant, the
+    source's own immediate folder for a source-level exception grant, no
+    truncation at all for a customer-level grant or super-admin, since
+    those already imply visibility into the whole structure beneath them)
+    — computed once per request (all folders + the role's grants loaded
+    up front), not once per source, which also closes the N+1-query
+    concern a naive per-source lazy-relationship walk would have had on a
+    large source list.
+  - `frontend/src/lib/connection-tree.ts`'s `buildConnectionTree` turns
+    that flat, already-filtered `Source[]` into the tree purely in memory
+    — folder ids are globally unique (not scoped per customer), so one
+    flat `Map` dedupes a folder shared by multiple sources without
+    tracking per-branch lookups. A source with `customer_id: null` (the
+    built-in system source) lands under a shared "No customer" bucket
+    rather than being excluded.
+  - **Additive "List"/"Tree" toggle, not a replacement** for "All
+    connections" — the shipped flat-list-with-search redesign stays the
+    default; Tree is an alternate view over the exact same
+    already-filtered/searched source list (`buildConnectionTree(filteredAllSources)`),
+    so typing in the existing search box also filters the tree, and a
+    non-empty query force-expands every node so a match several folders
+    deep isn't hidden behind a collapsed ancestor the viewer never
+    manually opened. Expand/collapse state is plain session state, not
+    persisted.
+  - Deliberately reused a distinct component name (`ConnectionsTree.svelte`),
+    not `FolderTree.svelte` — that name is already taken by the unrelated
+    per-source *remote directory* browser (SSH/SMB paths inside one
+    source), and reusing it here would have collided both in naming and
+    in what "expand" means.
+- **Folder management admin page (`Settings → Folders`, gated by the same
+  `create_source` capability `/folders` itself already requires)**: a
+  customer picker plus a real expand-free nested tree (every folder always
+  shown, no collapse needed at admin-page scale) with per-row rename,
+  "+ Subfolder", a "move to" `<select>` (re-parent via `PATCH
+  /folders/{id}`), and delete — reusing the exact same nesting logic as
+  `SourceEditor.svelte`'s existing folder picker (refactored into a new
+  shared `lib/folder-tree.ts` rather than staying duplicated). Customer
+  *creation* is deliberately out of scope here (still only possible inline
+  from the source editor, as before) — the ask was specifically folder
+  management, and there's no admin surface for customers themselves yet to
+  extend.
+  - The "move to" picker excludes a folder's own descendants client-side
+    (so the UI doesn't even offer an obviously-cyclic move), but the
+    backend's own `_validate_parent` check in `api/folders.py` remains the
+    actual source of truth — a race against a concurrent move from another
+    session still surfaces as a normal inline error, not a client crash.
+  - **Found and fixed a real bug while writing this page's own e2e
+    coverage**: a folder row's "move to" `<select>` lists every other
+    valid target folder as an `<option>`, and those options' text content
+    counts toward the row's own text even when the dropdown is closed —
+    so a naive text-based row lookup (e.g. "find the row containing 'EU'")
+    could match a *different* row whose own move-picker happens to list
+    "EU" as an option. Not an application bug (purely a test-locator
+    fragility), but real enough to note: both new e2e specs
+    (`folders.spec.ts`, `connections-tree.spec.ts`) scope row lookups to
+    the row's `.name` element specifically, not the row's full text
+    content, to avoid it.
+  - Live-verified end-to-end in a real browser: building a 3-level nested
+    folder structure, renaming, re-parenting, the delete-protection 409
+    when a folder still has children (confirmed the error shows and the
+    folder stays, not silently removed), and the Viewer's Tree view
+    correctly nesting a source 2 folders deep alongside a second source
+    sitting directly under the same customer, with the search box
+    correctly auto-expanding to reveal a folder-name match.
 
 ## Full audit log viewer (admin-only)
 
@@ -1045,19 +1135,18 @@ viewing.
       required. Uses the archive member's own name for files opened
       inside a `.zip`/`.tar.gz` (same field `FolderTree` already emits on
       open), not the archive's name.
-- [ ] **Compare files (diff view), as a toggle button.** Arm the "Compare"
+- [x] **Compare files (diff view), as a toggle button.** Arm the "Compare"
       button, pick a second file from the tree (or another open tab), and
       it renders a read-only diff against the currently active file in
-      place. `@codemirror/merge` (not yet installed) is the natural fit.
+      place. Built with `@codemirror/merge`'s `MergeView`, as planned.
 - [x] **Line-wrap toggle.** `EditorView.lineWrapping`, cheap and directly
       useful for long log lines.
-- [ ] **Beautify / minify for embedded JSON, XML, and (lower priority) JS.**
-      Display-only reformat, never touches the file on disk.
-- [ ] **Live-follow / "tail -f" mode, as a toggle button.** The
-      architecturally biggest item here — deferred. Two candidate
-      mechanisms: client-side polling (works uniformly but adds
-      round-trips over SSH/SMB/WinRM), or extending the agent-mode
-      WebSocket with a "watch" command (cheaper, agent-only).
+- [x] **Beautify / minify for embedded JSON and XML.** Display-only
+      reformat, never touches the file on disk. JS deliberately deferred
+      (see notes below).
+- [x] **Live-follow / "tail -f" mode, as a toggle button.** Built as
+      client-side polling — see notes below for why, over extending the
+      agent-mode WebSocket with a "watch" command.
 - [x] **Reload/refresh button.** A manual re-fetch of the currently open
       file's content in place, without closing and reopening the tab.
 - [x] **Copy selected lines (with line numbers).**
@@ -1065,7 +1154,7 @@ viewing.
       given this tool spans both Linux and Windows sources.
 - [x] **Go-to-line** (Ctrl+G).
 - [x] **Bookmarks.** Pure client-side/session state.
-- [ ] **Multi-pattern "mark" highlighting** (Notepad++'s Mark feature, not
+- [x] **Multi-pattern "mark" highlighting** (Notepad++'s Mark feature, not
       to be confused with severity indicators above). Persistently
       highlight all occurrences of one or more ad hoc patterns at once,
       each in its own color.
@@ -1129,6 +1218,138 @@ viewing.
   patterns of its own uses only those, full stop, rather than layering on
   top of the global set.
 
+### Notes on decisions made — compare, beautify/minify, follow, and mark highlighting
+
+The four items left open in "Viewer: toward an advanced editor" above,
+built together in one pass since they touch the same toolbar/tab-state
+surface (`Viewer.svelte`, `CodeMirrorPane.svelte`).
+
+- **Compare (diff view)**: `@codemirror/merge`'s `MergeView` renders two
+  read-only editors side by side (`lib/components/DiffPane.svelte`),
+  wrapped in a new `{#key}` block keyed by an incrementing counter so
+  picking a new comparison target remounts it cleanly rather than trying
+  to reconfigure an existing `MergeView` in place. "Compare" is a toggle
+  that arms a pick-the-next-thing-you-click mode: clicking a file in the
+  tree or another open tab while armed does a one-shot fetch (or reuses an
+  already-open tab's content) instead of opening/switching to it, sets it
+  as the comparison target, and disarms. The comparison state
+  (`compareWith`) isn't part of `Tab` — it's contextual to whichever file
+  is active right now, so switching the active tab clears it (same
+  reasoning as clearing `formatError` on tab switch, folded into the same
+  reactive statement). Both sides always diff **raw** fetched content
+  (`activeTab.content`, not `displayContent`) — an earlier version diffed
+  the left side's possibly-beautified display content against the right
+  side's always-raw one, which would show a whole file as changed purely
+  from indentation differences whenever Beautify was active, even for
+  byte-identical-modulo-formatting JSON.
+- **Beautify/minify**: `lib/format-content.ts`, JSON via
+  `JSON.parse`/`JSON.stringify(…, null, 2)`, XML via a small
+  indent-by-nesting-depth pretty-printer (there's no browser-native XML
+  formatter, and a real one wasn't worth a new dependency for a
+  display-only toggle) plus `DOMParser`-based well-formedness checking
+  before either direction. **JS deliberately excluded**, unlike the
+  checkbox's original "(lower priority)" JSON/XML/JS grouping — a real JS
+  beautifier needs an actual parser (e.g. `prettier/standalone`), a
+  meaningfully heavier dependency than JSON/XML's regex-and-DOM-only
+  approach, for a format this tool's logs rarely embed compared to
+  JSON/XML payloads. Revisit if that turns out wrong in practice. Toggling
+  a mode when the tab's current content doesn't parse leaves the raw
+  content on screen and surfaces `formatError` inline rather than
+  switching to a mode that would immediately need to fall back anyway.
+  Reloading a tab (manual or via Follow) deliberately keeps whatever
+  format was active rather than resetting it — an earlier version of this
+  reset it unconditionally on every reload, which silently fought Follow
+  into uselessness for a beautified tab (every ~2s poll would flip it back
+  to raw). `displayContent`'s own `formatContent(...) ?? content` fallback
+  already degrades gracefully to raw content if a reload's new bytes no
+  longer parse under the active mode, so nothing needs to force it off
+  ahead of that.
+- **Follow (tail -f)**: built as **client-side polling** (every 2s,
+  reusing the existing manual-reload fetch path), not the alternative
+  named in CLAUDE.md/this item's own original wording — extending the
+  agent-mode WebSocket with a "watch" command. That would only work for
+  agent-linked sources; this needs to work uniformly across SSH/SMB/WinRM/
+  local too, and there's no persistent connection to extend for the other
+  three. The accepted cost is a full re-fetch of the whole file on every
+  tick (same always-fresh, no-partial-read architecture as a manual
+  Reload — see CLAUDE.md's ephemeral-fetch rule) rather than a
+  byte-range/tail-only read; a future agent-only "watch" fast path could
+  still be added later as an optimization without changing this uniform
+  fallback. The toggle lives on the `Tab` (`following: boolean`, persists
+  across a tab switch) but the actual `setInterval` only ever runs for
+  whichever tab is both active *and* following, managed by a single
+  reactive block keyed on `activeTab?.following` — a background tab
+  doesn't keep polling, and switching back to a still-following tab
+  resumes it automatically.
+  - **Found and fixed a real bug while building this**: `CodeMirrorPane`
+    rebuilds its entire `EditorState` (`view.setState(...)`) on every
+    content/toggle change, which resets scroll to the top by default —
+    harmless for an occasional manual toggle, but it would have made
+    Follow unusable (yanking the view back to line 1 every 2 seconds
+    instead of tracking new content). Fixed generally, not just for
+    Follow: `syncView` now records whether the view was scrolled to the
+    bottom beforehand and restores either the bottom (if it was there) or
+    the same absolute scroll offset afterward — so an ordinary toggle like
+    Wrap or adding a mark no longer disturbs a reader's place in a large
+    file either, which was a latent, pre-existing UX gap this surfaced.
+- **Mark highlighting**: `lib/mark-highlighting.ts`, deliberately separate
+  from `severity-highlighting.ts` — a mark is ad hoc and session-only
+  (never persisted, same as bookmarks), typed in on the spot rather than
+  admin-configured, and reuses `Rule`'s `re:`-prefix convention
+  (`parsePatternInput`) purely for a consistent glob/regex switch, not
+  because it shares any matching-semantics code with rules. Colors cycle
+  through a fixed 6-entry palette (`nextMarkColorIndex`, least-recently-
+  used first, wrapping once every color is in use) rather than a color
+  picker — this is a quick highlight-and-discard tool, not a persistent
+  configuration surface. The toolbar button reads "Highlight," not "Mark,"
+  to avoid colliding with the existing bookmark-stepper buttons' own
+  "‹ mark / mark ›" labels, even though the underlying module and
+  ROADMAP.md both use "mark" (Notepad++'s own name for the feature).
+  - **Found and fixed a real bug while testing this live**: pressing Enter
+    in the add-mark input fired both the form's `submit` handler and a
+    `blur` (from the input being removed from the DOM once the form
+    closes), and since the second call ran before the input's value was
+    cleared, one Enter press silently added the same mark twice. Fixed by
+    clearing `markInputValue` and closing the form as the *first* thing
+    `submitMarkInput` does, before touching tab state — so the
+    blur-triggered second call sees an empty value and no-ops.
+  - **Live-verified all four together** against the built-in
+    super-admin log-viewer system source (M6) with two ad hoc JSON
+    fixture files: Beautify/Minify round-tripped correctly and toggled
+    off cleanly, Highlight produced exactly one decoration and one
+    toolbar chip per pattern (post-fix), Compare rendered a real
+    `MergeView` diff with correct per-side labels and word-level
+    highlighting and closed cleanly via "Exit compare," and Follow picked
+    up two consecutive appends to a live-growing file within one poll
+    interval each and stopped picking up new content immediately after
+    being toggled off. This exploratory pass is also what caught the
+    Beautify/Follow interaction bug and the Compare-diffs-formatted-content
+    bug above — both fixed and re-verified live before landing.
+  - **New Playwright spec** (`e2e/viewer-editor-features.spec.ts`) covers
+    all four against two small JSON fixture files written directly into
+    `LOG_DIR` (the `local` connector reads straight off disk with no
+    caching, so a file dropped in mid-run shows up on the next browse
+    exactly like production) — timestamped names, removed in `afterAll`.
+    Running the full suite surfaced one more real, if latent, bug: this
+    new spec is the first to open the built-in system source more than
+    once in the same run, so by its second test the source now shows up
+    in *both* the connections-home "Recent" and "All connections"
+    columns, breaking the plain `getByRole('button', { name: ... })`
+    locator `viewer.spec.ts` already used (strict-mode: two matches).
+    Fixed both specs to scope that click to `.picker-column.all`, which
+    always lists every source regardless of visit history — deterministic
+    regardless of what ran before it in the same worker.
+  - **Found, but deliberately not fixed here**: `backend/scripts/
+    run_e2e_server.sh`'s kill-the-previous-run's-daemons step records each
+    daemon's pidfile at the moment `sshd`/`smbd` first forks, not its
+    final post-fork PID, so a second consecutive run's `kill "$(cat
+    pidfile)"` targets an already-exited parent and fails under `set -e`,
+    silently aborting the whole script with no output. Reproduced
+    reliably outside this PR's own diff (pre-existing script, unrelated to
+    anything built here) — filed as issue #89 rather than fixed inline
+    here, same "small, unrelated infra fix gets its own PR" precedent as
+    issue #87's Dockerfile fix.
+
 ## Security hardening (pre-1.0)
 
 Called out as its own section, not folded silently into other phases —
@@ -1161,18 +1382,39 @@ Everything below is a candidate, not yet triaged into "must-have before
       (`AuthSession` already exists at the data layer) with the ability to
       revoke one remotely — useful on its own, and a prerequisite for any
       "someone else is logged in as me" incident response — see notes below
-- [ ] Optional TOTP/MFA for local accounts — SSO already delegates this to
+- [x] Optional TOTP/MFA for local accounts — SSO already delegates this to
       the IdP, but the local break-glass account (and any org that doesn't
-      enable SSO) has no second factor today
-- [ ] Audit log tamper-evidence (e.g. hash-chaining `AuditLog` rows) so a
+      enable SSO) has no second factor today — see notes below
+- [x] Audit log tamper-evidence (e.g. hash-chaining `AuditLog` rows) so a
       compromised admin account can't quietly edit history without it
-      being detectable
+      being detectable — see notes below
 - [x] CSRF review across every state-changing endpoint — confirm the
       existing `SameSite=strict` session cookie is sufficient on its own,
       or add explicit CSRF tokens where it isn't — see notes below
 - [ ] A formal third-party security review or pentest before declaring 1.0
       — SECURITY.md's disclosure policy covers *reporting* a vulnerability;
       this is about actively looking for one before external users show up
+- [x] Delegated admin capabilities (`manage_users`, `manage_roles`,
+      `manage_sso`) can't be used to reach super-admin, and built-in roles
+      are immutable — found in the October 2026 internal review, see notes
+      below
+- [x] Admin-created local-disk sources gated by an operator-set
+      `LOCAL_SOURCE_ROOTS` allowlist — found in the October 2026 internal
+      review, see notes below
+- [x] Credential salt and SSH `known_hosts` kept on the persistent volume
+      in Docker, with a startup guard against silently regenerating the
+      salt — found in the October 2026 internal review, see notes below
+- [x] Rule checks run only on canonical paths, case-insensitively for
+      Windows protocols — found in the October 2026 internal review, see
+      notes below
+- [x] Deleted customer/folder/source/role ids are never reused, and
+      nothing that pointed at a deleted row survives it — found in the
+      October 2026 internal review, see notes below
+- [x] WinRM command quoting covers every PowerShell single-quote character,
+      not just the ASCII apostrophe — found in the October 2026 internal
+      review. JEA (docs/source-setup.md) remains the real boundary on the
+      Windows side; this keeps a path from ever being read as anything but
+      a string literal.
 
 ### Notes on decisions made — response headers and login lockout
 
@@ -1400,6 +1642,28 @@ Everything below is a candidate, not yet triaged into "must-have before
   still carried the standard security headers (confirming the middleware
   ordering: innermost, wrapped by `SecurityHeadersMiddleware`/
   `RequestIDMiddleware`, so even a blocked response gets them).
+- **Follow-up fix: dropped scheme from the comparison entirely, comparing
+  `host[:port]` only.** Found while writing the nginx reverse-proxy
+  deployment docs: `docker-entrypoint.sh` runs uvicorn with no
+  `--proxy-headers`/`--forwarded-allow-ips` trust configured, so
+  `request.url.scheme` is always `"http"` as uvicorn sees a request
+  proxied by nginx, even when the real client connected over `https` and
+  its `Origin` header correctly says so. The original scheme-sensitive
+  comparison therefore 403'd *every* state-changing request — including
+  login — on exactly the TLS-terminating reverse-proxy setup this project
+  recommends. Reproduced directly against the middleware before fixing:
+  `POST` with `Origin: https://yourdomain.com` against a request whose
+  `scope["scheme"]` was `"http"` came back `403 "Cross-site request
+  blocked"`. Fixed by comparing only `host[:port]`, which doesn't
+  meaningfully weaken the defense — `SameSite=Strict` above is the actual
+  primary defense, this is only a fallback for a non-compliant client, and
+  a same-host request that merely differs in scheme was never the
+  cross-site attack this exists to stop. The alternative (trusting
+  `X-Forwarded-Proto` via `--forwarded-allow-ips`) was rejected: it needs
+  the reverse-proxy's address explicitly trusted, and `docker-compose.yml`
+  maps the app's port straight to the host alongside any reverse proxy a
+  deployer adds in front, so a wildcard trust would let a request that
+  bypasses the proxy entirely spoof the header instead.
 
 ### Notes on decisions made — audit findings fixed
 
@@ -1435,6 +1699,427 @@ two:
   toward "actually needed soon" — the next deployment to actually hold
   real credentials at any scale will want a rotation/re-encrypt tool
   before its next KDF change, not after.
+
+### Notes on decisions made — audit log tamper-evidence
+
+- **An HMAC-SHA256 hash chain over `AuditLog` rows** (`app/audit_hash_chain.py`),
+  not a separate append-only store or a full signature scheme — each row's
+  `row_hash` covers its own content plus the previous row's hash, so
+  altering or deleting a row anywhere changes every hash after it.
+  `app/audit_integrity.py`'s `verify_chain()` walks the table in id order
+  recomputing each hash; it stops at the first mismatch rather than
+  continuing past it, since everything after an altered row is
+  unverifiable regardless of whether a later row individually still
+  "looks" consistent on its own. **Keyed, not a bare `hashlib.sha256`** —
+  caught in review: a keyless hash chain over public fields, using the
+  exact algorithm this open-source project ships, is fully reproducible by
+  anyone with only the SQLite file (a stolen backup, or SQL access without
+  server/env access). That attacker could edit a row and simply recompute
+  every hash after it with the same public function, and `verify_chain()`
+  would report `"ok"` — silently defeating the feature against exactly the
+  "compromised admin account" threat it exists for. Fixed by keying the
+  HMAC with `app.crypto.audit_chain_key()`, a second key derived from
+  `CREDENTIAL_ENCRYPTION_KEY` and the existing per-install salt, but
+  domain-separated from the Fernet credential-encryption key by a
+  different KDF input label — not a refactor of `_derive_fernet_key`
+  itself, which must never change or every already-encrypted credential in
+  an existing deployment becomes undecryptable. This raises the bar to
+  "the SQLite file alone is no longer enough to forge a consistent chain"
+  — still not a defense against someone who also has
+  `CREDENTIAL_ENCRYPTION_KEY` (full server compromise), which no purely
+  server-side scheme can fully solve; that would need external anchoring
+  (e.g. periodically publishing the chain tip somewhere outside this
+  system), left as a future enhancement if it's ever actually needed.
+- **Backfilled at startup, not inside the Alembic migration.** The
+  migration itself (`a1c3f6e4b2d7`) only adds the two nullable columns
+  (`prev_hash`/`row_hash`) and the new `audit_chain_state` table — genuine
+  business logic like computing a whole historical hash chain belongs in
+  ordinary, unit-testable Python, not buried in a migration script that's
+  much harder to exercise directly. `app.audit_hash_chain.
+  backfill_chain_if_needed` runs once in `app/main.py`'s lifespan, before
+  any of the `seed_*` calls (none of which currently write an AuditLog row,
+  but the ordering is load-bearing regardless — a fresh, already-hashed row
+  written before backfill runs would get mistaken for the chain's tip
+  ahead of the still-unhashed legacy rows beneath it). Idempotent, so it's
+  cheap to run on every single startup rather than only the first one after
+  upgrading.
+- **A separate verification cadence from both the purge job's cadence and
+  the retention window itself, per explicit direction.** New
+  `Settings.audit_integrity_check_interval_days` (default `365`, i.e. 1
+  year) drives its own APScheduler job (`app.audit_integrity.
+  run_audit_integrity_check`) — deliberately not reusing
+  `audit_purge_interval_seconds` or `audit_retention_days`. Retention
+  decides what's kept; this decides how often what's kept gets
+  re-verified; coupling them would mean a retention change silently also
+  changing how often tampering gets caught. Expressed in days, not
+  seconds, unlike the other interval settings — a year in seconds
+  (31536000) is unreadable at a glance, and APScheduler's `IntervalTrigger`
+  accepts a `days=` kwarg directly.
+- **The purge sweep advances a persisted "chain anchor" before deleting,
+  so retention and tamper-evidence don't fight each other.** A new
+  singleton `AuditChainState` row (same "singleton by convention" pattern
+  as `MonitoringToken`) records the newest purged row's id/hash
+  (`anchor_row_id`/`anchor_hash`); `verify_chain()` treats that hash as
+  what the first surviving row should chain from, instead of expecting
+  `None` and flagging every routine purge as a tamper break. The same row
+  doubles as the last verification result (`status`, `last_checked_at`,
+  `broken_row_id`) for the Audit Log page's banner to read — two related,
+  small pieces of bookkeeping, one row, not two tables.
+- **The purge sweep deletes a genuine id-prefix, not just "whatever
+  matches `timestamp < cutoff`."** Also caught in review: the hash chain
+  links rows by id order, but purge was filtering by timestamp, and a
+  row's timestamp is captured at construction while its id is assigned at
+  commit — under concurrent writes (this app runs FastAPI sync endpoints
+  in a thread pool) those two orderings can, very rarely, diverge. A naive
+  timestamp filter could then delete a row from the *middle* of the id
+  sequence instead of a clean prefix, desyncing the anchor and producing a
+  false `"broken"` verification from routine retention purging, not real
+  tampering. Fixed by computing `first_not_old_id` — `MIN(id)` among rows
+  *not* old enough to purge — and deleting only `id < first_not_old_id`:
+  by that same minimality, everything below it is guaranteed to already be
+  older than cutoff, so this is always a safe prefix even if it
+  conservatively leaves a handful of out-of-order rows for a later sweep
+  instead of purging them now. Fetches only the single newest matching
+  row for the anchor (`ORDER BY id DESC LIMIT 1`), not every row about to
+  be purged — a second review pass caught the first version loading the
+  whole prefix into memory just to read its last element, right before a
+  separate bulk `DELETE` re-applied the same condition anyway.
+- **A manual "Verify now" action, not just the scheduled job.** With a
+  default check interval as long as a year, an admin who wants to confirm
+  the chain is intact right now shouldn't have to wait for the next
+  scheduled pass — `POST /audit/integrity/verify` runs the identical
+  `verify_chain()` the scheduled job does. Gated by `view_audit_log`, not a
+  manage-level capability: it only recomputes and stores a status, never
+  alters `AuditLog` content itself, so the same people who can read the
+  audit log can also ask it to check its own integrity. **A 30-second
+  cooldown guards it** (also from review) — a full `verify_chain()` pass is
+  an O(n) HMAC recompute over every surviving row, and `view_audit_log` is
+  a read-level, not manage-level, capability, so a low-trust viewer role
+  could otherwise script rapid repeated calls into real CPU cost on an
+  install with a large, long-retained log. A call inside the cooldown just
+  returns the already-current status rather than recomputing it. The
+  check-then-act itself is wrapped in a process-wide lock — without it,
+  two concurrent requests could both read the same stale
+  `last_checked_at`, both pass the cooldown check, and both run a full
+  verify pass at once, defeating the point of the cooldown for exactly
+  the burst-of-requests case it exists for.
+- **A known, accepted concurrency gap, documented rather than silently
+  left implicit.** `chain_new_entry` serializes "read the current tip,
+  compute this row's hash" with a process-wide lock, which stops two
+  audit-generating requests from both reading the same stale tip — but it
+  can't extend across each transaction's eventual `commit()` (that would
+  mean holding the lock through a whole request's remaining work, which
+  `record_audit_event`'s callers aren't structured for). A narrow race
+  therefore remains between two writers whose commits interleave after
+  both have already passed through the lock, which could in principle
+  surface as a false `"broken"` result rather than real tampering.
+  Accepted for now given how infrequent concurrent audit-generating writes
+  are for this tool's typical single-team deployment (same "in-memory,
+  per-process, accepted trade-off" reasoning `app/login_throttle.py`
+  already documents for this single-container SQLite model) — a fully
+  airtight fix needs DB-level write serialization (e.g. `BEGIN IMMEDIATE`)
+  across the whole record-and-commit sequence, a larger change deferred
+  unless this proves to be a real operational problem.
+- **`status` starts as `"unknown"`, not `"ok"`, until the first check ever
+  runs** — with the year-long default interval, defaulting to `"ok"` would
+  mean the banner claimed a clean bill of health for up to a year on a
+  chain nobody had actually looked at yet.
+
+### Notes on decisions made — optional TOTP/MFA for local accounts
+
+- **`pyotp` for the TOTP algorithm itself, not a hand-rolled HMAC
+  implementation** — this is a place where getting a subtle detail wrong
+  (padding, time-step rounding, constant-time comparison) silently breaks
+  security rather than throwing, and `pyotp` is small, unmaintained-risk-free
+  in the sense that TOTP (RFC 6238) hasn't changed, and already MIT-licensed
+  like the rest of this project's dependency choices.
+- **Two-phase enrollment, not "generate a secret and flip `mfa_enabled` in
+  one call."** `start_enrollment` persists a pending, Fernet-encrypted
+  secret but leaves `mfa_enabled = False`; `confirm_enrollment` only flips
+  it once the caller proves they can produce a valid code from what they
+  actually scanned. Without this split, a QR-scan typo or a wrong app would
+  silently brick the account's next login with no way back in short of
+  break-glass DB surgery.
+- **The TOTP secret is reversibly encrypted (`app.crypto.encrypt_secret`,
+  the same Fernet scheme as `Source.credential_ref`); the 10 backup codes
+  are one-way argon2 hashes**, not the other way around — the secret has to
+  be fed back into the TOTP algorithm on every login, so it must be
+  recoverable; a backup code only ever needs an equality check against what
+  the user typed, so it never needs to be decrypted back to plaintext, and
+  hashing it is strictly the safer choice.
+- **Backup codes are shown exactly once, at confirm time, and never
+  again** — `MfaBackupCode` stores only the hash, so even an admin
+  inspecting the database can't recover a lost set; the only path back is
+  `/auth/mfa/backup-codes/regenerate`, which invalidates the old set
+  entirely rather than appending to it.
+- **`LocalPasswordProvider.authenticate()` no longer finalizes a login on
+  its own.** Before MFA existed, a correct password immediately set
+  `last_login_at` and wrote a `user.login` audit event. Left unchanged,
+  that would mean a password-correct-but-MFA-still-pending attempt already
+  looked like a completed, audited sign-in — wrong for a tool whose audit
+  log is meant to be a trustworthy record (see the tamper-evidence work
+  above). Split into `authenticate()` (credentials only) and a new
+  `complete_login()`, called only after every required factor — password,
+  and MFA if enabled — has actually succeeded.
+- **A missing MFA code doesn't count against the login throttle; a
+  wrong one does.** The first `POST /auth/login` after a correct password
+  legitimately omits `mfa_code` — that's the client correctly stopping to
+  ask the user for one, not a guess that failed, so it shouldn't move
+  `login_throttle`'s counter. A present-but-wrong code is a real guess and
+  does count, closing off using the MFA code field itself as an
+  unthrottled brute-force surface.
+- **A structured `detail` on the 401s that need it** (`{"message": ...,
+  "error_code": "mfa_required" | "mfa_invalid_code"}`), not a new response
+  shape or a different status code — FastAPI's `HTTPException.detail`
+  already accepts a dict, every other endpoint's plain-string `detail`
+  keeps working unchanged, and the frontend's `ApiError` gained an optional
+  `errorCode` that's simply `undefined` for the plain-string case.
+- **MFA setup is entirely self-service in v1 — there's no admin
+  "reset this other user's MFA" capability.** An admin can already
+  deactivate an account or reset its password (`/users/{id}/reset-password`);
+  there's no equivalent "clear this user's MFA" endpoint yet. Accepted as a
+  real gap for now (a lost phone plus lost backup codes means the affected
+  user is locked out until an admin resets their password *and* the account
+  happens to still be reachable some other way, or a break-glass DB edit) —
+  deferred rather than guessed at, since the right shape for an admin-reset
+  capability (its own audit action, whether it should require re-confirming
+  the admin's own password, whether it belongs on the Users page or a new
+  per-user detail view) deserves its own design pass instead of being bolted
+  on here.
+- **The Security settings page (`/settings/security`) is ungated and
+  listed for every logged-in user**, unlike most of the settings nav which
+  is capability-gated — MFA is a property of *your own* account, the same
+  reasoning `/settings/sessions` already uses for the exact same "always
+  visible, self-service only" placement.
+- **The login page's second step lives entirely inside `Login.svelte` /
+  `lib/auth.ts`, not `App.svelte`'s existing `must_change_password`
+  redirect.** That redirect only works post-session (`$currentUser` is
+  only populated after a successful login), but a password-correct,
+  MFA-pending attempt has no session yet — so the "enter your code" step
+  has to be client-side state inside the login form itself, re-submitting
+  the same username/password alongside the code once the user has one.
+- **The e2e spec (`e2e/mfa.spec.ts`) runs its throwaway user's entire
+  login/enroll/disable flow in a separate `browser.newContext()`, not the
+  shared `page` fixture.** The `page` fixture starts already authenticated
+  from `e2e/.auth/admin.json`, which every other spec's storageState is
+  seeded from — clicking "Log out" on it deletes that session row
+  server-side (`auth/sessions.py`'s `delete_session`), which would
+  permanently break every spec that runs after it in the same worker. A
+  second, independently-logged-in context avoids ever touching that
+  session; the admin `page` is only used to create and later deactivate the
+  throwaway user. A hand-rolled RFC 6238 TOTP generator
+  (`e2e/totp.ts`, Node's built-in `crypto`) computes real codes against the
+  secret `/auth/mfa/enroll` returns, rather than pulling in an otplib-style
+  dependency for one test file — cross-checked against `pyotp`'s own output
+  for the same secret/timestamp before trusting it.
+
+**Four real issues found via code review and fixed before this shipped:**
+- **A live TOTP code was replayable within its own ~90s acceptance
+  window.** `pyotp`'s own `verify()` only checks whether a code is
+  currently valid, not whether it's already been used — a backup code was
+  already single-use via `MfaBackupCode.used_at`, but nothing gave a live
+  code the same property. Fixed by adding `User.mfa_last_used_step` and a
+  new `_consume_totp_code`, which only accepts a code whose time-step
+  counter is strictly newer than the last one this user successfully used.
+  Implementing this surfaced a real bug of its own: `pyotp.TOTP.at()` takes
+  a *timestamp*, not a raw counter — an initial version passed the counter
+  value straight to `.at()`, which silently computed the wrong code every
+  time (interpreting a counter like `59676303` as a Unix timestamp from
+  1972) rather than raising, so it looked plausible until a test actually
+  exercised it. Fixed by using `.at(now, counter_offset=offset)`, which
+  `pyotp` already provides for exactly this "N steps from now" case.
+- **`/auth/mfa/enroll` required only an active session, no password.**
+  Unlike `/disable` and `/backup-codes/regenerate`, which already required
+  re-confirming the password given "the stakes are higher," enroll had no
+  such check and didn't reject re-enrolling while MFA was already on. A
+  stolen session token (XSS, a shared browser) was therefore enough to
+  silently replace a victim's confirmed secret and backup codes with ones
+  only the attacker controls, while `mfa_enabled` stayed `true` and looked
+  intact. Fixed by requiring password re-confirmation on enroll too (a
+  shared `MfaPasswordConfirmRequest` / `_require_password_reconfirmation`
+  now backs all three self-service endpoints) and rejecting enrollment
+  outright while already enabled — disable first, then re-enroll.
+- **The state change and its audit event weren't atomic.**
+  `confirm_enrollment`/`disable_mfa`/`regenerate_backup_codes`/the backup-
+  code half of `verify_mfa_code` each committed on their own, separately
+  from the calling endpoint's later `record_audit_event` + commit — a crash
+  in between would leave MFA enabled/disabled/rotated with no matching
+  `AuditLog` row, the exact gap the audit log's tamper-evidence work above
+  exists to avoid. Fixed by having none of `app/auth/mfa.py`'s functions
+  commit on their own (`start_enrollment` is the one exception, since it
+  has no paired audit event); each endpoint's own single `session.commit()`
+  now covers the state change and its audit write together, matching
+  `app/audit.py`'s own "callers include this in their own transaction"
+  convention.
+- **The password re-check on `/disable` and `/backup-codes/regenerate` had
+  no rate limit.** A stolen session token could otherwise brute-force the
+  account password through either endpoint at argon2id-timing speed, with
+  none of `/auth/login`'s own lockout protecting it. Fixed by having
+  `_require_password_reconfirmation` reuse `app.login_throttle` directly,
+  keyed by the same username — the same "repeated password guessing
+  against one account" threat model already covers this, whichever
+  endpoint the guesses come through.
+
+### Notes on decisions made — delegated-admin authority
+
+Found during an internal code review of `dev` (October 2026). Each of the
+three delegated admin capabilities had its own direct path to super-admin,
+even though `api/roles.py` already stated the intended invariant ("only a
+super-admin can mint a super-admin"): `manage_users` could assign an
+existing super-admin role or reset a super-admin's password; `manage_sso`
+could map an IdP group to a super-admin role; `manage_roles` could add
+`manage_users` to its own role and then take the first path.
+
+- **One rule, applied everywhere a role changes hands:**
+  `rbac.role_within_authority(actor, role)` — a non-super-admin may only
+  assign, edit, duplicate, grant on, map a group to, or act on a user
+  holding a role that is not super-admin and whose global capabilities are
+  a subset of the actor's own. "You can't hand out more than you hold" is
+  the standard delegation rule, and it closes the chains above as well as
+  the direct paths.
+- **Acting on a more-privileged *account* is blocked too**, not just
+  assigning a more-privileged role — a password reset is an account
+  takeover, so `reset-password`, deactivate, and PATCH all check the
+  target user's current role.
+- **Data-access grants are deliberately not capped the same way.** A
+  `manage_roles` admin can still give a role (including its own) grants on
+  any customer/folder/source — administering grants is exactly what that
+  capability is for, and it never reaches super-admin or system sources.
+- **Built-in roles are immutable**, including for super-admins: no rename,
+  capability change, or grant change. "No Access" is what every newly
+  SSO-provisioned user lands on, so anything granted to it would go to
+  anyone with an account at the IdP; "Super Admin" is the break-glass role.
+  The role editor now shows built-in roles read-only.
+- **The last active super-admin can't be deactivated or demoted**, so the
+  break-glass account can't be removed by accident.
+- **Role update/delete and grant update/delete now write AuditLog
+  entries** — previously only role and grant *creation* did, which fell
+  short of CLAUDE.md's "role/grant changes" audit minimum.
+- **Known remaining gap, deliberately not closed here:** `manage_sso` also
+  controls the issuer URL, and SSO users are matched by `sub` alone, so
+  whoever holds it effectively controls who can sign in as an existing SSO
+  user. Treat `manage_sso` as a high-trust capability until SSO identities
+  are bound to their issuer (needs a schema change and a migration).
+### Notes on decisions made — local-disk sources
+
+Found during the October 2026 internal review: the `local` protocol exists
+for the built-in application-log source, but the source editor also offered
+"Local disk" for ordinary sources with no restriction on `base_path`, so
+anyone holding `create_source` could expose any directory on the PerchTail
+host, including its database and secrets.
+
+- **Operator allowlist, not removal.** Local-disk sources have a legitimate
+  use (a host log directory bind-mounted into the container, and the e2e
+  search spec relies on one), so they stay, but only under directories
+  listed in `LOCAL_SOURCE_ROOTS`. It's empty by default, which disables
+  them. It's an environment setting on purpose: whoever controls the
+  container's mounts decides what's reachable, and no web-UI role can widen it.
+- **Checked on every read, not just on save** (`collectors/local.py`'s
+  `resolve_path`), so a source created before this existed, or after the
+  allowlist was narrowed, can't keep reading. The archive endpoints return
+  a clean 403 for those.
+- **Reads are confined to the source's own base path after resolving
+  symlinks**, and symlinks pointing outside it are left out of listings.
+  This applies to the system source too.
+### Notes on decisions made — credential salt persistence
+
+Found during the October 2026 internal review. `CREDENTIAL_SALT_PATH` and
+`SSH_KNOWN_HOSTS_PATH` default to `./data/...` relative to the working
+directory, and the Dockerfile only redirected `LOG_DIR`, `DATABASE_URL` and
+`SCRATCH_DIR` onto `/data`. In the image both files therefore landed in the
+container's own writable layer. Any recreate (upgrade, `docker compose up
+--build`, `down`/`up`) generated a new salt, which broke decryption of every
+stored secret and every audit-chain HMAC, and silently reset SSH
+trust-on-first-use pinning.
+
+- **The Dockerfile now sets both paths under `/data`.** The app defaults are
+  unchanged for non-Docker setups, where `./data` is already persistent.
+- **Startup refuses to mint a new salt over existing encrypted data**
+  (`bootstrap.assert_credential_salt_present`, run before anything derives
+  a key). Failing loudly at boot keeps the original salt recoverable;
+  failing later, one decryption at a time, doesn't.
+  `CREDENTIAL_SALT_ALLOW_REGENERATE=true` is the explicit escape hatch when
+  the original is truly gone.
+- **No automatic migration from the old location.** By the time a new
+  image starts, the old container layer, and the salt with it, is already
+  gone. The upgrade step has to run in the old container, so it's documented
+  in the CHANGELOG rather than attempted by the new entrypoint.
+### Notes on decisions made — canonical paths for rule checks
+
+Found during the October 2026 internal review. Rules are matched against the
+client-supplied path *as written*, and `is_safe_relative_path` only blocked
+traversal (`..`), absolute paths and `:`. Other spellings of the same file
+therefore slipped past exclude rules on direct `/open` or `/download` calls:
+`./secret/x` or `secret//x`; `secret\x` on SMB/WinRM, where a backslash is a
+separator; `SECRET/x` on a case-insensitive Windows filesystem; and Windows
+name normalization (`secret./x`, `SECRE~1/x`).
+
+- **Reject rather than normalize.** Every path a listing produces is already
+  canonical, so the UI never sends any of these. Rejecting them (400) is
+  simpler and leaves no gap between how the backend normalizes a path and
+  how the remote OS does.
+- **Case-insensitive rules for SMB/WinRM, case-sensitive elsewhere.**
+  `is_visible(..., case_insensitive=True)` is used by the SMB/WinRM
+  listings and by the archive endpoints for those sources. Making every
+  protocol case-insensitive would quietly broaden include rules on Linux,
+  where `App.log` and `app.log` really are different files.
+- **Known gap: Agent sources on Windows.** The backend doesn't know the
+  agent's OS, so their rules stay case-sensitive. docs/source-setup.md
+  documents the regex workaround. Fixing it properly means the agent
+  reporting its OS, or refusing a path whose case doesn't match what's on
+  disk.
+### Notes on decisions made — no id reuse after delete
+
+Found during the October 2026 internal review. Plain SQLite `INTEGER PRIMARY
+KEY` assigns `max(id) + 1`, so deleting the newest row and creating another
+reused its id. `RoleGrant.scope_id` can't carry an FK (it points at one of
+three tables), and nothing cleaned up grants, search-index rows, alerts or
+severity patterns when a source was deleted. A brand-new source could
+therefore inherit a deleted source's grants and its indexed log lines.
+
+- **Both halves, not one.** `AUTOINCREMENT` (`app.models.NO_ID_REUSE`) stops
+  ids from being reused. Deleting dependents on delete
+  (`rbac.delete_scope_grants`, `search_index.delete_source_index`) stops
+  stale rows existing at all. Either alone would leave a gap: cleanup alone
+  still lets audit history and `/sources/recent` confuse two different
+  sources sharing an id, and AUTOINCREMENT alone leaves dead rows around.
+- **Alerts scoped to a deleted source are deleted, not unscoped.** A null
+  `source_id` means "every source the owner can view", which is broader.
+- **Roles mapped from an SSO group can't be deleted (409)**, the same as
+  roles that still have users, rather than silently dropping the mapping.
+- **The migration** (`47c9d392f28f`) removes rows already orphaned this
+  way, rebuilds the four tables with AUTOINCREMENT, and seeds each
+  `sqlite_sequence` with the larger of the current max id and the highest
+  `target_id` the audit log recorded for that table. That way an id
+  deleted before the upgrade isn't handed out once more either. Verified
+  with upgrade, downgrade and re-upgrade on a real SQLite file with
+  planted orphans; indexes and FKs survive the rebuild.
+
+## High availability & horizontal scaling
+
+Raised while evaluating whether PerchTail can run behind a load balancer, or
+in a multi-replica k3s/Kubernetes deployment, for real high availability
+rather than just a single self-healing pod. The honest answer today is no —
+the current architecture (SQLite with a raw FTS5 virtual table for search,
+an in-process APScheduler running five background jobs, in-memory
+login-throttle and push-agent connection state) is deliberately
+single-instance, per CLAUDE.md's own tech-stack rationale. See
+[docs/high-availability.md](docs/high-availability.md) for the full
+breakdown, organized by solution and load-balancing type, before picking a
+direction.
+
+- [x] Document today's real ceiling (single-replica k3s/Kubernetes with
+      orchestrator-level self-healing) and exactly what four independent
+      pieces of work true active-active horizontal scaling would require —
+      see the doc above
+- [ ] Ship the actual k3s manifests (Deployment/PVC/Service/Ingress) as a
+      maintained example under a new `deploy/k3s/` directory, once someone
+      is actually running this in a cluster rather than only documenting how
+      to
+- [ ] Revisit which further solution tier (warm standby vs. true
+      multi-replica) is worth building once a real deployment's uptime
+      requirement or measured load ceiling actually demands it — not ahead
+      of that demand
 
 ## Frontend E2E testing (Playwright)
 
@@ -1484,7 +2169,12 @@ it correctly; only exercising the real page does that.
       (`search.spec.ts`, `alerts.spec.ts`); the audit log page's type/action/
       date-range filters, driven off a real entry the test itself creates
       via the retention control rather than assuming prior specs left
-      matching rows behind (`audit-log.spec.ts`)
+      matching rows behind, and its tamper-evidence integrity banner
+      resolving to "chain intact" against a real, unmodified `AuditLog`
+      after clicking "Verify now" (`audit-log.spec.ts`); TOTP/MFA
+      enroll-confirm-login-disable against a throwaway user, using a
+      hand-rolled TOTP code generator rather than a new dependency
+      (`mfa.spec.ts`)
 - [x] CI job (`.github/workflows/ci.yml`'s `e2e` job) — separate from the
       existing `backend`/`frontend` jobs since it needs both toolchains
 

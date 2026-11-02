@@ -13,6 +13,12 @@ FROM python:3.12-slim
 
 WORKDIR /app/backend
 
+# python:3.12-slim's own OS packages lag behind Debian's security patches
+# between upstream rebuilds (see issue #87) — pull current packages from the
+# live Debian security mirror at build time instead of trusting whatever the
+# base image tag happened to bake in.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -26,9 +32,15 @@ RUN chmod +x /app/docker-entrypoint.sh
 # a path relative to itself, so this placement isn't arbitrary.
 COPY --from=frontend-build /frontend/dist /app/frontend/dist
 
+# Everything stateful lives under /data, the volume docker-compose.yml
+# mounts. The credential salt and SSH known_hosts in particular must survive
+# a container recreate: losing the salt makes every stored credential
+# undecryptable, and losing known_hosts silently resets SSH host-key pinning.
 ENV LOG_DIR=/data/logs \
     DATABASE_URL=sqlite:////data/perchtail.db \
-    SCRATCH_DIR=/data/scratch
+    SCRATCH_DIR=/data/scratch \
+    CREDENTIAL_SALT_PATH=/data/credential_salt \
+    SSH_KNOWN_HOSTS_PATH=/data/ssh_known_hosts
 
 EXPOSE 8000
 

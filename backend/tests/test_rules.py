@@ -1,5 +1,6 @@
+import pytest
 from app.models import PatternKind, Rule, RuleType
-from app.rules import is_safe_relative_path, is_visible, parse_pattern
+from app.rules import InvalidPatternError, is_safe_relative_path, is_visible, parse_pattern
 
 
 def _rule(order: int, type_: RuleType, pattern: str, kind: PatternKind = PatternKind.glob) -> Rule:
@@ -124,3 +125,33 @@ def test_is_safe_relative_path_rejects_backslash_traversal():
 
 def test_is_safe_relative_path_rejects_drive_letter_absolute_paths():
     assert is_safe_relative_path("C:\\Windows\\System32") is False
+
+
+def test_parse_pattern_rejects_an_invalid_regex():
+    with pytest.raises(InvalidPatternError):
+        parse_pattern("re:app-(\\d+.log")
+
+
+def test_parse_pattern_accepts_a_valid_regex_and_any_glob():
+    assert parse_pattern("re:app-\\d+\\.log") == ("app-\\d+\\.log", PatternKind.regex)
+    assert parse_pattern("logs/[") == ("logs/[", PatternKind.glob)
+
+
+def test_stored_invalid_include_rule_matches_nothing_instead_of_crashing():
+    rules = [
+        _rule(0, RuleType.include, "**/*.log", PatternKind.glob),
+        _rule(1, RuleType.include, "(", PatternKind.regex),
+    ]
+    assert is_visible("app.log", rules)
+    assert not is_visible("app.txt", rules)
+
+
+def test_stored_invalid_exclude_rule_fails_closed():
+    # An exclude that can't be evaluated must not quietly expose what it
+    # was written to hide, so it hides everything it might have covered.
+    rules = [
+        _rule(0, RuleType.include, "**/*", PatternKind.glob),
+        _rule(1, RuleType.exclude, "secret(", PatternKind.regex),
+    ]
+    assert not is_visible("secret(1).log", rules)
+    assert not is_visible("app.log", rules)

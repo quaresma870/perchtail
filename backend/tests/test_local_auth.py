@@ -2,6 +2,7 @@ from app.auth.models import AuditLog, Role
 from app.auth.providers.local import (
     LocalPasswordProvider,
     change_password,
+    complete_login,
     create_local_user,
     hash_password,
 )
@@ -33,7 +34,11 @@ def test_create_local_user_forces_password_change_and_audits(session):
     assert "user.create" in actions
 
 
-def test_authenticate_success_updates_last_login_and_audits(session):
+def test_authenticate_success_does_not_finalize_login(session):
+    """authenticate() only checks credentials -- see complete_login for the
+    step that actually records the sign-in. This matters once MFA exists: a
+    password-correct-but-MFA-pending attempt must not look like a completed
+    login in last_login_at or the audit log."""
     role = _make_role(session)
     create_local_user(
         session,
@@ -47,7 +52,28 @@ def test_authenticate_success_updates_last_login_and_audits(session):
     authenticated = provider.authenticate(session, "jdoe@example.com", "s3cret!")
 
     assert authenticated is not None
-    assert authenticated.last_login_at is not None
+    assert authenticated.last_login_at is None
+
+    actions = [e.action for e in session.exec(select(AuditLog)).all()]
+    assert "user.login" not in actions
+
+
+def test_complete_login_updates_last_login_and_audits(session):
+    role = _make_role(session)
+    create_local_user(
+        session,
+        actor_user_id=None,
+        username="jdoe@example.com",
+        password="s3cret!",
+        role_id=role.id,
+    )
+
+    provider = LocalPasswordProvider()
+    user = provider.authenticate(session, "jdoe@example.com", "s3cret!")
+    complete_login(session, user)
+    session.refresh(user)
+
+    assert user.last_login_at is not None
 
     actions = [e.action for e in session.exec(select(AuditLog)).all()]
     assert actions.count("user.login") == 1

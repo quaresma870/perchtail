@@ -1,8 +1,9 @@
 import secrets
+from pathlib import Path
 
 from sqlmodel import Session, select
 
-from app.auth.models import Role, User
+from app.auth.models import AuditLog, Role, SSOProviderConfig, User
 from app.auth.providers.local import create_local_user
 from app.auth.rbac import create_role
 from app.config import get_settings
@@ -15,6 +16,46 @@ logger = get_logger(__name__)
 SYSTEM_SOURCE_NAME = "PerchTail application logs"
 SUPER_ADMIN_ROLE_NAME = "Super Admin"
 NO_ACCESS_ROLE_NAME = "No Access"
+
+
+class CredentialSaltMissingError(RuntimeError):
+    pass
+
+
+def _has_salt_dependent_data(session: Session) -> bool:
+    checks = (
+        select(Source.id).where(Source.credential_ref.is_not(None)),
+        select(SSOProviderConfig.id),
+        select(User.id).where(User.mfa_secret_encrypted.is_not(None)),
+        select(AuditLog.id).where(AuditLog.row_hash.is_not(None)),
+    )
+    return any(session.exec(query).first() is not None for query in checks)
+
+
+def assert_credential_salt_present(session: Session) -> None:
+    """Must run before anything derives a key (app/crypto.py creates a new
+    salt on first use if the file is missing). A missing salt on a database
+    that already holds encrypted data means the salt was lost -- typically
+    a container recreated while the salt lived outside the persistent
+    volume -- and silently generating a new one would make every stored
+    credential, SSO secret and MFA secret undecryptable and every audit
+    row fail verification. Refusing to start keeps the original salt
+    recoverable."""
+    settings = get_settings()
+    salt_path = Path(settings.credential_salt_path)
+    if salt_path.exists() or not _has_salt_dependent_data(session):
+        return
+    if settings.credential_salt_allow_regenerate:
+        logger.critical("startup.credential_salt_regenerated", salt_path=str(salt_path))
+        return
+    logger.critical("startup.credential_salt_missing", salt_path=str(salt_path))
+    raise CredentialSaltMissingError(
+        f"CREDENTIAL_SALT_PATH ({salt_path}) is missing, but the database already holds "
+        "data encrypted with a key derived from it. Starting now would generate a new "
+        "salt and make every stored credential, SSO secret and MFA secret undecryptable. "
+        "Restore the original salt file (see the CHANGELOG's upgrade note) and restart, or "
+        "set CREDENTIAL_SALT_ALLOW_REGENERATE=true if it is permanently lost."
+    )
 
 
 def seed_system_log_source(session: Session) -> Source:

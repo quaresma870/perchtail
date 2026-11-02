@@ -8,7 +8,7 @@ from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import GlobalCapability, Role, User
 from app.auth.providers.local import create_local_user, hash_password
-from app.auth.rbac import require_global_capability
+from app.auth.rbac import require_global_capability, require_role_within_authority
 from app.db import get_session
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -41,6 +41,35 @@ class ResetPasswordResponse(BaseModel):
     temporary_password: str
 
 
+def _get_manageable_user(session: Session, actor: User, user_id: int) -> User:
+    """A delegated admin can't act on an account more privileged than
+    themselves -- resetting a super-admin's password, for example, would
+    otherwise hand the account (and its role) to whoever holds
+    manage_users. See rbac.role_within_authority."""
+    target = session.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    require_role_within_authority(actor, target.role)
+    return target
+
+
+def _require_not_last_super_admin(session: Session, target: User) -> None:
+    """Refuses to deactivate or demote the only remaining active
+    super-admin -- the break-glass account must always exist."""
+    if not target.role.is_super_admin:
+        return
+    others = session.exec(
+        select(User)
+        .join(Role)
+        .where(Role.is_super_admin.is_(True), User.active.is_(True), User.id != target.id)
+    ).first()
+    if others is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot remove the last active super-admin",
+        )
+
+
 @router.get("", response_model=list[UserPublic])
 def list_users(user: User = Depends(require_manage), session: Session = Depends(get_session)):
     return session.exec(select(User)).all()
@@ -52,8 +81,10 @@ def create_user(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    if session.get(Role, payload.role_id) is None:
+    role = session.get(Role, payload.role_id)
+    if role is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    require_role_within_authority(user, role)
     if session.exec(select(User).where(User.username == payload.username)).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already in use")
 
@@ -73,14 +104,18 @@ def update_user(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    target = session.get(User, user_id)
-    if target is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    target = _get_manageable_user(session, user, user_id)
 
     if payload.role_id is not None:
-        if session.get(Role, payload.role_id) is None:
+        new_role = session.get(Role, payload.role_id)
+        if new_role is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+        require_role_within_authority(user, new_role)
+        if not new_role.is_super_admin:
+            _require_not_last_super_admin(session, target)
         target.role_id = payload.role_id
+    if payload.active is False:
+        _require_not_last_super_admin(session, target)
     if payload.active is not None:
         target.active = payload.active
 
@@ -107,9 +142,7 @@ def reset_password(
     """Admin-triggered reset: issues a random temporary password (shown once,
     same as account creation) and forces a change on next login — same
     Security-notes rule as admin-created accounts."""
-    target = session.get(User, user_id)
-    if target is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    target = _get_manageable_user(session, user, user_id)
 
     temporary_password = secrets.token_urlsafe(12)
     target.password_hash = hash_password(temporary_password)
@@ -135,9 +168,8 @@ def deactivate_user(
     """Deactivate, not hard-delete — CLAUDE.md's Security notes: soft
     deactivation is the default way to remove access, keeping audit
     history intact."""
-    target = session.get(User, user_id)
-    if target is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    target = _get_manageable_user(session, user, user_id)
+    _require_not_last_super_admin(session, target)
 
     target.active = False
     session.add(target)

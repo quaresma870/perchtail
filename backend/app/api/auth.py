@@ -7,8 +7,15 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
+from app.audit import record_audit_event
+from app.auth import mfa
 from app.auth.models import AuthSession, GlobalCapability, Role, SSOProviderConfig, User
-from app.auth.providers.local import LocalPasswordProvider, change_password, verify_password
+from app.auth.providers.local import (
+    LocalPasswordProvider,
+    change_password,
+    complete_login,
+    verify_password,
+)
 from app.auth.providers.oidc import (
     STATE_TTL_SECONDS,
     OIDCProvider,
@@ -54,6 +61,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class LoginRequest(BaseModel):
     username: str
     password: str
+    # Only required when the account has MFA enabled -- accepts either a
+    # live 6-digit TOTP code or a backup code (see auth/mfa.py's
+    # verify_mfa_code, which tries both).
+    mfa_code: str | None = None
 
 
 class ChangePasswordRequest(BaseModel):
@@ -69,6 +80,7 @@ class UserPublic(BaseModel):
     role_id: int
     active: bool
     must_change_password: bool
+    mfa_enabled: bool
     # Denormalized from the user's role so the frontend can gate nav/UI
     # (e.g. show the Roles/Users admin pages) without a second round-trip or
     # needing manage_roles just to read its own role's shape.
@@ -83,6 +95,7 @@ class UserPublic(BaseModel):
             role_id=user.role_id,
             active=user.active,
             must_change_password=user.must_change_password,
+            mfa_enabled=user.mfa_enabled,
             is_super_admin=user.role.is_super_admin,
             global_capabilities=user.role.global_capabilities,
         )
@@ -157,7 +170,31 @@ def login(
         record_failure(payload.username)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
+    if user.mfa_enabled:
+        # A missing code isn't a guess that failed -- it's the client
+        # correctly stopping after step one to ask the user for a code, so
+        # it doesn't count against the login-throttle lockout the way a
+        # present-but-wrong code below does.
+        if not payload.mfa_code:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "message": "Authentication code required",
+                    "error_code": "mfa_required",
+                },
+            )
+        if not mfa.verify_mfa_code(session, user, payload.mfa_code):
+            record_failure(payload.username)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "message": "Invalid authentication code",
+                    "error_code": "mfa_invalid_code",
+                },
+            )
+
     record_success(payload.username)
+    complete_login(session, user)
     _, token = create_session(session, user, user_agent=request.headers.get("user-agent"))
     _set_session_cookie(response, token)
     return UserPublic.from_user(user)
@@ -193,6 +230,138 @@ def change_password_endpoint(
     change_password(session, user, payload.new_password)
     session.refresh(user)
     return UserPublic.from_user(user)
+
+
+class MfaEnrollResponse(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class MfaConfirmRequest(BaseModel):
+    code: str
+
+
+class MfaBackupCodesResponse(BaseModel):
+    backup_codes: list[str]
+
+
+class MfaPasswordConfirmRequest(BaseModel):
+    # Re-proves the caller is actually the account owner, not just holding
+    # an already-open session -- same reasoning as requiring the current
+    # password on /auth/change-password. Without this, a session token
+    # alone (stolen via XSS, a shared browser, etc.) would be enough to
+    # silently enroll a new device, turn MFA off, or invalidate someone's
+    # existing backup codes -- all of which are meant to require proving
+    # you're still the account owner, not just holding a live cookie.
+    password: str
+
+
+def _require_password_reconfirmation(user: User, password: str) -> None:
+    """Shared by every /mfa/* endpoint that re-proves account ownership via
+    password -- throttled exactly like /auth/login itself (keyed by
+    username, via app.login_throttle), since without a lockout here a
+    stolen session token would let an attacker brute-force the account
+    password at argon2-timing speed with no cap on attempts."""
+    remaining = seconds_until_unlocked(user.username)
+    if remaining is not None:
+        retry_after = math.ceil(remaining)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts. Try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    if not verify_password(user, password):
+        record_failure(user.username)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect"
+        )
+    record_success(user.username)
+
+
+@router.post("/mfa/enroll", response_model=MfaEnrollResponse)
+def mfa_enroll(
+    payload: MfaPasswordConfirmRequest,
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    """Self-service only, same scope as change-password -- generates a new
+    pending TOTP secret for an authenticator app to scan, but doesn't
+    enable MFA yet (see /mfa/confirm). Requires re-confirming the current
+    password (see MfaPasswordConfirmRequest) and refuses to start while MFA
+    is already enabled -- re-enrolling over an active secret would silently
+    replace it before a replacement is confirmed to actually work, bricking
+    the account's current second factor. Disable first to re-enroll."""
+    _require_password_reconfirmation(user, payload.password)
+    if user.mfa_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="MFA is already enabled — disable it first to re-enroll",
+        )
+    secret = mfa.start_enrollment(session, user)
+    return MfaEnrollResponse(secret=secret, otpauth_uri=mfa.provisioning_uri(secret, user.username))
+
+
+@router.post("/mfa/confirm", response_model=MfaBackupCodesResponse)
+def mfa_confirm(
+    payload: MfaConfirmRequest,
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    try:
+        codes = mfa.confirm_enrollment(session, user, payload.code)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid authentication code"
+        ) from None
+
+    record_audit_event(
+        session, user_id=user.id, action="user.mfa_enable", target_type="user", target_id=user.id
+    )
+    session.commit()
+    return MfaBackupCodesResponse(backup_codes=codes)
+
+
+@router.post("/mfa/disable", response_model=UserPublic)
+def mfa_disable(
+    payload: MfaPasswordConfirmRequest,
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    _require_password_reconfirmation(user, payload.password)
+
+    mfa.disable_mfa(session, user)
+    record_audit_event(
+        session, user_id=user.id, action="user.mfa_disable", target_type="user", target_id=user.id
+    )
+    session.commit()
+    session.refresh(user)
+    return UserPublic.from_user(user)
+
+
+@router.post("/mfa/backup-codes/regenerate", response_model=MfaBackupCodesResponse)
+def mfa_regenerate_backup_codes(
+    payload: MfaPasswordConfirmRequest,
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    _require_password_reconfirmation(user, payload.password)
+
+    try:
+        codes = mfa.regenerate_backup_codes(session, user)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="MFA is not enabled"
+        ) from None
+
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="user.mfa_backup_codes_regenerated",
+        target_type="user",
+        target_id=user.id,
+    )
+    session.commit()
+    return MfaBackupCodesResponse(backup_codes=codes)
 
 
 class AuthSessionPublic(BaseModel):

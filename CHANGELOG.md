@@ -8,6 +8,225 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
+A security release on top of new viewer and navigation features. A full
+security and bug review of the codebase, plus a CodeQL code-scanning pass,
+found and fixed the following:
+- delegated admins could escalate themselves to super-admin;
+- admin-created local-disk sources could read anywhere on the PerchTail
+  host;
+- exclude rules could be bypassed with a non-canonical path;
+- deleted ids could be reused and inherit their old access;
+- WinRM path quoting missed the Unicode quote characters;
+- archives had no decompression limit (zip bombs);
+- the Go push-agent could follow a symlink out of its folder.
+
+Also new since 0.2.0:
+- optional TOTP/MFA for local accounts;
+- tamper-evident (HMAC hash-chained) audit log;
+- viewer Compare, Beautify/Minify, Follow and multi-pattern Highlight;
+- a tree view of all connections, with a Folders admin page.
+
+Bugs fixed: concurrent opens of one file corrupting each other, invalid
+regex rules breaking a whole source, and alerts that missed new matches
+and repeated old ones.
+
+### Upgrading from 0.2.0
+
+Database migrations run automatically on startup. Back up the `/data`
+volume first. Before you restart, check the following:
+
+- **Local-disk sources** (other than the built-in application-log source)
+  are now off by default. Set `LOCAL_SOURCE_ROOTS` to the directories they
+  read from, comma-separated. Until you do, those sources answer 403.
+- **Docker deployments, do this before you recreate the container:** the
+  credential salt and SSH `known_hosts` now live on the `/data` volume.
+  While the *old* container is still running, copy them there:
+
+  ```sh
+  docker compose exec perchtail sh -c 'cp -n /app/backend/data/credential_salt /data/ 2>/dev/null; cp -n /app/backend/data/ssh_known_hosts /data/ 2>/dev/null; ls -l /data/credential_salt'
+  ```
+
+  If you skip this step, the new version refuses to start rather than
+  silently losing every stored credential, SSO secret and MFA secret.
+- **SMB/WinRM rules** now match case-insensitively, as Windows does.
+- **Regex rules** that don't compile are now rejected when saved. Any
+  already stored fail closed: a broken include matches nothing, and a
+  broken exclude hides everything. Check the ERROR log for
+  `rules.invalid_regex` after upgrading.
+- New optional setting: `MAX_DECOMPRESSED_MB` (default 2048).
+
+### Added
+- Viewer: Compare (a read-only side-by-side diff against a second file
+  picked from the tree or another open tab, via `@codemirror/merge`),
+  Beautify/Minify for JSON and XML tabs (display-only, never touches the
+  file on disk), Follow (a `tail -f`-style toggle that polls and re-fetches
+  the open file every few seconds), and multi-pattern "Highlight" (ad hoc,
+  session-only pattern highlighting, Notepad++'s Mark feature, each
+  pattern in its own color). See ROADMAP.md's notes for design decisions,
+  including two real bugs (a scroll-to-top regression on Follow, a
+  double-add on Enter in the highlight input) found and fixed while
+  building these.
+- Connections home: a "List"/"Tree" toggle for "All connections", showing
+  the real nested customer → folder → … → source hierarchy (built
+  client-side from a new `folder_path` field on each source), alongside
+  the existing flat list. A new "Folders" admin page (Settings → Folders)
+  covers create/rename/move/delete for folders. See ROADMAP.md's notes,
+  including a real RBAC information-disclosure issue (a narrowly-scoped
+  folder/source grant could leak ancestor folder names above its own
+  scope) found via code review and fixed before this shipped.
+
+### Security
+- The Go push-agent now reads through `os.Root`, so a symlink inside its
+  watched folder can no longer point a list or fetch at any other file on
+  that machine. The lexical `..` check stays as the first line of
+  defence. Found by CodeQL (`go/path-injection`).
+- The CI workflow's `GITHUB_TOKEN` is limited to `contents: read`
+  (CodeQL `actions/missing-workflow-permissions`).
+- Local-disk path containment uses `os.path.realpath` and a
+  separator-terminated prefix check, which static analysis recognises.
+  The behaviour is the same, and an allowlist entry of `/` still works.
+  Opening or downloading with an empty path is now a 400. Before, an
+  empty path named the source's base directory itself and failed with a
+  500.
+- Opening a `.gz` file or a `.zip`/`.tar.gz` member is now capped at
+  `MAX_DECOMPRESSED_MB` of decompressed output (default 2048). Previously a
+  small crafted archive (a "zip bomb") could expand without limit and
+  fill the scratch disk. The cap counts the bytes actually produced, not
+  the size the archive header claims. Going over it returns HTTP 413 and
+  deletes the partial file. The search indexer now stops decompressing at
+  its own per-file limit instead of decompressing in full first.
+- Delegated admin capabilities can no longer be used to reach
+  super-admin. A non-super-admin can now only assign, edit, grant on, or
+  map an SSO group to a role that isn't super-admin and carries no global
+  capability they don't hold themselves, and can't reset the password of,
+  deactivate, or edit a user more privileged than themselves. Built-in
+  roles ("Super Admin", "No Access") are now immutable, the last active
+  super-admin can't be deactivated or demoted, and role/grant updates and
+  deletions are now recorded in the audit log.
+- Admin-created "Local disk" sources are now off by default and can only
+  point under directories the server operator lists in the new
+  `LOCAL_SOURCE_ROOTS` environment setting. Previously anyone with
+  `create_source` could choose any base path on the PerchTail host itself.
+  Local reads are also confined to the source's base path, so a symlink
+  can't lead outside it. **Upgrade note:** existing local-disk sources stop
+  working (403) until `LOCAL_SOURCE_ROOTS` covers their base path. The
+  built-in application-log source is unaffected.
+- Exclude rules can no longer be sidestepped by requesting a
+  non-canonical spelling of the same path. Browse/open/download/close now
+  reject `.` and empty path segments, backslashes, `:` and control
+  characters. SMB and WinRM sources also reject trailing dots/spaces and
+  8.3 short names, and match rules case-insensitively, as Windows does.
+  **Behavior change** for SMB/WinRM sources: rules that previously relied
+  on case to tell files apart now match regardless of case.
+- Deleting a customer, folder, source or role can no longer hand its access
+  to whatever gets created next. SQLite reused the highest deleted id, and
+  the role grants, search-index snippets, alerts and severity patterns left
+  pointing at the old row silently attached to the new one, potentially
+  under a different customer. Those tables now use `AUTOINCREMENT`,
+  deletes remove everything that pointed at the deleted row, a role can't
+  be deleted while an SSO group mapping still targets it, and a migration
+  cleans up rows already orphaned this way and starts every id sequence
+  past any id the audit log has ever recorded.
+- WinRM sources now escape every character PowerShell accepts as a
+  single-quote string delimiter (the ASCII apostrophe and the Unicode
+  curly-quote variants U+2018–U+201B) when embedding a path in a command.
+  Previously only the ASCII apostrophe was escaped, so a crafted path could
+  end the quoted string early on the Windows host.
+- Optional TOTP/MFA for local accounts (`pyotp`). Self-service only, via a
+  new Settings → Security page: enroll by scanning a QR code (or entering
+  the secret manually), confirm with a live code before it's actually
+  turned on, and get 10 one-time backup codes shown exactly once. Once
+  enabled, `/auth/login` requires a second factor (a live TOTP code or an
+  unused backup code) after the password; a wrong code counts against the
+  existing login-throttle lockout, a missing one doesn't. A live TOTP code
+  is single-use, not just time-limited — replaying an already-accepted code
+  within its normal validity window is rejected. Enrolling, disabling, and
+  regenerating backup codes all require re-confirming the current password,
+  throttled the same way as login itself, so a stolen session token alone
+  isn't enough to take over an account's second factor. The TOTP secret
+  is Fernet-encrypted at rest (like `Source.credential_ref`); backup codes
+  are one-way argon2 hashes. See ROADMAP.md's security-hardening notes for
+  the full design, including why login finalization (`last_login_at` /
+  the `user.login` audit event) had to move behind the MFA check rather
+  than firing on password-correct alone.
+- Audit log tamper-evidence: `AuditLog` rows are now HMAC-SHA256
+  hash-chained (`app/audit_hash_chain.py`), keyed by a second key derived
+  from `CREDENTIAL_ENCRYPTION_KEY` (domain-separated from the credential
+  Fernet key, `app.crypto.audit_chain_key`) so the chain can't be silently
+  recomputed by anyone who only has the SQLite file itself. Altering or
+  deleting a row anywhere changes every hash after it. A new periodic
+  verification job (`app/audit_integrity.py`) walks the chain on its own
+  configurable cadence (`audit_integrity_check_interval_days`, default 365
+  — explicitly independent of the retention window and purge cadence), and
+  a manual, cooldown-throttled "Verify now" action on the Audit Log page
+  runs the same check on demand. Existing history is backfilled
+  automatically on first startup after upgrading; the retention purge
+  sweep now deletes only a genuine id-prefix of the table (not just
+  whatever matches the timestamp filter, which could rarely diverge from
+  id order under concurrent writes) and advances a persisted chain anchor,
+  so routine purging doesn't itself look like tampering to the next
+  verification pass. See ROADMAP.md's security-hardening notes for the
+  full design, including its one documented, accepted limitation around a
+  narrow concurrent-write race.
+
+### Fixed
+- Alerts missed new matches and repeated old ones. A new matching line
+  could be missed when more than 200 older matches ranked above it,
+  because only one top-200 search across the whole index was checked.
+  Every append to a file also re-sent all of that file's old matching
+  lines. Each changed file is now searched on its own, starting after the
+  last line that alert already reported. A rotated or rewritten file
+  reports from the top. Adds the `alert_file_state` table (migration
+  `c5e1a7d93b20`).
+- Two viewers opening the same file at the same moment could corrupt each
+  other's view. Both fetches wrote into one shared scratch file, so the
+  second fetch truncated and rewrote it while the first response was
+  still streaming. Each fetch now gets its own scratch file, and the
+  reference-counted purge removes them all once the last viewer closes.
+- A rule (or severity pattern) with an invalid regex, such as an
+  unbalanced `(`, used to save fine and then make every browse, open and
+  download of that source fail with a server error. Invalid regexes are
+  now rejected with a 400 when saved, and a raw-text paste names the bad
+  line and leaves the existing rule chain untouched. Rules saved before
+  this change fail closed: a broken include rule matches nothing, and a
+  broken exclude rule hides everything rather than exposing what it was
+  meant to hide. Each broken pattern is logged once at ERROR.
+- The Docker image now keeps the credential-encryption salt and SSH
+  `known_hosts` on the `/data` volume (`CREDENTIAL_SALT_PATH`,
+  `SSH_KNOWN_HOSTS_PATH`). Previously both defaulted to a path inside the
+  container's own filesystem, so recreating or upgrading the container
+  silently generated a new salt, which made every stored credential, SSO
+  client secret and MFA secret undecryptable, made the audit-log integrity
+  check report the whole chain as broken, and reset SSH host-key pinning.
+  Startup now also refuses to generate a fresh salt while the database
+  already holds data encrypted under the old one, instead of failing later
+  (`CREDENTIAL_SALT_ALLOW_REGENERATE=true` overrides this if the original
+  is permanently lost). **Upgrade step for Docker deployments:** while the
+  *old* container is still running, copy both files onto the volume first,
+  then upgrade as usual:
+
+  ```sh
+  docker compose exec perchtail sh -c 'cp -n /app/backend/data/credential_salt /data/ 2>/dev/null; cp -n /app/backend/data/ssh_known_hosts /data/ 2>/dev/null; ls -l /data/credential_salt'
+  ```
+- `OriginCheckMiddleware`'s CSRF defense-in-depth check was blocking every
+  state-changing request — including login — when deployed behind a
+  TLS-terminating reverse proxy (the standard, documented setup): uvicorn
+  runs with no proxy-header trust configured, so it always saw the
+  proxied connection's scheme as `http`, while a real browser's `Origin`
+  header correctly said `https`, and the check compared both. It now
+  compares only `host[:port]`, matching what the middleware's own
+  docstring already claimed it did. Found and verified while writing the
+  reverse-proxy deployment docs, before anyone hit it in production — see
+  ROADMAP.md's CSRF-review notes for the full reproduction and rationale.
+- CI: the `docker-image` job's Trivy scan was failing on every build (not
+  just feature PRs) because `python:3.12-slim`'s baked-in OS packages had
+  fallen behind Debian's own published security patches between upstream
+  rebuilds. The `Dockerfile`'s backend stage now runs `apt-get update &&
+  apt-get upgrade -y` before installing Python dependencies, pulling
+  current packages from the live Debian security mirror at build time.
+
 ## [0.2.0] - 2026-09-08
 
 Phase 2 (push-agent) and Phase 3 (full-text search, alerting, IdP
