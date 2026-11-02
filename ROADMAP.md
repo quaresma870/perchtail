@@ -636,9 +636,18 @@ they come before any connector or UI work, not after.
   the alert's `last_checked_at`, reusing that timestamp signal rather than
   depending on FTS5 rowid stability (rowids aren't stable across
   re-indexes, since a changed file's rows are deleted and reinserted).
-- **Alert matching is content-only, never path/filename** — reuses
-  `search_index.search_content_only()`, a column-filtered sibling of the
-  Search page's `search()` that never matches `file_path`. A file's path
+- **Each changed file is searched on its own, past the line the alert
+  already reported up to** (`AlertFileState.reported_through_line`). Fixed
+  after the first version shipped with two real bugs: it filtered a single
+  top-200 search across the whole index, so a new match ranked below 200
+  older ones was silently missed; and because the indexer re-reads a
+  changed file in full, every old matching line in it fired again on each
+  append. A file that now ends before the recorded line was rotated or
+  rewritten, so all of it counts as new. Known limit: a file rewritten to
+  *more* lines than before between two sweeps looks like an append.
+- **Alert matching is content-only, never path/filename** — uses
+  `search_index.search_file_content_after()`, a column-filtered query that
+  never matches `file_path`. A file's path
   doesn't change when a new line is appended to it, so a path match could
   never be "new content" the way a fresh line is; including path matches
   here would mean an alert fires forever on every sweep for any file whose

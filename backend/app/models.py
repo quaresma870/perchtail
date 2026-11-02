@@ -234,6 +234,21 @@ class Alert(SQLModel, table=True):
     created_at: datetime
 
 
+class AlertFileState(SQLModel, table=True):
+    """How far into each file an alert has already reported -- so a
+    re-indexed file (the indexer re-reads a changed file in full) only fires
+    for lines past this point, not every old match again. If the file now
+    ends before this line, it was rotated or rewritten, and every line in
+    it counts as new."""
+
+    __tablename__ = "alert_file_state"
+
+    alert_id: int = Field(foreign_key="alert.id", primary_key=True)
+    source_id: int = Field(foreign_key="source.id", primary_key=True)
+    file_path: str = Field(primary_key=True)
+    reported_through_line: int
+
+
 class SystemSetting(SQLModel, table=True):
     """Deployment-wide feature toggles, admin-configurable from Settings ->
     System (see app/api/system_settings.py) rather than only via an env var
