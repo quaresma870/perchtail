@@ -236,6 +236,9 @@ def _resolve_content(
     inherently zero-latency and always fresh"). Everything else (remote
     protocols always; local .gz/archive-member, since those produce derived
     bytes that must live somewhere) goes through the scratch store."""
+    if not path:
+        # Browsing the root is "", but opening or downloading needs a file.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
     if not _visible(source, path, rules):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
 

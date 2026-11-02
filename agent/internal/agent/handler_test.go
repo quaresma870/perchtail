@@ -78,3 +78,49 @@ func TestHandleFetchRejectsUnsafePath(t *testing.T) {
 		t.Fatal("expected an error for an absolute path")
 	}
 }
+
+func TestHandleFetchRefusesSymlinkOutOfBase(t *testing.T) {
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	if err := os.Symlink(secret, filepath.Join(base, "link.log")); err != nil {
+		t.Fatal(err)
+	}
+
+	if content, err := HandleFetch(base, "link.log"); err == nil {
+		t.Fatalf("expected an error following a symlink out of base, got %q", content)
+	}
+}
+
+func TestHandleListRefusesSymlinkedDirOutOfBase(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(base, "escape")); err != nil {
+		t.Fatal(err)
+	}
+
+	if entries, err := HandleList(base, "escape"); err == nil {
+		t.Fatalf("expected an error listing a symlinked dir out of base, got %+v", entries)
+	}
+}
+
+func TestHandleFetchFollowsSymlinkInsideBase(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "real.log"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.log", filepath.Join(base, "current.log")); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := HandleFetch(base, "current.log")
+	if err != nil || string(content) != "ok" {
+		t.Fatalf("content=%q err=%v", content, err)
+	}
+}

@@ -5,6 +5,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Every job only reads the repo and uploads build artifacts, so the
+# GITHUB_TOKEN gets read access to contents and nothing else.
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest
