@@ -29,6 +29,13 @@ release ships (0.x releases may include breaking changes between minors).
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- Opening a `.gz` file or a `.zip`/`.tar.gz` member is now capped at
+  `MAX_DECOMPRESSED_MB` of decompressed output (default 2048). Previously a
+  small crafted archive (a "zip bomb") could expand without limit and
+  fill the scratch disk. The cap counts the bytes actually produced, not
+  the size the archive header claims. Going over it returns HTTP 413 and
+  deletes the partial file. The search indexer now stops decompressing at
+  its own per-file limit instead of decompressing in full first.
 - Delegated admin capabilities can no longer be used to reach
   super-admin. A non-super-admin can now only assign, edit, grant on, or
   map an SSO group to a role that isn't super-admin and carries no global

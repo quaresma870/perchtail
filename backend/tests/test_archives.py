@@ -4,6 +4,7 @@ import zipfile
 
 import pytest
 from app.archives import (
+    DecompressionLimitError,
     decompress_gzip,
     extract_member,
     is_archive,
@@ -104,3 +105,46 @@ def test_decompress_gzip(tmp_path):
     destination = tmp_path / "app.log"
     decompress_gzip(archive_path, destination)
     assert destination.read_bytes() == b"hello from app.log"
+
+
+def test_decompress_gzip_stops_at_the_byte_limit(tmp_path):
+    src = tmp_path / "bomb.log.gz"
+    src.write_bytes(gzip.compress(b"A" * 100_000))
+    dest = tmp_path / "out"
+
+    with pytest.raises(DecompressionLimitError):
+        decompress_gzip(src, dest, max_bytes=1000)
+    assert not dest.exists()
+
+
+def test_decompress_gzip_at_exactly_the_limit_is_fine(tmp_path):
+    src = tmp_path / "ok.log.gz"
+    src.write_bytes(gzip.compress(b"A" * 1000))
+    dest = tmp_path / "out"
+
+    decompress_gzip(src, dest, max_bytes=1000)
+    assert dest.read_bytes() == b"A" * 1000
+
+
+def test_extract_zip_member_stops_at_the_byte_limit(tmp_path):
+    src = tmp_path / "bomb.zip"
+    with zipfile.ZipFile(src, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("big.log", b"A" * 100_000)
+    dest = tmp_path / "out"
+
+    with pytest.raises(DecompressionLimitError):
+        extract_member(src, "bomb.zip", "big.log", dest, max_bytes=1000)
+    assert not dest.exists()
+
+
+def test_extract_tar_member_stops_at_the_byte_limit(tmp_path):
+    payload = tmp_path / "big.log"
+    payload.write_bytes(b"A" * 100_000)
+    src = tmp_path / "bomb.tar.gz"
+    with tarfile.open(src, "w:gz") as tf:
+        tf.add(payload, arcname="big.log")
+    dest = tmp_path / "out"
+
+    with pytest.raises(DecompressionLimitError):
+        extract_member(src, "bomb.tar.gz", "big.log", dest, max_bytes=1000)
+    assert not dest.exists()
