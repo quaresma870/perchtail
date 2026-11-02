@@ -8,6 +8,55 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
+A security release on top of new viewer and navigation features. A full
+security and bug review of the codebase, plus a CodeQL code-scanning pass,
+found and fixed the following:
+- delegated admins could escalate themselves to super-admin;
+- admin-created local-disk sources could read anywhere on the PerchTail
+  host;
+- exclude rules could be bypassed with a non-canonical path;
+- deleted ids could be reused and inherit their old access;
+- WinRM path quoting missed the Unicode quote characters;
+- archives had no decompression limit (zip bombs);
+- the Go push-agent could follow a symlink out of its folder.
+
+Also new since 0.2.0:
+- optional TOTP/MFA for local accounts;
+- tamper-evident (HMAC hash-chained) audit log;
+- viewer Compare, Beautify/Minify, Follow and multi-pattern Highlight;
+- a tree view of all connections, with a Folders admin page.
+
+Bugs fixed: concurrent opens of one file corrupting each other, invalid
+regex rules breaking a whole source, and alerts that missed new matches
+and repeated old ones.
+
+### Upgrading from 0.2.0
+
+Database migrations run automatically on startup. Back up the `/data`
+volume first. Before you restart, check the following:
+
+- **Local-disk sources** (other than the built-in application-log source)
+  are now off by default. Set `LOCAL_SOURCE_ROOTS` to the directories they
+  read from, comma-separated. Until you do, those sources answer 403.
+- **Docker deployments, do this before you recreate the container:** the
+  credential salt and SSH `known_hosts` now live on the `/data` volume.
+  While the *old* container is still running, copy them there:
+
+  ```sh
+  docker compose exec perchtail sh -c 'cp -n /app/backend/data/credential_salt /data/ 2>/dev/null; cp -n /app/backend/data/ssh_known_hosts /data/ 2>/dev/null; ls -l /data/credential_salt'
+  ```
+
+  If you skip this step, the new version refuses to start rather than
+  silently losing every stored credential, SSO secret and MFA secret.
+- **SMB/WinRM rules** now match case-insensitively, as Windows does.
+- **Regex rules** that don't compile are now rejected when saved. Any
+  already stored fail closed: a broken include matches nothing, and a
+  broken exclude hides everything. Check the ERROR log for
+  `rules.invalid_regex` after upgrading.
+- New optional setting: `MAX_DECOMPRESSED_MB` (default 2048).
+
 ### Added
 - Viewer: Compare (a read-only side-by-side diff against a second file
   picked from the tree or another open tab, via `@codemirror/merge`),
