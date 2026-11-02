@@ -104,6 +104,11 @@ release ships (0.x releases may include breaking changes between minors).
   narrow concurrent-write race.
 
 ### Fixed
+- Two viewers opening the same file at the same moment could corrupt each
+  other's view. Both fetches wrote into one shared scratch file, so the
+  second fetch truncated and rewrote it while the first response was
+  still streaming. Each fetch now gets its own scratch file, and the
+  reference-counted purge removes them all once the last viewer closes.
 - The Docker image now keeps the credential-encryption salt and SSH
   `known_hosts` on the `/data` volume (`CREDENTIAL_SALT_PATH`,
   `SSH_KNOWN_HOSTS_PATH`). Previously both defaulted to a path inside the
