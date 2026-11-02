@@ -8,7 +8,7 @@ from app.auth.models import Capability, User
 from app.auth.rbac import require_capability
 from app.db import get_session
 from app.models import PatternKind, Rule, RuleType, Source
-from app.rules import parse_pattern
+from app.rules import InvalidPatternError, parse_pattern
 
 router = APIRouter(prefix="/sources/{source_id}/rules", tags=["rules"])
 
@@ -58,6 +58,13 @@ def _require_editable_rules(source: Source) -> None:
         )
 
 
+def parse_pattern_or_400(raw: str) -> tuple[str, PatternKind]:
+    try:
+        return parse_pattern(raw)
+    except InvalidPatternError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 def _ordered_rules(session: Session, source_id: int) -> list[Rule]:
     return list(
         session.exec(select(Rule).where(Rule.source_id == source_id).order_by(Rule.order)).all()
@@ -77,7 +84,7 @@ def create_rule(
     session: Session = Depends(get_session),
 ):
     _require_editable_rules(source)
-    pattern, pattern_kind = parse_pattern(payload.pattern)
+    pattern, pattern_kind = parse_pattern_or_400(payload.pattern)
 
     existing = _ordered_rules(session, source.id)
     next_order = (existing[-1].order + 1) if existing else 0
@@ -121,7 +128,7 @@ def update_rule(
     if payload.type is not None:
         rule.type = payload.type
     if payload.pattern is not None:
-        rule.pattern, rule.pattern_kind = parse_pattern(payload.pattern)
+        rule.pattern, rule.pattern_kind = parse_pattern_or_400(payload.pattern)
     if "notes" in payload.model_fields_set:
         rule.notes = payload.notes
 
@@ -221,19 +228,28 @@ def replace_rules_raw(
     """Bulk-replaces the source's entire rule chain from pasted text — the
     power-user alternative to the row-based editor, not a merge."""
     _require_editable_rules(source)
-    parsed = [
-        parsed_line
-        for line in payload.text.splitlines()
-        if (parsed_line := _parse_raw_line(line)) is not None
-    ]
+    # Every line is parsed and validated before anything is deleted, so a
+    # bad line rejects the whole paste and leaves the existing chain intact.
+    parsed: list[tuple[RuleType, str, PatternKind]] = []
+    for line_number, line in enumerate(payload.text.splitlines(), start=1):
+        parsed_line = _parse_raw_line(line)
+        if parsed_line is None:
+            continue
+        rule_type, raw_pattern = parsed_line
+        try:
+            pattern, pattern_kind = parse_pattern(raw_pattern)
+        except InvalidPatternError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=f"line {line_number}: {exc}"
+            ) from exc
+        parsed.append((rule_type, pattern, pattern_kind))
 
     for rule in _ordered_rules(session, source.id):
         session.delete(rule)
     session.flush()
 
     created: list[Rule] = []
-    for order, (rule_type, raw_pattern) in enumerate(parsed):
-        pattern, pattern_kind = parse_pattern(raw_pattern)
+    for order, (rule_type, pattern, pattern_kind) in enumerate(parsed):
         rule = Rule(
             source_id=source.id,
             order=order,

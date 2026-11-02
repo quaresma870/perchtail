@@ -193,3 +193,40 @@ def test_system_source_rules_not_editable_even_for_super_admin(session, client_f
         f"/sources/{source.id}/rules", json={"type": "include", "pattern": "**/*"}
     )
     assert response.status_code == 403
+
+
+@pytest.fixture()
+def admin_client(session, client_for):
+    _, user = _make_role_and_user(session, is_super_admin=True)
+    return client_for(user), _make_source(session)
+
+
+def test_creating_a_rule_with_an_invalid_regex_is_a_400(admin_client):
+    client, source = admin_client
+    response = client.post(
+        f"/sources/{source.id}/rules", json={"type": "include", "pattern": "re:("}
+    )
+    assert response.status_code == 400
+    assert "regex" in response.json()["detail"].lower()
+    assert client.get(f"/sources/{source.id}/rules").json() == []
+
+
+def test_updating_a_rule_to_an_invalid_regex_is_a_400(admin_client):
+    client, source = admin_client
+    created = client.post(
+        f"/sources/{source.id}/rules", json={"type": "include", "pattern": "**/*.log"}
+    ).json()
+    response = client.patch(f"/sources/{source.id}/rules/{created['id']}", json={"pattern": "re:["})
+    assert response.status_code == 400
+    assert client.get(f"/sources/{source.id}/rules").json()[0]["pattern"] == "**/*.log"
+
+
+def test_raw_paste_with_an_invalid_regex_names_the_line_and_changes_nothing(admin_client):
+    client, source = admin_client
+    client.post(f"/sources/{source.id}/rules", json={"type": "include", "pattern": "**/*.log"})
+    response = client.put(
+        f"/sources/{source.id}/rules/raw", json={"text": "# keep\n**/*.txt\n!re:(\n"}
+    )
+    assert response.status_code == 400
+    assert "line 3" in response.json()["detail"]
+    assert [r["pattern"] for r in client.get(f"/sources/{source.id}/rules").json()] == ["**/*.log"]

@@ -3,12 +3,12 @@ from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
 from app.api.auth import get_current_active_user
+from app.api.rules import parse_pattern_or_400
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, User
 from app.auth.rbac import require_capability, require_global_capability
 from app.db import get_session
 from app.models import PatternKind, SeverityLevel, SeverityPattern, Source
-from app.rules import parse_pattern
 from app.severity_patterns import effective_patterns
 
 require_manage_global = require_global_capability(
@@ -52,7 +52,7 @@ def _apply_update(pattern: SeverityPattern, payload: SeverityPatternUpdate) -> N
     if payload.level is not None:
         pattern.level = payload.level
     if payload.pattern is not None:
-        pattern.pattern, pattern.pattern_kind = parse_pattern(payload.pattern)
+        pattern.pattern, pattern.pattern_kind = parse_pattern_or_400(payload.pattern)
     if payload.enabled is not None:
         pattern.enabled = payload.enabled
     if payload.highlight_line is not None:
@@ -79,7 +79,7 @@ def create_global_pattern(
     user: User = Depends(require_manage_global),
     session: Session = Depends(get_session),
 ):
-    pattern_value, pattern_kind = parse_pattern(payload.pattern)
+    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern)
     pattern = SeverityPattern(
         source_id=None,
         level=payload.level,
@@ -180,7 +180,7 @@ def create_source_pattern(
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
-    pattern_value, pattern_kind = parse_pattern(payload.pattern)
+    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern)
     pattern = SeverityPattern(
         source_id=source.id,
         level=payload.level,
