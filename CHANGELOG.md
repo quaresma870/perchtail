@@ -111,6 +111,14 @@ release ships (0.x releases may include breaking changes between minors).
   narrow concurrent-write race.
 
 ### Fixed
+- Alerts missed new matches and repeated old ones. A new matching line
+  could be missed when more than 200 older matches ranked above it,
+  because only one top-200 search across the whole index was checked.
+  Every append to a file also re-sent all of that file's old matching
+  lines. Each changed file is now searched on its own, starting after the
+  last line that alert already reported. A rotated or rewritten file
+  reports from the top. Adds the `alert_file_state` table (migration
+  `c5e1a7d93b20`).
 - The Docker image now keeps the credential-encryption salt and SSH
   `known_hosts` on the `/data` volume (`CREDENTIAL_SALT_PATH`,
   `SSH_KNOWN_HOSTS_PATH`). Previously both defaulted to a path inside the
