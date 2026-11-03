@@ -9,6 +9,12 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- Opening a file (`file.open`) and downloading a folder as ZIP
+  (`folder.download`, with its file count) are now recorded in the audit
+  log, like single-file downloads already were. Viewing a file necessarily
+  sends its full content to the browser, so `view` can read whole files.
+  `download` gates bulk export on top of that, and the role editor now
+  says so on each capability.
 - The Docker image now runs PerchTail as an unprivileged `perchtail` user
   (uid/gid 10001) with no Linux capabilities, instead of as root. The
   entrypoint starts as root only long enough to give `/data` to that user,
