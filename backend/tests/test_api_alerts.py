@@ -12,8 +12,12 @@ from fastapi.testclient import TestClient
 from sqlmodel import select
 
 
-def _make_user(session, *, is_super_admin=False) -> User:
-    role = Role(name=f"role-{uuid.uuid4().hex}", is_super_admin=is_super_admin)
+def _make_user(session, *, is_super_admin=False, manage_alerts=True) -> User:
+    role = Role(
+        name=f"role-{uuid.uuid4().hex}",
+        is_super_admin=is_super_admin,
+        global_capabilities=["manage_alerts"] if manage_alerts else [],
+    )
     session.add(role)
     session.commit()
     session.refresh(role)
@@ -266,3 +270,48 @@ def test_test_endpoint_sends_a_synthetic_webhook(session, client_for, monkeypatc
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert len(posted["hits"]) == 1
+
+
+def test_creating_an_alert_requires_manage_alerts(session, client_for):
+    client = client_for(_make_user(session, manage_alerts=False))
+    response = client.post(
+        "/alerts", json={"name": "a", "query": "q", "webhook_url": "https://example.com/hook"}
+    )
+    assert response.status_code == 403
+
+
+def test_without_manage_alerts_you_can_still_list_and_delete_your_alerts(session, client_for):
+    user = _make_user(session, manage_alerts=True)
+    created = (
+        client_for(user)
+        .post(
+            "/alerts", json={"name": "a", "query": "q", "webhook_url": "https://example.com/hook"}
+        )
+        .json()
+    )
+    user.role.global_capabilities = []
+    session.add(user.role)
+    session.commit()
+    client = client_for(user)
+
+    assert client.get("/alerts").status_code == 200
+    assert client.patch(f"/alerts/{created['id']}", json={"name": "b"}).status_code == 403
+    assert client.post(f"/alerts/{created['id']}/test").status_code == 403
+    assert client.delete(f"/alerts/{created['id']}").status_code == 204
+
+
+def test_alert_changes_are_audited_without_the_full_webhook_url(session, client_for):
+    from app.auth.models import AuditLog
+
+    client = client_for(_make_user(session))
+    created = client.post(
+        "/alerts",
+        json={"name": "a", "query": "q", "webhook_url": "https://example.com/hook?token=SECRET"},
+    ).json()
+    client.patch(f"/alerts/{created['id']}", json={"enabled": False})
+    client.delete(f"/alerts/{created['id']}")
+
+    events = session.exec(select(AuditLog).where(AuditLog.target_type == "alert")).all()
+    assert [e.action for e in events] == ["alert.create", "alert.update", "alert.delete"]
+    assert events[0].event_metadata["webhook_host"] == "example.com"
+    assert "SECRET" not in str([e.event_metadata for e in events])

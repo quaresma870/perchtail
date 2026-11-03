@@ -21,6 +21,18 @@ release ships (0.x releases may include breaking changes between minors).
   sends its full content to the browser, so `view` can read whole files.
   `download` gates bulk export on top of that, and the role editor now
   says so on each capability.
+- Alerts are now treated as the export channel they are. Creating,
+  editing, enabling or testing an alert needs a new global capability,
+  `manage_alerts`. Anyone can still list and delete their own alerts.
+  An alert only fires while its owner holds `manage_alerts`, re-checked at
+  every evaluation like source access. Webhook targets must be publicly
+  routable (an `is_global` allowlist), which also rules out carrier-grade
+  NAT, documentation and benchmarking ranges and IPv4-mapped IPv6.
+  Creating, editing and deleting an alert is audited; the audit log
+  records only the webhook's host, never its path or query, which often
+  carry a token. **Upgrade note:** grant `manage_alerts` to the roles that
+  should keep using alerts. Until you do, their existing alerts stop
+  firing.
 - The Docker image now runs PerchTail as an unprivileged `perchtail` user
   (uid/gid 10001) with no Linux capabilities, instead of as root. The
   entrypoint starts as root only long enough to give `/data` to that user,

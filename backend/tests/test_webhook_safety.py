@@ -24,6 +24,10 @@ def test_allows_a_url_resolving_to_a_public_address():
         "http://192.168.1.5/hook",
         "http://0.0.0.0/hook",
         "http://224.0.0.1/hook",  # multicast
+        "http://100.64.0.1/hook",  # carrier-grade NAT (RFC 6598)
+        "http://192.0.2.10/hook",  # documentation range (TEST-NET-1)
+        "http://198.18.0.1/hook",  # benchmarking range
+        "http://[::ffff:127.0.0.1]/hook",  # IPv4-mapped loopback
     ],
 )
 def test_rejects_urls_resolving_to_non_public_addresses(url):
