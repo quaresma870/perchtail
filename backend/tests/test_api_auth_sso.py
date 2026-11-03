@@ -196,6 +196,42 @@ def test_callback_reuses_the_same_user_on_a_second_login(client, session, monkey
     assert len(users) == 1
 
 
+def test_callback_never_signs_into_an_account_from_another_issuer_with_the_same_sub(
+    client, session, monkeypatch
+):
+    """`sub` is only unique per issuer: once the provider points at a new
+    IdP, a user there whose `sub` happens to equal an old account's must get
+    their own account, not the old one (and its role)."""
+    role = seed_no_access_role(session)
+    admin_role = Role(name="Old admins", is_super_admin=True)
+    session.add(admin_role)
+    session.commit()
+    old = User(
+        username="victim@example.com",
+        role_id=admin_role.id,
+        auth_provider=AuthProviderType.oidc,
+        external_issuer="https://old-idp.example.com",
+        external_id="user-123",
+    )
+    session.add(old)
+    session.commit()
+    _make_enabled_provider(session)
+
+    state, nonce = _get_state_and_nonce(client, session, monkeypatch)
+    key_set, id_token = _key_set_and_token(nonce=nonce)
+    _patch_token_and_jwks(monkeypatch, key_set=key_set, id_token=id_token)
+    response = client.get("/auth/sso/callback", params={"code": "the-code", "state": state})
+
+    assert response.status_code == 302
+    me = client.get("/auth/me")
+    assert me.status_code == 200
+    assert me.json()["username"] == "jdoe@example.com"
+    new = session.exec(select(User).where(User.username == "jdoe@example.com")).one()
+    assert new.id != old.id
+    assert new.external_issuer == ISSUER
+    assert new.role_id == role.id
+
+
 def test_callback_redirects_to_login_error_on_idp_error_param(client, session):
     response = client.get(
         "/auth/sso/callback", params={"error": "access_denied", "state": "irrelevant"}
@@ -246,6 +282,7 @@ def test_callback_redirects_to_login_error_for_a_deactivated_account(client, ses
         username="jdoe@example.com",
         role_id=role.id,
         auth_provider=AuthProviderType.oidc,
+        external_issuer=ISSUER,
         external_id="user-123",
         active=False,
     )

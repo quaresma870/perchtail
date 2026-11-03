@@ -18,6 +18,16 @@ release ships (0.x releases may include breaking changes between minors).
   everything) and is logged once as `rules.invalid_regex`; rewrite it.
   Severity patterns run in the browser, not on the server, so they keep
   full regex syntax.
+- SSO accounts are now identified by the IdP's issuer and subject
+  (`iss` + `sub`), not by `sub` alone. `sub` is only unique within one
+  IdP, so after the SSO provider was pointed at a different issuer, a user
+  there whose `sub` matched an existing account's would have signed in as
+  that account, with its role. **Upgrade note:** on first start, existing
+  SSO accounts are bound to the enabled OIDC provider's issuer (or the
+  only one configured). If that is ambiguous, they are left unbound and a
+  `sso.issuer_backfill_skipped` warning is logged: those users then get a
+  new account at their next login, which clashes on username until an
+  admin renames or deletes the old one.
 - Turning off full-text search for a source, or disabling the source, now
   deletes the search snippets already stored for it, along with its
   alerts' per-file progress. Before, they stayed in the database
