@@ -58,9 +58,9 @@ def _require_editable_rules(source: Source) -> None:
         )
 
 
-def parse_pattern_or_400(raw: str) -> tuple[str, PatternKind]:
+def parse_pattern_or_400(raw: str, *, linear_time: bool = True) -> tuple[str, PatternKind]:
     try:
-        return parse_pattern(raw)
+        return parse_pattern(raw, linear_time=linear_time)
     except InvalidPatternError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

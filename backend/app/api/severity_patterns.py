@@ -52,7 +52,9 @@ def _apply_update(pattern: SeverityPattern, payload: SeverityPatternUpdate) -> N
     if payload.level is not None:
         pattern.level = payload.level
     if payload.pattern is not None:
-        pattern.pattern, pattern.pattern_kind = parse_pattern_or_400(payload.pattern)
+        pattern.pattern, pattern.pattern_kind = parse_pattern_or_400(
+            payload.pattern, linear_time=False
+        )
     if payload.enabled is not None:
         pattern.enabled = payload.enabled
     if payload.highlight_line is not None:
@@ -79,7 +81,7 @@ def create_global_pattern(
     user: User = Depends(require_manage_global),
     session: Session = Depends(get_session),
 ):
-    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern)
+    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern, linear_time=False)
     pattern = SeverityPattern(
         source_id=None,
         level=payload.level,
@@ -180,7 +182,7 @@ def create_source_pattern(
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
-    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern)
+    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern, linear_time=False)
     pattern = SeverityPattern(
         source_id=source.id,
         level=payload.level,
