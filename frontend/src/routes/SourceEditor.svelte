@@ -460,7 +460,8 @@
           </label>
           {#if protocol === 'ssh'}
             <label>
-              Private key (leave blank to use password instead)
+              Private key: ed25519, ECDSA or RSA, without a passphrase (leave blank to
+              use password instead)
               <textarea class="input" rows="4" bind:value={privateKey}></textarea>
             </label>
           {/if}

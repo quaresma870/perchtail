@@ -8,7 +8,7 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.3.0%20%28pre--1.0%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.3.1%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -20,7 +20,7 @@
 
 ## Status
 
-🟢 **v0.3.0 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
+🟢 **v0.3.1 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
 Phase 3 (full-text search, saved-search webhook alerts, IdP
 group-claim-to-role auto-mapping, a detailed health endpoint) are all
 complete** (see [ROADMAP.md](ROADMAP.md) for the full phase breakdown).

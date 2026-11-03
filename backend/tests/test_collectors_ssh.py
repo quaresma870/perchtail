@@ -248,3 +248,59 @@ def test_fetch_file_writes_remote_content_to_destination(monkeypatch, tmp_path):
     ssh_module.fetch_file(_source(), "app.log", destination)
 
     assert destination.read_bytes() == b"hello world"
+
+
+def _openssh_private_key(private_key, password: bytes | None = None) -> str:
+    from cryptography.hazmat.primitives import serialization
+
+    encryption = (
+        serialization.BestAvailableEncryption(password)
+        if password
+        else serialization.NoEncryption()
+    )
+    return private_key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH, encryption
+    ).decode()
+
+
+def _generated_key(kind: str) -> str:
+    from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+
+    if kind == "ed25519":
+        return _openssh_private_key(ed25519.Ed25519PrivateKey.generate())
+    if kind == "ecdsa":
+        return _openssh_private_key(ec.generate_private_key(ec.SECP256R1()))
+    return _openssh_private_key(rsa.generate_private_key(public_exponent=65537, key_size=2048))
+
+
+@pytest.mark.parametrize(
+    "kind,expected",
+    [
+        ("ed25519", paramiko.Ed25519Key),
+        ("ecdsa", paramiko.ECDSAKey),
+        ("rsa", paramiko.RSAKey),
+    ],
+)
+def test_connect_accepts_every_supported_private_key_type(monkeypatch, tmp_path, kind, expected):
+    created = _patch_ssh_infra(monkeypatch, tmp_path)
+    key_text = _generated_key(kind)
+    monkeypatch.setattr(
+        ssh_module, "decrypt_credential", lambda _ref: {"username": "svc", "private_key": key_text}
+    )
+
+    ssh_module._connect(_source())
+
+    assert isinstance(created[0].connect_calls[0][2]["pkey"], expected)
+
+
+def test_unreadable_private_key_is_a_clear_error():
+    with pytest.raises(ValueError, match="not a supported SSH private key"):
+        ssh_module.load_private_key("not a key at all")
+
+
+def test_passphrase_protected_private_key_is_a_clear_error():
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    key_text = _openssh_private_key(ed25519.Ed25519PrivateKey.generate(), b"secret")
+    with pytest.raises(ValueError, match="passphrase"):
+        ssh_module.load_private_key(key_text)
