@@ -17,6 +17,7 @@ Three environment variables, all required:
 | `PERCHTAIL_SERVER_URL` | `wss://perchtail.example.com/agent/connect` | The server's agent endpoint |
 | `PERCHTAIL_AGENT_TOKEN` | (from the admin UI) | Enrollment token, issued once via `POST /sources/{id}/agent-token` |
 | `PERCHTAIL_BASE_PATH` | `/var/log/myapp` | Local root the agent is allowed to read from |
+| `PERCHTAIL_ALLOW_INSECURE` | unset | Set to `true` to allow a plain `ws://` URL. Without it the agent refuses to start unless the URL is `wss://`, because the token and every fetched file travel over this connection. Only for testing or a fully trusted network. |
 
 ## Build
 

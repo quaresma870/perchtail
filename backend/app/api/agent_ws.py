@@ -43,7 +43,18 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
 
     await websocket.accept()
     registry = get_agent_registry()
-    registry.register(source.id, websocket)
+    replaced = registry.register(source.id, websocket)
+    if replaced is not None:
+        # Close the superseded socket so a half-dead connection doesn't
+        # linger; its own receive loop then ends, and its unregister below
+        # is a no-op because it is no longer the registered connection.
+        try:
+            await replaced.websocket.close(
+                code=status.WS_1000_NORMAL_CLOSURE,
+                reason="replaced by a newer connection for this source",
+            )
+        except Exception:  # noqa: BLE001 - it may already be gone
+            pass
     source.agent_last_seen_at = utcnow()
     session.add(source)
     session.commit()
@@ -51,8 +62,8 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
     try:
         while True:
             message = await websocket.receive_json()
-            registry.resolve_response(source.id, message)
+            registry.resolve_response(source.id, message, websocket)
     except WebSocketDisconnect:
         pass
     finally:
-        registry.unregister(source.id)
+        registry.unregister(source.id, websocket)
