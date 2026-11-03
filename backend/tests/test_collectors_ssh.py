@@ -6,6 +6,7 @@ import app.collectors.ssh as ssh_module
 import paramiko
 import pytest
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
+from structlog.testing import capture_logs
 
 
 class FakeAttr:
@@ -97,7 +98,7 @@ class FakeParamikoClient:
         pass
 
 
-def _patch_ssh_infra(monkeypatch, tmp_path, *, connect_raises=None):
+def _patch_ssh_infra(monkeypatch, tmp_path, *, connect_raises=None, policy="tofu"):
     """Patches paramiko.SSHClient to FakeParamikoClient (registering every
     created instance so a test can inspect it afterward) and points
     ssh_known_hosts_path at a fresh tmp_path location. Returns the list of
@@ -108,7 +109,9 @@ def _patch_ssh_infra(monkeypatch, tmp_path, *, connect_raises=None):
     monkeypatch.setattr(
         ssh_module,
         "get_settings",
-        lambda: SimpleNamespace(ssh_known_hosts_path=str(tmp_path / "known_hosts")),
+        lambda: SimpleNamespace(
+            ssh_known_hosts_path=str(tmp_path / "known_hosts"), ssh_host_key_policy=policy
+        ),
     )
     created: list[FakeParamikoClient] = []
 
@@ -122,10 +125,29 @@ def _patch_ssh_infra(monkeypatch, tmp_path, *, connect_raises=None):
     return created
 
 
-def test_connect_uses_autoadd_policy(monkeypatch, tmp_path):
+def test_connect_trusts_on_first_use_by_default(monkeypatch, tmp_path):
     created = _patch_ssh_infra(monkeypatch, tmp_path)
     ssh_module._connect(_source())
-    assert isinstance(created[0].policy, paramiko.AutoAddPolicy)
+    assert isinstance(created[0].policy, ssh_module.TrustOnFirstUsePolicy)
+
+
+def test_strict_mode_rejects_hosts_missing_from_known_hosts(monkeypatch, tmp_path):
+    created = _patch_ssh_infra(monkeypatch, tmp_path, policy="strict")
+    ssh_module._connect(_source())
+    assert isinstance(created[0].policy, paramiko.RejectPolicy)
+
+
+def test_trust_on_first_use_pins_the_key_and_logs_its_fingerprint():
+    client = paramiko.SSHClient()
+    key = paramiko.ECDSAKey.generate()
+
+    with capture_logs() as logs:
+        ssh_module.TrustOnFirstUsePolicy().missing_host_key(client, "app01.example.com", key)
+
+    assert client.get_host_keys().lookup("app01.example.com")[key.get_name()] == key
+    pinned = [entry for entry in logs if entry["event"] == "ssh.host_key_pinned"]
+    assert pinned and pinned[0]["fingerprint"] == ssh_module.fingerprint(key)
+    assert pinned[0]["fingerprint"].startswith("SHA256:")
 
 
 def test_connect_skips_loading_a_known_hosts_file_that_does_not_exist_yet(monkeypatch, tmp_path):
@@ -153,7 +175,9 @@ def test_connect_creates_the_known_hosts_parent_directory(monkeypatch, tmp_path)
         ssh_module, "decrypt_credential", lambda _ref: {"username": "svc", "password": "pw"}
     )
     monkeypatch.setattr(
-        ssh_module, "get_settings", lambda: SimpleNamespace(ssh_known_hosts_path=str(nested))
+        ssh_module,
+        "get_settings",
+        lambda: SimpleNamespace(ssh_known_hosts_path=str(nested), ssh_host_key_policy="tofu"),
     )
     monkeypatch.setattr(ssh_module.paramiko, "SSHClient", FakeParamikoClient)
 

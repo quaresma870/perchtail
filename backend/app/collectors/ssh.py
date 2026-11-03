@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import io
 import posixpath
 import stat as stat_module
@@ -11,10 +13,20 @@ import paramiko
 from app.collectors.base import DirEntry
 from app.config import get_settings
 from app.crypto import decrypt_credential
+from app.logging_config import get_logger
 from app.models import Rule, Source
 from app.rules import is_visible
 
-__all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
+__all__ = [
+    "DirEntry",
+    "TrustOnFirstUsePolicy",
+    "fetch_file",
+    "fingerprint",
+    "list_directory",
+    "local_copy",
+]
+
+logger = get_logger(__name__)
 
 # Guards load_host_keys()/save_host_keys() against the shared known_hosts
 # file being read and rewritten concurrently by two connections from
@@ -22,6 +34,38 @@ __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 # thread-safe) -- see _connect()'s docstring for why this file exists at
 # all.
 _host_keys_lock = threading.Lock()
+
+
+def fingerprint(key: paramiko.PKey) -> str:
+    """OpenSSH-style SHA256 fingerprint, the form `ssh-keygen -lf` prints,
+    so an operator can compare a logged pin against the server's own key."""
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
+class TrustOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
+    """Pins a host's key the first time PerchTail connects to it (OpenSSH's
+    `StrictHostKeyChecking=accept-new`). Only ever consulted for a host with
+    no key on file at all: a host whose pinned key changes fails with
+    paramiko's BadHostKeyException before any policy runs. Unlike
+    paramiko.AutoAddPolicy, every pin is logged with its fingerprint, so
+    there's a record of which key was trusted and when. Set
+    SSH_HOST_KEY_POLICY=strict to refuse unknown hosts instead."""
+
+    def missing_host_key(self, client, hostname, key):
+        client.get_host_keys().add(hostname, key.get_name(), key)
+        logger.warning(
+            "ssh.host_key_pinned",
+            host=hostname,
+            key_type=key.get_name(),
+            fingerprint=fingerprint(key),
+        )
+
+
+def _missing_host_key_policy() -> paramiko.MissingHostKeyPolicy:
+    if get_settings().ssh_host_key_policy == "strict":
+        return paramiko.RejectPolicy()
+    return TrustOnFirstUsePolicy()
 
 
 def _connect(source: Source) -> paramiko.SSHClient:
@@ -33,18 +77,17 @@ def _connect(source: Source) -> paramiko.SSHClient:
 
     Host keys are persisted across connections in a shared known_hosts file
     (ssh_known_hosts_path) rather than trusted fresh every single time.
-    AutoAddPolicy on its own only decides what happens for a host paramiko
-    has *never* seen at all (trust-on-first-use, same as a real SSH
-    client's "accept-new" mode) — paramiko itself, independent of policy,
+    The missing-host-key policy (TrustOnFirstUsePolicy, or RejectPolicy in
+    strict mode) only decides what happens for a host paramiko has *never*
+    seen at all — paramiko itself, independent of policy,
     already raises BadHostKeyException if a host key it *has* on file
     doesn't match what the server just presented. Without ever loading or
     saving that file, every connection looked "never seen" and silently
-    trusted whatever key showed up, every time — this is the fix, not a
-    behavior change to AutoAddPolicy itself."""
+    trusted whatever key showed up, every time."""
     creds = decrypt_credential(source.credential_ref)
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.set_missing_host_key_policy(_missing_host_key_policy())
 
     connect_kwargs: dict = {"username": creds["username"], "timeout": 10}
     if "private_key" in creds:

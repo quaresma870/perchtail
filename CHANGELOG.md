@@ -20,7 +20,9 @@ found and fixed the following:
 - deleted ids could be reused and inherit their old access;
 - WinRM path quoting missed the Unicode quote characters;
 - archives had no decompression limit (zip bombs);
-- the Go push-agent could follow a symlink out of its folder.
+- the Go push-agent could follow a symlink out of its folder;
+- first-use SSH host-key trust was silent: every pin is now logged with
+  its fingerprint, and a strict mode refuses unknown hosts.
 
 Also new since 0.2.0:
 - optional TOTP/MFA for local accounts;
@@ -55,7 +57,8 @@ volume first. Before you restart, check the following:
   already stored fail closed: a broken include matches nothing, and a
   broken exclude hides everything. Check the ERROR log for
   `rules.invalid_regex` after upgrading.
-- New optional setting: `MAX_DECOMPRESSED_MB` (default 2048).
+- New optional settings: `MAX_DECOMPRESSED_MB` (default 2048) and
+  `SSH_HOST_KEY_POLICY` (`tofu`, the default, or `strict`).
 
 ### Added
 - Viewer: Compare (a read-only side-by-side diff against a second file
@@ -78,6 +81,14 @@ volume first. Before you restart, check the following:
   scope) found via code review and fixed before this shipped.
 
 ### Security
+- SSH host keys are now pinned through PerchTail's own trust-on-first-use
+  policy instead of paramiko's `AutoAddPolicy`. The behaviour is the
+  same, but every newly pinned key is now logged at WARNING
+  (`ssh.host_key_pinned`) with its OpenSSH-style `SHA256:` fingerprint,
+  so you can check it against the server. The new
+  `SSH_HOST_KEY_POLICY=strict` setting refuses any server that isn't
+  already in `SSH_KNOWN_HOSTS_PATH`. Resolves the CodeQL alert
+  `py/paramiko-missing-host-key-validation`.
 - The Go push-agent now reads through `os.Root`, so a symlink inside its
   watched folder can no longer point a list or fetch at any other file on
   that machine. The lexical `..` check stays as the first line of
