@@ -36,6 +36,9 @@ class FakeSFTPClient:
     def get(self, remote_path, local_path):
         Path(local_path).write_bytes(self.files[remote_path])
 
+    def stat(self, remote_path):
+        return FakeAttr(remote_path.rsplit("/", 1)[-1], False, len(self.files[remote_path]))
+
     def close(self):
         pass
 
@@ -558,3 +561,30 @@ def test_download_zip_logs_a_folder_download_audit_event(app_client, session, tm
     assert len(events) == 1
     assert events[0].user_id == user.id
     assert events[0].event_metadata == {"path": "", "file_count": 2}
+
+
+def test_open_over_max_fetch_mb_is_a_413(
+    app_client, session, fake_sftp, scratch_store, monkeypatch
+):
+    monkeypatch.setattr(get_settings(), "max_fetch_mb", 0.001)  # ~1 KB
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+    fake_sftp.files["/var/log/appname/big.log"] = b"x" * 5000
+
+    response = client.get(f"/sources/{source.id}/open", params={"path": "big.log"})
+    assert response.status_code == 413
+    assert list(scratch_store.root.iterdir()) == []
+
+
+def test_folder_zip_over_max_fetch_mb_in_total_is_a_413(app_client, session, tmp_path, monkeypatch):
+    monkeypatch.setattr(get_settings(), "max_fetch_mb", 0.001)  # ~1 KB in total
+    app, client = app_client
+    for i in range(3):
+        (tmp_path / f"part{i}.log").write_text("x" * 600)
+    source = _make_local_source(session, tmp_path)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+
+    assert client.get(f"/sources/{source.id}/download-zip").status_code == 413

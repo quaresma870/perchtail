@@ -10,6 +10,7 @@ from pathlib import Path
 
 import paramiko
 
+from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.config import get_settings
 from app.crypto import decrypt_credential
@@ -193,11 +194,19 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     """Fetch-on-open into `destination` — always a fresh transfer, the
     caller (scratch.py) never reuses a prior fetch's bytes."""
     remote_path = posixpath.join(source.base_path, relative_path)
+    limit = collector_base.max_fetch_bytes()
     client = _connect(source)
     try:
         sftp = client.open_sftp()
         try:
+            size = sftp.stat(remote_path).st_size or 0
+            if size > limit:
+                raise collector_base.too_large(size, limit)
             sftp.get(remote_path, str(destination))
+            # The file may have grown between stat() and the transfer.
+            if destination.stat().st_size > limit:
+                destination.unlink(missing_ok=True)
+                raise collector_base.too_large(size, limit)
         finally:
             sftp.close()
     finally:

@@ -161,3 +161,15 @@ def test_list_directory_applies_rules_case_insensitively(fake_smbclient):
     ]
     names = [e.name for e in smb_module.list_directory(_source(), rules)]
     assert names == ["App.Log"]
+
+
+def test_fetch_file_stops_at_max_fetch_mb(fake_smbclient, tmp_path, monkeypatch):
+    from app.collectors.base import FetchTooLargeError
+
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 8)
+    fake_smbclient.files[smb_module._unc_path(_source(), "big.log")] = b"x" * 100
+
+    destination = tmp_path / "out"
+    with pytest.raises(FetchTooLargeError):
+        smb_module.fetch_file(_source(), "big.log", destination)
+    assert not destination.exists()
