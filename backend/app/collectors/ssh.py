@@ -22,6 +22,7 @@ __all__ = [
     "TrustOnFirstUsePolicy",
     "fetch_file",
     "fingerprint",
+    "load_private_key",
     "list_directory",
     "local_copy",
 ]
@@ -62,6 +63,32 @@ class TrustOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
         )
 
 
+# Tried in order; RSA last since it's the least likely to be what someone
+# generating a new key today (ssh-keygen's default is ed25519) pastes in.
+_KEY_CLASSES: tuple[type[paramiko.PKey], ...] = (
+    paramiko.Ed25519Key,
+    paramiko.ECDSAKey,
+    paramiko.RSAKey,
+)
+
+
+def load_private_key(key_text: str) -> paramiko.PKey:
+    """Parses a pasted ed25519, ECDSA or RSA private key, in either OpenSSH or
+    PEM format. Passphrase-protected keys aren't supported -- there's nowhere
+    to store a passphrase, and storing it next to the key would add nothing."""
+    for key_class in _KEY_CLASSES:
+        try:
+            return key_class.from_private_key(io.StringIO(key_text))
+        except paramiko.PasswordRequiredException as exc:
+            raise ValueError(
+                "SSH private key is protected by a passphrase; "
+                "use a key without one (see docs/source-setup.md)"
+            ) from exc
+        except (paramiko.SSHException, ValueError):
+            continue
+    raise ValueError("not a supported SSH private key (expected ed25519, ECDSA or RSA)")
+
+
 def _missing_host_key_policy() -> paramiko.MissingHostKeyPolicy:
     if get_settings().ssh_host_key_policy == "strict":
         return paramiko.RejectPolicy()
@@ -91,7 +118,7 @@ def _connect(source: Source) -> paramiko.SSHClient:
 
     connect_kwargs: dict = {"username": creds["username"], "timeout": 10}
     if "private_key" in creds:
-        connect_kwargs["pkey"] = paramiko.RSAKey.from_private_key(io.StringIO(creds["private_key"]))
+        connect_kwargs["pkey"] = load_private_key(creds["private_key"])
     elif "password" in creds:
         connect_kwargs["password"] = creds["password"]
     else:

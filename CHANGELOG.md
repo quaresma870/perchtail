@@ -8,6 +8,14 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Fixed
+- SSH sources only accepted RSA private keys, even though
+  `docs/source-setup.md` tells you to generate an ed25519 one. Pasting an
+  ed25519 or ECDSA key failed on every connection. All three key types
+  now work, in OpenSSH or PEM format. A passphrase-protected key, or text
+  that isn't a key, now fails with a clear message instead of a parser
+  error.
+
 ## [0.3.0] - 2026-11-02
 
 A security release on top of new viewer and navigation features. A full
