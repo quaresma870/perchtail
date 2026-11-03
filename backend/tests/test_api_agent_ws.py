@@ -91,3 +91,22 @@ def test_valid_token_registers_connection_and_updates_last_seen(session):
         assert source.agent_last_seen_at is not None
 
     assert _wait_until(lambda: not registry.is_connected(source.id))
+
+
+def test_reconnecting_agent_stays_connected_when_the_old_socket_closes(session):
+    """Regression: the old socket's cleanup used to unregister the source
+    unconditionally, removing the connection that had just replaced it."""
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    headers = {"authorization": "Bearer s3cret"}
+
+    old = client.websocket_connect("/agent/connect", headers=headers)
+    old.__enter__()
+    assert _wait_until(lambda: registry.is_connected(source.id))
+    with client.websocket_connect("/agent/connect", headers=headers):
+        old.__exit__(None, None, None)
+        # Give the old connection's handler time to run its cleanup.
+        time.sleep(0.2)
+        assert registry.is_connected(source.id)
+    assert _wait_until(lambda: not registry.is_connected(source.id))

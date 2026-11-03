@@ -9,6 +9,10 @@ from app.timeutils import utcnow
 
 logger = get_logger(__name__)
 _hasher = PasswordHasher()
+# Verified against when there's no real hash to check (unknown, inactive or
+# SSO-only account), so every failed login costs the same argon2 work and the
+# response time doesn't reveal which usernames exist.
+_DUMMY_HASH = _hasher.hash("perchtail-timing-equalizer")
 
 
 def hash_password(password: str) -> str:
@@ -23,6 +27,13 @@ def verify_password(user: User, password: str) -> bool:
     except VerifyMismatchError:
         return False
     return True
+
+
+def _burn_a_verify(password: str) -> None:
+    try:
+        _hasher.verify(_DUMMY_HASH, password)
+    except VerifyMismatchError:
+        pass
 
 
 def create_local_user(
@@ -80,7 +91,8 @@ class LocalPasswordProvider:
         last_login_at or a user.login audit event here would misrepresent
         an only-half-completed attempt as a real one."""
         user = session.exec(select(User).where(User.username == username)).first()
-        if user is None or not user.active:
+        if user is None or not user.active or user.password_hash is None:
+            _burn_a_verify(password)
             return None
 
         if not verify_password(user, password):

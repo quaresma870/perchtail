@@ -1,10 +1,10 @@
-import shutil
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
 import smbclient
 
+from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.crypto import decrypt_credential
 from app.models import Rule, Source
@@ -93,11 +93,8 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     connect_kwargs = _connect_kwargs(source)
     smbclient.register_session(source.host, **connect_kwargs)
     remote_path = _unc_path(source, relative_path)
-    with (
-        smbclient.open_file(remote_path, mode="rb", **connect_kwargs) as src,
-        open(destination, "wb") as dst,
-    ):
-        shutil.copyfileobj(src, dst)
+    with smbclient.open_file(remote_path, mode="rb", **connect_kwargs) as src:
+        collector_base.copy_with_limit(src, destination, collector_base.max_fetch_bytes())
 
 
 @contextmanager

@@ -1,16 +1,23 @@
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 from sqlmodel import Session, select
 
 from app.alerts import send_webhook
 from app.api.auth import get_current_active_user
-from app.auth.models import Capability, User
-from app.auth.rbac import visible_source_ids
+from app.audit import record_audit_event
+from app.auth.models import Capability, GlobalCapability, User
+from app.auth.rbac import require_global_capability, visible_source_ids
 from app.db import get_session
 from app.models import Alert, AlertFileState
 from app.search_index import SearchHit
 from app.timeutils import utcnow
 from app.webhook_safety import UnsafeWebhookURLError, assert_webhook_url_is_safe
+
+require_manage_alerts = require_global_capability(
+    GlobalCapability.manage_alerts, get_current_active_user
+)
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -100,10 +107,16 @@ def list_alerts(
     return [AlertPublic.from_model(a) for a in alerts]
 
 
+def _webhook_host(url: str) -> str | None:
+    # Only the host goes into the audit log: the path or query string of a
+    # webhook URL often carries a secret token.
+    return urlparse(url).hostname
+
+
 @router.post("", response_model=AlertPublic, status_code=status.HTTP_201_CREATED)
 def create_alert(
     payload: AlertCreate,
-    user: User = Depends(get_current_active_user),
+    user: User = Depends(require_manage_alerts),
     session: Session = Depends(get_session),
 ):
     _require_visible_source(session, user, payload.source_id)
@@ -117,6 +130,19 @@ def create_alert(
         created_at=utcnow(),
     )
     session.add(alert)
+    session.flush()
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="alert.create",
+        target_type="alert",
+        target_id=alert.id,
+        metadata={
+            "name": alert.name,
+            "source_id": alert.source_id,
+            "webhook_host": _webhook_host(alert.webhook_url),
+        },
+    )
     session.commit()
     session.refresh(alert)
     return AlertPublic.from_model(alert)
@@ -133,7 +159,7 @@ def _get_owned_alert(session: Session, user: User, alert_id: int) -> Alert:
 def update_alert(
     alert_id: int,
     payload: AlertUpdate,
-    user: User = Depends(get_current_active_user),
+    user: User = Depends(require_manage_alerts),
     session: Session = Depends(get_session),
 ):
     alert = _get_owned_alert(session, user, alert_id)
@@ -143,6 +169,17 @@ def update_alert(
     for key, value in changed.items():
         setattr(alert, key, value)
     session.add(alert)
+    metadata: dict = {"fields": sorted(changed)}
+    if "webhook_url" in changed:
+        metadata["webhook_host"] = _webhook_host(alert.webhook_url)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="alert.update",
+        target_type="alert",
+        target_id=alert.id,
+        metadata=metadata,
+    )
     session.commit()
     session.refresh(alert)
     return AlertPublic.from_model(alert)
@@ -161,6 +198,14 @@ def delete_alert(
         select(AlertFileState).where(AlertFileState.alert_id == alert.id)
     ).all():
         session.delete(state)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="alert.delete",
+        target_type="alert",
+        target_id=alert.id,
+        metadata={"name": alert.name},
+    )
     session.delete(alert)
     session.commit()
 
@@ -172,7 +217,7 @@ class AlertTestResult(BaseModel):
 @router.post("/{alert_id}/test", response_model=AlertTestResult)
 def test_alert_webhook(
     alert_id: int,
-    user: User = Depends(get_current_active_user),
+    user: User = Depends(require_manage_alerts),
     session: Session = Depends(get_session),
 ):
     """Sends a single synthetic hit to the alert's webhook so the owner can

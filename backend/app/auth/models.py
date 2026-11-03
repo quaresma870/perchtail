@@ -37,6 +37,10 @@ class GlobalCapability(StrEnum):
     # implied by any other capability above -- a role needs this explicitly,
     # same as a super-admin needs no capability at all to see everything.
     view_audit_log = "view_audit_log"
+    # Creating or editing an alert. An alert's webhook sends matching log
+    # content to an outside URL, an export channel, so it isn't implied by
+    # view access to the sources it watches.
+    manage_alerts = "manage_alerts"
 
 
 class AuthProviderType(StrEnum):
@@ -91,6 +95,11 @@ class User(SQLModel, table=True):
     role_id: int = Field(foreign_key="role.id")
     active: bool = True
     auth_provider: AuthProviderType = AuthProviderType.local
+    # An SSO account is identified by (external_issuer, external_id): the
+    # IdP's `iss` and `sub` claims. `sub` is only unique within one issuer,
+    # so matching on it alone would let a different IdP (after the provider's
+    # issuer is changed) sign in as whoever had the same `sub` before.
+    external_issuer: str | None = Field(default=None, index=True)
     external_id: str | None = None
     last_login_at: datetime | None = None
     # Set on admin-created local accounts (see CLAUDE.md's Security notes);

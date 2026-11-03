@@ -180,12 +180,15 @@ def decode_state(state: str) -> str:
 def find_or_provision_user(
     session: Session,
     *,
+    issuer: str,
     external_id: str,
     email: str,
     no_access_role_id: int,
     mapped_role_id: int | None = None,
 ) -> User:
-    """Finds the existing SSO user by (auth_provider=oidc, external_id), or
+    """Finds the existing SSO user by (auth_provider=oidc, issuer,
+    external_id) -- `sub` is only unique per issuer, so a user from one IdP
+    can never be matched to an account another IdP created -- or
     auto-provisions a new one per CLAUDE.md's Access control section --
     `mapped_role_id` (see resolve_group_mapped_role_id) if the IdP's group
     claim matched a configured SSOGroupRoleMapping, else the no-access
@@ -195,7 +198,9 @@ def find_or_provision_user(
     to the caller instead (see api/auth.py's callback handler)."""
     user = session.exec(
         select(User).where(
-            User.auth_provider == AuthProviderType.oidc, User.external_id == external_id
+            User.auth_provider == AuthProviderType.oidc,
+            User.external_issuer == issuer,
+            User.external_id == external_id,
         )
     ).first()
     if user is not None:
@@ -206,6 +211,7 @@ def find_or_provision_user(
         password_hash=None,
         role_id=mapped_role_id if mapped_role_id is not None else no_access_role_id,
         auth_provider=AuthProviderType.oidc,
+        external_issuer=issuer,
         external_id=external_id,
     )
     session.add(user)
@@ -217,7 +223,7 @@ def find_or_provision_user(
         action="user.sso_provision",
         target_type="user",
         target_id=user.id,
-        metadata={"username": email, "external_id": external_id},
+        metadata={"username": email, "issuer": issuer, "external_id": external_id},
     )
     session.commit()
     session.refresh(user)
@@ -286,6 +292,9 @@ class OIDCProvider:
 
         user = find_or_provision_user(
             session,
+            # verify_id_token already checked `iss` equals the configured
+            # issuer; the claim is what identifies the IdP that vouched.
+            issuer=claims["iss"],
             external_id=external_id,
             email=email,
             no_access_role_id=no_access_role_id,

@@ -2,6 +2,7 @@ import hashlib
 import shutil
 import tempfile
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -26,6 +27,7 @@ from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
 from app.collectors import ssh as ssh_collector
 from app.collectors import winrm as winrm_collector
+from app.collectors.base import FetchTooLargeError, max_fetch_bytes
 from app.config import get_settings
 from app.db import get_session
 from app.logging_config import get_logger
@@ -115,6 +117,14 @@ def _too_large(exc: DecompressionLimitError) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_413_CONTENT_TOO_LARGE,
         detail="File is too large once decompressed (MAX_DECOMPRESSED_MB)",
+    )
+
+
+def _fetch_too_large(exc: FetchTooLargeError) -> HTTPException:
+    logger.warning("archive.fetch_limit", error=str(exc))
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail="File or folder is too large to fetch (MAX_FETCH_MB)",
     )
 
 
@@ -256,6 +266,9 @@ def _resolve_content(
     destination = store.acquire(key)
     try:
         served_filename = _materialize(source, path, member, rules, destination)
+    except FetchTooLargeError as exc:
+        store.release(key)
+        raise _fetch_too_large(exc) from exc
     except Exception:
         store.release(key)
         raise
@@ -267,14 +280,28 @@ def open_file(
     path: str,
     member: str | None = None,
     source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
+    user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> FileResponse:
     """Fetches into scratch and holds it (refcounted) until a matching
     /close call — for a persistent viewer session, not a one-shot download.
-    (Local plain files skip scratch entirely — see _resolve_content.)"""
+    (Local plain files skip scratch entirely — see _resolve_content.)
+
+    Viewing necessarily hands the client the file's bytes, so `view` can
+    read a whole file; `download` gates bulk export (/download, the folder
+    ZIP). Every open is audited so reads are as traceable as downloads."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     served_path, filename, key = _resolve_content(source, path, member, rules)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="file.open",
+        target_type="source",
+        target_id=source.id,
+        metadata={"path": path, "member": member} if member else {"path": path},
+    )
+    session.commit()
     headers = {"X-Scratch-Key": key} if key else {}
     return FileResponse(served_path, filename=filename, headers=headers)
 
@@ -327,6 +354,14 @@ def download_file(
     return FileResponse(served_path, filename=filename, background=background)
 
 
+@dataclass
+class _ZipBudget:
+    """Bytes a folder ZIP may still collect -- the whole ZIP counts against
+    MAX_FETCH_MB, not just each file in it."""
+
+    remaining: int
+
+
 def _zip_directory(
     connector,
     source: Source,
@@ -335,6 +370,7 @@ def _zip_directory(
     current_dir: str,
     zf: zipfile.ZipFile,
     tmp_dir: Path,
+    budget: "_ZipBudget",
 ) -> None:
     """Recursively fetches every rule-visible file under `request_root`
     straight into the zip, one fresh fetch per file — same always-fresh
@@ -346,14 +382,23 @@ def _zip_directory(
     relative to the original `request_root` throughout."""
     for entry in connector.list_directory(source, rules, current_dir):
         if entry.is_dir:
-            _zip_directory(connector, source, rules, request_root, entry.path, zf, tmp_dir)
+            _zip_directory(connector, source, rules, request_root, entry.path, zf, tmp_dir, budget)
             continue
         if not _visible(source, entry.path, rules):
             continue
         arcname = entry.path[len(request_root) + 1 :] if request_root else entry.path
         with tempfile.NamedTemporaryFile(dir=tmp_dir, delete=False) as tmp_file:
             destination = Path(tmp_file.name)
+        # The listed size is checked first so an obviously-too-big folder
+        # fails before fetching anything; the fetched size is what counts.
+        if entry.size > budget.remaining:
+            destination.unlink()
+            raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
         connector.fetch_file(source, entry.path, destination)
+        budget.remaining -= destination.stat().st_size
+        if budget.remaining < 0:
+            destination.unlink()
+            raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
         zf.write(destination, arcname=arcname)
         destination.unlink()
 
@@ -362,6 +407,7 @@ def _zip_directory(
 def download_folder_zip(
     path: str = "",
     source: Source = Depends(require_capability(Capability.download, get_current_active_user)),
+    user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> FileResponse:
     """Zips an entire folder for download (CLAUDE.md's Viewer section:
@@ -373,12 +419,26 @@ def download_folder_zip(
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="perchtail-zip-"))
     zip_path = tmp_dir / "download.zip"
+    budget = _ZipBudget(remaining=max_fetch_bytes())
     try:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            _zip_directory(connector, source, rules, path, path, zf, tmp_dir)
+            _zip_directory(connector, source, rules, path, path, zf, tmp_dir, budget)
+            file_count = len(zf.namelist())
+    except FetchTooLargeError as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise _fetch_too_large(exc) from exc
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="folder.download",
+        target_type="source",
+        target_id=source.id,
+        metadata={"path": path, "file_count": file_count},
+    )
+    session.commit()
 
     folder_name = path.rsplit("/", 1)[-1] if path else source.name
     background = BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True)

@@ -1,6 +1,8 @@
 import re
 from functools import lru_cache
 
+import re2
+
 from app.logging_config import get_logger
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 
@@ -19,15 +21,37 @@ class InvalidPatternError(ValueError):
     pass
 
 
-def parse_pattern(raw: str) -> tuple[str, PatternKind]:
+def _re2_options(ignore_case: bool = False) -> "re2.Options":
+    options = re2.Options()
+    options.log_errors = False
+    options.case_sensitive = not ignore_case
+    return options
+
+
+def parse_pattern(raw: str, *, linear_time: bool = True) -> tuple[str, PatternKind]:
     """Splits the admin-facing `re:` prefix convention (CLAUDE.md's rule
     matching semantics) from the pattern itself. Raises InvalidPatternError
     for a regex that doesn't compile, so a typo is rejected when it's saved
-    instead of breaking every browse of the source afterward."""
+    instead of breaking every browse of the source afterward.
+
+    Rule regexes run on the backend for every path of every browse, so they
+    are compiled with RE2, which always matches in linear time: a
+    catastrophic pattern like `(a+)+$` can't stall the server (ReDoS). RE2
+    has no backreferences or lookaround, so those are rejected here.
+    linear_time=False keeps Python's full syntax for patterns that never run
+    on the backend (severity patterns, evaluated in the browser)."""
     if raw.startswith("re:"):
         pattern = raw[len("re:") :]
         try:
-            re.compile(pattern)
+            if linear_time:
+                re2.compile(pattern, _re2_options())
+            else:
+                re.compile(pattern)
+        except re2.error as exc:
+            raise InvalidPatternError(
+                f"invalid regex {pattern!r} (rules use RE2: no backreferences or "
+                f"lookaround): {exc}"
+            ) from exc
         except re.error as exc:
             raise InvalidPatternError(f"invalid regex {pattern!r}: {exc}") from exc
         return pattern, PatternKind.regex
@@ -65,12 +89,13 @@ def _compile_glob(pattern: str, ignore_case: bool = False) -> re.Pattern[str]:
 
 
 @lru_cache(maxsize=2048)
-def _compile_regex(pattern: str, ignore_case: bool = False) -> re.Pattern[str] | None:
+def _compile_regex(pattern: str, ignore_case: bool = False):
     try:
-        return re.compile(pattern, re.IGNORECASE if ignore_case else 0)
-    except re.error as exc:
+        return re2.compile(pattern, _re2_options(ignore_case))
+    except re2.error as exc:
         # Only reachable for rules saved before parse_pattern validated
-        # regexes; logged once per pattern thanks to the cache.
+        # regexes with RE2 (e.g. one using lookaround); logged once per
+        # pattern thanks to the cache.
         logger.error("rules.invalid_regex", pattern=pattern, error=str(exc))
         return None
 

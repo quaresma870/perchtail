@@ -49,6 +49,12 @@ class _AgentConnection:
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
 
 
+def _fail_pending(connection: _AgentConnection, reason: str) -> None:
+    for future in connection.pending.values():
+        if not future.done():
+            future.set_exception(AgentNotConnectedError(reason))
+
+
 class AgentRegistry:
     def __init__(self):
         self._connections: dict[int, _AgentConnection] = {}
@@ -71,29 +77,51 @@ class AgentRegistry:
         with self._lock:
             return len(self._connections)
 
-    def register(self, source_id: int, websocket: WebSocket) -> None:
+    def register(self, source_id: int, websocket: WebSocket) -> "_AgentConnection | None":
+        """Makes `websocket` the source's connection. If one was already
+        registered (the agent reconnected before the old socket was noticed
+        as dead, or a second agent is using the same token), it's replaced:
+        its pending commands fail now instead of waiting out their timeout,
+        and it is returned so the caller can close it."""
         with self._lock:
+            replaced = self._connections.get(source_id)
             self._connections[source_id] = _AgentConnection(websocket=websocket)
+        if replaced is not None:
+            _fail_pending(replaced, "agent connection replaced by a newer one")
+            logger.warning("agent.connection_replaced", source_id=source_id)
         logger.info("agent.connected", source_id=source_id)
+        return replaced
 
-    def unregister(self, source_id: int) -> None:
+    def unregister(self, source_id: int, websocket: WebSocket | None = None) -> None:
+        """Removes the source's connection -- but, when `websocket` is given,
+        only if it is still the registered one. A replaced connection's
+        receive loop ends after its successor registered, and must not take
+        the successor down with it (the source would show as disconnected
+        while its agent is connected)."""
         with self._lock:
-            connection = self._connections.pop(source_id, None)
-        if connection is None:
-            return
+            connection = self._connections.get(source_id)
+            if connection is None:
+                return
+            if websocket is not None and connection.websocket is not websocket:
+                return
+            del self._connections[source_id]
         # Anything still awaiting a response when the agent drops must be
         # woken up with an error rather than hanging until its own timeout.
-        for future in connection.pending.values():
-            if not future.done():
-                future.set_exception(AgentNotConnectedError("agent disconnected"))
+        _fail_pending(connection, "agent disconnected")
         logger.info("agent.disconnected", source_id=source_id)
 
-    def resolve_response(self, source_id: int, message: dict) -> None:
+    def resolve_response(
+        self, source_id: int, message: dict, websocket: WebSocket | None = None
+    ) -> None:
         """Called from the WS endpoint's receive loop (already on the main
-        event loop) when the agent sends a `*_result`/`*_error` message."""
+        event loop) when the agent sends a `*_result`/`*_error` message.
+        With `websocket`, a message from a connection that has since been
+        replaced is ignored: only the current connection answers commands."""
         with self._lock:
             connection = self._connections.get(source_id)
         if connection is None:
+            return
+        if websocket is not None and connection.websocket is not websocket:
             return
         future = connection.pending.get(message.get("id", ""))
         if future is None or future.done():

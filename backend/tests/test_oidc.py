@@ -177,7 +177,11 @@ def test_find_or_provision_user_creates_a_new_user_with_no_access_role(session):
     role = _no_access_role(session)
 
     user = oidc.find_or_provision_user(
-        session, external_id="sub-1", email="new@example.com", no_access_role_id=role.id
+        session,
+        issuer=ISSUER,
+        external_id="sub-1",
+        email="new@example.com",
+        no_access_role_id=role.id,
     )
 
     assert user.username == "new@example.com"
@@ -193,11 +197,19 @@ def test_find_or_provision_user_creates_a_new_user_with_no_access_role(session):
 def test_find_or_provision_user_reuses_the_existing_user_on_a_second_login(session):
     role = _no_access_role(session)
     first = oidc.find_or_provision_user(
-        session, external_id="sub-1", email="new@example.com", no_access_role_id=role.id
+        session,
+        issuer=ISSUER,
+        external_id="sub-1",
+        email="new@example.com",
+        no_access_role_id=role.id,
     )
 
     second = oidc.find_or_provision_user(
-        session, external_id="sub-1", email="new@example.com", no_access_role_id=role.id
+        session,
+        issuer=ISSUER,
+        external_id="sub-1",
+        email="new@example.com",
+        no_access_role_id=role.id,
     )
 
     assert second.id == first.id
@@ -249,6 +261,7 @@ def test_complete_login_provisions_and_signs_in_a_new_user(
     )
 
     assert user.username == "jdoe@example.com"
+    assert user.external_issuer == ISSUER
     assert user.role_id == role.id
     assert user.last_login_at is not None
     actions = [e.action for e in session.exec(select(AuditLog)).all()]
@@ -274,7 +287,11 @@ def test_complete_login_rejects_a_deactivated_account(session, monkeypatch, disc
     role = _no_access_role(session)
     # Pre-existing, deactivated SSO user
     existing = oidc.find_or_provision_user(
-        session, external_id="user-123", email="jdoe@example.com", no_access_role_id=role.id
+        session,
+        issuer=ISSUER,
+        external_id="user-123",
+        email="jdoe@example.com",
+        no_access_role_id=role.id,
     )
     existing.active = False
     session.add(existing)
@@ -365,6 +382,54 @@ def test_resolve_group_mapped_role_id_respects_order_not_insertion_order(session
     assert oidc.resolve_group_mapped_role_id(session, ["staff", "engineering"]) == tier2.id
 
 
+def test_find_or_provision_user_does_not_match_the_same_sub_from_another_issuer(session):
+    role = _no_access_role(session)
+    first = oidc.find_or_provision_user(
+        session,
+        issuer=ISSUER,
+        external_id="sub-1",
+        email="a@example.com",
+        no_access_role_id=role.id,
+    )
+
+    other = oidc.find_or_provision_user(
+        session,
+        issuer="https://other-idp.example.com",
+        external_id="sub-1",
+        email="b@example.com",
+        no_access_role_id=role.id,
+    )
+
+    assert other.id != first.id
+    assert other.external_issuer == "https://other-idp.example.com"
+    assert first.external_issuer == ISSUER
+
+
+def test_find_or_provision_user_ignores_an_account_not_yet_bound_to_an_issuer(session):
+    """An account from before issuers were recorded is only bound at
+    startup (bootstrap.backfill_sso_user_issuers), never claimed by whichever
+    IdP logs in first."""
+    role = _no_access_role(session)
+    legacy = User(
+        username="legacy@example.com",
+        role_id=role.id,
+        auth_provider=AuthProviderType.oidc,
+        external_id="sub-1",
+    )
+    session.add(legacy)
+    session.commit()
+
+    user = oidc.find_or_provision_user(
+        session,
+        issuer=ISSUER,
+        external_id="sub-1",
+        email="new@example.com",
+        no_access_role_id=role.id,
+    )
+
+    assert user.id != legacy.id
+
+
 # --- find_or_provision_user with group mapping --------------------------------------
 
 
@@ -374,6 +439,7 @@ def test_find_or_provision_user_uses_mapped_role_for_a_new_user(session):
 
     user = oidc.find_or_provision_user(
         session,
+        issuer=ISSUER,
         external_id="sub-1",
         email="new@example.com",
         no_access_role_id=no_access.id,
@@ -388,6 +454,7 @@ def test_find_or_provision_user_falls_back_to_no_access_without_a_mapped_role(se
 
     user = oidc.find_or_provision_user(
         session,
+        issuer=ISSUER,
         external_id="sub-1",
         email="new@example.com",
         no_access_role_id=no_access.id,
@@ -436,7 +503,11 @@ def test_complete_login_resyncs_an_existing_users_role_on_each_login(
 ):
     no_access = _no_access_role(session)
     existing = oidc.find_or_provision_user(
-        session, external_id="user-123", email="jdoe@example.com", no_access_role_id=no_access.id
+        session,
+        issuer=ISSUER,
+        external_id="user-123",
+        email="jdoe@example.com",
+        no_access_role_id=no_access.id,
     )
     assert existing.role_id == no_access.id
 
@@ -476,7 +547,11 @@ def test_complete_login_leaves_role_unchanged_when_no_group_matches(
     no_access = _no_access_role(session)
     manually_promoted = create_role(session, actor_user_id=None, name="ManuallyPromoted")
     existing = oidc.find_or_provision_user(
-        session, external_id="user-123", email="jdoe@example.com", no_access_role_id=no_access.id
+        session,
+        issuer=ISSUER,
+        external_id="user-123",
+        email="jdoe@example.com",
+        no_access_role_id=no_access.id,
     )
     existing.role_id = manually_promoted.id
     session.add(existing)

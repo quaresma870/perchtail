@@ -1,12 +1,14 @@
+import json
 import secrets
 from pathlib import Path
 
 from sqlmodel import Session, select
 
-from app.auth.models import AuditLog, Role, SSOProviderConfig, User
+from app.auth.models import AuditLog, AuthProviderType, Role, SSOProtocol, SSOProviderConfig, User
 from app.auth.providers.local import create_local_user
 from app.auth.rbac import create_role
 from app.config import get_settings
+from app.crypto import decrypt_secret
 from app.logging_config import get_logger
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 from app.severity_patterns import seed_default_global_patterns
@@ -160,6 +162,44 @@ def seed_no_access_role(session: Session) -> Role:
         is_builtin=True,
         is_super_admin=False,
     )
+
+
+def backfill_sso_user_issuers(session: Session) -> int:
+    """Binds SSO accounts created before accounts were keyed on (issuer,
+    sub) to the issuer they came from. Only done when that issuer is
+    unambiguous: the enabled OIDC provider, or the only one configured. If
+    it isn't, the accounts are left unbound -- they no longer match any
+    login, so their owners get a new account (or a username clash an admin
+    resolves) instead of possibly someone else's. Returns the number bound."""
+    unbound = session.exec(
+        select(User).where(
+            User.auth_provider == AuthProviderType.oidc, User.external_issuer.is_(None)
+        )
+    ).all()
+    if not unbound:
+        return 0
+
+    configs = session.exec(
+        select(SSOProviderConfig).where(SSOProviderConfig.protocol == SSOProtocol.oidc)
+    ).all()
+    enabled = [c for c in configs if c.enabled]
+    candidates = enabled if enabled else configs
+    if len(candidates) != 1:
+        logger.warning(
+            "sso.issuer_backfill_skipped",
+            unbound_users=len(unbound),
+            oidc_providers=len(configs),
+            reason="no single OIDC provider to attribute these accounts to",
+        )
+        return 0
+
+    issuer = json.loads(decrypt_secret(candidates[0].config))["issuer"]
+    for user in unbound:
+        user.external_issuer = issuer
+        session.add(user)
+    session.commit()
+    logger.info("sso.issuer_backfill_complete", users=len(unbound), issuer=issuer)
+    return len(unbound)
 
 
 def seed_severity_patterns(session: Session) -> None:

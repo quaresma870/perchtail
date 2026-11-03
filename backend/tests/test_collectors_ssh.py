@@ -30,6 +30,9 @@ class FakeSFTPClient:
     def get(self, remote_path, local_path):
         Path(local_path).write_bytes(self._files[remote_path])
 
+    def stat(self, remote_path):
+        return FakeAttr(remote_path.rsplit("/", 1)[-1], False, len(self._files[remote_path]))
+
     def close(self):
         self.closed = True
 
@@ -304,3 +307,16 @@ def test_passphrase_protected_private_key_is_a_clear_error():
     key_text = _openssh_private_key(ed25519.Ed25519PrivateKey.generate(), b"secret")
     with pytest.raises(ValueError, match="passphrase"):
         ssh_module.load_private_key(key_text)
+
+
+def test_fetch_refuses_a_file_over_max_fetch_mb_before_transferring_it(monkeypatch, tmp_path):
+    from app.collectors.base import FetchTooLargeError
+
+    sftp = FakeSFTPClient(files={"/var/log/appname/big.log": b"x" * 2048})
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 1024)
+
+    destination = tmp_path / "out"
+    with pytest.raises(FetchTooLargeError):
+        ssh_module.fetch_file(_source(), "big.log", destination)
+    assert not destination.exists()

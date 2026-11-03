@@ -189,3 +189,44 @@ def test_revoke_session_refuses_a_session_owned_by_someone_else(session):
 def test_revoke_session_returns_false_for_an_unknown_id(session):
     user = _make_user(session)
     assert revoke_session(session, user_id=user.id, session_id=999999) is False
+
+
+def test_last_seen_at_is_not_rewritten_on_every_request(session):
+    user = _make_user(session)
+    auth_session, token = create_session(session, user)
+    get_user_by_token(session, token)
+    session.refresh(auth_session)
+    first_seen = auth_session.last_seen_at
+
+    get_user_by_token(session, token)
+
+    session.refresh(auth_session)
+    assert auth_session.last_seen_at == first_seen
+
+
+def test_last_seen_at_refreshes_once_it_is_stale(session):
+    user = _make_user(session)
+    auth_session, token = create_session(session, user)
+    auth_session.last_seen_at = utcnow() - timedelta(minutes=10)
+    session.add(auth_session)
+    session.commit()
+
+    get_user_by_token(session, token)
+
+    session.refresh(auth_session)
+    assert auth_session.last_seen_at > utcnow() - timedelta(minutes=1)
+
+
+def test_purge_expired_sessions_deletes_only_expired_rows(session):
+    from app.auth.sessions import purge_expired_sessions
+
+    user = _make_user(session)
+    live, _ = create_session(session, user)
+    expired, _ = create_session(session, user)
+    expired.expires_at = utcnow() - timedelta(hours=1)
+    session.add(expired)
+    session.commit()
+
+    assert purge_expired_sessions(session) == 1
+    remaining = session.exec(select(AuthSession)).all()
+    assert [s.id for s in remaining] == [live.id]

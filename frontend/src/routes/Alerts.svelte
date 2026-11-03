@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import { currentUser, hasCapability } from '../lib/auth'
   import type { Alert, AlertCreate, Source } from '../lib/types'
 
   let alerts: Alert[] = []
@@ -17,6 +18,10 @@
   let webhookUrl = ''
 
   let testResult: Record<number, 'sending' | boolean> = {}
+
+  // Without manage_alerts you can still see and delete your own alerts, but
+  // not create, edit, enable or test them (the API enforces the same).
+  $: canManage = hasCapability($currentUser, 'manage_alerts')
 
   const sourceName = (id: number | null) =>
     id === null ? 'All sources you can view' : (sources.find((s) => s.id === id)?.name ?? `#${id}`)
@@ -105,9 +110,11 @@
         <a href="#/search">Search</a>.
       </p>
     </div>
-    <button class="btn btn-primary" on:click={() => (showCreate = !showCreate)}>
-      {showCreate ? 'Cancel' : '+ New alert'}
-    </button>
+    {#if canManage}
+      <button class="btn btn-primary" on:click={() => (showCreate = !showCreate)}>
+        {showCreate ? 'Cancel' : '+ New alert'}
+      </button>
+    {/if}
   </div>
 
   {#if showCreate}
@@ -176,15 +183,17 @@
             {:else if testResult[alert.id] === false}
               <span class="error">Failed</span>
             {/if}
-            <button class="btn btn-ghost" on:click={() => sendTest(alert)}>Test</button>
-            <label class="switch">
-              <input
-                type="checkbox"
-                checked={alert.enabled}
-                on:change={() => toggleEnabled(alert)}
-              />
-              <span class="switch-track"></span>
-            </label>
+            {#if canManage}
+              <button class="btn btn-ghost" on:click={() => sendTest(alert)}>Test</button>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  checked={alert.enabled}
+                  on:change={() => toggleEnabled(alert)}
+                />
+                <span class="switch-track"></span>
+              </label>
+            {/if}
             <button class="btn btn-ghost danger" on:click={() => removeAlert(alert)}>Delete</button>
           </div>
         </li>

@@ -8,6 +8,138 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-03
+
+A security-hardening release: fixes from the internal review that
+prepares the external pentest (#124). It includes one database migration
+(applied automatically on start) and several changes that need action
+when upgrading. **Before upgrading, check:**
+
+1. **Container user:** the container now runs as uid/gid 10001, not root.
+   Host directories mounted for local-disk sources (`LOCAL_SOURCE_ROOTS`)
+   must be readable by uid 10001. `/data` is fixed up automatically.
+2. **Alerts:** creating or editing alerts needs the new `manage_alerts`
+   global capability, and an alert only fires while its owner holds it.
+   Grant it to the roles that use alerts.
+3. **Regex rules:** `re:` rules now use RE2. A rule that uses lookaround
+   or backreferences fails closed (logged as `rules.invalid_regex`) and
+   must be rewritten.
+4. **Push agent:** a `ws://` server URL is refused unless
+   `PERCHTAIL_ALLOW_INSECURE=true`. Use `wss://`.
+5. **SSO:** accounts are now bound to the IdP's issuer. Existing accounts
+   are bound on first start when exactly one OIDC provider is configured
+   or enabled. Otherwise watch for a `sso.issuer_backfill_skipped`
+   warning.
+6. **Delegated SSO admins** (`manage_sso` without super admin) can no
+   longer change the trusted IdP or group claim while a group mapping
+   grants a role above their own.
+
+New setting: `MAX_FETCH_MB` (default 2048) caps each remote fetch and
+each folder ZIP.
+
+### Security
+- The push agent now refuses to start with a plain `ws://` server URL,
+  because its enrollment token and every file it serves travel over that
+  connection. Use `wss://`, or set `PERCHTAIL_ALLOW_INSECURE=true` to
+  opt in for testing or a fully trusted network. **Upgrade note:** an
+  agent configured with `ws://` and no opt-in exits on start with an
+  error saying so.
+- A delegated SSO admin (`manage_sso` without super admin) could escalate
+  to any role a group mapping grants, including Super Admin, by pointing
+  the provider at an IdP or group claim they control and signing in as a
+  member of the mapped group. Creating a provider, enabling one, or
+  changing its issuer, client id or group claim now returns 403 unless
+  every group mapping's role is within the admin's own authority, the
+  same bar as creating such a mapping directly. Renaming, rotating the
+  client secret and disabling stay open to them.
+- Regex rules (`re:`) are now compiled with RE2 (`google-re2`), which
+  always matches in linear time. A catastrophic pattern such as `(a+)+$`
+  can no longer stall every browse of a source (ReDoS). RE2 has no
+  backreferences or lookaround, so a rule using them is rejected with a
+  400 that says why. **Upgrade note:** an existing rule that uses them
+  fails closed (a broken include matches nothing, a broken exclude hides
+  everything) and is logged once as `rules.invalid_regex`; rewrite it.
+  Severity patterns run in the browser, not on the server, so they keep
+  full regex syntax.
+- SSO accounts are now identified by the IdP's issuer and subject
+  (`iss` + `sub`), not by `sub` alone. `sub` is only unique within one
+  IdP, so after the SSO provider was pointed at a different issuer, a user
+  there whose `sub` matched an existing account's would have signed in as
+  that account, with its role. **Upgrade note:** on first start, existing
+  SSO accounts are bound to the enabled OIDC provider's issuer (or the
+  only one configured). If that is ambiguous, they are left unbound and a
+  `sso.issuer_backfill_skipped` warning is logged: those users then get a
+  new account at their next login, which clashes on username until an
+  admin renames or deletes the old one.
+- Turning off full-text search for a source, or disabling the source, now
+  deletes the search snippets already stored for it, along with its
+  alerts' per-file progress. Before, they stayed in the database
+  indefinitely. Each indexing sweep also purges leftovers from sources
+  that are no longer active, which covers anything left by earlier
+  versions.
+- Remote fetches are capped by a new `MAX_FETCH_MB` setting (default
+  2048). The cap applies per file and to a folder ZIP's total. Over the
+  limit, the request gets HTTP 413 and no partial file is left behind. SSH
+  checks the size before transferring anything; SMB streams in chunks and
+  stops at the cap. WinRM no longer reads a whole file into memory in one
+  PowerShell call: it checks the size first, then reads byte ranges, and
+  opens the file with shared read/write access, so a log that is still
+  being written can be read. Folder ZIPs stop as soon as their total
+  passes the cap, instead of growing outside the scratch size guard.
+- Opening a file (`file.open`) and downloading a folder as ZIP
+  (`folder.download`, with its file count) are now recorded in the audit
+  log, like single-file downloads already were. Viewing a file necessarily
+  sends its full content to the browser, so `view` can read whole files.
+  `download` gates bulk export on top of that, and the role editor now
+  says so on each capability.
+- Alerts are now treated as the export channel they are. Creating,
+  editing, enabling or testing an alert needs a new global capability,
+  `manage_alerts`. Anyone can still list and delete their own alerts.
+  An alert only fires while its owner holds `manage_alerts`, re-checked at
+  every evaluation like source access. Webhook targets must be publicly
+  routable (an `is_global` allowlist), which also rules out carrier-grade
+  NAT, documentation and benchmarking ranges and IPv4-mapped IPv6.
+  Creating, editing and deleting an alert is audited; the audit log
+  records only the webhook's host, never its path or query, which often
+  carry a token. **Upgrade note:** grant `manage_alerts` to the roles that
+  should keep using alerts. Until you do, their existing alerts stop
+  firing.
+- The Docker image now runs PerchTail as an unprivileged `perchtail` user
+  (uid/gid 10001) with no Linux capabilities, instead of as root. The
+  entrypoint starts as root only long enough to give `/data` to that user,
+  so existing root-owned volumes keep working, then drops privileges.
+  **Upgrade note:** host directories mounted for local-disk sources
+  (`LOCAL_SOURCE_ROOTS`) must be readable by uid 10001, for example
+  `setfacl -R -m u:10001:rX /var/log/app` on the host.
+- CI: `aquasecurity/trivy-action` is pinned to `v0.35.0` instead of
+  `@master`. That action's tags were force-pushed to credential-stealing
+  code in March 2026, and a branch reference would have run whatever was
+  pushed there. `actions/checkout` and `actions/setup-python` move to their
+  Node 24 majors, and Dependabot now also keeps the workflow's actions up
+  to date.
+- Login lockout can no longer be reset by flooding the throttle with other
+  usernames. An entry only leaves the tracker once it's idle (unlocked,
+  with no failure inside the lockout window). If the tracker fills with
+  live entries, new usernames are refused with 429 instead of evicting
+  someone else's count.
+- A login with an unknown, inactive or SSO-only username now costs the
+  same argon2 verify as a wrong password, so response timing no longer
+  reveals which usernames exist.
+- `/auth/change-password` is throttled like login. Changing your password
+  signs out every other session. An admin password reset signs the user
+  out everywhere.
+
+### Fixed
+- An agent that reconnected before the server noticed its old connection
+  had dropped showed as disconnected, and every browse of its source
+  failed, until it reconnected again. The old connection's cleanup was
+  removing the new one. Now a new connection replaces the old one
+  cleanly: the old socket is closed, commands still waiting on it fail at
+  once instead of timing out, and late replies from it are ignored.
+- Expired login sessions are now deleted hourly instead of piling up
+  forever, and a session's `last_seen_at` is written at most once a
+  minute instead of on every authenticated request.
+
 ## [0.3.1] - 2026-11-03
 
 A bug-fix release: SSH sources now accept ed25519 and ECDSA private keys,

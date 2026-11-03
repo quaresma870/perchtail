@@ -32,8 +32,11 @@ FIXTURE_FILES = {
 }
 
 _LIST_RE = re.compile(r"Get-ChildItem -LiteralPath '(?P<path>.*)' \|")
+_SIZE_RE = re.compile(r"\(Get-Item -LiteralPath '(?P<path>.*)'\)\.Length")
 _READ_RE = re.compile(
-    r"\[Convert\]::ToBase64String\(\[IO\.File\]::ReadAllBytes\('(?P<path>.*)'\)\)"
+    r"\[IO\.File\]::Open\('(?P<path>.*)', 'Open', 'Read', 'ReadWrite'\).*"
+    r"Seek\((?P<offset>\d+), 'Begin'\).*New-Object byte\[\] (?P<length>\d+)",
+    re.S,
 )
 
 
@@ -55,9 +58,20 @@ class _FakeWinRMSession:
         if list_match:
             return self._list(list_match.group("path"))
 
+        size_match = _SIZE_RE.search(script)
+        if size_match:
+            content = self._content(size_match.group("path"))
+            if content is None:
+                return _FakeResult(status_code=1, std_err=b"fake_winrm: file not found")
+            return _FakeResult(std_out=str(len(content)).encode())
+
         read_match = _READ_RE.search(script)
         if read_match:
-            return self._read(read_match.group("path"))
+            content = self._content(read_match.group("path"))
+            if content is None:
+                return _FakeResult(status_code=1, std_err=b"fake_winrm: file not found")
+            offset, length = int(read_match.group("offset")), int(read_match.group("length"))
+            return _FakeResult(std_out=base64.b64encode(content[offset : offset + length]))
 
         return _FakeResult(status_code=1, std_err=b"fake_winrm: unrecognized script")
 
@@ -70,12 +84,8 @@ class _FakeWinRMSession:
         ]
         return _FakeResult(std_out=json.dumps(items).encode("utf-8"))
 
-    def _read(self, path: str) -> _FakeResult:
-        name = path.rsplit("\\", 1)[-1]
-        content = FIXTURE_FILES.get(name)
-        if content is None:
-            return _FakeResult(status_code=1, std_err=b"fake_winrm: file not found")
-        return _FakeResult(std_out=base64.b64encode(content))
+    def _content(self, path: str) -> bytes | None:
+        return FIXTURE_FILES.get(path.rsplit("\\", 1)[-1])
 
 
 winrm_module._session = lambda source: _FakeWinRMSession()

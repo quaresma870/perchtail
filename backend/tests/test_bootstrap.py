@@ -1,12 +1,23 @@
-from app.auth.models import Capability, Role, User
+import json
+
+from app.auth.models import (
+    AuthProviderType,
+    Capability,
+    Role,
+    SSOProtocol,
+    SSOProviderConfig,
+    User,
+)
 from app.auth.providers.local import verify_password
 from app.auth.rbac import resolve_capability
 from app.bootstrap import (
     SUPER_ADMIN_ROLE_NAME,
     SYSTEM_SOURCE_NAME,
+    backfill_sso_user_issuers,
     seed_initial_super_admin,
     seed_system_log_source,
 )
+from app.crypto import encrypt_secret
 from app.models import Rule, Source
 from sqlmodel import select
 
@@ -112,3 +123,77 @@ def test_seed_initial_super_admin_respects_custom_username(session, monkeypatch)
     assert user.username == "root"
 
     get_settings.cache_clear()
+
+
+def _oidc_provider(session, issuer: str, *, enabled: bool) -> None:
+    config = {"issuer": issuer, "client_id": "c", "client_secret": "s"}
+    session.add(
+        SSOProviderConfig(
+            protocol=SSOProtocol.oidc,
+            name=issuer,
+            config=encrypt_secret(json.dumps(config)),
+            enabled=enabled,
+        )
+    )
+    session.commit()
+
+
+def _unbound_sso_user(session) -> User:
+    role = Role(name="r")
+    session.add(role)
+    session.commit()
+    user = User(
+        username="sso@example.com",
+        role_id=role.id,
+        auth_provider=AuthProviderType.oidc,
+        external_id="sub-1",
+    )
+    session.add(user)
+    session.commit()
+    return user
+
+
+def test_backfill_binds_existing_sso_users_to_the_enabled_providers_issuer(session):
+    user = _unbound_sso_user(session)
+    _oidc_provider(session, "https://old.example.com", enabled=False)
+    _oidc_provider(session, "https://idp.example.com", enabled=True)
+
+    assert backfill_sso_user_issuers(session) == 1
+
+    session.refresh(user)
+    assert user.external_issuer == "https://idp.example.com"
+
+
+def test_backfill_uses_the_only_provider_even_when_disabled(session):
+    user = _unbound_sso_user(session)
+    _oidc_provider(session, "https://idp.example.com", enabled=False)
+
+    assert backfill_sso_user_issuers(session) == 1
+
+    session.refresh(user)
+    assert user.external_issuer == "https://idp.example.com"
+
+
+def test_backfill_leaves_users_unbound_when_the_issuer_is_ambiguous(session):
+    user = _unbound_sso_user(session)
+    _oidc_provider(session, "https://a.example.com", enabled=False)
+    _oidc_provider(session, "https://b.example.com", enabled=False)
+
+    assert backfill_sso_user_issuers(session) == 0
+
+    session.refresh(user)
+    assert user.external_issuer is None
+
+
+def test_backfill_leaves_local_accounts_alone(session):
+    role = Role(name="r")
+    session.add(role)
+    session.commit()
+    local = User(username="admin", role_id=role.id)
+    session.add(local)
+    session.commit()
+    _oidc_provider(session, "https://idp.example.com", enabled=True)
+
+    assert backfill_sso_user_issuers(session) == 0
+    session.refresh(local)
+    assert local.external_issuer is None

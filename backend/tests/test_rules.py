@@ -155,3 +155,20 @@ def test_stored_invalid_exclude_rule_fails_closed():
     ]
     assert not is_visible("secret(1).log", rules)
     assert not is_visible("app.log", rules)
+
+
+@pytest.mark.parametrize("pattern", ["re:(a)\\1", "re:app(?=\\.log)", "re:(?<!x)y"])
+def test_rule_regexes_reject_syntax_re2_cannot_run_in_linear_time(pattern):
+    with pytest.raises(InvalidPatternError, match="RE2"):
+        parse_pattern(pattern)
+
+
+def test_catastrophic_backtracking_pattern_evaluates_quickly():
+    # (a+)+$ against "aaa...b" takes exponential time with a backtracking
+    # engine -- with Python's re this blocks for seconds; RE2 is linear.
+    import time
+
+    rules = [_rule(0, RuleType.include, "(a+)+$", PatternKind.regex)]
+    started = time.monotonic()
+    assert not is_visible("a" * 26 + "b", rules)
+    assert time.monotonic() - started < 0.5
