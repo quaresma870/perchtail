@@ -29,6 +29,7 @@ from app.auth.sessions import (
     get_user_by_token,
     hash_token,
     list_sessions_for_user,
+    revoke_all_sessions,
     revoke_session,
 )
 from app.bootstrap import NO_ACCESS_ROLE_NAME
@@ -221,12 +222,15 @@ def change_password_endpoint(
     payload: ChangePasswordRequest,
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ):
-    if not verify_password(user, payload.current_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect"
-        )
+    # Throttled like /auth/login, so a stolen session can't be used to
+    # brute-force the account password at argon2 speed.
+    _require_password_reconfirmation(user, payload.current_password)
 
+    # Every other session was opened with the old password; it shouldn't
+    # outlive it. This session (the one that just proved the password) stays.
+    revoke_all_sessions(session, user.id, except_token=session_token)
     change_password(session, user, payload.new_password)
     session.refresh(user)
     return UserPublic.from_user(user)

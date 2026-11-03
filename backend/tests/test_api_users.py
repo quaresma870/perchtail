@@ -126,6 +126,19 @@ def test_reset_password_forces_change_and_returns_temp_password(session, admin_c
     assert verify_password(target, temp_password) is True
 
 
+def test_reset_password_signs_the_user_out_everywhere(session, admin_client):
+    from app.auth.sessions import create_session, get_user_by_token
+
+    role = _make_target_role(session)
+    created = admin_client.post(
+        "/users", json={"username": "b@example.com", "password": "s3cret!", "role_id": role.id}
+    ).json()
+    _, token = create_session(session, session.get(User, created["id"]))
+
+    assert admin_client.post(f"/users/{created['id']}/reset-password").status_code == 200
+    assert get_user_by_token(session, token) is None
+
+
 def test_deactivate_is_soft_delete(session, admin_client):
     role = _make_target_role(session)
     created = admin_client.post(

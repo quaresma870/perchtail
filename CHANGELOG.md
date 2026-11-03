@@ -28,6 +28,22 @@ release ships (0.x releases may include breaking changes between minors).
   pushed there. `actions/checkout` and `actions/setup-python` move to their
   Node 24 majors, and Dependabot now also keeps the workflow's actions up
   to date.
+- Login lockout can no longer be reset by flooding the throttle with other
+  usernames. An entry only leaves the tracker once it's idle (unlocked,
+  with no failure inside the lockout window). If the tracker fills with
+  live entries, new usernames are refused with 429 instead of evicting
+  someone else's count.
+- A login with an unknown, inactive or SSO-only username now costs the
+  same argon2 verify as a wrong password, so response timing no longer
+  reveals which usernames exist.
+- `/auth/change-password` is throttled like login. Changing your password
+  signs out every other session. An admin password reset signs the user
+  out everywhere.
+
+### Fixed
+- Expired login sessions are now deleted hourly instead of piling up
+  forever, and a session's `last_seen_at` is written at most once a
+  minute instead of on every authenticated request.
 
 ## [0.3.1] - 2026-11-03
 
