@@ -9,6 +9,15 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- Regex rules (`re:`) are now compiled with RE2 (`google-re2`), which
+  always matches in linear time. A catastrophic pattern such as `(a+)+$`
+  can no longer stall every browse of a source (ReDoS). RE2 has no
+  backreferences or lookaround, so a rule using them is rejected with a
+  400 that says why. **Upgrade note:** an existing rule that uses them
+  fails closed (a broken include matches nothing, a broken exclude hides
+  everything) and is logged once as `rules.invalid_regex`; rewrite it.
+  Severity patterns run in the browser, not on the server, so they keep
+  full regex syntax.
 - SSO accounts are now identified by the IdP's issuer and subject
   (`iss` + `sub`), not by `sub` alone. `sub` is only unique within one
   IdP, so after the SSO provider was pointed at a different issuer, a user

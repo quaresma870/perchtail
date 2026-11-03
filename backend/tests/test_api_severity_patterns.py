@@ -221,3 +221,16 @@ def test_invalid_regex_severity_pattern_is_a_400(session, client_for):
     response = client.post("/severity-patterns", json={"level": "error", "pattern": "re:("})
     assert response.status_code == 400
     assert client.get("/severity-patterns").json() == []
+
+
+def test_severity_patterns_keep_full_regex_syntax(session, client_for):
+    # Evaluated in the browser (JavaScript), not by the backend's rule
+    # engine, so lookaround stays allowed here.
+    _, user = _make_role_and_user(
+        session, global_capabilities=[GlobalCapability.manage_system_settings]
+    )
+    client = client_for(user)
+    response = client.post(
+        "/severity-patterns", json={"level": "error", "pattern": "re:ERROR(?!: ignored)"}
+    )
+    assert response.status_code == 201
