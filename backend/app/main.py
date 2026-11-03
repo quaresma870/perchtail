@@ -43,6 +43,7 @@ from app.bootstrap import (
     seed_severity_patterns,
     seed_system_log_source,
 )
+from app.collectors.base import PathOutsideBaseError
 from app.collectors.local import LocalPathNotAllowedError
 from app.config import get_settings
 from app.crypto import audit_chain_key
@@ -291,6 +292,12 @@ app.include_router(monitoring_router)
 @app.exception_handler(LocalPathNotAllowedError)
 async def local_path_not_allowed(request: Request, exc: LocalPathNotAllowedError):
     return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+
+@app.exception_handler(PathOutsideBaseError)
+async def path_outside_base(request: Request, exc: PathOutsideBaseError):
+    # Same answer as a rule-hidden path: nothing about the target leaks.
+    return JSONResponse(status_code=404, content={"detail": "not found"})
 
 
 @app.get("/healthz")
