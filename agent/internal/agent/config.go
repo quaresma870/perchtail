@@ -1,6 +1,17 @@
 package agent
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+)
+
+// allowInsecureEnv opts in to a plain ws:// server URL. Off by default: the
+// enrollment token travels in the connection's Authorization header and
+// every fetched file comes back over this connection, so an unencrypted
+// link would expose both to anyone on the path.
+const allowInsecureEnv = "PERCHTAIL_ALLOW_INSECURE"
 
 // Config holds everything the agent needs to dial out to a PerchTail
 // connector and answer live list/fetch commands against a local directory
@@ -30,5 +41,37 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	case cfg.BasePath == "":
 		return cfg, errors.New("PERCHTAIL_BASE_PATH is required")
 	}
+	if err := checkServerURL(cfg.ServerURL, isTruthy(getenv(allowInsecureEnv))); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+func checkServerURL(raw string, allowInsecure bool) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("PERCHTAIL_SERVER_URL %q is not a valid URL", raw)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "wss":
+		return nil
+	case "ws":
+		if allowInsecure {
+			return nil
+		}
+		return fmt.Errorf(
+			"PERCHTAIL_SERVER_URL uses unencrypted ws://, which would send the agent token "+
+				"and every fetched file in clear text; use wss://, or set %s=true "+
+				"for a trusted network (e.g. testing)", allowInsecureEnv)
+	default:
+		return fmt.Errorf("PERCHTAIL_SERVER_URL must start with wss:// (got %q)", u.Scheme)
+	}
+}
+
+func isTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
