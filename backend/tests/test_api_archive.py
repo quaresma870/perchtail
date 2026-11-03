@@ -526,3 +526,35 @@ def test_download_logs_file_download_audit_event(app_client, session, fake_sftp,
     assert events[0].user_id == user.id
     assert events[0].target_id == source.id
     assert events[0].event_metadata == {"path": "app.log"}
+
+
+def test_open_logs_a_file_open_audit_event(app_client, session, fake_sftp, scratch_store):
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+    fake_sftp.files["/var/log/appname/app.log"] = b"hello world"
+
+    assert client.get(f"/sources/{source.id}/open", params={"path": "app.log"}).status_code == 200
+
+    events = session.exec(select(AuditLog).where(AuditLog.action == "file.open")).all()
+    assert len(events) == 1
+    assert events[0].user_id == user.id
+    assert events[0].target_id == source.id
+    assert events[0].event_metadata == {"path": "app.log"}
+
+
+def test_download_zip_logs_a_folder_download_audit_event(app_client, session, tmp_path):
+    app, client = app_client
+    (tmp_path / "app.log").write_text("hello")
+    (tmp_path / "other.log").write_text("hi")
+    source = _make_local_source(session, tmp_path)
+    user = _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+
+    assert client.get(f"/sources/{source.id}/download-zip").status_code == 200
+
+    events = session.exec(select(AuditLog).where(AuditLog.action == "folder.download")).all()
+    assert len(events) == 1
+    assert events[0].user_id == user.id
+    assert events[0].event_metadata == {"path": "", "file_count": 2}
