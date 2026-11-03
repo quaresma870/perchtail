@@ -69,8 +69,14 @@ Generate a key for PerchTail — ideally one key per source, so a leaked key
 only affects that source:
 
 ```bash
-ssh-keygen -t ed25519 -f perchtail_<source-name> -C "perchtail"
+ssh-keygen -t ed25519 -N "" -f perchtail_<source-name> -C "perchtail"
 ```
+
+PerchTail accepts ed25519, ECDSA and RSA private keys, in OpenSSH or PEM
+format. Leave the passphrase empty (`-N ""`): a passphrase-protected key is
+rejected, since PerchTail would have to store the passphrase right next to
+the key anyway. The key itself is encrypted at rest like every other
+credential.
 
 Install only the **public** key on the source:
 
