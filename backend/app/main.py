@@ -37,6 +37,7 @@ from app.audit_purge import run_audit_purge_sweep
 from app.auth.sessions import run_session_purge_sweep
 from app.bootstrap import (
     assert_credential_salt_present,
+    backfill_sso_user_issuers,
     seed_initial_super_admin,
     seed_no_access_role,
     seed_severity_patterns,
@@ -228,6 +229,7 @@ async def lifespan(app: FastAPI):
         seed_initial_super_admin(session)
         seed_no_access_role(session)
         seed_severity_patterns(session)
+        backfill_sso_user_issuers(session)
 
     store = get_scratch_store()
     scheduler.add_job(
