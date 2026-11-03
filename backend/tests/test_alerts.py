@@ -1,6 +1,7 @@
 import uuid
 from types import SimpleNamespace
 
+import pytest
 from app.alerts import check_alert, evaluate_alerts, send_webhook
 from app.auth.models import Capability, Role, ScopeType, User
 from app.auth.rbac import create_role_grant
@@ -13,7 +14,13 @@ from sqlmodel import Session, SQLModel, create_engine
 
 
 def _user(session, *, is_super_admin=False, active=True) -> User:
-    role = Role(name=f"role-{uuid.uuid4().hex}", is_super_admin=is_super_admin)
+    # Alert owners hold manage_alerts; without it an alert never fires (see
+    # test_alerts_only_fire_while_the_owner_has_manage_alerts).
+    role = Role(
+        name=f"role-{uuid.uuid4().hex}",
+        is_super_admin=is_super_admin,
+        global_capabilities=["manage_alerts"],
+    )
     session.add(role)
     session.commit()
     session.refresh(role)
@@ -503,3 +510,39 @@ def test_a_rotated_file_reports_its_new_content_from_the_top(tmp_path, monkeypat
 
     assert len(posted) == 2
     assert [hit["line_number"] for hit in posted[-1]["hits"]] == [1]
+
+
+@pytest.mark.parametrize("has_capability,expected_posts", [(True, 1), (False, 0)])
+def test_alerts_only_fire_while_the_owner_has_manage_alerts(
+    tmp_path, monkeypatch, has_capability, expected_posts
+):
+    engine = _throwaway_engine(monkeypatch)
+    posted = _capture_posts(monkeypatch)
+
+    with Session(engine) as session:
+        role = Role(
+            name=f"role-{uuid.uuid4().hex}",
+            global_capabilities=["manage_alerts"] if has_capability else [],
+        )
+        session.add(role)
+        session.commit()
+        owner = User(username="o@example.com", role_id=role.id)
+        session.add(owner)
+        session.commit()
+        source = _source(session, tmp_path)
+        _rule(session, source.id)
+        create_role_grant(
+            session,
+            actor_user_id=None,
+            role_id=role.id,
+            scope_type=ScopeType.source,
+            scope_id=source.id,
+            capabilities=[Capability.view],
+        )
+        (tmp_path / "app.log").write_text("connection refused by upstream\n")
+        index_source(session, source)
+        _alert(session, owner, query="refused")
+
+    evaluate_alerts()
+
+    assert len(posted) == expected_posts

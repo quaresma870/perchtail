@@ -9,7 +9,7 @@ racing ahead of or behind indexing."""
 import httpx
 from sqlmodel import Session, select
 
-from app.auth.models import Capability, User
+from app.auth.models import Capability, GlobalCapability, User
 from app.auth.rbac import visible_source_ids
 from app.logging_config import get_logger
 from app.models import Alert, AlertFileState, SearchIndexState, Source
@@ -24,6 +24,16 @@ _MAX_HITS_PER_WEBHOOK = 10
 # Bounds memory for a file that suddenly gains a huge number of matching
 # lines; matched_count in the webhook stops counting there.
 _MAX_HITS_PER_FILE = 500
+
+
+def _owner_may_alert(owner: User | None) -> bool:
+    """Alerts are an export channel, so they only fire while their owner is
+    active and still holds manage_alerts, re-checked live like source RBAC."""
+    if owner is None or not owner.active:
+        return False
+    return owner.role.is_super_admin or GlobalCapability.manage_alerts in (
+        owner.role.global_capabilities
+    )
 
 
 def _resolve_alert_source_ids(session: Session, owner: User, alert: Alert) -> set[int]:
@@ -123,7 +133,7 @@ def check_alert(session: Session, alert: Alert) -> list[SearchHit]:
     since it also needs the resolved set to decide whether to advance
     last_checked_at."""
     owner = session.get(User, alert.user_id)
-    if owner is None or not owner.active:
+    if not _owner_may_alert(owner):
         return []
     source_ids = _resolve_alert_source_ids(session, owner, alert)
     hits, _ = _new_hits_for_source_ids(session, alert, source_ids)
@@ -192,7 +202,7 @@ def evaluate_alerts() -> None:
                 owner = session.get(User, alert.user_id)
                 source_ids = (
                     _resolve_alert_source_ids(session, owner, alert)
-                    if owner is not None and owner.active
+                    if _owner_may_alert(owner)
                     else set()
                 )
                 hits, watermarks = _new_hits_for_source_ids(session, alert, source_ids)

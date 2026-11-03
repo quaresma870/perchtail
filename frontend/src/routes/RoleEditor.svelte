@@ -27,6 +27,7 @@
     { key: 'manage_sso', label: 'Manage SSO settings' },
     { key: 'manage_system_settings', label: 'Manage system settings (feature toggles)' },
     { key: 'view_audit_log', label: 'View audit log' },
+    { key: 'manage_alerts', label: 'Create and edit alerts (webhooks export log content)' },
   ]
   const ALL_CAPS: Capability[] = ['view', 'download', 'manage_rules', 'run_now']
 
