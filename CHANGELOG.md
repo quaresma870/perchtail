@@ -8,6 +8,12 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-03
+
+A bug-fix release: SSH sources now accept ed25519 and ECDSA private keys,
+not only RSA. No migrations and no configuration changes; upgrade by
+replacing the container.
+
 ### Fixed
 - SSH sources only accepted RSA private keys, even though
   `docs/source-setup.md` tells you to generate an ed25519 one. Pasting an
