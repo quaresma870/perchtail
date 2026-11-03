@@ -112,18 +112,59 @@ def test_run_ps_raises_on_nonzero_status(fake_session):
         winrm_module._run_ps(_source(), "whatever")
 
 
+def _serve_file(content: bytes):
+    """Handler for the size + byte-range scripts fetch_file() runs."""
+    import re
+
+    def handler(script):
+        if "Get-Item" in script:
+            return FakeResult(std_out=str(len(content)).encode())
+        m = re.search(r"Seek\((\d+),.*New-Object byte\[\] (\d+)", script, re.S)
+        assert m, script
+        offset, length = int(m.group(1)), int(m.group(2))
+        return FakeResult(std_out=base64.b64encode(content[offset : offset + length]))
+
+    return handler
+
+
 def test_fetch_file_decodes_base64_output(fake_session, tmp_path):
     content = b"hello world"
-    fake_session.handler = lambda script: FakeResult(std_out=base64.b64encode(content))
+    fake_session.handler = _serve_file(content)
 
     destination = tmp_path / "out"
     winrm_module.fetch_file(_source(), "app.log", destination)
     assert destination.read_bytes() == content
 
 
+def test_fetch_file_streams_in_chunks_instead_of_one_read(fake_session, tmp_path, monkeypatch):
+    monkeypatch.setattr(winrm_module, "_CHUNK_BYTES", 4)
+    content = b"0123456789abc"
+    fake_session.handler = _serve_file(content)
+
+    destination = tmp_path / "out"
+    winrm_module.fetch_file(_source(), "app.log", destination)
+
+    assert destination.read_bytes() == content
+    assert not any("ReadAllBytes" in script for script in fake_session.scripts_run)
+    assert sum("Seek(" in script for script in fake_session.scripts_run) == 4
+
+
+def test_fetch_file_refuses_a_file_over_max_fetch_mb(fake_session, tmp_path, monkeypatch):
+    from app.collectors.base import FetchTooLargeError
+
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 8)
+    fake_session.handler = _serve_file(b"x" * 100)
+
+    destination = tmp_path / "out"
+    with pytest.raises(FetchTooLargeError):
+        winrm_module.fetch_file(_source(), "app.log", destination)
+    assert not destination.exists()
+    assert not any("Seek(" in script for script in fake_session.scripts_run)
+
+
 def test_local_copy_fetches_into_a_temp_path(fake_session):
     content = b"hello world"
-    fake_session.handler = lambda script: FakeResult(std_out=base64.b64encode(content))
+    fake_session.handler = _serve_file(content)
 
     with winrm_module.local_copy(_source(), "app.log") as path:
         assert path.read_bytes() == content

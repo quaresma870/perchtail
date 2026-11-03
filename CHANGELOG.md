@@ -9,6 +9,15 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- Remote fetches are capped by a new `MAX_FETCH_MB` setting (default
+  2048). The cap applies per file and to a folder ZIP's total. Over the
+  limit, the request gets HTTP 413 and no partial file is left behind. SSH
+  checks the size before transferring anything; SMB streams in chunks and
+  stops at the cap. WinRM no longer reads a whole file into memory in one
+  PowerShell call: it checks the size first, then reads byte ranges, and
+  opens the file with shared read/write access, so a log that is still
+  being written can be read. Folder ZIPs stop as soon as their total
+  passes the cap, instead of growing outside the scratch size guard.
 - Opening a file (`file.open`) and downloading a folder as ZIP
   (`folder.download`, with its file count) are now recorded in the audit
   log, like single-file downloads already were. Viewing a file necessarily

@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from app.agent_registry import get_agent_registry
+from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.models import Rule, Source
 from app.rules import is_visible
@@ -36,7 +37,11 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     a single, simple wire format over squeezing the last bit of transfer
     efficiency out of what's still just a log-file viewer)."""
     result = get_agent_registry().send_command_sync(source.id, "fetch", path=relative_path)
-    destination.write_bytes(base64.b64decode(result["content_b64"]))
+    content = base64.b64decode(result["content_b64"])
+    limit = collector_base.max_fetch_bytes()
+    if len(content) > limit:
+        raise collector_base.too_large(len(content), limit)
+    destination.write_bytes(content)
 
 
 @contextmanager

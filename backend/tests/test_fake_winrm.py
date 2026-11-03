@@ -1,4 +1,3 @@
-import base64
 import importlib
 
 import app.collectors.winrm as winrm_module
@@ -46,22 +45,33 @@ def test_list_fails_for_an_unknown_path(fake_winrm_module):
     assert result.status_code != 0
 
 
-def test_read_matches_the_real_fetch_file_script_shape_and_returns_fixture_content(
-    fake_winrm_module,
-):
-    session = fake_winrm_module._FakeWinRMSession()
-    path = f"{fake_winrm_module.FIXTURE_ROOT}\\hello.log"
-    script = f"[Convert]::ToBase64String([IO.File]::ReadAllBytes({winrm_module._ps_quote(path)}))"
-    result = session.run_ps(script)
-    assert result.status_code == 0
-    assert base64.b64decode(result.std_out) == fake_winrm_module.FIXTURE_FILES["hello.log"]
+def test_fake_serves_the_real_fetch_file_scripts(fake_winrm_module, monkeypatch, tmp_path):
+    # Drives winrm.fetch_file() itself (size query + byte-range reads) through
+    # the fake, so the fake can't drift from the scripts the collector sends.
+    from app.models import Protocol, Source
+
+    monkeypatch.setattr(winrm_module, "_CHUNK_BYTES", 16)
+    monkeypatch.setattr(
+        winrm_module, "decrypt_credential", lambda ref: {"username": "u", "password": "p"}
+    )
+    source = Source(
+        name="w",
+        protocol=Protocol.winrm,
+        host="h",
+        base_path=fake_winrm_module.FIXTURE_ROOT,
+        credential_ref="x",
+    )
+    destination = tmp_path / "out"
+
+    winrm_module.fetch_file(source, "hello.log", destination)
+
+    assert destination.read_bytes() == fake_winrm_module.FIXTURE_FILES["hello.log"]
 
 
 def test_read_fails_for_an_unknown_file(fake_winrm_module):
     session = fake_winrm_module._FakeWinRMSession()
     path = f"{fake_winrm_module.FIXTURE_ROOT}\\does-not-exist.log"
-    script = f"[Convert]::ToBase64String([IO.File]::ReadAllBytes({winrm_module._ps_quote(path)}))"
-    result = session.run_ps(script)
+    result = session.run_ps(f"(Get-Item -LiteralPath {winrm_module._ps_quote(path)}).Length")
     assert result.status_code != 0
 
 
