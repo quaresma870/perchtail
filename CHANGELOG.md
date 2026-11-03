@@ -8,6 +8,16 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Security
+- SSH host keys are now pinned through PerchTail's own trust-on-first-use
+  policy instead of paramiko's `AutoAddPolicy`. The behaviour is the
+  same, but every newly pinned key is now logged at WARNING
+  (`ssh.host_key_pinned`) with its OpenSSH-style `SHA256:` fingerprint,
+  so you can check it against the server. The new
+  `SSH_HOST_KEY_POLICY=strict` setting refuses any server that isn't
+  already in `SSH_KNOWN_HOSTS_PATH`. Resolves the CodeQL alert
+  `py/paramiko-missing-host-key-validation`.
+
 ## [0.3.0] - 2026-11-02
 
 A security release on top of new viewer and navigation features. A full
