@@ -11,7 +11,7 @@ from pathlib import Path
 import paramiko
 
 from app.collectors import base as collector_base
-from app.collectors.base import DirEntry
+from app.collectors.base import DirEntry, PathOutsideBaseError
 from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
@@ -20,6 +20,7 @@ from app.rules import is_visible
 
 __all__ = [
     "DirEntry",
+    "PathOutsideBaseError",
     "TrustOnFirstUsePolicy",
     "fetch_file",
     "fingerprint",
@@ -153,35 +154,71 @@ def _connect(source: Source) -> paramiko.SSHClient:
     return client
 
 
+def _is_within(path: str, root: str) -> bool:
+    root = root.rstrip("/") or "/"
+    return path == root or path.startswith(root if root == "/" else root + "/")
+
+
+def _resolve_contained(sftp: paramiko.SFTPClient, source: Source, relative_path: str) -> str:
+    """Resolves `relative_path` on the server (SSH_FXP_REALPATH, which
+    follows symlinks) and returns the real path, refusing anything that
+    ends up outside the resolved base path. Without this, a symlink inside
+    the base path (`escape -> /etc`) would let anyone with `view` on the
+    source read whatever the SSH account can read -- the base path and the
+    rules only ever saw the link's name. The caller must then use the
+    returned real path, not the joined one, so the link can't be swapped
+    between this check and the read."""
+    root = sftp.normalize(source.base_path)
+    joined = posixpath.join(source.base_path, relative_path) if relative_path else source.base_path
+    try:
+        real = sftp.normalize(joined)
+    except OSError as exc:
+        raise FileNotFoundError(relative_path) from exc
+    if not _is_within(real, root):
+        logger.warning(
+            "ssh.path_outside_base",
+            source_id=source.id,
+            path=relative_path,
+        )
+        raise PathOutsideBaseError(relative_path)
+    return real
+
+
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:
     """Live directory listing filtered through the rule engine. Directories
     are always listed (never filtered by the rule chain) so the tree stays
     navigable toward deeper matches like `**/*.log` — only files are subject
-    to CLAUDE.md's "Rules decide which files ... are visible" filtering. An
-    exclude rule targeting a directory still hides everything under it,
-    since its files would fail the rule check; the directory itself may
-    still appear (possibly empty), which is a UX wrinkle, not a security
-    gap."""
-    remote_path = (
-        posixpath.join(source.base_path, relative_path) if relative_path else source.base_path
-    )
+    to CLAUDE.md's "Rules decide which files ... are visible" filtering.
+
+    Symlinks are resolved on the server: one that points outside the base
+    path is left out of the listing entirely, and one that points inside it
+    is shown as whatever it points to (file or directory)."""
     client = _connect(source)
     try:
         sftp = client.open_sftp()
         try:
+            root = sftp.normalize(source.base_path)
+            remote_path = _resolve_contained(sftp, source, relative_path)
             entries = []
             for attr in sftp.listdir_attr(remote_path):
                 child_path = f"{relative_path}/{attr.filename}" if relative_path else attr.filename
-                is_dir = stat_module.S_ISDIR(attr.st_mode or 0)
+                mode = attr.st_mode or 0
+                size = attr.st_size or 0
+                if stat_module.S_ISLNK(mode):
+                    try:
+                        target = sftp.normalize(posixpath.join(remote_path, attr.filename))
+                        if not _is_within(target, root):
+                            continue
+                        target_attr = sftp.stat(target)
+                    except OSError:
+                        continue  # dangling link: nothing to show
+                    mode = target_attr.st_mode or 0
+                    size = target_attr.st_size or 0
+                is_dir = stat_module.S_ISDIR(mode)
                 if not is_dir and not is_visible(child_path, rules):
                     continue
                 entries.append(
-                    DirEntry(
-                        name=attr.filename,
-                        path=child_path,
-                        is_dir=is_dir,
-                        size=attr.st_size or 0,
-                    )
+                    DirEntry(name=attr.filename, path=child_path, is_dir=is_dir, size=size)
                 )
             return entries
         finally:
@@ -193,12 +230,12 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
 def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     """Fetch-on-open into `destination` — always a fresh transfer, the
     caller (scratch.py) never reuses a prior fetch's bytes."""
-    remote_path = posixpath.join(source.base_path, relative_path)
     limit = collector_base.max_fetch_bytes()
     client = _connect(source)
     try:
         sftp = client.open_sftp()
         try:
+            remote_path = _resolve_contained(sftp, source, relative_path)
             size = sftp.stat(remote_path).st_size or 0
             if size > limit:
                 raise collector_base.too_large(size, limit)

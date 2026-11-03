@@ -8,6 +8,20 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Security
+- SSH/SFTP sources no longer follow symlinks out of the base path. A
+  symlink inside the base path (for example `escape -> /etc`) let anyone
+  with `view` on an SSH source that isn't chrooted browse the link target
+  and read any file the SSH account could read, such as `/etc/passwd`.
+  Paths are now resolved on the server (SFTP `realpath`) before every
+  listing and read, and anything that resolves outside the resolved base
+  path gets the same 404 as a path hidden by the rules. Outward and
+  dangling symlinks are left out of listings. Symlinks that stay inside
+  the base path still work, and are shown as the file or folder they
+  point to. Refusals are logged as `ssh.path_outside_base`. Found in the
+  Hyper-V lab tests. The push agent got the equivalent fix in 0.3.0;
+  local sources were already contained.
+
 ## [0.4.0] - 2026-11-03
 
 A security-hardening release: fixes from the internal review that
