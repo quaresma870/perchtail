@@ -8,6 +8,35 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-03
+
+A security-hardening release: fixes from the internal review that
+prepares the external pentest (#124). It includes one database migration
+(applied automatically on start) and several changes that need action
+when upgrading. **Before upgrading, check:**
+
+1. **Container user:** the container now runs as uid/gid 10001, not root.
+   Host directories mounted for local-disk sources (`LOCAL_SOURCE_ROOTS`)
+   must be readable by uid 10001. `/data` is fixed up automatically.
+2. **Alerts:** creating or editing alerts needs the new `manage_alerts`
+   global capability, and an alert only fires while its owner holds it.
+   Grant it to the roles that use alerts.
+3. **Regex rules:** `re:` rules now use RE2. A rule that uses lookaround
+   or backreferences fails closed (logged as `rules.invalid_regex`) and
+   must be rewritten.
+4. **Push agent:** a `ws://` server URL is refused unless
+   `PERCHTAIL_ALLOW_INSECURE=true`. Use `wss://`.
+5. **SSO:** accounts are now bound to the IdP's issuer. Existing accounts
+   are bound on first start when exactly one OIDC provider is configured
+   or enabled. Otherwise watch for a `sso.issuer_backfill_skipped`
+   warning.
+6. **Delegated SSO admins** (`manage_sso` without super admin) can no
+   longer change the trusted IdP or group claim while a group mapping
+   grants a role above their own.
+
+New setting: `MAX_FETCH_MB` (default 2048) caps each remote fetch and
+each folder ZIP.
+
 ### Security
 - The push agent now refuses to start with a plain `ws://` server URL,
   because its enrollment token and every file it serves travel over that
