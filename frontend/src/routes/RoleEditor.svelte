@@ -30,6 +30,14 @@
     { key: 'manage_alerts', label: 'Create and edit alerts (webhooks export log content)' },
   ]
   const ALL_CAPS: Capability[] = ['view', 'download', 'manage_rules', 'run_now']
+  // Viewing a file necessarily sends its full content to the browser, so
+  // `view` can read whole files; `download` gates bulk export on top of that.
+  const CAP_HINTS: Record<Capability, string> = {
+    view: 'Browse and open files in the viewer. Opening a file sends its full content; every open is audited.',
+    download: 'Download whole files and folders as ZIP (bulk export). Every download is audited.',
+    manage_rules: "Edit this scope's visibility rules.",
+    run_now: 'Reserved: not used by any feature yet.',
+  }
 
   let name = ''
   let isSuperAdmin = false
@@ -230,7 +238,7 @@
                 <td class="target">{scopeLabel(grant)}</td>
                 <td class="cap-list">
                   {#each grant.capabilities as cap}
-                    <span class="badge badge-accent">{cap}</span>
+                    <span class="badge badge-accent" title={CAP_HINTS[cap]}>{cap}</span>
                   {/each}
                   {#if grant.capabilities.length === 0}—{/if}
                 </td>
@@ -264,7 +272,7 @@
           </select>
           <div class="cap-checks">
             {#each ALL_CAPS as cap}
-              <label class="chip" class:chip-active={newCaps.has(cap)}>
+              <label class="chip" class:chip-active={newCaps.has(cap)} title={CAP_HINTS[cap]}>
                 <input
                   type="checkbox"
                   checked={newCaps.has(cap)}

@@ -267,14 +267,28 @@ def open_file(
     path: str,
     member: str | None = None,
     source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
+    user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> FileResponse:
     """Fetches into scratch and holds it (refcounted) until a matching
     /close call — for a persistent viewer session, not a one-shot download.
-    (Local plain files skip scratch entirely — see _resolve_content.)"""
+    (Local plain files skip scratch entirely — see _resolve_content.)
+
+    Viewing necessarily hands the client the file's bytes, so `view` can
+    read a whole file; `download` gates bulk export (/download, the folder
+    ZIP). Every open is audited so reads are as traceable as downloads."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     served_path, filename, key = _resolve_content(source, path, member, rules)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="file.open",
+        target_type="source",
+        target_id=source.id,
+        metadata={"path": path, "member": member} if member else {"path": path},
+    )
+    session.commit()
     headers = {"X-Scratch-Key": key} if key else {}
     return FileResponse(served_path, filename=filename, headers=headers)
 
@@ -362,6 +376,7 @@ def _zip_directory(
 def download_folder_zip(
     path: str = "",
     source: Source = Depends(require_capability(Capability.download, get_current_active_user)),
+    user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> FileResponse:
     """Zips an entire folder for download (CLAUDE.md's Viewer section:
@@ -376,9 +391,19 @@ def download_folder_zip(
     try:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             _zip_directory(connector, source, rules, path, path, zf, tmp_dir)
+            file_count = len(zf.namelist())
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="folder.download",
+        target_type="source",
+        target_id=source.id,
+        metadata={"path": path, "file_count": file_count},
+    )
+    session.commit()
 
     folder_name = path.rsplit("/", 1)[-1] if path else source.name
     background = BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True)
