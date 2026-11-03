@@ -15,7 +15,11 @@ from app.auth.models import (
     User,
 )
 from app.auth.providers.oidc import fetch_discovery_document, fetch_jwks, parse_oidc_settings
-from app.auth.rbac import require_global_capability, require_role_within_authority
+from app.auth.rbac import (
+    require_global_capability,
+    require_role_within_authority,
+    role_within_authority,
+)
 from app.crypto import decrypt_secret, encrypt_secret
 from app.db import get_session
 
@@ -116,6 +120,29 @@ def _assert_single_enabled(session: Session, *, enabled: bool, exclude_id: int |
         )
 
 
+def _require_trust_change_within_authority(session: Session, user: User) -> None:
+    """Which IdP is trusted (issuer, client id), which claim carries group
+    names, and whether a provider is live decide who receives every group
+    mapping's role. A delegated SSO admin could otherwise point them at an
+    IdP (or a claim) they control and sign in with any mapped group --
+    including one a super admin mapped to a role far above their own. So
+    those changes require every existing mapping to be within the actor's
+    authority, the same bar as creating such a mapping directly."""
+    if user.role.is_super_admin:
+        return
+    for mapping in session.exec(select(SSOGroupRoleMapping)).all():
+        role = session.get(Role, mapping.role_id)
+        if role is not None and not role_within_authority(user, role):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Not permitted: a group mapping grants a role with privileges beyond "
+                    "your own, so only an admin holding them can change which IdP or "
+                    "group claim is trusted"
+                ),
+            )
+
+
 @router.get("", response_model=list[SSOProviderPublic])
 def list_providers(user: User = Depends(require_manage), session: Session = Depends(get_session)):
     configs = session.exec(select(SSOProviderConfig)).all()
@@ -129,6 +156,7 @@ def create_provider(
     session: Session = Depends(get_session),
 ):
     _assert_single_enabled(session, enabled=payload.enabled)
+    _require_trust_change_within_authority(session, user)
 
     config = SSOProviderConfig(
         protocol=SSOProtocol.oidc,
@@ -333,6 +361,18 @@ def update_provider(
 ):
     config = _get_or_404(session, provider_id)
     raw = json.loads(decrypt_secret(config.config))
+
+    changes_trust = (
+        payload.enabled is True
+        or (payload.issuer is not None and payload.issuer != raw.get("issuer"))
+        or (payload.client_id is not None and payload.client_id != raw.get("client_id"))
+        or (
+            payload.group_claim is not None
+            and (payload.group_claim or None) != raw.get("group_claim")
+        )
+    )
+    if changes_trust:
+        _require_trust_change_within_authority(session, user)
 
     if payload.enabled is not None:
         _assert_single_enabled(session, enabled=payload.enabled, exclude_id=provider_id)
