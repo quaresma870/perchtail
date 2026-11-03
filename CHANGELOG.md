@@ -9,6 +9,12 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- Turning off full-text search for a source, or disabling the source, now
+  deletes the search snippets already stored for it, along with its
+  alerts' per-file progress. Before, they stayed in the database
+  indefinitely. Each indexing sweep also purges leftovers from sources
+  that are no longer active, which covers anything left by earlier
+  versions.
 - Opening a file (`file.open`) and downloading a folder as ZIP
   (`folder.download`, with its file count) are now recorded in the audit
   log, like single-file downloads already were. Viewing a file necessarily

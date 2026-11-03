@@ -361,6 +361,10 @@ def update_source(
         source.credential_ref = encrypt_credential(payload.credential)
     if payload.search_indexing_enabled is not None:
         source.search_indexing_enabled = payload.search_indexing_enabled
+    if not (source.enabled and source.search_indexing_enabled):
+        # Opting out of search (or disabling the source) means its content
+        # stops being kept: drop the stored snippets now, not never.
+        delete_source_index(session, source.id)
 
     session.add(source)
     record_audit_event(
