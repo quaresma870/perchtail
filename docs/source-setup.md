@@ -125,6 +125,12 @@ these directories keep gaining members over time (see CLAUDE.md's "Live
 browsing & ephemeral fetch behavior") — a one-time `chmod` won't cover what
 logrotate creates tomorrow.
 
+PerchTail resolves every path on the server before listing or reading
+it, and refuses anything that resolves outside the source's base path,
+symlinks included. A link such as `escape -> /etc` inside the log folder
+is hidden from listings and can't be opened. A chroot is still
+recommended as a second, OS-level boundary.
+
 ### 5. Firewall
 
 Allow TCP 22 (or your custom SSH port) inbound from the PerchTail connector's

@@ -15,6 +15,12 @@ class DirEntry:
     size: int
 
 
+class PathOutsideBaseError(PermissionError):
+    """A requested path resolves (on the source host, symlinks included) to
+    somewhere outside the source's base path. Answered as 404, the same as
+    a path the rules hide, so it reveals nothing about what's out there."""
+
+
 class FetchTooLargeError(ValueError):
     """A file (or a folder ZIP's total) is over MAX_FETCH_MB -- refused
     rather than filling scratch disk or memory with it."""

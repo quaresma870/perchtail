@@ -30,6 +30,9 @@ class FakeSFTPClient:
         self.listing: list[FakeAttr] = []
         self.files: dict[str, bytes] = {}
 
+    def normalize(self, path):
+        return path
+
     def listdir_attr(self, path):
         return self.listing
 
@@ -588,3 +591,34 @@ def test_folder_zip_over_max_fetch_mb_in_total_is_a_413(app_client, session, tmp
     _add_rule(session, source, 0, RuleType.include, "*.log")
 
     assert client.get(f"/sources/{source.id}/download-zip").status_code == 413
+
+
+def test_symlink_escaping_base_path_is_a_404_on_browse_and_open(
+    app_client, session, monkeypatch, scratch_store
+):
+    """Lab finding F-10: `escape -> /etc` inside an SSH base path let a
+    view-only user read /etc/passwd. Both browse and open must answer 404,
+    the same as a rule-hidden path."""
+    from app.collectors.base import PathOutsideBaseError
+    from app.main import path_outside_base
+
+    app, client = app_client
+    app.add_exception_handler(PathOutsideBaseError, path_outside_base)
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+
+    class EscapingSFTP(FakeSFTPClient):
+        def normalize(self, path):
+            return "/etc" if path.startswith("/var/log/appname/escape") else path
+
+    sftp = EscapingSFTP()
+    sftp.files["/etc/passwd"] = b"root:x:0:0"
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    browse = client.get(f"/sources/{source.id}/browse", params={"path": "escape"})
+    opened = client.get(f"/sources/{source.id}/open", params={"path": "escape/passwd"})
+
+    assert browse.status_code == 404
+    assert opened.status_code == 404
+    assert b"root:" not in opened.content
