@@ -295,3 +295,49 @@ def test_logging_in_twice_shows_both_sessions_with_only_the_newest_current(clien
     body = response.json()
     assert len(body) == 2
     assert sum(1 for s in body if s["is_current"]) == 1
+
+
+def test_change_password_is_throttled_like_login(client, session, monkeypatch):
+    from app import login_throttle
+
+    login_throttle.reset_for_tests()
+    monkeypatch.setenv("LOGIN_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
+    _make_user(session)
+    _login(client)
+
+    for _ in range(3):
+        wrong = client.post(
+            "/auth/change-password",
+            json={"current_password": "nope", "new_password": "N3w-passw0rd!"},
+        )
+        assert wrong.status_code == 401
+    blocked = client.post(
+        "/auth/change-password",
+        json={"current_password": PASSWORD, "new_password": "N3w-passw0rd!"},
+    )
+    assert blocked.status_code == 429
+    login_throttle.reset_for_tests()
+
+
+def test_change_password_signs_out_every_other_session(client, session):
+    from app.auth.models import AuthSession
+    from app.auth.sessions import create_session
+    from sqlmodel import select
+
+    user = _make_user(session)
+    _, other_token = create_session(session, user)
+    _login(client)
+
+    response = client.post(
+        "/auth/change-password",
+        json={"current_password": PASSWORD, "new_password": "N3w-passw0rd!"},
+    )
+
+    assert response.status_code == 200
+    assert client.get("/auth/me").status_code == 200  # this session survives
+    remaining = session.exec(select(AuthSession).where(AuthSession.user_id == user.id)).all()
+    assert len(remaining) == 1
+    from app.auth.sessions import get_user_by_token
+
+    assert get_user_by_token(session, other_token) is None

@@ -143,3 +143,23 @@ def test_hash_password_produces_argon2_hash():
     hashed = hash_password("s3cret!")
     assert hashed.startswith("$argon2")
     assert hashed != "s3cret!"
+
+
+def test_unknown_username_still_costs_a_password_hash(session, monkeypatch):
+    # Without this, "no such user" returns in microseconds while a wrong
+    # password takes an argon2 verify -- the response time tells an
+    # attacker which usernames exist.
+    from app.auth.providers import local as local_module
+
+    calls = []
+    real_hasher = local_module._hasher
+
+    class SpyHasher:
+        def verify(self, hash_, password):
+            calls.append(hash_)
+            return real_hasher.verify(hash_, password)
+
+    monkeypatch.setattr(local_module, "_hasher", SpyHasher())
+
+    assert local_module.LocalPasswordProvider().authenticate(session, "ghost", "pw") is None
+    assert len(calls) == 1
