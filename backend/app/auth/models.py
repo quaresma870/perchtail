@@ -37,6 +37,10 @@ class GlobalCapability(StrEnum):
     # implied by any other capability above -- a role needs this explicitly,
     # same as a super-admin needs no capability at all to see everything.
     view_audit_log = "view_audit_log"
+    # Creating or editing an alert. An alert's webhook sends matching log
+    # content to an outside URL, an export channel, so it isn't implied by
+    # view access to the sources it watches.
+    manage_alerts = "manage_alerts"
 
 
 class AuthProviderType(StrEnum):
