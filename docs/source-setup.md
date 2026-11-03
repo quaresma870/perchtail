@@ -285,6 +285,7 @@ Three environment variables, all required:
 | `PERCHTAIL_SERVER_URL` | `wss://perchtail.example.com/agent/connect` | PerchTail's agent endpoint |
 | `PERCHTAIL_AGENT_TOKEN` | (from step 1) | The enrollment token |
 | `PERCHTAIL_BASE_PATH` | `/var/log/myapp` | The only local root the agent will read from |
+| `PERCHTAIL_ALLOW_INSECURE` | unset | `true` allows a plain `ws://` URL. By default the agent refuses anything but `wss://`. Testing or trusted networks only. |
 
 Run it under whatever process supervisor the host already uses (systemd,
 Windows Service, etc.) so it restarts on failure or reboot — it reconnects

@@ -57,3 +57,34 @@ func TestLoadConfigRequiresBasePath(t *testing.T) {
 		t.Fatal("expected an error when PERCHTAIL_BASE_PATH is missing")
 	}
 }
+
+func TestLoadConfigServerURLScheme(t *testing.T) {
+	cases := []struct {
+		name     string
+		url      string
+		insecure string
+		wantErr  bool
+	}{
+		{"wss accepted", "wss://example.com/agent/connect", "", false},
+		{"ws rejected by default", "ws://example.com/agent/connect", "", true},
+		{"ws rejected when opt-in is false", "ws://example.com/agent/connect", "false", true},
+		{"ws accepted with explicit opt-in", "ws://example.com/agent/connect", "true", false},
+		{"https rejected", "https://example.com/agent/connect", "true", true},
+		{"no host rejected", "wss:///agent/connect", "", true},
+		{"garbage rejected", "not a url", "true", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := fakeGetenv(map[string]string{
+				"PERCHTAIL_SERVER_URL":     tc.url,
+				"PERCHTAIL_AGENT_TOKEN":    "s3cret",
+				"PERCHTAIL_BASE_PATH":      "/var/log/app",
+				"PERCHTAIL_ALLOW_INSECURE": tc.insecure,
+			})
+			_, err := LoadConfig(getenv)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfig(%q, insecure=%q) error = %v, wantErr %v", tc.url, tc.insecure, err, tc.wantErr)
+			}
+		})
+	}
+}

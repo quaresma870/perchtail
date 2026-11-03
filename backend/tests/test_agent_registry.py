@@ -154,3 +154,59 @@ def test_get_agent_registry_is_a_singleton():
     from app.agent_registry import get_agent_registry
 
     assert get_agent_registry() is get_agent_registry()
+
+
+def test_a_replaced_connection_closing_does_not_unregister_its_successor(loop_in_thread):
+    """The agent reconnects before the server notices the old socket is
+    dead; when the old socket's receive loop finally ends, it must not take
+    the new connection down with it."""
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    old, new = FakeWebSocket(), FakeWebSocket()
+    registry.register(1, old)
+    assert registry.register(1, new).websocket is old
+
+    registry.unregister(1, old)
+
+    assert registry.is_connected(1)
+
+    def responder():
+        assert _wait_until(lambda: len(new.sent) > 0)
+        command = new.sent[0]
+        reply = {"type": "list_result", "id": command["id"], "entries": []}
+        # The stale socket answering the same id must be ignored.
+        registry.resolve_response(1, {**reply, "entries": ["stale"]}, old)
+        registry.resolve_response(1, reply, new)
+
+    thread = threading.Thread(target=responder)
+    thread.start()
+    try:
+        result = registry.send_command_sync(1, "list", timeout=5, path="")
+    finally:
+        thread.join(timeout=2)
+    assert result["entries"] == []
+    assert old.sent == []
+
+    registry.unregister(1, new)
+    assert not registry.is_connected(1)
+
+
+def test_replacing_a_connection_fails_its_pending_commands_immediately(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    old = FakeWebSocket()
+    registry.register(1, old)
+
+    def reconnector():
+        assert _wait_until(lambda: len(old.sent) > 0)
+        loop_in_thread.call_soon_threadsafe(registry.register, 1, FakeWebSocket())
+
+    thread = threading.Thread(target=reconnector)
+    thread.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(AgentNotConnectedError, match="replaced"):
+            registry.send_command_sync(1, "list", timeout=10, path="")
+    finally:
+        thread.join(timeout=2)
+    assert time.monotonic() - started < 5

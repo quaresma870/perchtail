@@ -9,6 +9,12 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- The push agent now refuses to start with a plain `ws://` server URL,
+  because its enrollment token and every file it serves travel over that
+  connection. Use `wss://`, or set `PERCHTAIL_ALLOW_INSECURE=true` to
+  opt in for testing or a fully trusted network. **Upgrade note:** an
+  agent configured with `ws://` and no opt-in exits on start with an
+  error saying so.
 - Regex rules (`re:`) are now compiled with RE2 (`google-re2`), which
   always matches in linear time. A catastrophic pattern such as `(a+)+$`
   can no longer stall every browse of a source (ReDoS). RE2 has no
@@ -77,6 +83,12 @@ release ships (0.x releases may include breaking changes between minors).
   out everywhere.
 
 ### Fixed
+- An agent that reconnected before the server noticed its old connection
+  had dropped showed as disconnected, and every browse of its source
+  failed, until it reconnected again. The old connection's cleanup was
+  removing the new one. Now a new connection replaces the old one
+  cleanly: the old socket is closed, commands still waiting on it fail at
+  once instead of timing out, and late replies from it are ignored.
 - Expired login sessions are now deleted hourly instead of piling up
   forever, and a session's `last_seen_at` is written at most once a
   minute instead of on every authenticated request.
