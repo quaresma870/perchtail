@@ -9,6 +9,12 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- Turning off full-text search for a source, or disabling the source, now
+  deletes the search snippets already stored for it, along with its
+  alerts' per-file progress. Before, they stayed in the database
+  indefinitely. Each indexing sweep also purges leftovers from sources
+  that are no longer active, which covers anything left by earlier
+  versions.
 - Remote fetches are capped by a new `MAX_FETCH_MB` setting (default
   2048). The cap applies per file and to a folder ZIP's total. Over the
   limit, the request gets HTTP 413 and no partial file is left behind. SSH

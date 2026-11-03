@@ -242,6 +242,31 @@ def index_source(session: Session, source: Source) -> IndexStats:
     return stats
 
 
+def purge_inactive_source_indexes(session: Session) -> int:
+    """Backstop for the immediate purge in api/sources.py: drops indexed
+    content for any source that's disabled or no longer opted in, however it
+    got that way (e.g. an older version that never purged). Commits."""
+    indexed_ids = set(session.exec(select(SearchIndexState.source_id).distinct()).all())
+    if not indexed_ids:
+        return 0
+    active_ids = set(
+        session.exec(
+            select(Source.id).where(
+                Source.id.in_(indexed_ids),
+                Source.search_indexing_enabled.is_(True),
+                Source.enabled.is_(True),
+            )
+        ).all()
+    )
+    stale = indexed_ids - active_ids
+    for source_id in stale:
+        delete_source_index(session, source_id)
+    session.commit()
+    if stale:
+        logger.info("search_index.purged_inactive_sources", source_ids=sorted(stale))
+    return len(stale)
+
+
 def run_indexing_sweep() -> None:
     """The APScheduler job (see app/main.py's lifespan) — indexes every
     enabled, opted-in source in turn. One source's failure (a dead
@@ -250,6 +275,7 @@ def run_indexing_sweep() -> None:
     from app.db import engine  # deferred: app.db imports this module for schema setup
 
     with Session(engine) as session:
+        purge_inactive_source_indexes(session)
         sources = session.exec(
             select(Source).where(Source.search_indexing_enabled.is_(True), Source.enabled.is_(True))
         ).all()
