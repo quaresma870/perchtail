@@ -9,6 +9,19 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- The Docker image now runs PerchTail as an unprivileged `perchtail` user
+  (uid/gid 10001) with no Linux capabilities, instead of as root. The
+  entrypoint starts as root only long enough to give `/data` to that user,
+  so existing root-owned volumes keep working, then drops privileges.
+  **Upgrade note:** host directories mounted for local-disk sources
+  (`LOCAL_SOURCE_ROOTS`) must be readable by uid 10001, for example
+  `setfacl -R -m u:10001:rX /var/log/app` on the host.
+- CI: `aquasecurity/trivy-action` is pinned to `v0.35.0` instead of
+  `@master`. That action's tags were force-pushed to credential-stealing
+  code in March 2026, and a branch reference would have run whatever was
+  pushed there. `actions/checkout` and `actions/setup-python` move to their
+  Node 24 majors, and Dependabot now also keeps the workflow's actions up
+  to date.
 - Login lockout can no longer be reset by flooding the throttle with other
   usernames. An entry only leaves the tracker once it's idle (unlocked,
   with no failure inside the lockout window). If the tracker fills with

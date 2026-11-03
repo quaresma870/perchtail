@@ -29,3 +29,13 @@ updates:
     labels:
       - dependencies
       - agent
+
+  # CI workflow actions (.github/workflows/*.yml)
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - ci

@@ -19,6 +19,13 @@ WORKDIR /app/backend
 # base image tag happened to bake in.
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
+# The app runs as this unprivileged user, never as root -- see
+# docker-entrypoint.sh for how /data ownership is handed over on startup.
+RUN groupadd --system --gid 10001 perchtail \
+    && useradd --system --uid 10001 --gid perchtail --home-dir /app --no-create-home \
+        --shell /usr/sbin/nologin perchtail \
+    && mkdir -p /data && chown perchtail:perchtail /data
+
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

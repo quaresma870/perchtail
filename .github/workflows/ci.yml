@@ -14,9 +14,9 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -50,7 +50,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v4
         with:
@@ -76,9 +76,9 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -136,7 +136,7 @@ jobs:
       run:
         working-directory: agent
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-go@v5
         with:
@@ -186,7 +186,7 @@ jobs:
   docker-image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 
@@ -204,8 +204,11 @@ jobs:
       # Blocking, same as the dependency scans above -- HIGH/CRITICAL in the
       # published base image + OS packages is exactly the kind of thing that
       # should stop a merge, not just get noted somewhere.
+      # Pinned to a release, never a branch: in March 2026 this action's
+      # tags were force-pushed to credential-stealing code; v0.35.0 is the
+      # first release published after that cleanup.
       - name: Scan image for vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: perchtail:ci
           severity: "HIGH,CRITICAL"
@@ -217,7 +220,7 @@ jobs:
       # (see ROADMAP.md), so "alongside releases" is a follow-up once one
       # exists rather than invented here.
       - name: Generate SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: perchtail:ci
           format: cyclonedx
