@@ -622,3 +622,51 @@ def test_symlink_escaping_base_path_is_a_404_on_browse_and_open(
     assert browse.status_code == 404
     assert opened.status_code == 404
     assert b"root:" not in opened.content
+
+
+# --- every protocol is served by browse/open (regression: #165) ------------
+
+
+def test_every_protocol_has_a_connector():
+    from app.collectors.registry import CONNECTORS
+
+    assert set(CONNECTORS) == set(Protocol)
+
+
+def test_agent_source_can_be_browsed_and_opened(app_client, session, monkeypatch, scratch_store):
+    """v0.4.0 answered 501 "protocol agent not yet supported" on every
+    browse/open of an agent source while /check passed: archive.py kept its
+    own connector map without the agent."""
+    import base64
+
+    from app.agent_registry import get_agent_registry
+
+    app, client = app_client
+    _make_user(session, app, is_super_admin=True)
+    source = Source(
+        name="agent01",
+        protocol=Protocol.agent,
+        host="agent01",
+        base_path="/var/log/app",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+
+    def fake_send(source_id, command_type, timeout=30.0, **fields):
+        assert source_id == source.id
+        if command_type == "list":
+            return {"entries": [{"name": "app.log", "is_dir": False, "size": 5}]}
+        assert command_type == "fetch" and fields["path"] == "app.log"
+        return {"content_b64": base64.b64encode(b"hello").decode()}
+
+    monkeypatch.setattr(get_agent_registry(), "send_command_sync", fake_send)
+
+    browse = client.get(f"/sources/{source.id}/browse")
+    opened = client.get(f"/sources/{source.id}/open", params={"path": "app.log"})
+
+    assert browse.status_code == 200, browse.text
+    assert [e["name"] for e in browse.json()] == ["app.log"]
+    assert opened.status_code == 200, opened.text
+    assert opened.content == b"hello"

@@ -19,11 +19,8 @@ from app.auth.rbac import (
     require_global_capability,
     visible_source_ids,
 )
-from app.collectors import agent as agent_collector
 from app.collectors import local as local_collector
-from app.collectors import smb as smb_collector
-from app.collectors import ssh as ssh_collector
-from app.collectors import winrm as winrm_collector
+from app.collectors.registry import CONNECTORS
 from app.crypto import encrypt_credential
 from app.db import get_session
 from app.logging_config import get_logger
@@ -43,13 +40,7 @@ logger = get_logger(__name__)
 
 require_manage = require_global_capability(GlobalCapability.create_source, get_current_active_user)
 
-_CONNECTORS = {
-    Protocol.ssh: ssh_collector,
-    Protocol.smb: smb_collector,
-    Protocol.winrm: winrm_collector,
-    Protocol.local: local_collector,
-    Protocol.agent: agent_collector,
-}
+_CONNECTORS = CONNECTORS
 
 
 class FolderPathEntry(BaseModel):

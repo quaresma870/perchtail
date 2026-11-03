@@ -24,10 +24,8 @@ from app.audit import record_audit_event
 from app.auth.models import Capability, User
 from app.auth.rbac import require_capability
 from app.collectors import local as local_collector
-from app.collectors import smb as smb_collector
-from app.collectors import ssh as ssh_collector
-from app.collectors import winrm as winrm_collector
 from app.collectors.base import FetchTooLargeError, max_fetch_bytes
+from app.collectors.registry import CONNECTORS
 from app.config import get_settings
 from app.db import get_session
 from app.logging_config import get_logger
@@ -43,12 +41,7 @@ from app.scratch import get_scratch_store
 router = APIRouter(prefix="/sources/{source_id}", tags=["archive"])
 logger = get_logger(__name__)
 
-_CONNECTORS = {
-    Protocol.ssh: ssh_collector,
-    Protocol.smb: smb_collector,
-    Protocol.winrm: winrm_collector,
-    Protocol.local: local_collector,
-}
+_CONNECTORS = CONNECTORS
 
 
 class BrowseEntry(BaseModel):

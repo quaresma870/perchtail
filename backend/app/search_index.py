@@ -25,27 +25,17 @@ from app.archives import (
     is_archive,
     is_transparent_gzip,
 )
-from app.collectors import agent as agent_collector
-from app.collectors import local as local_collector
-from app.collectors import smb as smb_collector
-from app.collectors import ssh as ssh_collector
-from app.collectors import winrm as winrm_collector
 from app.collectors.base import DirEntry
+from app.collectors.registry import CONNECTORS
 from app.config import get_settings
 from app.health import record_search_sweep
 from app.logging_config import get_logger
-from app.models import AlertFileState, Protocol, Rule, SearchIndexState, Source
+from app.models import AlertFileState, Rule, SearchIndexState, Source
 from app.timeutils import utcnow
 
 logger = get_logger(__name__)
 
-_CONNECTORS = {
-    Protocol.ssh: ssh_collector,
-    Protocol.smb: smb_collector,
-    Protocol.winrm: winrm_collector,
-    Protocol.local: local_collector,
-    Protocol.agent: agent_collector,
-}
+_CONNECTORS = CONNECTORS
 
 # Enough to reliably catch binary content without reading an entire large
 # file just to decide whether to skip it.
