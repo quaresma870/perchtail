@@ -8,6 +8,13 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-03
+
+A security fix release. SSH/SFTP sources no longer follow symlinks out
+of the base path. **Upgrade now if you use SSH sources without a
+`ChrootDirectory`.** No migrations and no configuration changes: replace
+the container.
+
 ### Security
 - SSH/SFTP sources no longer follow symlinks out of the base path. A
   symlink inside the base path (for example `escape -> /etc`) let anyone
