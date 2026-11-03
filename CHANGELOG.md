@@ -9,6 +9,14 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Security
+- A delegated SSO admin (`manage_sso` without super admin) could escalate
+  to any role a group mapping grants, including Super Admin, by pointing
+  the provider at an IdP or group claim they control and signing in as a
+  member of the mapped group. Creating a provider, enabling one, or
+  changing its issuer, client id or group claim now returns 403 unless
+  every group mapping's role is within the admin's own authority, the
+  same bar as creating such a mapping directly. Renaming, rotating the
+  client secret and disabling stay open to them.
 - Regex rules (`re:`) are now compiled with RE2 (`google-re2`), which
   always matches in linear time. A catastrophic pattern such as `(a+)+$`
   can no longer stall every browse of a source (ReDoS). RE2 has no

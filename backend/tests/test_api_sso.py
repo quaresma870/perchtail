@@ -305,3 +305,122 @@ def test_delete_group_mapping(manage_client, session):
 def test_get_missing_group_mapping_is_404(manage_client):
     assert manage_client.patch("/sso/group-mappings/99999", json={"order": 1}).status_code == 404
     assert manage_client.delete("/sso/group-mappings/99999").status_code == 404
+
+
+# --- delegated SSO admins can't repoint trust past their own authority ----------
+
+
+def _super_admin_mapping(session) -> None:
+    from app.auth.models import SSOGroupRoleMapping
+
+    role = Role(name=f"Super-{uuid.uuid4().hex}", is_super_admin=True)
+    session.add(role)
+    session.commit()
+    session.add(SSOGroupRoleMapping(order=1, group_name="admins", role_id=role.id))
+    session.commit()
+
+
+def _seed_provider(session, *, enabled=True) -> int:
+    from app.crypto import encrypt_secret
+
+    config = SSOProviderConfig(
+        protocol="oidc",
+        name="Corporate SSO",
+        config=encrypt_secret(
+            json.dumps(
+                {
+                    "issuer": "https://idp.example.com",
+                    "client_id": "perchtail-client",
+                    "client_secret": "s3cret-value",
+                    "scopes": "openid email profile",
+                    "group_claim": "groups",
+                }
+            )
+        ),
+        enabled=enabled,
+    )
+    session.add(config)
+    session.commit()
+    session.refresh(config)
+    return config.id
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"issuer": "https://attacker-idp.example.com"},
+        {"client_id": "attacker-client"},
+        {"group_claim": "nickname"},
+        {"enabled": True},
+    ],
+)
+def test_delegated_sso_admin_cannot_change_trust_while_a_mapping_exceeds_them(
+    manage_client, session, change
+):
+    _super_admin_mapping(session)
+    provider_id = _seed_provider(session, enabled=False)
+
+    response = manage_client.patch(f"/sso/{provider_id}", json=change)
+
+    assert response.status_code == 403
+    raw = json.loads(decrypt_secret(session.get(SSOProviderConfig, provider_id).config))
+    assert raw["issuer"] == "https://idp.example.com"
+    assert raw["client_id"] == "perchtail-client"
+    assert raw["group_claim"] == "groups"
+
+
+def test_delegated_sso_admin_cannot_create_a_provider_while_a_mapping_exceeds_them(
+    manage_client, session
+):
+    _super_admin_mapping(session)
+
+    response = manage_client.post("/sso", json=CREATE_PAYLOAD)
+
+    assert response.status_code == 403
+    assert session.exec(select(SSOProviderConfig)).all() == []
+
+
+def test_delegated_sso_admin_can_still_make_non_trust_changes(manage_client, session):
+    _super_admin_mapping(session)
+    provider_id = _seed_provider(session)
+
+    response = manage_client.patch(
+        f"/sso/{provider_id}",
+        json={
+            "name": "Renamed",
+            "client_secret": "rotated",
+            "enabled": False,
+            "issuer": "https://idp.example.com",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+
+def test_super_admin_can_change_trust_with_any_mapping(session, client_for):
+    _super_admin_mapping(session)
+    provider_id = _seed_provider(session)
+    client = client_for(_make_user(session, is_super_admin=True))
+
+    response = client.patch(f"/sso/{provider_id}", json={"issuer": "https://new-idp.example.com"})
+
+    assert response.status_code == 200
+
+
+def test_delegated_sso_admin_can_change_trust_when_mappings_are_within_authority(
+    manage_client, session
+):
+    from app.auth.models import SSOGroupRoleMapping
+
+    role = Role(name="Viewer")
+    session.add(role)
+    session.commit()
+    session.add(SSOGroupRoleMapping(order=1, group_name="viewers", role_id=role.id))
+    session.commit()
+    provider_id = _seed_provider(session)
+
+    response = manage_client.patch(
+        f"/sso/{provider_id}", json={"issuer": "https://new-idp.example.com"}
+    )
+
+    assert response.status_code == 200
