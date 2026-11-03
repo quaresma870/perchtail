@@ -6,6 +6,7 @@ from pathlib import Path
 
 import winrm
 
+from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.crypto import decrypt_credential
 from app.models import Rule, Source
@@ -82,16 +83,42 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     return entries
 
 
+# Each WinRM round trip returns one base64-encoded block, so a large file is
+# read in ranges instead of loaded whole into memory on either end.
+_CHUNK_BYTES = 4 * 1024 * 1024
+
+
 def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
-    """WinRM has no native bulk file-transfer primitive, so content is
-    base64-encoded through PowerShell (Get-Content) and decoded on our side
-    — fine for log files, not efficient for very large ones. CLAUDE.md
-    documents WinRM as the fallback for when SMB isn't open, not the
-    primary path, so this tradeoff is acceptable here."""
-    path = _remote_path(source, relative_path)
-    script = f"[Convert]::ToBase64String([IO.File]::ReadAllBytes({_ps_quote(path)}))"
-    encoded = _run_ps(source, script).strip()
-    destination.write_bytes(base64.b64decode(encoded))
+    """WinRM has no native bulk file-transfer primitive, so content is read
+    through PowerShell in byte ranges, base64-encoded, and reassembled here.
+    The file is opened with FileShare.ReadWrite so a log another process is
+    still writing can be read. Refuses anything over MAX_FETCH_MB before
+    transferring a single block."""
+    path = _ps_quote(_remote_path(source, relative_path))
+    limit = collector_base.max_fetch_bytes()
+    size = int(_run_ps(source, f"(Get-Item -LiteralPath {path}).Length").strip() or 0)
+    if size > limit:
+        raise collector_base.too_large(size, limit)
+
+    written = 0
+    try:
+        with open(destination, "wb") as dst:
+            while written < size:
+                script = (
+                    f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
+                    f"try {{ $f.Seek({written}, 'Begin') | Out-Null; "
+                    f"$b = New-Object byte[] {_CHUNK_BYTES}; "
+                    "$n = $f.Read($b, 0, $b.Length); "
+                    "[Convert]::ToBase64String($b, 0, $n) } finally { $f.Close() }"
+                )
+                block = base64.b64decode(_run_ps(source, script).strip())
+                if not block:
+                    break  # the file shrank (rotated) while being read
+                dst.write(block)
+                written += len(block)
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 @contextmanager

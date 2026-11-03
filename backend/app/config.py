@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # to before the fetch is refused -- a tiny crafted archive could
     # otherwise expand to fill the scratch disk.
     max_decompressed_mb: float = 2048.0
+    # Largest single file a remote connector will fetch into scratch, and the
+    # largest total a folder ZIP may collect -- keeps one request from filling
+    # the scratch disk or (for WinRM/agent) memory.
+    max_fetch_mb: float = 2048.0
 
     # Phase 3 full-text search (app/search_index.py) — how often the
     # background indexer sweeps opted-in sources, and the largest single
