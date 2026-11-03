@@ -313,3 +313,33 @@ def test_run_indexing_sweep_only_processes_enabled_opted_in_sources(tmp_path, mo
     with Session(engine) as session:
         assert len(_fts_rows(session, opted_in_id)) == 1
         assert _fts_rows(session, not_opted_in_id) == []
+
+
+def test_sweep_purges_snippets_left_behind_by_an_opted_out_source(tmp_path, monkeypatch):
+    from app.models import SearchIndexState
+    from app.search_index import _insert_fts_rows
+    from app.timeutils import utcnow
+    from sqlmodel import select
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    SQLModel.metadata.create_all(engine)
+    ensure_search_schema(engine)
+    monkeypatch.setattr("app.db.engine", engine)
+    monkeypatch.setattr("app.alerts.evaluate_alerts", lambda: None)
+
+    with Session(engine) as session:
+        source = _source(session, tmp_path, search_indexing_enabled=False)
+        _insert_fts_rows(session, source.id, "app.log", "secret token here")
+        session.add(
+            SearchIndexState(source_id=source.id, file_path="app.log", size=1, indexed_at=utcnow())
+        )
+        session.commit()
+        source_id = source.id
+
+    run_indexing_sweep()
+
+    with Session(engine) as session:
+        assert _fts_rows(session, source_id) == []
+        assert session.exec(select(SearchIndexState)).all() == []
