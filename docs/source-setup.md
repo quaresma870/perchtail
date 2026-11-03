@@ -124,6 +124,28 @@ logrotate creates tomorrow.
 Allow TCP 22 (or your custom SSH port) inbound from the PerchTail connector's
 IP only.
 
+### 6. Host-key pinning
+
+PerchTail keeps every SSH server's host key in `SSH_KNOWN_HOSTS_PATH`
+(`/data/ssh_known_hosts` in Docker). If a pinned key ever changes, the
+connection fails. That is the man-in-the-middle check.
+
+What happens the *first* time PerchTail sees a host depends on
+`SSH_HOST_KEY_POLICY`:
+
+- `tofu` (default) pins the key on first connect. The OpenSSH equivalent
+  is `StrictHostKeyChecking=accept-new`. Each pin is logged at WARNING as
+  `ssh.host_key_pinned`, with an OpenSSH-style `SHA256:` fingerprint.
+  Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on
+  the server.
+- `strict` refuses any host that isn't already in the file. Add each
+  server first, from a machine you trust, and check the fingerprint
+  before you append:
+
+  ```bash
+  ssh-keyscan -p 22 app01.example.com >> /data/ssh_known_hosts
+  ```
+
 ## SMB (Windows shares)
 
 ### 1. Create a dedicated account

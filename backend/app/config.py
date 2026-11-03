@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -28,6 +29,10 @@ class Settings(BaseSettings):
     # fresh SSHClient is created per call with no persistence otherwise,
     # so every connection would silently trust whatever key is presented.
     ssh_known_hosts_path: str = "./data/ssh_known_hosts"
+    # What to do with a host that has no key in ssh_known_hosts yet: "tofu"
+    # pins it on first connect (and logs the fingerprint), "strict" refuses
+    # to connect until an operator adds the key to the file by hand.
+    ssh_host_key_policy: Literal["tofu", "strict"] = "tofu"
     # Username for the auto-seeded break-glass super-admin (see
     # app/bootstrap.py's seed_initial_super_admin) — only used on a fresh
     # deployment with zero users; its password is randomly generated and
