@@ -6,7 +6,16 @@ from sqlmodel import Session, select
 
 from app.auth.models import AuthSession, User
 from app.config import get_settings
+from app.logging_config import get_logger
 from app.timeutils import utcnow
+
+logger = get_logger(__name__)
+
+
+# last_seen_at only needs minute-level accuracy for the Sessions page, so it
+# isn't rewritten (a SQLite write on every authenticated request) more often
+# than this.
+_LAST_SEEN_RESOLUTION = timedelta(minutes=1)
 
 
 def hash_token(token: str) -> str:
@@ -46,9 +55,12 @@ def get_user_by_token(session: Session, token: str) -> User | None:
     if user is None or not user.active:
         return None
 
-    auth_session.last_seen_at = utcnow()
-    session.add(auth_session)
-    session.commit()
+    now = utcnow()
+    last_seen = auth_session.last_seen_at
+    if last_seen is None or now - last_seen >= _LAST_SEEN_RESOLUTION:
+        auth_session.last_seen_at = now
+        session.add(auth_session)
+        session.commit()
     return user
 
 
@@ -86,3 +98,36 @@ def revoke_session(session: Session, *, user_id: int, session_id: int) -> bool:
     session.delete(auth_session)
     session.commit()
     return True
+
+
+def revoke_all_sessions(session: Session, user_id: int, *, except_token: str | None = None) -> int:
+    """Signs a user out everywhere (optionally except the caller's own
+    session) -- after a password change or an admin reset, a session opened
+    with the old password must not stay valid. Doesn't commit."""
+    keep = hash_token(except_token) if except_token else None
+    rows = session.exec(select(AuthSession).where(AuthSession.user_id == user_id)).all()
+    revoked = 0
+    for row in rows:
+        if row.token_hash != keep:
+            session.delete(row)
+            revoked += 1
+    return revoked
+
+
+def purge_expired_sessions(session: Session) -> int:
+    """Deletes expired session rows -- get_user_by_token already refuses
+    them, but nothing ever removed them, so the table only grew."""
+    rows = session.exec(select(AuthSession).where(AuthSession.expires_at < utcnow())).all()
+    for row in rows:
+        session.delete(row)
+    session.commit()
+    return len(rows)
+
+
+def run_session_purge_sweep() -> None:
+    from app.db import engine  # deferred: same reason as the other sweeps
+
+    with Session(engine) as session:
+        purged = purge_expired_sessions(session)
+    if purged:
+        logger.info("sessions.expired_purged", count=purged)

@@ -34,6 +34,7 @@ from app.api.users import router as users_router
 from app.audit_hash_chain import backfill_chain_if_needed
 from app.audit_integrity import run_audit_integrity_check
 from app.audit_purge import run_audit_purge_sweep
+from app.auth.sessions import run_session_purge_sweep
 from app.bootstrap import (
     assert_credential_salt_present,
     seed_initial_super_admin,
@@ -250,6 +251,7 @@ async def lifespan(app: FastAPI):
         "interval",
         seconds=settings.audit_purge_interval_seconds,
     )
+    scheduler.add_job(run_session_purge_sweep, "interval", hours=1)
     scheduler.add_job(
         run_audit_integrity_check,
         "interval",

@@ -9,6 +9,7 @@ from app.audit import record_audit_event
 from app.auth.models import GlobalCapability, Role, User
 from app.auth.providers.local import create_local_user, hash_password
 from app.auth.rbac import require_global_capability, require_role_within_authority
+from app.auth.sessions import revoke_all_sessions
 from app.db import get_session
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -148,6 +149,7 @@ def reset_password(
     target.password_hash = hash_password(temporary_password)
     target.must_change_password = True
     session.add(target)
+    revoke_all_sessions(session, target.id)
     record_audit_event(
         session,
         user_id=user.id,
