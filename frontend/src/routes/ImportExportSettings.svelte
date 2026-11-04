@@ -12,6 +12,7 @@
     key: string
     changes: string[]
     needs_credential: boolean
+    protocol?: string | null
   }
   interface Problem {
     where: string
@@ -29,13 +30,25 @@
   let busy = false
   let error = ''
   let showUnchanged = false
-  // Typed credentials for sources the file gives none, by plan key.
-  let credentials: Record<string, { username: string; password: string }> = {}
+  // Typed credentials for sources with none in the file or saved, by plan
+  // key. SSH sources can take a private key instead of a password (#196).
+  interface TypedCredential {
+    username: string
+    password: string
+    privateKey: string
+    useKey: boolean
+  }
+  let credentials: Record<string, TypedCredential> = {}
 
   $: changed = result?.items.filter((i) => i.action !== 'unchanged') ?? []
   $: unchanged = result?.items.filter((i) => i.action === 'unchanged') ?? []
   $: needingCredential = result?.items.filter((i) => i.needs_credential) ?? []
   $: stale = result !== null && text !== previewedText
+  // A credential typed for a source that's otherwise unchanged is a change too.
+  $: credentialOnly = needingCredential.filter(
+    (i) => i.action === 'unchanged' && typedCredentials(credentials)[i.key],
+  ).length
+  $: applyCount = changed.length + credentialOnly
 
   function download(name: string, content: string) {
     const url = URL.createObjectURL(new Blob([content], { type: 'application/yaml' }))
@@ -62,11 +75,16 @@
     if (file) text = await file.text()
   }
 
-  function typedCredentials() {
+  function typedCredentials(typed: Record<string, TypedCredential>) {
     return Object.fromEntries(
-      Object.entries(credentials)
-        .filter(([, c]) => c.username && c.password)
-        .map(([key, c]) => [key, { username: c.username, password: c.password }]),
+      Object.entries(typed)
+        .filter(([, c]) => c.username && (c.useKey ? c.privateKey : c.password))
+        .map(([key, c]) => [
+          key,
+          c.useKey
+            ? { username: c.username, private_key: c.privateKey }
+            : { username: c.username, password: c.password },
+        ]),
     )
   }
 
@@ -77,13 +95,13 @@
       const response = await api.post<ImportResult>('/admin/config/import', {
         yaml: text,
         dry_run: dryRun,
-        credentials: typedCredentials(),
+        credentials: typedCredentials(credentials),
       })
       result = response
       previewedText = text
       for (const item of response.items) {
         if (item.needs_credential && !credentials[item.key]) {
-          credentials[item.key] = { username: '', password: '' }
+          credentials[item.key] = { username: '', password: '', privateKey: '', useKey: false }
         }
       }
       if (response.applied) credentials = {}
@@ -141,8 +159,8 @@
         {busy ? 'Checking…' : 'Preview'}
       </button>
       {#if result && !result.applied && result.problems.length === 0 && !stale}
-        <button class="btn btn-primary" disabled={busy || changed.length === 0} on:click={() => submit(false)}>
-          Apply {changed.length} change{changed.length === 1 ? '' : 's'}
+        <button class="btn btn-primary" disabled={busy || applyCount === 0} on:click={() => submit(false)}>
+          Apply {applyCount} change{applyCount === 1 ? '' : 's'}
         </button>
       {/if}
     </div>
@@ -171,8 +189,8 @@
       <div class="card">
         <h2>Credentials</h2>
         <p class="hint">
-          These new sources have no credential in the file. Type one now, or leave it blank and set it
-          in the source's settings later.
+          These sources have no credential, in the file or saved. Type one now, or leave it blank and
+          set it in the source's settings later.
         </p>
         {#each needingCredential as item (item.key)}
           {#if credentials[item.key]}
@@ -185,14 +203,33 @@
                 autocomplete="off"
                 data-gramm="false"
               />
-              <input
-                class="input"
-                type="password"
-                placeholder="password"
-                bind:value={credentials[item.key].password}
-                autocomplete="new-password"
-                data-gramm="false"
-              />
+              {#if credentials[item.key].useKey}
+                <textarea
+                  class="input mono key-input"
+                  rows="3"
+                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                  aria-label={`Private key for ${item.key}`}
+                  bind:value={credentials[item.key].privateKey}
+                  spellcheck="false"
+                  autocomplete="off"
+                  data-gramm="false"
+                ></textarea>
+              {:else}
+                <input
+                  class="input"
+                  type="password"
+                  placeholder="password"
+                  bind:value={credentials[item.key].password}
+                  autocomplete="new-password"
+                  data-gramm="false"
+                />
+              {/if}
+              {#if item.protocol === 'ssh'}
+                <label class="key-toggle">
+                  <input type="checkbox" bind:checked={credentials[item.key].useKey} />
+                  SSH key
+                </label>
+              {/if}
             </div>
           {/if}
         {/each}
@@ -327,10 +364,21 @@
   }
   .cred-row {
     display: grid;
-    grid-template-columns: 1fr 160px 160px;
+    grid-template-columns: 1fr 160px 220px 80px;
     gap: 0.5rem;
     align-items: center;
     margin-top: 0.4rem;
+  }
+  .key-input {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+  }
+  .key-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
   }
   .key {
     font-size: 0.85rem;

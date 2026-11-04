@@ -149,6 +149,12 @@
             ? `:${source.port}`
             : ''}
           {#if source.tls_ca_pem}<span class="badge badge-muted">own CA</span>{/if}
+          {#if source.winrm_effective_scheme === 'http'}
+            <p class="http-warning">
+              Plain HTTP: NTLM still encrypts the WinRM messages, but the server isn't
+              authenticated. Prefer HTTPS.
+            </p>
+          {/if}
         </dd>
       {/if}
       {#if source.roots.length > 0}
@@ -206,6 +212,12 @@
 </div>
 
 <style>
+  .http-warning {
+    margin: 0.3rem 0 0;
+    font-family: var(--font-sans, inherit);
+    font-size: 0.8rem;
+    color: var(--warning, #b58105);
+  }
   .roots {
     list-style: none;
     margin: 0;

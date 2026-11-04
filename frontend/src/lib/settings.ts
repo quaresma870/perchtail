@@ -15,12 +15,24 @@ export const systemSettings = writable<SystemSettings>({
   connections_view_default: 'list',
 })
 
+let loadedAt = 0
+
 export async function refreshSystemSettings(): Promise<void> {
   try {
     const settings = await api.get<SystemSettings>('/system-settings')
     systemSettings.set(settings)
+    loadedAt = Date.now()
   } catch {
     // Non-fatal -- keep the optimistic default rather than blocking the app
     // on a settings fetch failing.
   }
+}
+
+// Settings an admin changes reach users who already have the app open on
+// their next navigation or when they come back to the tab, instead of only
+// after a reload (#196). At most one request per `maxAgeMs`.
+export function refreshSystemSettingsIfStale(maxAgeMs = 30_000): Promise<void> | undefined {
+  if (Date.now() - loadedAt < maxAgeMs) return undefined
+  loadedAt = Date.now()
+  return refreshSystemSettings()
 }

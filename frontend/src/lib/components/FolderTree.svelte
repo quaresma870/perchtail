@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte'
+  import { createEventDispatcher, onMount } from 'svelte'
+  import { get } from 'svelte/store'
+  import { explorerExpanded, setExpanded } from '../viewer-tabs'
   import { api, ApiError } from '../api'
   import { tabKey, memberPath } from '../tab-key'
   import { downloadHref } from '../download-href'
@@ -32,6 +34,7 @@
   let error = ''
 
   const canExpand = entry.is_dir || (entry.is_archive && archiveRoot === null)
+  const expandKey = `dir:${sourceId}:${archiveRoot ?? ''}:${entry.path}`
 
   $: ownKey =
     archiveRoot !== null
@@ -58,6 +61,7 @@
         }
       }
       expanded = !expanded
+      setExpanded(expandKey, expanded)
     } else if (!entry.is_dir) {
       if (archiveRoot !== null) {
         const member = memberPath(entry.path, archiveRoot)
@@ -67,6 +71,10 @@
       }
     }
   }
+
+  onMount(() => {
+    if (canExpand && get(explorerExpanded).has(expandKey)) toggle()
+  })
 </script>
 
 <div class="node">

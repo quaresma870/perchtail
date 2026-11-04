@@ -3,6 +3,8 @@
   import { api, ApiError } from '../api'
   import type { BrowseEntry, Source } from '../types'
   import FolderTree from './FolderTree.svelte'
+  import { explorerExpanded, setExpanded } from '../viewer-tabs'
+  import { get } from 'svelte/store'
 
   /** A source (machine) in the viewer's explorer: expands in place to its
    * own directory tree, loaded lazily on first expand (#162). Errors stay
@@ -40,6 +42,7 @@
 
   async function toggle() {
     expanded = !expanded
+    setExpanded(`source:${source.id}`, expanded)
     if (expanded && !loaded) await load()
   }
 
@@ -51,6 +54,8 @@
     if (initiallyExpanded) {
       toggle()
       element?.scrollIntoView({ block: 'nearest' })
+    } else if (get(explorerExpanded).has(`source:${source.id}`)) {
+      toggle()
     }
   })
 </script>

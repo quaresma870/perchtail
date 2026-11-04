@@ -32,6 +32,8 @@ test('tabs from the viewer survive a visit to Settings and back', async ({ page 
   await page.goto('/#/viewer')
 
   await expect(page.locator('.tab .tab-label')).toContainText('perchtail.log')
+  // The machine stays expanded too (#196), not just the tabs.
+  await expect(page.locator('.tree-body').getByRole('button', { name: 'perchtail.log' })).toBeVisible()
 })
 
 test('the page itself never scrolls: only the log pane does', async ({ page }) => {

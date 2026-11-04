@@ -331,3 +331,23 @@ def test_quoting_the_whole_rule_is_fine(session, client):
     )
     assert result["problems"] == []
     assert "**/debug/**" in {r.pattern for r in session.exec(select(Rule)).all()}
+
+
+def test_an_imported_source_without_a_credential_still_asks_for_one(session, client):
+    """#196: after applying, a second preview showed the sources as
+    unchanged and stopped offering the credential they still lack."""
+    _import(client)
+    again = _import(client, dry_run=True)
+    needs = {i["key"]: i for i in again["items"] if i["needs_credential"]}
+    assert set(needs) == {"Acme / fs01", "Acme / iis01"}
+    assert needs["Acme / fs01"]["action"] == "unchanged"
+
+    result = _import(
+        client,
+        credentials={"Acme / fs01": {"username": "svc", "password": "pw"}},
+    )
+    item = next(i for i in result["items"] if i["key"] == "Acme / fs01")
+    assert item["action"] == "update" and "credential set" in item["changes"]
+    assert item["needs_credential"] is False
+    fs01 = session.exec(select(Source).where(Source.name == "fs01")).one()
+    assert fs01.credential_ref is not None
