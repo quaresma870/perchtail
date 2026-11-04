@@ -1,71 +1,52 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte'
   import { push, router } from 'svelte-spa-router'
-  import { api, ApiError } from '../lib/api'
+  import { api } from '../lib/api'
   import ConnectionCard from '../lib/components/ConnectionCard.svelte'
   import ConnectionsTree from '../lib/components/ConnectionsTree.svelte'
-  import FolderTree from '../lib/components/FolderTree.svelte'
+  import SourceNode from '../lib/components/SourceNode.svelte'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
   import DiffPane from '../lib/components/DiffPane.svelte'
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
   import { buildConnectionTree } from '../lib/connection-tree'
   import { filterConnections } from '../lib/connection-filter'
-  import { canFormat, formatContent, type FormatMode } from '../lib/format-content'
+  import { readFetchFailure, type FetchProblem } from '../lib/fetch-errors'
+  import { canFormat, formatContent } from '../lib/format-content'
   import { languageForFilename } from '../lib/file-language'
   import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
   import { parsePatternInput } from '../lib/rule-format'
+  import { systemSettings } from '../lib/settings'
   import { tabKey } from '../lib/tab-key'
-  import type { BrowseEntry, SeverityPattern, Source } from '../lib/types'
+  import type { SeverityPattern, Source } from '../lib/types'
+  import { sourceHue, viewerState, type Tab } from '../lib/viewer-tabs'
 
+  /** The viewer is one explorer across every source the user can see
+   * (#162): machines expand in place in the sidebar, and tabs from
+   * several sources stay open side by side. Tabs live in `viewerState`
+   * (lib/viewer-tabs.ts), so they also survive visiting Search or
+   * Settings and coming back. `/viewer/:sourceId` only expands and
+   * reveals that source (plus `?path=&line=` to open a file, from
+   * Search). */
   export let params: { sourceId?: string } = {}
 
-  interface Tab {
-    key: string
-    path: string
-    member: string | null
-    name: string
-    content: string
-    scratchKey: string | null
-    wrapEnabled: boolean
-    showWhitespace: boolean
-    // Pure client-side/session state (ROADMAP.md: never written to the
-    // file, never persisted server-side) -- 1-indexed line numbers, kept
-    // sorted ascending so the bookmark-nav wrap-around cycling and the
-    // CodeMirror decoration builder can both rely on that order.
-    bookmarks: number[]
-    // Notepad++-style "Mark" highlighting (ROADMAP.md): ad hoc patterns the
-    // viewer types in on the spot, each its own color. Same
-    // never-persisted, per-tab-state shape as bookmarks above.
-    markPatterns: MarkPattern[]
-    // Display-only reformat (ROADMAP.md: "never touches the file on disk")
-    // for JSON/XML tabs -- 'none' shows the raw fetched content as-is.
-    format: FormatMode
-    // "Follow" (tail -f, ROADMAP.md): client-side polling, not a
-    // persistent connection -- see the reactive block below for why. Only
-    // ever driven while this tab is the active one; the flag itself
-    // persists on the tab so switching away and back resumes it.
-    following: boolean
-  }
-
   const FOLLOW_INTERVAL_MS = 2000
+  const VIEW_PREF_KEY = 'perchtail.connectionsView'
 
-  const sourceId = params.sourceId ? Number(params.sourceId) : null
+  const focusSourceId = params.sourceId ? Number(params.sourceId) : null
 
   let recentSources: Source[] = []
   let allSources: Source[] = []
   let connectionsQuery = ''
-  let source: Source | null = null
-  let rootEntries: BrowseEntry[] = []
-  let severityPatterns: SeverityPattern[] = []
   let loading = true
-  let error = ''
+  let loadError = ''
+  // Per-source severity patterns, fetched on first use for that source.
+  let severityBySource: Record<number, SeverityPattern[]> = {}
 
-  let tabs: Tab[] = []
-  let activeKey: string | null = null
+  // A failed open/reload/compare shows here, above the editor, with the
+  // server's reason -- it never replaces the explorer (#160).
+  let notice: (FetchProblem & { retry?: () => void }) | null = null
+
   let paneRef: CodeMirrorPane | null = null
-  // Deliberately not reset on tab switch -- if it's open, it stays open and
-  // re-searches whatever tab becomes active against the same query, rather
-  // than forcing it closed and reopened for every file.
   let findAllOpen = false
   let goToLineOpen = false
   let goToLineValue = ''
@@ -76,38 +57,42 @@
   let copyStatus: '' | 'copied' | 'empty' = ''
   let copyStatusTimer: ReturnType<typeof setTimeout> | null = null
   let formatError = ''
-  // "Compare" (ROADMAP.md's diff-view item): `compareArmed` is the
-  // "waiting for a second file/tab to be picked" state; `compareWith` is
-  // the resulting one-shot snapshot (name + already-fetched content) to
-  // diff the active tab against. Neither is part of `Tab` -- a comparison
-  // is contextual to whichever file is active right now, not a persisted
-  // per-tab mode, so it's cleared whenever the active tab itself changes.
   let compareArmed = false
   let compareWith: { name: string; content: string } | null = null
   let compareKey = 0
+
+  $: tabs = $viewerState.tabs
+  $: activeKey = $viewerState.activeKey
   $: activeKey, (formatError = ''), (compareWith = null), (compareArmed = false)
   $: activeTab = tabs.find((t) => t.key === activeKey) ?? null
-  // Display-only reformat (never mutates activeTab.content itself, so
-  // reloading or turning the toggle back off always recovers the exact
-  // raw fetched text) -- falls back to the raw content if formatting the
-  // *current* content fails, which can only happen after a reload changed
-  // the underlying bytes out from under an active 'pretty'/'minified' mode
-  // (setFormat itself refuses to turn the mode on for invalid content).
+  $: activeSource = activeTab ? allSources.find((s) => s.id === activeTab.sourceId) ?? null : null
+  $: canDownloadActive = activeSource?.my_capabilities?.includes('download') ?? false
+  $: activeSeverityPatterns = activeTab ? (severityBySource[activeTab.sourceId] ?? []) : []
   $: displayContent = activeTab
     ? (formatContent(activeTab.content, languageForFilename(activeTab.name), activeTab.format) ??
       activeTab.content)
     : ''
+  $: sourceNames = new Set(tabs.map((t) => t.sourceId)).size > 1
 
   $: filteredAllSources = filterConnections(allSources, connectionsQuery)
 
-  // "All connections" view toggle (ROADMAP.md's folder-tree navigation
-  // item): additive alongside the existing flat list + search, not a
-  // replacement -- List stays the default so nothing about the shipped
-  // connections-home redesign regresses. `expandedTreeIds` is plain
-  // session state (never persisted); a non-empty search query forces
-  // every node open regardless of it, so a match several folders deep
-  // isn't hidden behind a collapsed ancestor.
+  // List or tree: the admin's default (Settings -> System), and -- when
+  // switching is allowed -- each browser remembers its own last choice (#156).
   let connectionsView: 'list' | 'tree' = 'list'
+  let viewChosenLocally = false
+  $: switchable = $systemSettings.connections_view_switchable
+  $: if (!switchable || !viewChosenLocally) connectionsView = $systemSettings.connections_view_default
+
+  function chooseView(view: 'list' | 'tree') {
+    connectionsView = view
+    viewChosenLocally = true
+    try {
+      localStorage.setItem(VIEW_PREF_KEY, view)
+    } catch {
+      // storage unavailable: the choice just isn't remembered
+    }
+  }
+
   let expandedTreeIds = new Set<string>()
   $: connectionTree = buildConnectionTree(filteredAllSources)
 
@@ -121,18 +106,26 @@
     expandedTreeIds = next
   }
 
-  async function loadSourcePicker() {
+  function revealInTree(source: Source) {
+    const next = new Set(expandedTreeIds)
+    next.add(source.customer_id !== null ? `customer:${source.customer_id}` : 'unassigned')
+    for (const entry of source.folder_path) next.add(`folder:${entry.id}`)
+    expandedTreeIds = next
+  }
+
+  function setState(patch: Partial<{ tabs: Tab[]; activeKey: string | null }>) {
+    viewerState.update((state) => ({ ...state, ...patch }))
+  }
+
+  async function loadSources() {
     loading = true
-    error = ''
+    loadError = ''
     try {
       allSources = await api.get<Source[]>('/sources')
-    } catch (err) {
-      error = err instanceof ApiError ? err.detail : 'Failed to load sources'
+    } catch {
+      loadError = 'Failed to load sources'
     }
     try {
-      // Kept independent of the call above -- an issue fetching recent
-      // history shouldn't block the all-connections column, which is the
-      // more essential of the two lists.
       recentSources = await api.get<Source[]>('/sources/recent')
     } catch {
       recentSources = []
@@ -140,57 +133,63 @@
     loading = false
   }
 
-  async function loadTree() {
-    if (sourceId === null) return
-    loading = true
-    error = ''
+  async function ensureSeverityPatterns(sourceId: number) {
+    if (severityBySource[sourceId] !== undefined) return
+    severityBySource = { ...severityBySource, [sourceId]: [] }
     try {
-      source = await api.get<Source>(`/sources/${sourceId}`)
-      rootEntries = await api.get<BrowseEntry[]>(`/sources/${sourceId}/browse?path=`)
-    } catch (err) {
-      error = err instanceof ApiError ? err.detail : 'Failed to load source'
-    } finally {
-      loading = false
-    }
-    try {
-      // Independent of the calls above -- a failure here shouldn't block
-      // browsing/opening files, it just means no highlighting.
-      severityPatterns = await api.get<SeverityPattern[]>(
+      const patterns = await api.get<SeverityPattern[]>(
         `/sources/${sourceId}/severity-patterns/effective`,
       )
+      severityBySource = { ...severityBySource, [sourceId]: patterns }
     } catch {
-      severityPatterns = []
+      // no highlighting for this source; browsing still works
     }
   }
 
-  async function openFile(path: string, member: string | null, name: string): Promise<boolean> {
-    if (sourceId === null) return false
-    const key = tabKey(path, member)
-    const existing = tabs.find((t) => t.key === key)
-    if (existing) {
-      activeKey = key
-      return true
-    }
-
+  function openUrl(sourceId: number, path: string, member: string | null): string {
     const fetchParams = new URLSearchParams({ path })
     if (member) fetchParams.set('member', member)
+    return `/sources/${sourceId}/open?${fetchParams.toString()}`
+  }
+
+  function releaseScratch(sourceId: number, path: string, member: string | null) {
+    api.post(`/sources/${sourceId}/close`, { path, member }).catch(() => {})
+  }
+
+  async function openFile(
+    sourceId: number,
+    sourceName: string,
+    path: string,
+    member: string | null,
+    name: string,
+  ): Promise<boolean> {
+    const key = tabKey(sourceId, path, member)
+    if (tabs.some((t) => t.key === key)) {
+      setState({ activeKey: key })
+      return true
+    }
     try {
-      const response = await fetch(`/sources/${sourceId}/open?${fetchParams.toString()}`, {
-        credentials: 'include',
-      })
+      const response = await fetch(openUrl(sourceId, path, member), { credentials: 'include' })
       if (!response.ok) {
-        error = `Failed to open ${name}`
+        const problem = await readFetchFailure(response, name)
+        notice = {
+          ...problem,
+          retry: problem.retryable
+            ? () => openFile(sourceId, sourceName, path, member, name)
+            : undefined,
+        }
         return false
       }
       const content = await response.text()
-      const scratchKey = response.headers.get('x-scratch-key')
       const tab: Tab = {
         key,
+        sourceId,
+        sourceName,
         path,
         member,
         name,
         content,
-        scratchKey,
+        scratchKey: response.headers.get('x-scratch-key'),
         wrapEnabled: false,
         showWhitespace: false,
         bookmarks: [],
@@ -198,110 +197,101 @@
         format: 'none',
         following: false,
       }
-      tabs = [...tabs, tab]
-      activeKey = key
+      notice = null
+      ensureSeverityPatterns(sourceId)
+      setState({ tabs: [...tabs, tab], activeKey: key })
       return true
     } catch {
-      error = `Failed to open ${name}`
+      notice = {
+        message: `${name}: the server could not be reached.`,
+        retryable: true,
+        retry: () => openFile(sourceId, sourceName, path, member, name),
+      }
       return false
     }
   }
 
-  async function handleOpen(event: CustomEvent<{ path: string; member: string | null; name: string }>) {
-    const { path, member, name } = event.detail
+  async function handleOpen(
+    event: CustomEvent<{ sourceId: number; sourceName: string; path: string; member: string | null; name: string }>,
+  ) {
+    const { sourceId, sourceName, path, member, name } = event.detail
     if (compareArmed) {
-      await pickCompareTarget(path, member, name)
+      await pickCompareTarget(sourceId, path, member, name)
       return
     }
-    await openFile(path, member, name)
+    await openFile(sourceId, sourceName, path, member, name)
   }
 
-  // "Compare" (ROADMAP.md): fetches the picked file fresh, same as opening
-  // it, but doesn't add a tab for it -- it's a one-shot snapshot to diff
-  // against the active tab, not something meant to stay open on its own.
-  // Releases its scratch reference immediately after fetching, same
-  // best-effort close as every other one-shot fetch in this file.
-  async function pickCompareTarget(path: string, member: string | null, name: string) {
-    if (sourceId === null) return
-    const fetchParams = new URLSearchParams({ path })
-    if (member) fetchParams.set('member', member)
+  // "Compare": a one-shot snapshot of another file -- from any source, so
+  // the same log on two servers can be diffed (#162).
+  async function pickCompareTarget(sourceId: number, path: string, member: string | null, name: string) {
     try {
-      const response = await fetch(`/sources/${sourceId}/open?${fetchParams.toString()}`, {
-        credentials: 'include',
-      })
+      const response = await fetch(openUrl(sourceId, path, member), { credentials: 'include' })
       if (!response.ok) {
-        error = `Failed to open ${name} for comparison`
+        notice = await readFetchFailure(response, name)
         compareArmed = false
         return
       }
       const content = await response.text()
-      const scratchKey = response.headers.get('x-scratch-key')
-      compareWith = { name, content }
+      const label = sourceId === activeTab?.sourceId ? name : `${sourceLabel(sourceId)} › ${name}`
+      compareWith = { name: label, content }
       compareArmed = false
       compareKey += 1
-      if (scratchKey) {
-        api.post(`/sources/${sourceId}/close`, { path, member }).catch(() => {})
-      }
+      if (response.headers.get('x-scratch-key')) releaseScratch(sourceId, path, member)
     } catch {
-      error = `Failed to open ${name} for comparison`
+      notice = { message: `${name}: the server could not be reached.`, retryable: true }
       compareArmed = false
     }
   }
 
-  // Picking another already-open tab as the compare target, instead of
-  // switching to it, while "Compare" is armed.
+  function sourceLabel(sourceId: number): string {
+    return allSources.find((s) => s.id === sourceId)?.name ?? `source #${sourceId}`
+  }
+
   function handleTabClick(tab: Tab) {
     if (compareArmed) {
       compareArmed = false
       if (tab.key !== activeKey) {
-        compareWith = { name: tab.name, content: tab.content }
+        const label = tab.sourceId === activeTab?.sourceId ? tab.name : `${tab.sourceName} › ${tab.name}`
+        compareWith = { name: label, content: tab.content }
         compareKey += 1
       }
       return
     }
-    activeKey = tab.key
+    setState({ activeKey: tab.key })
   }
 
-  // Search click-through (Search.svelte pushes here with ?path=...&line=...)
-  // — opens the file same as clicking it in the tree, then scrolls the
-  // CodeMirror pane to the matched line once its content has rendered.
-  async function openFromDeepLink(path: string, line: number | null) {
+  async function openFromDeepLink(sourceId: number, path: string, line: number | null) {
     const name = path.split('/').pop() ?? path
-    const opened = await openFile(path, null, name)
+    const opened = await openFile(sourceId, sourceLabel(sourceId), path, null, name)
     if (opened && line !== null) {
       await tick()
       paneRef?.scrollToLine(line)
     }
   }
 
-  async function closeTab(tab: Tab) {
-    tabs = tabs.filter((t) => t.key !== tab.key)
-    if (activeKey === tab.key) {
-      activeKey = tabs.length > 0 ? tabs[tabs.length - 1].key : null
-    }
-    if (tab.scratchKey && sourceId !== null) {
-      try {
-        await api.post(`/sources/${sourceId}/close`, { path: tab.path, member: tab.member })
-      } catch {
-        // best-effort — the idle-sweep backstop will clean this up regardless
-      }
-    }
+  function closeTab(tab: Tab) {
+    const remaining = tabs.filter((t) => t.key !== tab.key)
+    setState({
+      tabs: remaining,
+      activeKey:
+        activeKey === tab.key ? (remaining.length > 0 ? remaining[remaining.length - 1].key : null) : activeKey,
+    })
+    if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
   }
 
   function updateActiveTab(patch: Partial<Tab>) {
     if (!activeTab) return
     const key = activeTab.key
-    tabs = tabs.map((t) => (t.key === key ? { ...t, ...patch } : t))
+    setState({ tabs: tabs.map((t) => (t.key === key ? { ...t, ...patch } : t)) })
   }
 
   function toggleWrap() {
-    if (!activeTab) return
-    updateActiveTab({ wrapEnabled: !activeTab.wrapEnabled })
+    if (activeTab) updateActiveTab({ wrapEnabled: !activeTab.wrapEnabled })
   }
 
   function toggleShowWhitespace() {
-    if (!activeTab) return
-    updateActiveTab({ showWhitespace: !activeTab.showWhitespace })
+    if (activeTab) updateActiveTab({ showWhitespace: !activeTab.showWhitespace })
   }
 
   function toggleBookmark() {
@@ -313,10 +303,6 @@
     updateActiveTab({ bookmarks })
   }
 
-  // "Mark" highlighting (Notepad++ feature, ROADMAP.md) -- reuses Rule's
-  // `re:`-prefix convention (parsePatternInput) so a viewer can switch a
-  // mark to regex the same way an admin switches a rule, without a
-  // separate glob/regex toggle control cluttering this small inline form.
   async function openMarkInput() {
     markInputOpen = true
     markInputValue = ''
@@ -325,12 +311,8 @@
   }
 
   function submitMarkInput() {
-    // Closing the form (both branches below) removes the input from the
-    // DOM, which fires its own blur -- and the input's on:blur also calls
-    // this function, so a plain Enter keypress would otherwise run this
-    // twice (submit, then the blur it triggers) and add the same mark
-    // twice. Clearing the value up front before doing anything else makes
-    // that second call a harmless no-op (trimmed === '').
+    // Clearing first makes the blur that closing the form fires a no-op,
+    // so Enter doesn't add the same mark twice.
     const trimmed = markInputValue.trim()
     markInputValue = ''
     markInputOpen = false
@@ -343,27 +325,15 @@
   }
 
   function removeMark(id: string) {
-    if (!activeTab) return
-    updateActiveTab({ markPatterns: activeTab.markPatterns.filter((m) => m.id !== id) })
+    if (activeTab) updateActiveTab({ markPatterns: activeTab.markPatterns.filter((m) => m.id !== id) })
   }
 
   function clearMarks() {
     updateActiveTab({ markPatterns: [] })
   }
 
-  // "Beautify"/"Minify" toggle buttons (ROADMAP.md): clicking the active
-  // mode again turns it back off (-> 'none'), same toggle-button UX as
-  // Wrap/Show chars. Validates against the tab's raw content before
-  // switching modes -- a failed beautify/minify (invalid JSON/malformed
-  // XML) leaves the tab exactly as it was and surfaces `formatError`,
-  // rather than silently switching to a mode that immediately falls back
-  // to unformatted content with no explanation.
-  // Bookmarks are 1-indexed *line numbers* against whatever's currently
-  // displayed (codemirror-theme.ts's buildBookmarkDecorations) -- any
-  // format change reflows the document into a different line count, so an
-  // old bookmark's line number no longer points at the same content (or
-  // any content at all). Cleared on every format transition rather than
-  // left to silently drift or vanish out-of-range.
+  // Bookmarks are line numbers in what's displayed, so any format change
+  // clears them rather than letting them drift.
   function setFormat(mode: 'pretty' | 'minified') {
     if (!activeTab) return
     if (activeTab.format === mode) {
@@ -380,59 +350,33 @@
     updateActiveTab({ format: mode, bookmarks: [] })
   }
 
-  // Manual re-fetch of the currently open file's content in place, without
-  // closing and reopening the tab -- the always-fresh-fetch model already
-  // exists for a fresh *open*, this just exposes a fetch-again action for a
-  // tab that's already open. Releases the previous scratch reference after
-  // the new one lands, same "path/member, not the scratch key itself"
-  // release call closeTab already makes.
+  // Re-fetch the active tab in place (Reload, and every Follow tick); the
+  // previous scratch reference is released once the new one lands.
   async function reloadActiveTab() {
-    if (!activeTab || sourceId === null) return
+    if (!activeTab) return
     const tab = activeTab
-    const fetchParams = new URLSearchParams({ path: tab.path })
-    if (tab.member) fetchParams.set('member', tab.member)
     try {
-      const response = await fetch(`/sources/${sourceId}/open?${fetchParams.toString()}`, {
+      const response = await fetch(openUrl(tab.sourceId, tab.path, tab.member), {
         credentials: 'include',
       })
       if (!response.ok) {
-        error = `Failed to reload ${tab.name}`
+        const problem = await readFetchFailure(response, tab.name)
+        notice = { ...problem, retry: problem.retryable ? reloadActiveTab : undefined }
         return
       }
       const content = await response.text()
       const scratchKey = response.headers.get('x-scratch-key')
-      const oldScratchKey = tab.scratchKey
-      // Deliberately keeps whatever `format` was active -- Follow (tail -f)
-      // calls this every couple of seconds, and resetting it on every
-      // fetch would silently fight a Beautify/Minify toggle into
-      // uselessness the moment Follow is also on. `displayContent`'s own
-      // `formatContent(...) ?? content` fallback already degrades
-      // gracefully to raw content if a reload's new bytes no longer parse
-      // under the active mode, so nothing here needs to force it off.
-      tabs = tabs.map((t) => (t.key === tab.key ? { ...t, content, scratchKey } : t))
-      if (oldScratchKey) {
-        api
-          .post(`/sources/${sourceId}/close`, { path: tab.path, member: tab.member })
-          .catch(() => {})
-      }
+      setState({ tabs: tabs.map((t) => (t.key === tab.key ? { ...t, content, scratchKey } : t)) })
+      if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
     } catch {
-      error = `Failed to reload ${tab.name}`
+      notice = { message: `${tab.name}: the server could not be reached.`, retryable: true, retry: reloadActiveTab }
     }
   }
 
   function toggleFollow() {
-    if (!activeTab) return
-    updateActiveTab({ following: !activeTab.following })
+    if (activeTab) updateActiveTab({ following: !activeTab.following })
   }
 
-  // "Follow" (tail -f, ROADMAP.md): client-side polling was picked over
-  // extending the agent-mode WebSocket with a "watch" command -- this
-  // needs to work uniformly across every protocol (SSH/SMB/WinRM/local),
-  // not just agent-linked sources, and there's no persistent connection to
-  // extend for the other three. The accepted cost is a full re-fetch of
-  // the whole file on every tick (same always-fresh, no-partial-read
-  // architecture as a manual Reload -- see CLAUDE.md's ephemeral-fetch
-  // rule) rather than a byte-range/tail-only read.
   let followTimer: ReturnType<typeof setInterval> | null = null
   let followPolling = false
 
@@ -444,9 +388,6 @@
   }
 
   async function followTick() {
-    // Skips a tick rather than queuing it -- if a fetch is still in
-    // flight when the next interval fires (a slow SSH/SMB round trip),
-    // overlapping reloads could land out of order.
     if (followPolling) return
     followPolling = true
     try {
@@ -456,15 +397,9 @@
     }
   }
 
-  // Re-evaluated whenever the active tab (a tab switch swaps in a
-  // different object) or that tab's own `following` flag changes: only
-  // ever one timer running, and only for whichever tab is both active and
-  // following -- switching away pauses it (a background tab doesn't keep
-  // polling), switching back resumes it, since the flag itself lives on
-  // the tab, not on this component.
   $: {
     stopFollowTimer()
-    if (activeTab?.following && sourceId !== null) {
+    if (activeTab?.following) {
       followTimer = setInterval(followTick, FOLLOW_INTERVAL_MS)
     }
   }
@@ -492,12 +427,6 @@
     goToLineOpen = false
   }
 
-  // Ctrl/Cmd+F is meant to search the open file via CodeMirror's own search
-  // panel, not the browser's find bar — but a plain keydown on the editor
-  // DOM isn't reliable (see CodeMirrorPane's openSearch doc comment), so
-  // it's intercepted here at the window level instead, while a tab is open.
-  // Ctrl/Cmd+G (go to line) is intercepted the same way and for the same
-  // reason.
   function handleKeydown(event: KeyboardEvent) {
     if (!activeTab) return
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
@@ -509,145 +438,115 @@
     }
   }
 
-  onMount(() => {
-    if (sourceId === null) {
-      loadSourcePicker()
-    } else {
-      loadTree()
+  onMount(async () => {
+    try {
+      const stored = localStorage.getItem(VIEW_PREF_KEY)
+      if (stored === 'list' || stored === 'tree') {
+        connectionsView = stored
+        viewChosenLocally = true
+      }
+    } catch {
+      // storage unavailable
+    }
+    window.addEventListener('keydown', handleKeydown)
+    await loadSources()
+    for (const tab of tabs) ensureSeverityPatterns(tab.sourceId)
+    if (focusSourceId !== null) {
+      const focused = allSources.find((s) => s.id === focusSourceId)
+      if (focused) revealInTree(focused)
       const deepLink = new URLSearchParams(router.querystring ?? '')
       const deepLinkPath = deepLink.get('path')
       if (deepLinkPath) {
         const line = deepLink.get('line')
-        openFromDeepLink(deepLinkPath, line ? Number(line) : null)
+        openFromDeepLink(focusSourceId, deepLinkPath, line ? Number(line) : null)
       }
     }
-    window.addEventListener('keydown', handleKeydown)
   })
 
   onDestroy(() => {
+    // Tabs stay open in viewerState; only this view's timers stop.
     window.removeEventListener('keydown', handleKeydown)
     if (copyStatusTimer) clearTimeout(copyStatusTimer)
     stopFollowTimer()
-    for (const tab of tabs) {
-      if (tab.scratchKey && sourceId !== null) {
-        api.post(`/sources/${sourceId}/close`, { path: tab.path, member: tab.member }).catch(() => {})
-      }
-    }
   })
 </script>
 
-{#if sourceId === null}
-  <div class="picker page">
-    {#if loading}
-      <p class="hint">Loading…</p>
-    {:else if error}
-      <p class="error">{error}</p>
-    {:else}
-      <div class="picker-columns">
-        <section class="picker-column recent">
-          <h1>Recent</h1>
-          {#if recentSources.length === 0}
-            <p class="hint">Sources you open will show up here.</p>
-          {:else}
-            <ul>
-              {#each recentSources as s (s.id)}
-                <li>
-                  <ConnectionCard source={s} on:click={() => push(`/viewer/${s.id}`)} />
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </section>
-
-        <section class="picker-column all">
-          <div class="all-header">
-            <h1>All connections</h1>
-            <div class="all-header-controls">
-              <input
-                class="input search-box"
-                type="search"
-                placeholder="Search by folder, customer, or host…"
-                bind:value={connectionsQuery}
-              />
-              <div class="view-toggle" role="group" aria-label="View">
-                <button
-                  class="view-toggle-btn"
-                  class:active={connectionsView === 'list'}
-                  on:click={() => (connectionsView = 'list')}
-                >
-                  List
-                </button>
-                <button
-                  class="view-toggle-btn"
-                  class:active={connectionsView === 'tree'}
-                  on:click={() => (connectionsView = 'tree')}
-                >
-                  Tree
-                </button>
-              </div>
-            </div>
-          </div>
-          {#if filteredAllSources.length === 0}
-            <p class="hint">
-              {connectionsQuery.trim() ? 'No connections match that search.' : 'No sources visible to your account.'}
-            </p>
-          {:else if connectionsView === 'tree'}
-            <div class="connections-tree-body">
-              {#each connectionTree as node (node.id)}
-                <ConnectionsTree
-                  {node}
-                  expandedIds={expandedTreeIds}
-                  forceExpand={connectionsQuery.trim().length > 0}
-                  on:toggle={(e) => toggleTreeNode(e.detail.id)}
-                  on:open={(e) => push(`/viewer/${e.detail.source.id}`)}
-                />
-              {/each}
-            </div>
-          {:else}
-            <ul>
-              {#each filteredAllSources as s (s.id)}
-                <li>
-                  <ConnectionCard source={s} on:click={() => push(`/viewer/${s.id}`)} />
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </section>
-      </div>
-    {/if}
-  </div>
-{:else}
-  <div class="viewer">
-    <aside class="tree">
-      <div class="tree-header">
-        <button class="link" on:click={() => push('/viewer')}>← sources</button>
-        <strong>{source?.name ?? ''}</strong>
-      </div>
-      {#if loading}
-        <p class="hint">Loading…</p>
-      {:else if error}
-        <p class="error">{error}</p>
-      {:else}
-        <div class="tree-body">
-          {#each rootEntries as entry (entry.path)}
-            <FolderTree {sourceId} {entry} {activeKey} on:open={handleOpen} />
-          {/each}
-          {#if rootEntries.length === 0}
-            <p class="hint">Nothing visible here — check the source's rules.</p>
-          {/if}
+<div class="viewer">
+  <aside class="explorer">
+    <div class="explorer-header">
+      <input
+        class="input search-box"
+        type="search"
+        placeholder="Search by folder, customer, or host…"
+        bind:value={connectionsQuery}
+      />
+      {#if switchable}
+        <div class="view-toggle" role="group" aria-label="View">
+          <button
+            class="view-toggle-btn"
+            class:active={connectionsView === 'list'}
+            on:click={() => chooseView('list')}
+          >
+            List
+          </button>
+          <button
+            class="view-toggle-btn"
+            class:active={connectionsView === 'tree'}
+            on:click={() => chooseView('tree')}
+          >
+            Tree
+          </button>
         </div>
       {/if}
-    </aside>
+    </div>
+    <div class="explorer-body">
+      {#if loading}
+        <p class="hint">Loading…</p>
+      {:else if loadError}
+        <p class="error">{loadError}</p>
+      {:else if filteredAllSources.length === 0}
+        <p class="hint">
+          {connectionsQuery.trim() ? 'No connections match that search.' : 'No sources visible to your account.'}
+        </p>
+      {:else if connectionsView === 'tree'}
+        <div class="connections-tree-body">
+          {#each connectionTree as node (node.id)}
+            <ConnectionsTree
+              {node}
+              expandedIds={expandedTreeIds}
+              forceExpand={connectionsQuery.trim().length > 0}
+              {activeKey}
+              {focusSourceId}
+              on:toggle={(e) => toggleTreeNode(e.detail.id)}
+              on:open={handleOpen}
+            />
+          {/each}
+        </div>
+      {:else}
+        <div class="connections-list">
+          {#each filteredAllSources as s (s.id)}
+            <SourceNode
+              source={s}
+              {activeKey}
+              initiallyExpanded={focusSourceId === s.id}
+              on:open={handleOpen}
+            />
+          {/each}
+        </div>
+      {/if}
+    </div>
+  </aside>
 
-    <section class="editor-area">
+  <section class="editor-area">
+    {#if tabs.length > 0}
       <div class="tabs">
         {#each tabs as tab (tab.key)}
-          <div class="tab" class:active={tab.key === activeKey}>
+          <div class="tab" class:active={tab.key === activeKey} title={`${tab.sourceName} › ${tab.member ? `${tab.path} › ${tab.member}` : tab.path}`}>
             <button class="tab-label" on:click={() => handleTabClick(tab)}>
-              <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z" />
-                <path d="M14 2v4a2 2 0 0 0 2 2h4" />
-              </svg>
+              <span class="source-dot" style="background: hsl({sourceHue(tab.sourceId)} 65% 55%)"></span>
+              {#if sourceNames}
+                <span class="tab-source">{tab.sourceName} ›</span>
+              {/if}
               {tab.name}
             </button>
             <button class="close" on:click={() => closeTab(tab)} aria-label={`Close ${tab.name}`}
@@ -656,6 +555,18 @@
           </div>
         {/each}
       </div>
+    {/if}
+    {#if notice}
+      <div class="notice" role="alert">
+        <span>{notice.message}</span>
+        <span class="notice-actions">
+          {#if notice.retry}
+            <button class="link" on:click={() => notice?.retry?.()}>Try again</button>
+          {/if}
+          <button class="link" aria-label="Dismiss" on:click={() => (notice = null)}>✕</button>
+        </span>
+      </div>
+    {/if}
       {#if activeTab && compareWith}
         <div class="pane-toolbar">
           <div class="toolbar-left">
@@ -819,7 +730,7 @@
                 mark ›
               </button>
             {/if}
-            {#if severityPatterns.length > 0}
+            {#if activeSeverityPatterns.length > 0}
               <button
                 class="link"
                 title="Previous problem"
@@ -835,9 +746,10 @@
                 problem ›
               </button>
             {/if}
+            {#if canDownloadActive}
             <a
               class="link"
-              href={`/sources/${sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
+              href={`/sources/${activeTab.sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
               target="_blank"
               rel="noreferrer"
             >
@@ -848,12 +760,13 @@
               </svg>
               Download
             </a>
+            {/if}
           </div>
         </div>
         <CodeMirrorPane
           bind:this={paneRef}
           content={displayContent}
-          {severityPatterns}
+          severityPatterns={activeSeverityPatterns}
           filename={activeTab.name}
           wrapEnabled={activeTab.wrapEnabled}
           showWhitespace={activeTab.showWhitespace}
@@ -868,137 +781,127 @@
           />
         {/if}
       {:else}
-        <div class="empty-state">Select a file from the tree to view it.</div>
-      {/if}
-    </section>
-  </div>
-{/if}
+      <div class="empty-state">
+        <div class="empty-inner">
+          <p>Expand a machine in the explorer and pick a file to view it.</p>
+          {#if recentSources.length > 0}
+            <h2>Recent</h2>
+            <ul class="recent">
+              {#each recentSources as s (s.id)}
+                <li>
+                  <ConnectionCard source={s} on:click={() => push(`/viewer/${s.id}`)} />
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      </div>
+    {/if}
+  </section>
+</div>
 
 <style>
-  .page {
-    padding: 1.75rem 2rem;
-  }
-  .picker-columns {
+  .viewer {
+    flex: 1;
     display: flex;
-    gap: 2rem;
-    align-items: flex-start;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
   }
-  .picker-column {
+  .explorer {
+    flex: 0 0 320px;
     display: flex;
     flex-direction: column;
-    gap: 0.9rem;
-    min-width: 0;
+    min-height: 0;
+    border-right: 1px solid var(--border-soft);
+    background: var(--bg-elevated);
   }
-  .picker-column.recent {
-    flex: 0 0 320px;
-  }
-  .picker-column.all {
-    flex: 1;
-    min-width: 0;
-  }
-  .picker-column h1 {
-    font-size: 1.1rem;
-    margin: 0;
-    color: var(--text);
-  }
-  .all-header {
+  .explorer-header {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    flex-wrap: wrap;
-  }
-  .all-header-controls {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    border-bottom: 1px solid var(--border-soft);
   }
   .search-box {
-    width: 280px;
-    max-width: 100%;
+    width: 100%;
   }
   .view-toggle {
     display: flex;
     border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.1rem;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    align-self: flex-start;
   }
   .view-toggle-btn {
     border: none;
-    background: none;
+    background: transparent;
     color: var(--text-muted);
-    padding: 0.2rem 0.7rem;
-    font-size: 0.76rem;
-    font-weight: 600;
-    border-radius: 999px;
+    padding: 0.25rem 0.8rem;
+    font-size: 0.78rem;
     cursor: pointer;
   }
   .view-toggle-btn.active {
     background: var(--accent-soft);
     color: var(--accent-hover);
   }
-  .connections-tree-body {
+  .explorer-body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 0.4rem;
+  }
+  .connections-tree-body,
+  .connections-list {
     display: flex;
     flex-direction: column;
-    gap: 1px;
   }
-  .picker-column ul {
+  .source-dot {
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+  .tab-source {
+    color: var(--text-faint);
+  }
+  .notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.5rem 0.9rem;
+    background: var(--danger-soft, rgba(248, 113, 113, 0.12));
+    border-bottom: 1px solid var(--danger, #f87171);
+    color: var(--text);
+    font-size: 0.82rem;
+  }
+  .notice-actions {
+    display: flex;
+    gap: 0.75rem;
+    flex: 0 0 auto;
+  }
+  .empty-inner {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-width: 30rem;
+    width: 100%;
+    padding: 1rem;
+  }
+  .empty-inner h2 {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin: 0.5rem 0 0;
+  }
+  .recent {
     list-style: none;
     padding: 0;
     margin: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.4rem;
   }
-  .picker-column :global(.card) {
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
-    background: var(--bg-elevated);
-  }
-  .picker-column :global(.card:hover) {
-    border-color: var(--accent-border);
-  }
-  @media (max-width: 900px) {
-    .picker-columns {
-      flex-direction: column;
-    }
-    .picker-column.recent {
-      flex: 0 0 auto;
-      width: 100%;
-    }
-  }
-  .viewer {
-    flex: 1;
-    display: flex;
-    min-height: 0;
-  }
-  .tree {
-    width: 280px;
-    flex: 0 0 280px;
-    border-right: 1px solid var(--border-soft);
-    background: var(--bg-elevated);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .tree-header {
-    padding: 0.7rem 0.9rem;
-    border-bottom: 1px solid var(--border-soft);
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    font-size: 0.85rem;
-  }
-  .tree-header strong {
-    color: var(--text);
-  }
-  .tree-body {
-    flex: 1;
-    overflow: auto;
-    padding: 0.4rem 0;
-  }
-  button.link,
   a.link {
     border: none;
     background: none;

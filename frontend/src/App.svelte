@@ -3,11 +3,13 @@
   import { onMount } from 'svelte'
   import { authChecked, currentUser, hasCapability, logout, refreshCurrentUser } from './lib/auth'
   import { currentHash } from './lib/hash'
+  import { closeAllTabs } from './lib/viewer-tabs'
   import { refreshSystemSettings, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
   import Sources from './routes/Sources.svelte'
   import SourceEditor from './routes/SourceEditor.svelte'
+  import SourceOverview from './routes/SourceOverview.svelte'
   import Folders from './routes/Folders.svelte'
   import Viewer from './routes/Viewer.svelte'
   import Search from './routes/Search.svelte'
@@ -33,7 +35,8 @@
     '/settings': SettingsIndex,
     '/settings/sources': Sources,
     '/settings/sources/new': SourceEditor,
-    '/settings/sources/:id': SourceEditor,
+    '/settings/sources/:id/edit': SourceEditor,
+    '/settings/sources/:id': SourceOverview,
     '/settings/folders': Folders,
     '/settings/roles': Roles,
     '/settings/roles/new': RoleEditor,
@@ -90,6 +93,7 @@
   const isActive = (prefix: string) => $currentHash === prefix || $currentHash.startsWith(prefix + '/')
 
   async function handleLogout() {
+    await closeAllTabs()
     await logout()
     push('/login')
   }
@@ -122,10 +126,15 @@
 </main>
 
 <style>
+  /* The window itself never scrolls (#154): the nav stays put, ordinary
+     pages scroll inside .content, and the viewer fills .content and
+     scrolls only its own panes. */
   main {
     display: flex;
     flex-direction: column;
-    min-height: 100vh;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
   }
   nav {
     display: flex;
@@ -171,5 +180,6 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    overflow: auto;
   }
 </style>

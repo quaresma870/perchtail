@@ -16,6 +16,10 @@
   // The tab key of the file currently open in the viewer, so this node can
   // highlight itself the same way an editor's file tree does.
   export let activeKey: string | null = null
+  // Whether the user holds `download` on this source -- without it the
+  // per-entry download icon isn't shown (the endpoint would refuse anyway,
+  // #174).
+  export let canDownload = true
 
   const dispatch = createEventDispatcher<{
     open: { path: string; member: string | null; name: string }
@@ -31,11 +35,11 @@
 
   $: ownKey =
     archiveRoot !== null
-      ? tabKey(archiveRoot, memberPath(entry.path, archiveRoot))
-      : tabKey(entry.path, null)
+      ? tabKey(sourceId, archiveRoot, memberPath(entry.path, archiveRoot))
+      : tabKey(sourceId, entry.path, null)
   $: isActive = !entry.is_dir && activeKey === ownKey
 
-  $: ownDownloadHref = downloadHref(sourceId, entry, archiveRoot)
+  $: ownDownloadHref = canDownload ? downloadHref(sourceId, entry, archiveRoot) : null
 
   async function toggle() {
     if (canExpand) {
@@ -125,6 +129,7 @@
           depth={depth + 1}
           archiveRoot={entry.is_archive ? entry.path : archiveRoot}
           {activeKey}
+          {canDownload}
           on:open
         />
       {/each}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { findAllMatches, snippetAround } from './find-in-document'
+import { copyText, findAllMatches, groupMatchesByLine, refineLines, segments, snippetAround } from './find-in-document'
 
 describe('findAllMatches', () => {
   const content = ['line one error here', 'line two ok', 'ERROR again on line three', 'error error same line'].join(
@@ -83,5 +83,48 @@ describe('snippetAround', () => {
     const result = snippetAround('ERROR' + 'y'.repeat(200), 0, 5, 10)
     expect(result.text.startsWith('…')).toBe(false)
     expect(result.text.slice(result.matchStart, result.matchStart + result.matchLength)).toBe('ERROR')
+  })
+})
+
+describe('Find All result lines (#155)', () => {
+  const content = 'error one error\nok\nerror two\nwarn three'
+
+  it('groups matches into one row per line with every range', () => {
+    const lines = groupMatchesByLine(findAllMatches(content, 'error').matches)
+    expect(lines.map((l) => l.line)).toEqual([1, 3])
+    expect(lines[0].text).toBe('error one error')
+    expect(lines[0].ranges).toEqual([
+      { start: 0, length: 5 },
+      { start: 10, length: 5 },
+    ])
+  })
+
+  it('refines results by search and by exclusion, chained', () => {
+    const lines = groupMatchesByLine(findAllMatches(content, 'e').matches)
+    const kept = refineLines(lines, { query: 'error', caseSensitive: false, useRegex: false, exclude: false })
+    expect(kept.map((l) => l.line)).toEqual([1, 3])
+    const dropped = refineLines(kept, { query: 'two', caseSensitive: false, useRegex: false, exclude: true })
+    expect(dropped.map((l) => l.line)).toEqual([1])
+  })
+
+  it('leaves results unchanged for an invalid regex', () => {
+    const lines = groupMatchesByLine(findAllMatches(content, 'e').matches)
+    expect(refineLines(lines, { query: '(', caseSensitive: false, useRegex: true, exclude: false })).toEqual(lines)
+  })
+
+  it('copies selected lines in file order, with or without numbers', () => {
+    const lines = groupMatchesByLine(findAllMatches(content, 'e').matches)
+    const selected = new Set([3, 1])
+    expect(copyText(lines, selected, false)).toBe('error one error\nerror two')
+    expect(copyText(lines, selected, true)).toBe('1: error one error\n3: error two')
+  })
+
+  it('splits a line into highlighted segments', () => {
+    const [row] = groupMatchesByLine(findAllMatches('a-error-b', 'error').matches)
+    expect(segments(row)).toEqual([
+      { text: 'a-', hit: false },
+      { text: 'error', hit: true },
+      { text: '-b', hit: false },
+    ])
   })
 })

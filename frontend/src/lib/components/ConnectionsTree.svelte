@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte'
   import type { ConnectionTreeNode } from '../connection-tree'
-  import type { Source } from '../types'
+  import SourceNode from './SourceNode.svelte'
 
   export let node: ConnectionTreeNode
   export let depth = 0
@@ -11,10 +11,12 @@
   // isn't hidden behind a collapsed ancestor the viewer never manually
   // opened.
   export let forceExpand = false
+  export let activeKey: string | null = null
+  // Source to expand on mount (deep link /viewer/:sourceId).
+  export let focusSourceId: number | null = null
 
   const dispatch = createEventDispatcher<{
     toggle: { id: string }
-    open: { source: Source }
   }>()
 
   $: expanded = forceExpand || expandedIds.has(node.id)
@@ -31,24 +33,25 @@
 
   {#if expanded}
     {#each node.children as child (child.id)}
-      <svelte:self node={child} depth={depth + 1} {expandedIds} {forceExpand} on:toggle on:open />
+      <svelte:self
+        node={child}
+        depth={depth + 1}
+        {expandedIds}
+        {forceExpand}
+        {activeKey}
+        {focusSourceId}
+        on:toggle
+        on:open
+      />
     {/each}
     {#each node.sources as source (source.id)}
-      <button
-        class="row source"
-        style="padding-left: {(depth + 1) * 14}px"
-        on:click={() => dispatch('open', { source })}
-      >
-        <span class="chevron blank"></span>
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-          <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z" />
-          <path d="M14 2v4a2 2 0 0 0 2 2h4" />
-        </svg>
-        <span class="name">{source.name}</span>
-        {#if source.is_system}
-          <span class="badge badge-accent">system</span>
-        {/if}
-      </button>
+      <SourceNode
+        {source}
+        depth={depth + 1}
+        {activeKey}
+        initiallyExpanded={focusSourceId === source.id}
+        on:open
+      />
     {/each}
   {/if}
 </div>
@@ -82,9 +85,6 @@
     color: var(--text-faint);
     font-size: 0.7rem;
   }
-  .chevron.blank {
-    visibility: hidden;
-  }
   .icon {
     flex: 0 0 auto;
     width: 14px;
@@ -98,14 +98,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .badge-accent {
-    flex: 0 0 auto;
-    background: var(--accent-soft);
-    color: var(--accent-hover);
-    font-size: 0.68rem;
-    font-weight: 600;
-    padding: 0.05rem 0.4rem;
-    border-radius: 999px;
   }
 </style>

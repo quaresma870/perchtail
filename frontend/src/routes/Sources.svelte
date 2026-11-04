@@ -110,7 +110,7 @@
             <tr>
               <td>
                 <div class="source-name">
-                  {source.name}
+                  <a class="name-link" href={`#/settings/sources/${source.id}`}>{source.name}</a>
                   {#if source.is_system}
                     <span class="badge badge-accent">system</span>
                   {/if}
@@ -162,7 +162,7 @@
                   ▶
                 </button>
                 {#if !source.is_system && hasCapability($currentUser, 'create_source')}
-                  <button class="link" on:click={() => push(`/settings/sources/${source.id}`)}
+                  <button class="link" on:click={() => push(`/settings/sources/${source.id}/edit`)}
                     >edit</button
                   >
                   <button class="link danger" on:click={() => removeSource(source)}>delete</button>
@@ -331,5 +331,12 @@
   }
   .hint {
     color: var(--text-faint);
+  }
+  .name-link {
+    color: inherit;
+    text-decoration: none;
+  }
+  .name-link:hover {
+    text-decoration: underline;
   }
 </style>

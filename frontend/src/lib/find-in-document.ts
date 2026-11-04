@@ -93,3 +93,71 @@ export function snippetAround(
     matchLength,
   }
 }
+
+/** One result line in the Find All panel: the whole line, with every
+ * match on it (#155) -- one row per line, not per match. */
+export interface LineResult {
+  line: number // 1-based
+  text: string
+  ranges: { start: number; length: number }[]
+}
+
+export function groupMatchesByLine(matches: FindMatch[]): LineResult[] {
+  const byLine = new Map<number, LineResult>()
+  for (const m of matches) {
+    let row = byLine.get(m.line)
+    if (!row) {
+      row = { line: m.line, text: m.lineText, ranges: [] }
+      byLine.set(m.line, row)
+    }
+    row.ranges.push({ start: m.matchStart, length: m.matchLength })
+  }
+  return [...byLine.values()]
+}
+
+export interface RefineStep {
+  query: string
+  caseSensitive: boolean
+  useRegex: boolean
+  /** true = drop lines that match (Notepad++'s "exclude"), false = keep only matches. */
+  exclude: boolean
+}
+
+/** "Search in these results" / "Exclude lines matching…": narrows an
+ * existing result set without re-scanning the whole file. The original
+ * highlights stay; an invalid regex leaves the lines unchanged. */
+export function refineLines(lines: LineResult[], step: RefineStep): LineResult[] {
+  if (!step.query) return lines
+  const flags = step.caseSensitive ? '' : 'i'
+  let pattern: RegExp
+  try {
+    pattern = new RegExp(step.useRegex ? step.query : escapeRegex(step.query), flags)
+  } catch {
+    return lines
+  }
+  return lines.filter((l) => pattern.test(l.text) !== step.exclude)
+}
+
+/** Text for "Copy selected lines" (optionally with line numbers), in file
+ * order regardless of the order lines were selected in. */
+export function copyText(lines: LineResult[], selected: Set<number>, withNumbers: boolean): string {
+  return lines
+    .filter((l) => selected.has(l.line))
+    .map((l) => (withNumbers ? `${l.line}: ${l.text}` : l.text))
+    .join('\n')
+}
+
+/** Splits a line into plain and highlighted segments for rendering. */
+export function segments(row: LineResult): { text: string; hit: boolean }[] {
+  const ranges = [...row.ranges].sort((a, b) => a.start - b.start)
+  const out: { text: string; hit: boolean }[] = []
+  let pos = 0
+  for (const r of ranges) {
+    if (r.start < pos) continue // overlapping match: already covered
+    if (r.start > pos) out.push({ text: row.text.slice(pos, r.start), hit: false })
+    if (r.length > 0) out.push({ text: row.text.slice(r.start, r.start + r.length), hit: true })
+    pos = r.start + r.length
+  }
+  if (pos < row.text.length) out.push({ text: row.text.slice(pos), hit: false })
+  return out
+}

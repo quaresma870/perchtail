@@ -212,6 +212,9 @@
         <input
           class="input mono"
           type="password"
+          spellcheck="false"
+          data-gramm="false"
+          data-enable-grammarly="false"
           bind:value={clientSecret}
           placeholder={provider ? 'Leave blank to keep the current secret' : ''}
           required={!provider}

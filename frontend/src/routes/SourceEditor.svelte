@@ -2,10 +2,10 @@
   import { onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
-  import RuleEditor from '../lib/components/RuleEditor.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import SeverityPatternEditor from '../lib/components/SeverityPatternEditor.svelte'
   import { nestFoldersFlat } from '../lib/folder-tree'
+  import { justCreatedSourceId } from '../lib/source-created'
   import type { AgentTokenResult, Customer, Folder, Protocol, Source } from '../lib/types'
 
   export let params: { id?: string } = {}
@@ -193,6 +193,8 @@
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
         })
+        // Land on the read-only overview, not back on this form (#157).
+        justCreatedSourceId.set(created.id)
         push(`/settings/sources/${created.id}`)
       } else {
         await api.patch(`/sources/${sourceId}`, {
@@ -206,7 +208,7 @@
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
         })
-        push('/settings/sources')
+        push(`/settings/sources/${sourceId}`)
       }
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to save source'
@@ -236,8 +238,10 @@
 <div class="page">
   <div class="header">
     <h1>{isNew ? 'New source' : `Edit ${name}`}</h1>
-    <button class="btn btn-ghost" on:click={() => push('/settings/sources')}
-      >← back to sources</button
+    <button
+      class="btn btn-ghost"
+      on:click={() => push(isNew ? '/settings/sources' : `/settings/sources/${sourceId}`)}
+      >{isNew ? '← back to sources' : '← back to source'}</button
     >
   </div>
 
@@ -462,12 +466,31 @@
             <label>
               Private key: ed25519, ECDSA or RSA, without a passphrase (leave blank to
               use password instead)
-              <textarea class="input" rows="4" bind:value={privateKey}></textarea>
+              <textarea
+                class="input mono"
+                rows="4"
+                wrap="off"
+                bind:value={privateKey}
+                spellcheck="false"
+                autocomplete="off"
+                autocapitalize="off"
+                data-gramm="false"
+                data-gramm_editor="false"
+                data-enable-grammarly="false"
+              ></textarea>
             </label>
           {/if}
           <label>
             Password
-            <input class="input" type="password" bind:value={password} autocomplete="new-password" />
+            <input
+              class="input"
+              type="password"
+              bind:value={password}
+              autocomplete="new-password"
+              spellcheck="false"
+              data-gramm="false"
+              data-enable-grammarly="false"
+            />
           </label>
         </fieldset>
       {/if}
@@ -478,7 +501,6 @@
     </form>
 
     {#if !isNew && sourceId !== null}
-      <RuleEditor {sourceId} readOnly={source?.is_system ?? false} />
       <p class="hint override-hint">
         Adding a pattern below overrides the global severity indicators (Settings → Severity
         indicators) for this source specifically — its own set replaces the global one entirely
@@ -529,7 +551,9 @@
     gap: 0.5rem;
     color: var(--text);
   }
-  input,
+  /* Full width for text fields only -- checkboxes and radios keep their
+     natural size, so they sit right next to their label (#158). */
+  input:not([type='checkbox']):not([type='radio']),
   select,
   textarea {
     width: 100%;
