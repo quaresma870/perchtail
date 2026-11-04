@@ -1,6 +1,8 @@
 # Frontend build stage — produces the static SPA bundle only; this stage's
-# node toolchain never ships in the final image.
-FROM node:22-slim AS frontend-build
+# node toolchain never ships in the final image. The bundle is the same on
+# every architecture, so it is built on the builder's own platform rather
+# than under emulation in multi-arch release builds.
+FROM --platform=$BUILDPLATFORM node:22-slim AS frontend-build
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./

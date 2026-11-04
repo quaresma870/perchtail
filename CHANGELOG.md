@@ -8,6 +8,13 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Added
+- Releases now carry what's needed to install them (`.github/workflows/release.yml`):
+  - push-agent binaries for Linux (amd64, arm64) and Windows (amd64), with `SHA256SUMS`;
+  - the Docker image on `ghcr.io/quaresma870/perchtail`, for amd64 and arm64, with provenance and an SBOM;
+  - the SBOM, also attached to the release.
+  `latest` and `X.Y` image tags move only with full releases. The workflow can also be run by hand for an existing tag, to add these to a release published earlier.
+
 ## [0.5.0] - 2026-11-04
 
 Fixes and features from the Hyper-V lab test of 0.4.0. The viewer
