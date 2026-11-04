@@ -240,7 +240,7 @@ def test_list_directory_always_shows_directories_but_filters_files(monkeypatch):
     fake_client = FakeSSHClient(fake_sftp)
     monkeypatch.setattr(ssh_module, "_connect", lambda source: fake_client)
 
-    rules = [_rule(0, RuleType.include, "*.log")]
+    rules = [_rule(0, RuleType.include, "**/*.log")]
     entries = ssh_module.list_directory(_source(), rules)
 
     names = {e.name: e for e in entries}

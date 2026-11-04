@@ -19,11 +19,9 @@ from app.auth.rbac import (
     require_global_capability,
     visible_source_ids,
 )
-from app.collectors import agent as agent_collector
 from app.collectors import local as local_collector
-from app.collectors import smb as smb_collector
-from app.collectors import ssh as ssh_collector
-from app.collectors import winrm as winrm_collector
+from app.collectors.base import SourceError, SourceNotFoundError
+from app.collectors.registry import CONNECTORS
 from app.crypto import encrypt_credential
 from app.db import get_session
 from app.logging_config import get_logger
@@ -43,13 +41,7 @@ logger = get_logger(__name__)
 
 require_manage = require_global_capability(GlobalCapability.create_source, get_current_active_user)
 
-_CONNECTORS = {
-    Protocol.ssh: ssh_collector,
-    Protocol.smb: smb_collector,
-    Protocol.winrm: winrm_collector,
-    Protocol.local: local_collector,
-    Protocol.agent: agent_collector,
-}
+_CONNECTORS = CONNECTORS
 
 
 class FolderPathEntry(BaseModel):
@@ -411,12 +403,18 @@ def delete_source(
 @router.post("/{source_id}/check", response_model=ConnectionCheckResult)
 def check_connection(
     source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
+    user: User = Depends(get_current_active_user),
 ):
     """On-demand reachability check — lists the source's base path through
     its connector. Replaces the pre-pivot "run-now"/"last run" concept from
     CLAUDE.md's original Web UI wording: there is no scheduled sync anymore,
     so there is nothing to run, only a live connection to test (see
-    ROADMAP.md's M7 notes)."""
+    ROADMAP.md's M7 notes).
+
+    Anyone with `view` can run it, so the answer is the mapped, actionable
+    message (SourceError.public_message) plus the effective base path; the
+    raw library error, which can carry UNC paths, host keys or internals,
+    is added only for users who can manage sources (#170)."""
     connector = _CONNECTORS.get(source.protocol)
     if connector is None:
         return ConnectionCheckResult(ok=False, detail=f"protocol {source.protocol} not supported")
@@ -425,9 +423,25 @@ def check_connection(
         connector.list_directory(source, [], "")
     except Exception as exc:  # noqa: BLE001 - surfaced to the caller, not swallowed
         logger.warning("source.check.failed", source_id=source.id, error=str(exc))
-        return ConnectionCheckResult(ok=False, detail=str(exc))
+        if isinstance(exc, SourceError):
+            message = f"{exc.public_message} (base path: {source.base_path or '/'})"
+            if source.protocol == Protocol.ssh and isinstance(exc, SourceNotFoundError):
+                message += (
+                    ". If this account has a ChrootDirectory, Base path is relative to the "
+                    "chroot (usually /)."
+                )
+        else:
+            message = f"The connection check failed (base path: {source.base_path or '/'})"
+        if _can_manage_sources(user):
+            message += f" — {exc}"
+        return ConnectionCheckResult(ok=False, detail=message)
 
     return ConnectionCheckResult(ok=True, detail="Connected")
+
+
+def _can_manage_sources(user: User) -> bool:
+    role = user.role
+    return role.is_super_admin or GlobalCapability.create_source in role.global_capabilities
 
 
 class AgentTokenResult(BaseModel):

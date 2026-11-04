@@ -50,6 +50,50 @@ def is_transparent_gzip(filename: str) -> bool:
     return filename.endswith(".gz") and not filename.endswith(_TAR_SUFFIXES)
 
 
+def normalize_member_name(name: str) -> str:
+    """The name a member is shown and opened under: `/`-separated, without
+    leading `/`, `./` or `..` segments. A crafted archive can name members
+    `../../evil` or `/etc/x`; those are only ever *displayed* under their
+    normalized name -- extraction streams the member's bytes and never
+    writes to a path derived from its name."""
+    parts = [p for p in name.replace("\\", "/").split("/") if p not in ("", ".", "..")]
+    return "/".join(parts)
+
+
+def tree_children(members: list[ArchiveMember], member_dir: str) -> list[ArchiveMember]:
+    """The direct children of `member_dir` inside an archive ("" = the
+    archive's root), as a folder tree: members deeper down are represented
+    by a synthesised directory entry for their next path segment, whether
+    or not the archive lists that directory explicitly. Names are
+    normalized (normalize_member_name)."""
+    prefix = f"{member_dir}/" if member_dir else ""
+    children: dict[str, ArchiveMember] = {}
+    for member in members:
+        name = normalize_member_name(member.name)
+        if not name or not name.startswith(prefix) or name == member_dir:
+            continue
+        rest = name[len(prefix) :]
+        head, _, tail = rest.partition("/")
+        child = f"{prefix}{head}"
+        if tail or member.is_dir:
+            children.setdefault(child, ArchiveMember(name=child, size=0, is_dir=True))
+        else:
+            children[child] = ArchiveMember(name=child, size=member.size, is_dir=False)
+    return sorted(children.values(), key=lambda m: (not m.is_dir, m.name.lower()))
+
+
+def resolve_member_name(local_path: Path, filename: str, requested: str) -> str:
+    """Maps a (normalized) member name from the tree back to the archive's
+    own member name, so members with odd raw names can still be opened."""
+    for member in list_members(local_path, filename):
+        if member.name == requested:
+            return member.name
+    for member in list_members(local_path, filename):
+        if not member.is_dir and normalize_member_name(member.name) == requested:
+            return member.name
+    return requested
+
+
 def list_members(local_path: Path, filename: str) -> list[ArchiveMember]:
     if filename.endswith(".zip"):
         with zipfile.ZipFile(local_path) as zf:

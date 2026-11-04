@@ -7,7 +7,7 @@ from app.agent_registry import get_agent_registry
 from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.models import Rule, Source
-from app.rules import is_visible
+from app.rules import is_entry_visible
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 
@@ -22,7 +22,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     entries = []
     for raw in result.get("entries", []):
         child_path = f"{relative_path}/{raw['name']}" if relative_path else raw["name"]
-        if not raw["is_dir"] and not is_visible(child_path, rules):
+        if not is_entry_visible(child_path, raw["is_dir"], rules):
             continue
         entries.append(
             DirEntry(name=raw["name"], path=child_path, is_dir=raw["is_dir"], size=raw["size"])

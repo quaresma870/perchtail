@@ -10,7 +10,7 @@ from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.crypto import decrypt_credential
 from app.models import Rule, Source
-from app.rules import is_visible
+from app.rules import is_entry_visible
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 
@@ -54,20 +54,26 @@ def _remote_path(source: Source, relative_path: str = "") -> str:
 
 
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:
-    """Live directory listing filtered through the rule engine, via a
-    JEA-constrained Get-ChildItem call (see docs/source-setup.md's WinRM
-    section) — directories are always listed (never filtered), only files
-    go through is_visible(), same rationale as the other connectors."""
+    """Live directory listing through Get-ChildItem, filtered through the
+    rule engine like the other connectors (files by the rule chain, folders
+    by rules.is_dir_visible).
+
+    The JSON comes back base64-encoded from UTF-8 bytes: PowerShell runs in
+    a cmd shell whose stdout uses the console's OEM code page, so a single
+    accented file name (`ação.log`) used to make the whole listing fail to
+    decode (#168). Base64 sidesteps the code page entirely, the same way
+    fetch_file already returns content."""
     path = _remote_path(source, relative_path)
     script = (
-        f"Get-ChildItem -LiteralPath {_ps_quote(path)} | "
-        "Select-Object Name, PSIsContainer, Length | ConvertTo-Json -Compress"
+        f"$j = Get-ChildItem -LiteralPath {_ps_quote(path)} | "
+        "Select-Object Name, PSIsContainer, Length | ConvertTo-Json -Compress; "
+        "if ($j) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)) }"
     )
     output = _run_ps(source, script).strip()
     if not output:
         return []
 
-    raw = json.loads(output)
+    raw = json.loads(base64.b64decode(output).decode("utf-8"))
     if isinstance(raw, dict):
         raw = [raw]
 
@@ -76,7 +82,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         name = item["Name"]
         is_dir = bool(item["PSIsContainer"])
         child_path = f"{relative_path}/{name}" if relative_path else name
-        if not is_dir and not is_visible(child_path, rules, case_insensitive=True):
+        if not is_entry_visible(child_path, is_dir, rules, case_insensitive=True):
             continue
         size = 0 if is_dir else int(item.get("Length") or 0)
         entries.append(DirEntry(name=name, path=child_path, is_dir=is_dir, size=size))

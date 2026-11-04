@@ -20,6 +20,8 @@ from app.api.archive import router as archive_router
 from app.api.audit import router as audit_router
 from app.api.auth import router as auth_router
 from app.api.customers import router as customers_router
+from app.api.errors import install as install_error_handlers
+from app.api.errors import path_outside_base as _path_outside_base
 from app.api.folders import router as folders_router
 from app.api.monitoring import router as monitoring_router
 from app.api.roles import router as roles_router
@@ -43,7 +45,6 @@ from app.bootstrap import (
     seed_severity_patterns,
     seed_system_log_source,
 )
-from app.collectors.base import PathOutsideBaseError
 from app.collectors.local import LocalPathNotAllowedError
 from app.config import get_settings
 from app.crypto import audit_chain_key
@@ -294,10 +295,9 @@ async def local_path_not_allowed(request: Request, exc: LocalPathNotAllowedError
     return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 
-@app.exception_handler(PathOutsideBaseError)
-async def path_outside_base(request: Request, exc: PathOutsideBaseError):
-    # Same answer as a rule-hidden path: nothing about the target leaks.
-    return JSONResponse(status_code=404, content={"detail": "not found"})
+install_error_handlers(app)
+# Kept importable for tests that build a bare app around one router.
+path_outside_base = _path_outside_base
 
 
 @app.get("/healthz")

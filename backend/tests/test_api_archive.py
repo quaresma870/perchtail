@@ -156,7 +156,7 @@ def test_browse_lists_directory_filtered_by_rules(app_client, session, fake_sftp
     app, client = app_client
     source = _make_source(session)
     _make_user(session, app, is_super_admin=True)
-    _add_rule(session, source, 0, RuleType.include, "*.log")
+    _add_rule(session, source, 0, RuleType.include, "**/*.log")
 
     fake_sftp.listing = [
         FakeAttr("nested", is_dir=True),
@@ -492,6 +492,7 @@ def test_browse_subdirectory_does_not_log_audit_event(app_client, session, fake_
     app, client = app_client
     source = _make_source(session)
     _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
     fake_sftp.listing = [FakeAttr("nested.log", is_dir=False, size=1)]
 
     response = client.get(f"/sources/{source.id}/browse", params={"path": "nested"})
@@ -622,3 +623,127 @@ def test_symlink_escaping_base_path_is_a_404_on_browse_and_open(
     assert browse.status_code == 404
     assert opened.status_code == 404
     assert b"root:" not in opened.content
+
+
+# --- every protocol is served by browse/open (regression: #165) ------------
+
+
+def test_every_protocol_has_a_connector():
+    from app.collectors.registry import CONNECTORS
+
+    assert set(CONNECTORS) == set(Protocol)
+
+
+def test_agent_source_can_be_browsed_and_opened(app_client, session, monkeypatch, scratch_store):
+    """v0.4.0 answered 501 "protocol agent not yet supported" on every
+    browse/open of an agent source while /check passed: archive.py kept its
+    own connector map without the agent."""
+    import base64
+
+    from app.agent_registry import get_agent_registry
+
+    app, client = app_client
+    _make_user(session, app, is_super_admin=True)
+    source = Source(
+        name="agent01",
+        protocol=Protocol.agent,
+        host="agent01",
+        base_path="/var/log/app",
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+
+    def fake_send(source_id, command_type, timeout=30.0, **fields):
+        assert source_id == source.id
+        if command_type == "list":
+            return {"entries": [{"name": "app.log", "is_dir": False, "size": 5}]}
+        assert command_type == "fetch" and fields["path"] == "app.log"
+        return {"content_b64": base64.b64encode(b"hello").decode()}
+
+    monkeypatch.setattr(get_agent_registry(), "send_command_sync", fake_send)
+
+    browse = client.get(f"/sources/{source.id}/browse")
+    opened = client.get(f"/sources/{source.id}/open", params={"path": "app.log"})
+
+    assert browse.status_code == 200, browse.text
+    assert [e["name"] for e in browse.json()] == ["app.log"]
+    assert opened.status_code == 200, opened.text
+    assert opened.content == b"hello"
+
+
+# --- folders hidden by the rules are not browsable (#164) -------------------
+
+
+def test_excluded_folder_is_neither_listed_nor_browsable(app_client, session, fake_sftp):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    _add_rule(session, source, 1, RuleType.exclude, "secret/**")
+    fake_sftp.listing = [FakeAttr("app", is_dir=True), FakeAttr("secret", is_dir=True)]
+
+    root = client.get(f"/sources/{source.id}/browse")
+    inside = client.get(f"/sources/{source.id}/browse", params={"path": "secret"})
+    deeper = client.get(f"/sources/{source.id}/browse", params={"path": "secret/sub"})
+
+    assert {e["name"] for e in root.json()} == {"app"}
+    assert inside.status_code == 404
+    assert deeper.status_code == 404
+
+
+def test_hidden_folder_cannot_be_downloaded_as_zip(app_client, session, fake_sftp):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    _add_rule(session, source, 1, RuleType.exclude, "secret/**")
+
+    response = client.get(f"/sources/{source.id}/download-zip", params={"path": "secret"})
+
+    assert response.status_code == 404
+
+
+# --- archives browse as a folder tree (#175) --------------------------------
+
+
+def test_archive_members_are_listed_as_a_tree(app_client, session, fake_sftp):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/logs.zip"] = _zip_bytes(
+        {"raiz.log": "r", "sub/pasta/membro.log": "m", "sub/outro.log": "o"}
+    )
+
+    top = client.get(f"/sources/{source.id}/browse", params={"path": "logs.zip"})
+    sub = client.get(f"/sources/{source.id}/browse", params={"path": "logs.zip/sub"})
+    deep = client.get(f"/sources/{source.id}/browse", params={"path": "logs.zip/sub/pasta"})
+
+    assert top.status_code == 200, top.text
+    assert [(e["name"], e["is_dir"]) for e in top.json()] == [("sub", True), ("raiz.log", False)]
+    assert [(e["name"], e["is_dir"]) for e in sub.json()] == [
+        ("pasta", True),
+        ("outro.log", False),
+    ]
+    assert [e["path"] for e in deep.json()] == ["logs.zip/sub/pasta/membro.log"]
+
+
+def test_member_with_a_traversal_name_is_shown_normalized_and_opens(
+    app_client, session, fake_sftp, scratch_store
+):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/bad.zip"] = _zip_bytes({"../../evil.txt": "e"})
+
+    listing = client.get(f"/sources/{source.id}/browse", params={"path": "bad.zip"})
+    opened = client.get(
+        f"/sources/{source.id}/open", params={"path": "bad.zip", "member": "evil.txt"}
+    )
+
+    assert [e["path"] for e in listing.json()] == ["bad.zip/evil.txt"]
+    assert opened.status_code == 200
+    assert opened.content == b"e"

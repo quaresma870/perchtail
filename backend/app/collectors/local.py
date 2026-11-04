@@ -6,7 +6,7 @@ from pathlib import Path
 from app.collectors.base import DirEntry
 from app.config import get_settings
 from app.models import Rule, Source
-from app.rules import is_visible
+from app.rules import is_entry_visible
 
 __all__ = [
     "DirEntry",
@@ -78,7 +78,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
             continue
         child_path = f"{relative_path}/{child.name}" if relative_path else child.name
         is_dir = child.is_dir()
-        if not is_dir and not is_visible(child_path, rules):
+        if not is_entry_visible(child_path, is_dir, rules, case_insensitive=False):
             continue
         size = 0 if is_dir else child.stat().st_size
         entries.append(DirEntry(name=child.name, path=child_path, is_dir=is_dir, size=size))

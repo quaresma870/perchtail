@@ -81,9 +81,9 @@ def test_list_directory_always_shows_dirs_but_filters_files(fake_session):
             {"Name": "secret.txt", "PSIsContainer": False, "Length": 5},
         ]
     ).encode()
-    fake_session.handler = lambda script: FakeResult(std_out=payload)
+    fake_session.handler = lambda script: FakeResult(std_out=base64.b64encode(payload))
 
-    rules = [_rule(0, RuleType.include, "*.log")]
+    rules = [_rule(0, RuleType.include, "**/*.log")]
     entries = {e.name: e for e in winrm_module.list_directory(_source(), rules)}
 
     assert "nested" in entries and entries["nested"].is_dir is True
@@ -95,7 +95,7 @@ def test_list_directory_handles_a_single_result_object(fake_session):
     # Get-ChildItem | ConvertTo-Json emits a bare object, not a list, when
     # there's exactly one match.
     payload = json.dumps({"Name": "app.log", "PSIsContainer": False, "Length": 10}).encode()
-    fake_session.handler = lambda script: FakeResult(std_out=payload)
+    fake_session.handler = lambda script: FakeResult(std_out=base64.b64encode(payload))
 
     entries = winrm_module.list_directory(_source(), [_rule(0, RuleType.include, "*.log")])
     assert entries[0].name == "app.log"
@@ -168,3 +168,27 @@ def test_local_copy_fetches_into_a_temp_path(fake_session):
 
     with winrm_module.local_copy(_source(), "app.log") as path:
         assert path.read_bytes() == content
+
+
+def test_list_directory_decodes_non_ascii_names(fake_session):
+    """#168: an accented name used to break the whole listing, because the
+    console wrote it in the OEM code page and the bytes weren't UTF-8."""
+    payload = json.dumps(
+        [
+            {"Name": "ação-é.log", "PSIsContainer": False, "Length": 3},
+            {"Name": "aspas ’curvas“ ”.log", "PSIsContainer": False, "Length": 4},
+        ],
+        ensure_ascii=False,
+    ).encode("utf-8")
+    seen = []
+
+    def handler(script):
+        seen.append(script)
+        return FakeResult(std_out=base64.b64encode(payload))
+
+    fake_session.handler = handler
+
+    entries = winrm_module.list_directory(_source(), [_rule(0, RuleType.include, "**/*")])
+
+    assert {e.name for e in entries} == {"ação-é.log", "aspas ’curvas“ ”.log"}
+    assert "ToBase64String" in seen[0] and "UTF8" in seen[0]

@@ -15,6 +15,60 @@ class DirEntry:
     size: int
 
 
+class SourceError(Exception):
+    """A predictable failure on the source side, with a status and a message
+    that are safe to show anyone who can view the source. The underlying
+    error text (UNC paths, library internals, host keys) stays in `detail`,
+    which only goes to the server log and to source managers."""
+
+    status_code = 502
+    public_message = "The source returned an error"
+
+    def __init__(self, detail: str = "", public_message: str | None = None):
+        super().__init__(detail or public_message or self.public_message)
+        self.detail = detail
+        if public_message:
+            self.public_message = public_message
+
+
+class SourcePermissionError(SourceError):
+    status_code = 403
+    public_message = "The source account has no read permission for this path"
+
+
+class SourceNotFoundError(SourceError):
+    status_code = 404
+    public_message = "Not found on the source"
+
+
+class SourceLockedError(SourceError):
+    status_code = 409
+    public_message = "The file is locked by another process on the source"
+
+
+class SourceUnreachableError(SourceError):
+    status_code = 502
+    public_message = "Can't reach the source"
+
+
+class SourceAuthError(SourceError):
+    status_code = 502
+    public_message = "Authentication to the source failed"
+
+
+class SourceHostKeyError(SourceError):
+    status_code = 502
+    public_message = (
+        "The server's SSH host key doesn't match the pinned one -- refusing to connect "
+        "(possible man-in-the-middle). An administrator must verify and re-pin it."
+    )
+
+
+class SourceTLSError(SourceError):
+    status_code = 502
+    public_message = "The source's TLS certificate isn't trusted"
+
+
 class PathOutsideBaseError(PermissionError):
     """A requested path resolves (on the source host, symlinks included) to
     somewhere outside the source's base path. Answered as 404, the same as

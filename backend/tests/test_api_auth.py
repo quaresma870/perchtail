@@ -341,3 +341,56 @@ def test_change_password_signs_out_every_other_session(client, session):
     from app.auth.sessions import get_user_by_token
 
     assert get_user_by_token(session, other_token) is None
+
+
+# --- failed logins and lockouts are audited (#171) -------------------------
+
+
+def _audit(session, action):
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    return session.exec(select(AuditLog).where(AuditLog.action == action)).all()
+
+
+def test_failed_login_is_audited_without_the_password(client, session):
+    user = _make_user(session)
+
+    _login(client, password="wrong-password-123")
+
+    rows = _audit(session, "user.login_failed")
+    assert len(rows) == 1
+    assert rows[0].user_id == user.id
+    assert rows[0].event_metadata["username"] == USERNAME
+    assert rows[0].event_metadata["reason"] == "bad_credentials"
+    assert "wrong-password-123" not in str(rows[0].event_metadata)
+
+
+def test_failed_login_for_unknown_user_is_audited_with_no_user_id(client, session):
+    _login(client, username="nobody@example.com", password="x")
+
+    rows = _audit(session, "user.login_failed")
+    assert rows[0].user_id is None
+    assert rows[0].event_metadata["username"] == "nobody@example.com"
+
+
+def test_repeated_identical_failures_are_aggregated(client, session):
+    _make_user(session)
+    for _ in range(3):
+        _login(client, password="wrong")
+
+    assert len(_audit(session, "user.login_failed")) == 1
+
+
+def test_lockout_and_attempts_while_locked_are_audited(client, session, monkeypatch):
+    monkeypatch.setenv("LOGIN_MAX_ATTEMPTS", "2")
+    get_settings.cache_clear()
+    _make_user(session)
+
+    _login(client, password="wrong")
+    _login(client, password="wrong")
+    locked = _login(client)
+
+    assert locked.status_code == 429
+    assert len(_audit(session, "user.locked_out")) == 1
+    assert len(_audit(session, "user.login_throttled")) == 1
