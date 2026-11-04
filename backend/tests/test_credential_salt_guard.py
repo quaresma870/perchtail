@@ -69,6 +69,15 @@ def test_escape_hatch_allows_regenerating(session, salt_path, monkeypatch):
 def test_dockerfile_keeps_salt_and_known_hosts_on_the_data_volume():
     from pathlib import Path
 
+    from app.config import Settings
+
     dockerfile = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text()
-    assert "CREDENTIAL_SALT_PATH=/data/credential_salt" in dockerfile
-    assert "SSH_KNOWN_HOSTS_PATH=/data/ssh_known_hosts" in dockerfile
+    assert "DATA_DIR=/data/db" in dockerfile
+    for explicit in ("CREDENTIAL_SALT_PATH=", "SSH_KNOWN_HOSTS_PATH=", "DATABASE_URL="):
+        assert explicit not in dockerfile
+    settings = Settings(
+        data_dir="/data/db", database_url="", credential_salt_path="", ssh_known_hosts_path=""
+    )
+    assert settings.credential_salt_path == "/data/db/credential_salt"
+    assert settings.ssh_known_hosts_path == "/data/db/ssh_known_hosts"
+    assert settings.database_url == "sqlite:////data/db/perchtail.db"

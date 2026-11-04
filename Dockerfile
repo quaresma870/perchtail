@@ -40,14 +40,16 @@ RUN chmod +x /app/docker-entrypoint.sh
 COPY --from=frontend-build /frontend/dist /app/frontend/dist
 
 # Everything stateful lives under /data, the volume docker-compose.yml
-# mounts. The credential salt and SSH known_hosts in particular must survive
-# a container recreate: losing the salt makes every stored credential
-# undecryptable, and losing known_hosts silently resets SSH host-key pinning.
-ENV LOG_DIR=/data/logs \
-    DATABASE_URL=sqlite:////data/perchtail.db \
-    SCRATCH_DIR=/data/scratch \
-    CREDENTIAL_SALT_PATH=/data/credential_salt \
-    SSH_KNOWN_HOSTS_PATH=/data/ssh_known_hosts
+# mounts, in one directory per kind of data (#172) so each can be mounted
+# on its own: /data/db holds what must be backed up (database, credential
+# salt, SSH known_hosts -- losing the salt makes every stored credential
+# undecryptable, and losing known_hosts silently resets SSH host-key
+# pinning), /data/logs and /data/scratch what can be lost. Images before
+# 0.5.0 kept the database and its siblings at /data itself; the entrypoint
+# moves them (app/data_layout.py).
+ENV DATA_DIR=/data/db \
+    LOG_DIR=/data/logs \
+    SCRATCH_DIR=/data/scratch
 
 EXPOSE 8000
 
