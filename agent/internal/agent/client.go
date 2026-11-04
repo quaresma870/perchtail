@@ -56,12 +56,31 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 	defer conn.Close()
 	log.Printf("agent: connected to %s", cfg.ServerURL)
 
+	// ReadJSON blocks until the backend sends something, so a stop signal
+	// (ctx cancelled) wouldn't be noticed until then and `systemctl stop`
+	// waited out its timeout (#205). Closing the connection unblocks it.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent stopping"),
+				time.Now().Add(time.Second))
+			conn.Close()
+		case <-done:
+		}
+	}()
+
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 		var cmd Command
 		if err := conn.ReadJSON(&cmd); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("read: %w", err)
 		}
 		if err := conn.WriteJSON(handleCommand(cfg, cmd)); err != nil {

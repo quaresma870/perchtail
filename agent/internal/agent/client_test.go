@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -112,5 +113,54 @@ func TestConnectSendsOSHeader(t *testing.T) {
 
 	if reported := <-got; reported != runtime.GOOS {
 		t.Fatalf("OS header = %q, want %q", reported, runtime.GOOS)
+	}
+}
+
+func TestRunStopsPromptlyWhileConnected(t *testing.T) {
+	// #205: a connected agent blocked in ReadJSON ignored the stop signal
+	// until the backend sent a message.
+	upgrader := websocket.Upgrader{}
+	connected := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// One full round trip first, so the agent is surely back in
+		// ReadJSON, waiting, when the context is cancelled.
+		if err := conn.WriteJSON(Command{Type: "noop", ID: "1"}); err != nil {
+			return
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		close(connected)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := Config{ServerURL: "ws" + strings.TrimPrefix(server.URL, "http"), Token: "t"}
+	result := make(chan error, 1)
+	go func() { result <- Run(ctx, cfg) }()
+
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent never connected")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("Run returned %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run didn't return after the context was cancelled")
 	}
 }

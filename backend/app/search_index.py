@@ -26,7 +26,13 @@ from app.archives import (
     is_archive,
     is_transparent_gzip,
 )
-from app.collectors.base import DirEntry
+from app.collectors.base import (
+    DirEntry,
+    FetchTooLargeError,
+    PathOutsideBaseError,
+    SourceNotFoundError,
+    SourcePermissionError,
+)
 from app.collectors.registry import CONNECTORS
 from app.config import get_settings
 from app.health import record_search_sweep
@@ -51,6 +57,9 @@ class IndexStats:
     indexed: int = 0
     skipped: int = 0
     removed: int = 0
+    # Files that couldn't be read this sweep (no permission, gone since the
+    # listing, grown past the limit); also counted in `skipped` (#204).
+    unreadable: int = 0
 
 
 @dataclass
@@ -165,6 +174,9 @@ def delete_source_index(session: Session, source_id: int) -> None:
     _delete_alert_file_states(session, source_id)
 
 
+_UNREADABLE = (SourcePermissionError, SourceNotFoundError, PathOutsideBaseError, FetchTooLargeError)
+
+
 def index_source(session: Session, source: Source) -> IndexStats:
     """Indexes (or re-indexes) every rule-visible file in `source`. Safe to
     call repeatedly — unchanged files (by size, see SearchIndexState's
@@ -211,7 +223,21 @@ def index_source(session: Session, source: Source) -> IndexStats:
             logger.info("search_index.source_stopped", source_id=source_id)
             return stats
 
-        content = _read_text(connector, source, entry, max_bytes)
+        try:
+            content = _read_text(connector, source, entry, max_bytes)
+        except _UNREADABLE as exc:
+            # One file the service account can't read, or that rotated away
+            # since the listing, mustn't fail the whole source (#204). The
+            # previous index of that file, if any, is kept.
+            logger.debug(
+                "search_index.file_unreadable",
+                source_id=source_id,
+                path=entry.path,
+                error=type(exc).__name__,
+            )
+            stats.skipped += 1
+            stats.unreadable += 1
+            continue
         if content is None:
             stats.skipped += 1
             continue
@@ -242,6 +268,7 @@ def index_source(session: Session, source: Source) -> IndexStats:
         source_id=source_id,
         indexed=stats.indexed,
         skipped=stats.skipped,
+        unreadable=stats.unreadable,
         removed=stats.removed,
     )
     return stats

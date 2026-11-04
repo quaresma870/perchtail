@@ -3,6 +3,7 @@ actionable message instead of a bare 500, and view-only users never see
 raw library error text."""
 
 import errno
+import ssl
 import uuid
 
 import pytest
@@ -236,3 +237,32 @@ def test_winrm_tls_errors_say_which_check_failed(text, fragment):
 
     mapped = errors.translate_winrm(requests.exceptions.SSLError(text))
     assert fragment in mapped.public_message
+
+
+def _cert_error(code: int, message: str) -> ssl.SSLCertVerificationError:
+    exc = ssl.SSLCertVerificationError(1, f"[SSL: CERTIFICATE_VERIFY_FAILED] {message}")
+    exc.verify_code = code
+    exc.verify_message = message
+    return exc
+
+
+@pytest.mark.parametrize(
+    "code, message, fragment",
+    [
+        (64, "IP address mismatch, certificate is not valid for '192.168.77.10'.", "different name"),
+        (62, "Hostname mismatch, certificate is not valid for 'x'.", "different name"),
+        (10, "certificate has expired", "expired"),
+        (20, "unable to get local issuer certificate", "issuer is unknown"),
+        (19, "self-signed certificate in certificate chain", "issuer is unknown"),
+    ],
+)
+def test_winrm_tls_errors_are_decided_by_the_verify_code(code, message, fragment):
+    """#203: with an IP host, OpenSSL says "IP address mismatch", which the
+    text match missed. The verify code is checked through the wrapping that
+    requests/urllib3 add."""
+    import requests
+    from urllib3.exceptions import MaxRetryError, SSLError as Urllib3SSLError
+
+    inner = Urllib3SSLError(_cert_error(code, message))
+    wrapped = requests.exceptions.SSLError(MaxRetryError(None, "/wsman", reason=inner))
+    assert fragment in errors.translate_winrm(wrapped).public_message
