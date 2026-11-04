@@ -285,14 +285,20 @@ def _validate_base_path(protocol: Protocol, base_path: str) -> str:
     return source_roots.normalize_root_path(protocol, path)
 
 
-def _validate_roots(protocol: Protocol, roots: list[SourceRootModel]) -> list[dict] | None:
-    """None for zero or one root (a plain single-folder source)."""
+def _validate_roots(
+    protocol: Protocol,
+    roots: list[SourceRootModel],
+    max_roots: int = source_roots.HARD_MAX_ROOTS,
+) -> list[dict] | None:
+    """None for zero or one root (a plain single-folder source). `max_roots`
+    is the configured limit (source_roots.max_roots); callers that check the
+    count themselves leave it at the hard cap."""
     if len(roots) <= 1:
         return None
     if protocol == Protocol.agent:
         raise _bad_request("A push-agent source serves a single folder; it can't have several")
-    if len(roots) > source_roots.MAX_ROOTS:
-        raise _bad_request(f"A source can read at most {source_roots.MAX_ROOTS} folders")
+    if len(roots) > max_roots:
+        raise _bad_request(source_roots.roots_limit_message(max_roots))
     seen: set[str] = set()
     out = []
     for root in roots:
@@ -441,7 +447,7 @@ def create_source(
     session: Session = Depends(get_session),
 ):
     _validate_scope(session, customer_id=payload.customer_id, folder_id=payload.folder_id)
-    roots = _validate_roots(payload.protocol, payload.roots or [])
+    roots = _validate_roots(payload.protocol, payload.roots or [], source_roots.max_roots(session))
     if roots:
         base_path = roots[0]["path"]
     elif payload.roots:
@@ -529,7 +535,10 @@ def update_source(
     if "port" in fields_set:
         source.port = payload.port
     if payload.roots is not None:
-        roots = _validate_roots(source.protocol, payload.roots)
+        # Lowering the limit never locks a source out of editing: it can
+        # keep the folders it has, just not add more.
+        limit = max(source_roots.max_roots(session), len(source_roots.roots_of(source)))
+        roots = _validate_roots(source.protocol, payload.roots, limit)
         source.roots = roots
         if roots:
             source.base_path = roots[0]["path"]

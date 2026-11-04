@@ -41,6 +41,7 @@ _DEFAULTS = {
     "search_view_enabled": True,
     "audit_view_enabled": True,
     "audit_retention_days": 365,
+    "source_max_roots": 20,
     "connections_view_switchable": True,
     "connections_view_default": "list",
 }
@@ -162,3 +163,12 @@ def test_connections_view_default_rejects_unknown_values(session, client_for):
     admin_client = client_for(_make_user(session, is_super_admin=True))
     response = admin_client.patch("/system-settings", json={"connections_view_default": "grid"})
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("value, status", [(1, 200), (100, 200), (0, 422), (101, 422)])
+def test_source_max_roots_is_bounded_by_the_hard_cap(session, client_for, value, status):
+    client = client_for(_make_user(session, is_super_admin=True))
+    response = client.patch("/system-settings", json={"source_max_roots": value})
+    assert response.status_code == status
+    if status == 200:
+        assert client.get("/system-settings").json()["source_max_roots"] == value

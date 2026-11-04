@@ -31,6 +31,9 @@ INT_DEFAULTS: dict[str, str] = {
     # expire after N months?"), resolved as: admin picks a number, default
     # 365. 0 means "keep forever" (the purge sweep no-ops).
     "audit_retention_days": "365",
+    # How many folders one source may read (#161): 1 turns the feature off.
+    # Never above source_roots.HARD_MAX_ROOTS, whatever is stored.
+    "source_max_roots": "20",
 }
 
 

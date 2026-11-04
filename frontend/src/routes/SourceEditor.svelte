@@ -12,6 +12,7 @@
     suggestRootLabel,
   } from '../lib/base-path'
   import { nestFoldersFlat } from '../lib/folder-tree'
+  import { systemSettings } from '../lib/settings'
   import { justCreatedSourceId } from '../lib/source-created'
   import type {
     AgentTokenResult,
@@ -48,6 +49,10 @@
   let originalPaths = ''
   // Index of the root whose Browse… picker is open.
   let pickerFor: number | null = null
+  // Settings -> System -> Folders per source; a source that already has
+  // more than the limit keeps them but can't add more.
+  let hadRootsCount = 0
+  $: rootsLimit = $systemSettings.source_max_roots
   let winrmScheme: 'https' | 'http' = 'https'
   let tlsCaPem = ''
   let enabled = true
@@ -182,6 +187,7 @@
               ? source.roots.map((r) => ({ ...r }))
               : [{ label: '', path: source.base_path }]
           hadRoots = source.roots.length > 0
+          hadRootsCount = source.roots.length
           winrmScheme = source.winrm_effective_scheme ?? 'https'
           tlsCaPem = source.tls_ca_pem ?? ''
           originalPaths = JSON.stringify(roots.map((r) => r.path))
@@ -559,7 +565,7 @@
         {#if basePathHint(protocol)}
           <p class="hint small">{basePathHint(protocol)}</p>
         {/if}
-        {#if protocol !== 'agent'}
+        {#if protocol !== 'agent' && roots.length < Math.max(rootsLimit, hadRootsCount)}
           <button type="button" class="btn btn-ghost add-root" on:click={addRoot}>
             + Add another folder
           </button>

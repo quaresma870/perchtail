@@ -284,3 +284,16 @@ def test_the_documented_template_imports_cleanly(session, client, monkeypatch):
     result = _import(client, text=template)
     assert result["problems"] == []
     assert result["applied"] is True
+
+
+def test_import_respects_the_configured_folder_limit(session, client):
+    from app import system_settings
+
+    system_settings.set_int(session, "source_max_roots", 1)
+    session.commit()
+    result = _import(client, dry_run=True)
+    assert result["applied"] is False
+    assert any(
+        p["where"].endswith("sources[0].roots") and "turned off" in p["message"]
+        for p in result["problems"]
+    ), result["problems"]

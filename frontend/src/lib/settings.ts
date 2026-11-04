@@ -10,6 +10,7 @@ export const systemSettings = writable<SystemSettings>({
   search_view_enabled: true,
   audit_view_enabled: true,
   audit_retention_days: 365,
+  source_max_roots: 20,
   connections_view_switchable: true,
   connections_view_default: 'list',
 })
