@@ -68,3 +68,18 @@ test('full-text search: indexes a source and deep-links a hit into the viewer', 
     .click()
   await expect(page.getByRole('row', { name: new RegExp(sourceName) })).toHaveCount(0)
 })
+
+test('a query typed before the source list loads is kept', async ({ page }) => {
+  // The page used to set the query from the URL only after /sources
+  // answered, wiping whatever had been typed in the meantime.
+  await page.route('**/sources', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+    await route.continue()
+  })
+  const box = page.getByPlaceholder('Search indexed log content…')
+  await page.goto('/#/search')
+  await box.fill('typed early')
+  const sourcesLoaded = page.waitForResponse((r) => r.url().endsWith('/sources'))
+  await sourcesLoaded
+  await expect(box).toHaveValue('typed early')
+})
