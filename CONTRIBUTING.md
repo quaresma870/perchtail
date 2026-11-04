@@ -87,6 +87,34 @@ up to date as the source of truth for design decisions.
 4. Describe what changed and why in the PR description — link the issue if there
    is one.
 
+## Releasing (maintainers)
+
+Releases are immutable once published: a published release accepts no new
+assets and its tag can't be reused. `.github/workflows/release.yml`
+therefore prepares a **draft**, and a maintainer publishes it.
+
+1. Merge a PR into `dev` that sets the version in `backend/app/version.py`
+   and `frontend/package.json` (`cd frontend && npm version --no-git-tag-version X.Y.Z`)
+   and adds a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md`.
+   Use a suffix such as `X.Y.Z-rc.1` for a pre-release.
+2. Start the Release workflow, either way:
+   - Actions → Release → Run workflow, with the tag (`vX.Y.Z`) and the
+     branch or commit to tag (default `dev`). The workflow creates the tag.
+   - Or push the tag yourself: `git tag vX.Y.Z <commit> && git push origin vX.Y.Z`.
+
+   It refuses a tag whose code carries another version or has no
+   CHANGELOG section, and a tag whose release is already published.
+3. It builds the agent binaries and `SHA256SUMS`, pushes
+   `ghcr.io/quaresma870/perchtail:X.Y.Z` with its SBOM, and creates a
+   draft release with all of them attached and the CHANGELOG section as
+   notes. A tag with a suffix becomes a pre-release.
+4. Review the draft (notes, assets), edit the notes if needed, and
+   publish it. Publishing a full release moves the image's `X.Y` and
+   `latest` tags to it; a pre-release never does.
+
+To fix a draft, push the fix, delete the draft and its tag, and run the
+workflow again. Once a release is published, a fix needs a new version.
+
 ## Security-sensitive areas
 
 Changes touching credential storage, RBAC/grant resolution, or auth providers get
