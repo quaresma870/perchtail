@@ -98,9 +98,13 @@ therefore prepares a **draft**, and a maintainer publishes it.
    and adds a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md`.
    Use a suffix such as `X.Y.Z-rc.1` for a pre-release.
 2. Start the Release workflow, either way:
-   - Actions → Release → Run workflow, with the tag (`vX.Y.Z`) and the
-     branch or commit to tag (default `dev`). The workflow creates the tag.
-   - Or push the tag yourself: `git tag vX.Y.Z <commit> && git push origin vX.Y.Z`.
+   - Push the tag: `git tag vX.Y.Z <commit> && git push origin vX.Y.Z`.
+   - Or Actions → Release → Run workflow, choosing `dev` under "Use
+     workflow from", with the tag (`vX.Y.Z`) and the branch or commit to
+     tag (default `dev`). The workflow creates the tag. GitHub only shows
+     this button once `release.yml` is on the default branch (`main`); until
+     then, push the tag, or dispatch the workflow through the API with
+     `ref: dev`.
 
    It refuses a tag whose code carries another version or has no
    CHANGELOG section, and a tag whose release is already published.
