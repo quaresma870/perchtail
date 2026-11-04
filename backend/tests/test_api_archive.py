@@ -747,3 +747,38 @@ def test_member_with_a_traversal_name_is_shown_normalized_and_opens(
     assert [e["path"] for e in listing.json()] == ["bad.zip/evil.txt"]
     assert opened.status_code == 200
     assert opened.content == b"e"
+
+
+def test_open_is_served_inline_as_text(app_client, session, fake_sftp, scratch_store):
+    """#174: /open is what the viewer reads, not a download endpoint."""
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/app.log"] = b"hello"
+
+    response = client.get(f"/sources/{source.id}/open", params={"path": "app.log"})
+
+    assert response.headers["content-disposition"].startswith("inline")
+    assert response.headers["content-type"].startswith("text/plain")
+
+
+def test_413_reports_file_size_and_limit(
+    app_client, session, fake_sftp, scratch_store, monkeypatch
+):
+    """#160: the viewer needs to say by how much a file is over the limit."""
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 8)
+    monkeypatch.setattr("app.api.archive.max_fetch_bytes", lambda: 8)
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/big.log"] = b"x" * 100
+
+    response = client.get(f"/sources/{source.id}/open", params={"path": "big.log"})
+
+    assert response.status_code == 413
+    detail = response.json()["detail"]
+    assert detail["error_code"] == "fetch_too_large"
+    assert detail["size_bytes"] == 100
+    assert detail["limit_bytes"] == 8

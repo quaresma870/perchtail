@@ -141,9 +141,23 @@ def _too_large(exc: DecompressionLimitError) -> HTTPException:
 
 def _fetch_too_large(exc: FetchTooLargeError) -> HTTPException:
     logger.warning("archive.fetch_limit", error=str(exc))
+    limit = exc.limit if exc.limit is not None else max_fetch_bytes()
+    limit_mb = limit / 1024**2
+    if exc.size is not None:
+        message = (
+            f"This file is {exc.size / 1024**2:.1f} MB, over this server's "
+            f"{limit_mb:.0f} MB limit (MAX_FETCH_MB)."
+        )
+    else:
+        message = f"This folder is over this server's {limit_mb:.0f} MB limit (MAX_FETCH_MB)."
     return HTTPException(
         status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-        detail="File or folder is too large to fetch (MAX_FETCH_MB)",
+        detail={
+            "message": message,
+            "error_code": "fetch_too_large",
+            "size_bytes": exc.size,
+            "limit_bytes": limit,
+        },
     )
 
 
@@ -334,7 +348,17 @@ def open_file(
     )
     session.commit()
     headers = {"X-Scratch-Key": key} if key else {}
-    return FileResponse(served_path, filename=filename, headers=headers)
+    # Inline, not an attachment: this is what the viewer reads to display a
+    # file, not a download endpoint (downloads go through /download, gated
+    # by the `download` capability -- #174). nosniff (set app-wide) keeps
+    # a browser from rendering it as HTML.
+    return FileResponse(
+        served_path,
+        filename=filename,
+        headers=headers,
+        media_type="text/plain; charset=utf-8",
+        content_disposition_type="inline",
+    )
 
 
 class CloseRequest(BaseModel):

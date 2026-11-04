@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlmodel import Session
@@ -20,6 +22,8 @@ class SystemSettingsPublic(BaseModel):
     search_view_enabled: bool
     audit_view_enabled: bool
     audit_retention_days: int
+    connections_view_switchable: bool
+    connections_view_default: Literal["list", "tree"]
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -27,12 +31,15 @@ class SystemSettingsUpdate(BaseModel):
     audit_view_enabled: bool | None = None
     # 0 means "keep forever" -- see system_settings.INT_DEFAULTS's docstring.
     audit_retention_days: int | None = Field(default=None, ge=0)
+    connections_view_switchable: bool | None = None
+    connections_view_default: Literal["list", "tree"] | None = None
 
 
 def _read_all(session: Session) -> SystemSettingsPublic:
     return SystemSettingsPublic(
         **system_settings.get_all_bool(session),
         audit_retention_days=system_settings.get_int(session, "audit_retention_days"),
+        connections_view_default=system_settings.get_choice(session, "connections_view_default"),
     )
 
 
@@ -67,6 +74,9 @@ def update_system_settings(
     for key in system_settings.BOOL_DEFAULTS:
         if key in changed:
             system_settings.set_bool(session, key, changed[key])
+    for key in system_settings.CHOICE_DEFAULTS:
+        if key in changed:
+            system_settings.set_choice(session, key, changed[key])
     record_audit_event(
         session,
         user_id=user.id,

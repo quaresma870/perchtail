@@ -8,6 +8,16 @@ from app.models import SystemSetting
 BOOL_DEFAULTS: dict[str, str] = {
     "search_view_enabled": "true",
     "audit_view_enabled": "true",
+    # Whether users may switch the viewer's connections between list and
+    # tree; when false, everyone sees connections_view_default only (#156).
+    "connections_view_switchable": "true",
+}
+
+# Enumerated string settings: key -> (default, allowed values). A value
+# outside the allowed set is never stored (the API validates with a
+# Literal, set_choice re-checks).
+CHOICE_DEFAULTS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "connections_view_default": ("list", ("list", "tree")),
 }
 
 # Separate from BOOL_DEFAULTS since get_all_bool()/get_bool() would silently
@@ -58,3 +68,21 @@ def set_int(session: Session, key: str, value: int) -> None:
         session.add(SystemSetting(key=key, value=str(value)))
     else:
         row.value = str(value)
+
+
+def get_choice(session: Session, key: str) -> str:
+    default, allowed = CHOICE_DEFAULTS[key]
+    row = session.get(SystemSetting, key)
+    value = row.value if row is not None else default
+    return value if value in allowed else default
+
+
+def set_choice(session: Session, key: str, value: str) -> None:
+    _default, allowed = CHOICE_DEFAULTS[key]
+    if value not in allowed:
+        raise ValueError(f"{key} must be one of {allowed}")
+    row = session.get(SystemSetting, key)
+    if row is None:
+        session.add(SystemSetting(key=key, value=value))
+    else:
+        row.value = value
