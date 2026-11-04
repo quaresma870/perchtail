@@ -5,8 +5,10 @@ import { loadFixturePaths } from './fixture-paths'
 // creates the customer and source, and a second preview finds nothing to
 // change. A local source keeps it free of credentials and network.
 const stamp = Date.now()
-const customer = `E2E Import Customer ${stamp}`
-const sourceName = `E2E Imported Source ${stamp}`
+// No "port" in these names: other specs find the Port field with getByLabel('Port'),
+// a substring match that would also hit a Customer select listing "Import".
+const customer = `E2E Bulk Customer ${stamp}`
+const sourceName = `E2E Bulk Source ${stamp}`
 
 test('bulk import: preview, apply, idempotent re-preview', async ({ page }) => {
   const fixtures = loadFixturePaths()
