@@ -159,8 +159,8 @@ version (amd64 and arm64), for example:
 
 Each [GitHub release](https://github.com/quaresma870/perchtail/releases)
 also carries the push-agent binaries, their `SHA256SUMS`, and the image's
-SBOM. `latest` and `X.Y` tags only move with full releases, never with a
-pre-release.
+SBOM, attached before the release is published. `latest` and `X.Y` tags
+only move when a full release is published, never with a pre-release.
 
 On first startup (only when the database has zero users), PerchTail creates a
 break-glass super-admin account with a randomly generated password and prints
