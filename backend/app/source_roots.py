@@ -25,7 +25,10 @@ from app.collectors.base import DirEntry, SourceNotFoundError
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 from app.rules import is_entry_visible, rules_case_insensitive
 
-MAX_ROOTS = 20
+# The admin-configurable limit (Settings -> System, `source_max_roots`)
+# can be set anywhere from 1 (several folders turned off) to this hard cap.
+DEFAULT_MAX_ROOTS = 20
+HARD_MAX_ROOTS = 100
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 
 ALLOW_ALL = [Rule(order=0, type=RuleType.include, pattern="**", pattern_kind=PatternKind.glob)]
@@ -35,6 +38,19 @@ def roots_of(source: Source) -> list[dict]:
     """The configured roots, or [] for an ordinary single-folder source."""
     roots = source.roots or []
     return roots if len(roots) >= 2 else []
+
+
+def max_roots(session) -> int:
+    """The configured per-source folder limit, clamped to 1..HARD_MAX_ROOTS."""
+    from app import system_settings
+
+    return max(1, min(system_settings.get_int(session, "source_max_roots"), HARD_MAX_ROOTS))
+
+
+def roots_limit_message(limit: int) -> str:
+    if limit <= 1:
+        return "Several folders per source are turned off (Settings → System)"
+    return f"A source can read at most {limit} folders (Settings → System)"
 
 
 def is_multi_root(source: Source) -> bool:

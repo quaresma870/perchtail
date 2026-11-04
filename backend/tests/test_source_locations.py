@@ -459,3 +459,60 @@ def test_multi_root_local_source_needs_every_root_allowed(client, two_roots, tmp
         ],
     )
     assert response.status_code == 400
+
+
+# --- configurable folder limit -------------------------------------------
+
+
+def _set_limit(session, value):
+    from app import system_settings
+
+    system_settings.set_int(session, "source_max_roots", value)
+    session.commit()
+
+
+def _roots(base, n):
+    return [{"label": f"r{i}", "path": str(base)} for i in range(n)]
+
+
+def test_folder_limit_is_configurable(session, client, two_roots):
+    _set_limit(session, 3)
+    too_many = _create(
+        client, protocol="local", host="localhost", credential=None, roots=_roots(two_roots, 4)
+    )
+    assert too_many.status_code == 400
+    assert "at most 3 folders" in too_many.json()["detail"]
+    ok = _create(
+        client, protocol="local", host="localhost", credential=None, roots=_roots(two_roots, 3)
+    )
+    assert ok.status_code == 201
+
+
+def test_limit_of_one_turns_several_folders_off(session, client, two_roots):
+    _set_limit(session, 1)
+    response = _multi(client, two_roots)
+    assert response.status_code == 400
+    assert "turned off" in response.json()["detail"]
+
+
+def test_lowering_the_limit_keeps_existing_sources_editable(session, client, two_roots):
+    body = _create(
+        client, protocol="local", host="localhost", credential=None, roots=_roots(two_roots, 4)
+    ).json()
+    _set_limit(session, 2)
+
+    same = client.patch(f"/sources/{body['id']}", json={"roots": _roots(two_roots, 4)})
+    assert same.status_code == 200
+    more = client.patch(f"/sources/{body['id']}", json={"roots": _roots(two_roots, 5)})
+    assert more.status_code == 400
+    fewer = client.patch(f"/sources/{body['id']}", json={"roots": _roots(two_roots, 3)})
+    assert fewer.status_code == 200
+
+
+def test_stored_limit_is_clamped_to_the_hard_cap(session):
+    from app import source_roots
+    from app.models import SystemSetting
+
+    session.add(SystemSetting(key="source_max_roots", value="5000"))
+    session.commit()
+    assert source_roots.max_roots(session) == source_roots.HARD_MAX_ROOTS == 100

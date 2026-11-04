@@ -82,10 +82,14 @@ volume first.
   new dependency). Folders only, never file names; limited to users who
   can manage sources and audited. A saved credential is only reused for
   the host and port it was saved for.
-- **Several folders in one source** (#161): up to 20 labelled folders on
-  the same host, each shown at the top level of the source's tree. Rules
-  see the labelled paths (`**/*.log` for all, `IIS/**` for one), and the
-  connection test checks each folder. Push-agent sources stay single-folder.
+- **Several folders in one source** (#161): labelled folders on the same
+  host, each shown at the top level of the source's tree. Rules see the
+  labelled paths (`**/*.log` for all, `IIS/**` for one), and the connection
+  test checks each folder. Push-agent sources stay single-folder. How many
+  folders a source may have is set in Settings → System → Folders per
+  source: 20 by default, 1 turns the feature off, 100 at most. Lowering it
+  never locks an existing source out: it keeps its folders but can't add
+  more.
 - **Search scope** (#163): narrow a search to any mix of customers,
   folders (with their sub-folders) and sources, and to file paths
   containing some text or matching a glob. The scope is applied before the

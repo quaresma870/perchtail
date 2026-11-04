@@ -17,6 +17,10 @@
   let connectionsViewSwitchable = true
   let retentionSaving = false
   let retentionError = ''
+  let maxRoots = 20
+  let maxRootsInput = '20'
+  let maxRootsSaving = false
+  let maxRootsError = ''
 
   let monitoringConfigured = false
   let monitoringToken = ''
@@ -30,6 +34,8 @@
       auditViewEnabled = settings.audit_view_enabled
       auditRetentionDays = settings.audit_retention_days
       retentionInput = String(settings.audit_retention_days)
+      maxRoots = settings.source_max_roots
+      maxRootsInput = String(settings.source_max_roots)
       connectionsViewDefault = settings.connections_view_default
       connectionsViewSwitchable = settings.connections_view_switchable
     } catch (err) {
@@ -106,6 +112,28 @@
       error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
     } finally {
       saving = false
+    }
+  }
+
+  async function saveMaxRoots() {
+    const parsed = Number(maxRootsInput)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+      maxRootsError = 'Enter a whole number from 1 to 100.'
+      return
+    }
+    maxRootsError = ''
+    maxRootsSaving = true
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        source_max_roots: parsed,
+      })
+      maxRoots = settings.source_max_roots
+      maxRootsInput = String(settings.source_max_roots)
+      systemSettings.set(settings)
+    } catch (err) {
+      maxRootsError = err instanceof ApiError ? err.detail : 'Failed to update the folder limit'
+    } finally {
+      maxRootsSaving = false
     }
   }
 
@@ -259,6 +287,39 @@
             disabled={retentionSaving || Number(retentionInput) === auditRetentionDays}
           >
             {retentionSaving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Folders per source</div>
+          <p class="hint">
+            How many folders one source may read. 1 turns several folders per source off. At most
+            100. Sources that already have more keep them, but can't add more.
+          </p>
+        </div>
+        {#if maxRootsError}
+          <p class="error">{maxRootsError}</p>
+        {/if}
+        <div class="retention-row">
+          <input
+            class="input retention-input"
+            type="number"
+            min="1"
+            max="100"
+            step="1"
+            aria-label="Folders per source"
+            bind:value={maxRootsInput}
+          />
+          <span class="hint">folders</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={saveMaxRoots}
+            disabled={maxRootsSaving || Number(maxRootsInput) === maxRoots}
+          >
+            {maxRootsSaving ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>

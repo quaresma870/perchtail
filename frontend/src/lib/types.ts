@@ -196,6 +196,8 @@ export interface SystemSettings {
   search_view_enabled: boolean
   audit_view_enabled: boolean
   audit_retention_days: number
+  // Folders one source may read (#161): 1 = feature off, 100 at most.
+  source_max_roots: number
   connections_view_switchable: boolean
   connections_view_default: 'list' | 'tree'
 }

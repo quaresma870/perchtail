@@ -442,6 +442,7 @@ def run(
     if problems:
         return items, problems
 
+    roots_limit = source_roots.max_roots(session)
     customer_ids: dict[str, int | None] = {}
     for name in parsed.customers:
         customer = session.exec(select(Customer).where(Customer.name == name)).first()
@@ -519,6 +520,14 @@ def run(
         if len(existing) > 1:
             problems.append(
                 Problem(spec.where, f"{len(existing)} sources are already named {spec.name!r} here")
+            )
+            continue
+        # Same rule as the editor: the configured limit, or the folders an
+        # existing source already has if that is more.
+        allowed = max(roots_limit, len(source_roots.roots_of(existing[0])) if existing else 0)
+        if spec.roots and len(spec.roots) > allowed:
+            problems.append(
+                Problem(f"{spec.where}.roots", source_roots.roots_limit_message(allowed))
             )
             continue
         credential = credentials.get(spec.key) or spec.credential

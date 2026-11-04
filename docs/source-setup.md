@@ -430,8 +430,11 @@ cleared, and the audit log records the old and new values.
 
 ### Several folders in one source
 
-A source can read up to 20 folders on the same host with the same
-credential, for example IIS logs on `D:` and application logs on `E:`. Use
+A source can read several folders on the same host with the same
+credential, for example IIS logs on `D:` and application logs on `E:`. How
+many is set in **Settings → System → Folders per source**: 20 by default,
+1 turns the feature off, and 100 at most. Lowering the limit doesn't
+affect sources that already have more folders, but they can't add any. Use
 **+ Add another folder** in the source editor and give each folder a
 label. In the viewer each folder appears at the top level under its label,
 and rules see the same paths, so `**/*.log` applies to every folder and
