@@ -302,9 +302,9 @@
         {#if maxRootsError}
           <p class="error">{maxRootsError}</p>
         {/if}
-        <div class="retention-row">
+        <div class="limit-row">
           <input
-            class="input retention-input"
+            class="input limit-input"
             type="number"
             min="1"
             max="100"
@@ -411,12 +411,14 @@
   .setting-row.column .btn {
     align-self: flex-start;
   }
-  .retention-row {
+  .retention-row,
+  .limit-row {
     display: flex;
     align-items: center;
     gap: 0.5rem;
   }
-  .retention-input {
+  .retention-input,
+  .limit-input {
     width: 6rem;
   }
   .token-box {
