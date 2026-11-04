@@ -98,6 +98,13 @@ class Source(SQLModel, table=True):
     # folders (#161; see app/source_roots.py), else null. base_path then
     # mirrors the first root's path.
     roots: list[dict] | None = Field(default=None, sa_column=Column(JSON))
+    # WinRM only (#169): "https" or "http". Null keeps the pre-0.5.0 rule of
+    # inferring it from the port (HTTPS on 5986 or no port, HTTP otherwise).
+    winrm_scheme: str | None = None
+    # PEM CA certificate(s) trusted for this source's TLS listener (WinRM
+    # over HTTPS) -- internal PKI or a self-signed certificate, without a
+    # server-wide REQUESTS_CA_BUNDLE. Public data, not a secret.
+    tls_ca_pem: str | None = None
     enabled: bool = True
     schedule_cron: str | None = None
     is_system: bool = False

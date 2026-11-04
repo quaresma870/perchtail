@@ -51,9 +51,23 @@ curl -H "Authorization: Bearer <token>" https://your-perchtail-host/monitoring/h
     "jobs": [
       { "id": "...", "next_run_at": "2026-08-17T17:15:00+00:00" }
     ]
+  },
+  "logs": {
+    "used_bytes": 734003200,
+    "max_total_bytes": 2147483648,
+    "retention_days": 30,
+    "size_limit_deleted_early": false,
+    "size_limit_deleted_files": 0,
+    "size_limit_newest_deleted_day": null
   }
 }
 ```
+
+`logs.size_limit_deleted_early` turns `true` once `LOG_MAX_TOTAL_MB` has
+deleted log archives that `LOG_RETENTION_DAYS` would still have kept,
+usually because `LOG_LEVEL=DEBUG` was left on. It doesn't change `status`,
+but it means you have less log history than configured; lower the log
+level, set `LOG_QUIET_THIRD_PARTY=true`, or give the logs more space.
 
 `status` is `"ok"`, `"degraded"`, or `"error"` — a single field to alert on if
 you don't want to reason about every sub-metric yourself:
@@ -84,6 +98,7 @@ preprocessing, e.g.:
 | Search sweep overdue | `$.search_index.overdue` |
 | Scheduler running | `$.scheduler.running` |
 | Connected agents | `$.agent.connected` |
+| Logs lost to the size limit | `$.logs.size_limit_deleted_early` |
 | Configured agents | `$.agent.connected` vs `$.agent.configured` |
 
 Trigger on `status != "ok"` for a single alert covering everything above, or

@@ -132,7 +132,12 @@
       <dd>{source.folder_path.length ? source.folder_path.map((f) => f.name).join(' / ') : '—'}</dd>
       {#if source.protocol !== 'agent'}
         <dt>Host</dt>
-        <dd class="mono">{source.host}{source.port ? `:${source.port}` : ''}</dd>
+        <dd class="mono">
+          {#if source.winrm_effective_scheme}{source.winrm_effective_scheme}://{/if}{source.host}{source.port
+            ? `:${source.port}`
+            : ''}
+          {#if source.tls_ca_pem}<span class="badge badge-muted">own CA</span>{/if}
+        </dd>
       {/if}
       {#if source.roots.length > 0}
         <dt>Folders</dt>

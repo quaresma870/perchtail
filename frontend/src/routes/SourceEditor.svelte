@@ -48,6 +48,8 @@
   let originalPaths = ''
   // Index of the root whose Browse… picker is open.
   let pickerFor: number | null = null
+  let winrmScheme: 'https' | 'http' = 'https'
+  let tlsCaPem = ''
   let enabled = true
   let searchIndexingEnabled = false
   let username = ''
@@ -180,6 +182,8 @@
               ? source.roots.map((r) => ({ ...r }))
               : [{ label: '', path: source.base_path }]
           hadRoots = source.roots.length > 0
+          winrmScheme = source.winrm_effective_scheme ?? 'https'
+          tlsCaPem = source.tls_ca_pem ?? ''
           originalPaths = JSON.stringify(roots.map((r) => r.path))
           enabled = source.enabled
           searchIndexingEnabled = source.search_indexing_enabled
@@ -227,6 +231,11 @@
     pickerFor = null
   }
 
+  function winrmPayload(): Record<string, string> {
+    if (protocol !== 'winrm') return {}
+    return { winrm_scheme: winrmScheme, tls_ca_pem: winrmScheme === 'https' ? tlsCaPem : '' }
+  }
+
   function locationPayload() {
     const cleaned = roots.map((r) => ({ label: r.label.trim(), path: r.path.trim() }))
     if (cleaned.length > 1) return { base_path: cleaned[0].path, roots: cleaned }
@@ -248,6 +257,7 @@
           host,
           port,
           ...locationPayload(),
+          ...winrmPayload(),
           enabled,
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
@@ -263,6 +273,7 @@
           host,
           port,
           ...locationPayload(),
+          ...winrmPayload(),
           enabled,
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
@@ -444,13 +455,47 @@
             placeholder={protocol === 'agent' ? 'friendly name for the agent host' : undefined}
           />
         </label>
+        {#if protocol === 'winrm'}
+          <label class="narrow">
+            Scheme
+            <select class="input" bind:value={winrmScheme}>
+              <option value="https">HTTPS</option>
+              <option value="http">HTTP</option>
+            </select>
+          </label>
+        {/if}
         {#if protocol !== 'agent'}
           <label class="narrow">
             Port
-            <input class="input" type="number" bind:value={port} placeholder="default" />
+            <input
+              class="input"
+              type="number"
+              bind:value={port}
+              placeholder={protocol === 'winrm' ? (winrmScheme === 'https' ? '5986' : '5985') : 'default'}
+            />
           </label>
         {/if}
       </div>
+      {#if protocol === 'winrm' && winrmScheme === 'https'}
+        <label>
+          CA certificate (PEM, optional)
+          <textarea
+            class="input mono"
+            rows="3"
+            wrap="off"
+            bind:value={tlsCaPem}
+            placeholder="-----BEGIN CERTIFICATE-----  for an internal CA or a self-signed listener"
+            spellcheck="false"
+            autocomplete="off"
+            data-gramm="false"
+          ></textarea>
+        </label>
+      {:else if protocol === 'winrm'}
+        <p class="warning small">
+          Plain HTTP: NTLM still encrypts the WinRM messages, but the server isn't authenticated.
+          Prefer HTTPS.
+        </p>
+      {/if}
 
       <div class="roots">
         {#each roots as root, index (index)}
@@ -504,6 +549,7 @@
               {port}
               credential={buildCredential()}
               sourceId={isNew ? null : sourceId}
+              winrm={protocol === 'winrm' ? winrmPayload() : null}
               startPath={root.path}
               on:pick={(e) => pickedFolder(index, e.detail)}
               on:close={() => (pickerFor = null)}

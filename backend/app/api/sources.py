@@ -6,8 +6,9 @@ import secrets
 from datetime import datetime
 from typing import Literal
 
+from cryptography import x509
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import Session, select
 
 from app import source_roots
@@ -28,6 +29,7 @@ from app.auth.rbac import (
 from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
 from app.collectors import smb_shares
+from app.collectors import winrm as winrm_collector
 from app.collectors.base import SourceError, SourceNotFoundError
 from app.collectors.errors import translate_smb, translate_winrm, translated
 from app.collectors.registry import CONNECTORS
@@ -58,6 +60,9 @@ class FolderPathEntry(BaseModel):
     name: str
 
 
+_MAX_CA_PEM = 64 * 1024
+
+
 class SourceRootModel(BaseModel):
     label: str
     path: str
@@ -78,6 +83,11 @@ class SourcePublic(BaseModel):
     port: int | None
     base_path: str
     roots: list[SourceRootModel] = []
+    # WinRM (#169): the stored choice (null = inferred from the port) and
+    # what is actually used.
+    winrm_scheme: Literal["https", "http"] | None = None
+    winrm_effective_scheme: Literal["https", "http"] | None = None
+    tls_ca_pem: str | None = None
     enabled: bool
     is_system: bool
     rule_count: int
@@ -104,6 +114,8 @@ class SourceCreate(BaseModel):
     # Two or more folders read by one source (#161); see app/source_roots.py.
     # When given, base_path is ignored and the first root's path is used.
     roots: list[SourceRootModel] | None = None
+    winrm_scheme: Literal["https", "http"] | None = None
+    tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
     enabled: bool = True
     # Per-protocol JSON blob (SSH: username + private_key|password; SMB/WinRM:
     # username + password); omitted entirely for `local`, which needs none.
@@ -120,6 +132,9 @@ class SourceUpdate(BaseModel):
     base_path: str | None = None
     # [] or a single entry turns a multi-root source back into a plain one.
     roots: list[SourceRootModel] | None = None
+    winrm_scheme: Literal["https", "http"] | None = None
+    # "" removes the CA certificate.
+    tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
     enabled: bool | None = None
     credential: dict | None = None
     search_indexing_enabled: bool | None = None
@@ -178,6 +193,11 @@ def _to_public(
         port=source.port,
         base_path=source.base_path,
         roots=[SourceRootModel(**r) for r in source_roots.roots_of(source)],
+        winrm_scheme=source.winrm_scheme,
+        winrm_effective_scheme=(
+            winrm_collector.endpoint(source)[0] if source.protocol == Protocol.winrm else None
+        ),
+        tls_ca_pem=source.tls_ca_pem,
         enabled=source.enabled,
         is_system=source.is_system,
         rule_count=rule_count,
@@ -287,6 +307,27 @@ def _validate_roots(protocol: Protocol, roots: list[SourceRootModel]) -> list[di
         seen.add(label.lower())
         out.append({"label": label, "path": _validate_base_path(protocol, root.path)})
     return out
+
+
+def _validate_ca_pem(protocol: Protocol, pem: str | None) -> str | None:
+    """None/"" clears it; anything else must be PEM certificates (#169)."""
+    if not pem or not pem.strip():
+        return None
+    if protocol != Protocol.winrm:
+        raise _bad_request("A CA certificate is only used by WinRM sources over HTTPS")
+    try:
+        certificates = x509.load_pem_x509_certificates(pem.strip().encode())
+    except ValueError as exc:
+        raise _bad_request(f"CA certificate isn't valid PEM: {exc}") from exc
+    if not certificates:
+        raise _bad_request("CA certificate contains no certificate")
+    return pem.strip() + "\n"
+
+
+def _validate_winrm_scheme(protocol: Protocol, scheme: str | None) -> str | None:
+    if scheme is not None and protocol != Protocol.winrm:
+        raise _bad_request("winrm_scheme only applies to WinRM sources")
+    return scheme
 
 
 def _location(source: Source) -> dict:
@@ -419,6 +460,17 @@ def create_source(
         port=payload.port,
         base_path=base_path,
         roots=roots,
+        winrm_scheme=_validate_winrm_scheme(payload.protocol, payload.winrm_scheme)
+        # New WinRM sources always store a scheme: the one asked for, or the
+        # one the port implied before 0.5.0.
+        or (
+            winrm_collector.endpoint(
+                Source(name="", protocol=Protocol.winrm, host="", base_path="", port=payload.port)
+            )[0]
+            if payload.protocol == Protocol.winrm
+            else None
+        ),
+        tls_ca_pem=_validate_ca_pem(payload.protocol, payload.tls_ca_pem),
         enabled=payload.enabled,
         credential_ref=encrypt_credential(payload.credential) if payload.credential else None,
         search_indexing_enabled=payload.search_indexing_enabled,
@@ -457,7 +509,12 @@ def update_source(
     _require_not_system(source)
 
     fields_set = payload.model_fields_set
-    before = {"name": source.name, "enabled": source.enabled, **_location(source)}
+    before = {
+        "name": source.name,
+        "enabled": source.enabled,
+        "winrm_scheme": source.winrm_scheme,
+        **_location(source),
+    }
     new_customer_id = payload.customer_id if "customer_id" in fields_set else source.customer_id
     new_folder_id = payload.folder_id if "folder_id" in fields_set else source.folder_id
     if "customer_id" in fields_set or "folder_id" in fields_set:
@@ -485,13 +542,25 @@ def update_source(
                 if source.protocol == Protocol.agent
                 else _validate_base_path(source.protocol, payload.base_path)
             )
+    if "winrm_scheme" in fields_set:
+        source.winrm_scheme = _validate_winrm_scheme(source.protocol, payload.winrm_scheme)
+    tls_ca_changed = False
+    if "tls_ca_pem" in fields_set:
+        new_ca = _validate_ca_pem(source.protocol, payload.tls_ca_pem)
+        tls_ca_changed = new_ca != source.tls_ca_pem
+        source.tls_ca_pem = new_ca
     if payload.enabled is not None:
         source.enabled = payload.enabled
     if payload.credential is not None:
         source.credential_ref = encrypt_credential(payload.credential)
     if payload.search_indexing_enabled is not None:
         source.search_indexing_enabled = payload.search_indexing_enabled
-    after = {"name": source.name, "enabled": source.enabled, **_location(source)}
+    after = {
+        "name": source.name,
+        "enabled": source.enabled,
+        "winrm_scheme": source.winrm_scheme,
+        **_location(source),
+    }
     location_changed = any(before[k] != after[k] for k in _location(source))
     if location_changed or not (source.enabled and source.search_indexing_enabled):
         # Opting out of search (or disabling the source) means its content
@@ -503,6 +572,8 @@ def update_source(
     changes = {k: {"from": before[k], "to": after[k]} for k in before if before[k] != after[k]}
     if payload.credential is not None:
         changes["credential"] = "replaced"
+    if tls_ca_changed:
+        changes["tls_ca_pem"] = "replaced" if source.tls_ca_pem else "removed"
     session.add(source)
     record_audit_event(
         session,
@@ -665,6 +736,8 @@ class FolderPickRequest(BaseModel):
     host: str | None = None
     port: int | None = None
     credential: dict | None = None
+    winrm_scheme: Literal["https", "http"] | None = None
+    tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
     path: str = ""
 
 
@@ -709,6 +782,16 @@ def _picker_source(session: Session, payload: FolderPickRequest) -> Source:
     else:
         raise _bad_request("Enter the credential first")
 
+    scheme = (
+        payload.winrm_scheme
+        if "winrm_scheme" in payload.model_fields_set
+        else (saved.winrm_scheme if saved else None)
+    )
+    ca_pem = (
+        _validate_ca_pem(protocol, payload.tls_ca_pem)
+        if "tls_ca_pem" in payload.model_fields_set
+        else (saved.tls_ca_pem if saved else None)
+    )
     return Source(
         id=saved.id if saved else None,
         name=saved.name if saved else "picker",
@@ -717,6 +800,8 @@ def _picker_source(session: Session, payload: FolderPickRequest) -> Source:
         port=port,
         credential_ref=credential_ref,
         base_path="",
+        winrm_scheme=scheme if protocol == Protocol.winrm else None,
+        tls_ca_pem=ca_pem if protocol == Protocol.winrm else None,
     )
 
 
