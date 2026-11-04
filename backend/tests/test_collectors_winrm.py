@@ -192,3 +192,10 @@ def test_list_directory_decodes_non_ascii_names(fake_session):
 
     assert {e.name for e in entries} == {"ação-é.log", "aspas ’curvas“ ”.log"}
     assert "ToBase64String" in seen[0] and "UTF8" in seen[0]
+
+
+def test_remote_path_of_a_drive_root_keeps_the_backslash():
+    """ "D:" alone is the current directory on D:, not its root."""
+    source = _source(base_path="D:\\")
+    assert winrm_module._remote_path(source) == "D:\\"
+    assert winrm_module._remote_path(source, "Logs/app.log") == "D:\\Logs\\app.log"

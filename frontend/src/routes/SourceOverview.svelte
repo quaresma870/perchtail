@@ -134,8 +134,19 @@
         <dt>Host</dt>
         <dd class="mono">{source.host}{source.port ? `:${source.port}` : ''}</dd>
       {/if}
-      <dt>Base path</dt>
-      <dd class="mono">{source.base_path || '/'}</dd>
+      {#if source.roots.length > 0}
+        <dt>Folders</dt>
+        <dd>
+          <ul class="roots">
+            {#each source.roots as root (root.label)}
+              <li><strong>{root.label}</strong> <span class="mono">{root.path}</span></li>
+            {/each}
+          </ul>
+        </dd>
+      {:else}
+        <dt>Base path</dt>
+        <dd class="mono">{source.base_path || '/'}</dd>
+      {/if}
       {#if source.protocol === 'agent'}
         <dt>Agent</dt>
         <dd>{source.agent_connected ? 'connected' : 'not connected'}</dd>
@@ -176,6 +187,15 @@
 </div>
 
 <style>
+  .roots {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
   .page {
     padding: 1.75rem 2rem;
     max-width: 760px;

@@ -3,10 +3,24 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import FolderPicker from '../lib/components/FolderPicker.svelte'
   import SeverityPatternEditor from '../lib/components/SeverityPatternEditor.svelte'
+  import {
+    basePathHint,
+    basePathPlaceholder,
+    canPickFolder,
+    suggestRootLabel,
+  } from '../lib/base-path'
   import { nestFoldersFlat } from '../lib/folder-tree'
   import { justCreatedSourceId } from '../lib/source-created'
-  import type { AgentTokenResult, Customer, Folder, Protocol, Source } from '../lib/types'
+  import type {
+    AgentTokenResult,
+    Customer,
+    Folder,
+    Protocol,
+    Source,
+    SourceRoot,
+  } from '../lib/types'
 
   export let params: { id?: string } = {}
 
@@ -26,7 +40,14 @@
   let protocol: Protocol = 'ssh'
   let host = ''
   let port: number | null = null
-  let basePath = ''
+  // The folder(s) this source reads. One entry is an ordinary source
+  // (its path is the Base path); two or more each get a label and show up
+  // as top-level folders in the viewer (#161).
+  let roots: SourceRoot[] = [{ label: '', path: '' }]
+  let hadRoots = false
+  let originalPaths = ''
+  // Index of the root whose Browse… picker is open.
+  let pickerFor: number | null = null
   let enabled = true
   let searchIndexingEnabled = false
   let username = ''
@@ -154,7 +175,12 @@
           protocol = source.protocol
           host = source.host
           port = source.port
-          basePath = source.base_path
+          roots =
+            source.roots.length > 0
+              ? source.roots.map((r) => ({ ...r }))
+              : [{ label: '', path: source.base_path }]
+          hadRoots = source.roots.length > 0
+          originalPaths = JSON.stringify(roots.map((r) => r.path))
           enabled = source.enabled
           searchIndexingEnabled = source.search_indexing_enabled
         }
@@ -175,6 +201,39 @@
     return Object.keys(cred).length > 0 ? cred : null
   }
 
+  $: multiRoot = roots.length > 1
+  $: pathsChanged = !isNew && JSON.stringify(roots.map((r) => r.path)) !== originalPaths
+
+  function addRoot() {
+    if (roots.length === 1 && !roots[0].label) {
+      roots[0].label = suggestRootLabel(roots[0].path, [])
+    }
+    roots = [...roots, { label: '', path: '' }]
+  }
+
+  function removeRoot(index: number) {
+    roots = roots.filter((_, i) => i !== index)
+    if (pickerFor !== null) pickerFor = null
+  }
+
+  function pickedFolder(index: number, path: string) {
+    roots[index].path = path
+    if (roots.length > 1 && !roots[index].label) {
+      roots[index].label = suggestRootLabel(
+        path,
+        roots.filter((_, i) => i !== index).map((r) => r.label),
+      )
+    }
+    pickerFor = null
+  }
+
+  function locationPayload() {
+    const cleaned = roots.map((r) => ({ label: r.label.trim(), path: r.path.trim() }))
+    if (cleaned.length > 1) return { base_path: cleaned[0].path, roots: cleaned }
+    // Sending a single root turns a multi-root source back into a plain one.
+    return { base_path: cleaned[0].path, ...(hadRoots ? { roots: cleaned } : {}) }
+  }
+
   async function handleSubmit() {
     error = ''
     saving = true
@@ -188,7 +247,7 @@
           protocol,
           host,
           port,
-          base_path: basePath,
+          ...locationPayload(),
           enabled,
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
@@ -203,7 +262,7 @@
           folder_id: folderId,
           host,
           port,
-          base_path: basePath,
+          ...locationPayload(),
           enabled,
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
@@ -393,23 +452,86 @@
         {/if}
       </div>
 
-      <label>
-        Base path
-        <input
-          class="input"
-          bind:value={basePath}
-          required
-          placeholder={protocol === 'agent'
-            ? 'documented for reference — the agent enforces its own root'
-            : '/var/log/appname'}
-        />
-      </label>
-      {#if protocol === 'local'}
-        <p class="hint">
-          Must be under a directory the server operator allows via <code>LOCAL_SOURCE_ROOTS</code> —
-          see docs/source-setup.md.
-        </p>
-      {/if}
+      <div class="roots">
+        {#each roots as root, index (index)}
+          <div class="root-row">
+            {#if multiRoot}
+              <label class="root-label">
+                Label
+                <input
+                  class="input"
+                  bind:value={root.label}
+                  required
+                  maxlength="64"
+                  placeholder="e.g. IIS"
+                />
+              </label>
+            {/if}
+            <label class="grow">
+              {index === 0 ? 'Base path' : 'Path'}
+              <input
+                class="input mono"
+                bind:value={root.path}
+                required={protocol !== 'agent'}
+                placeholder={basePathPlaceholder(protocol)}
+                spellcheck="false"
+                autocomplete="off"
+                data-gramm="false"
+              />
+            </label>
+            {#if canPickFolder(protocol)}
+              <button
+                type="button"
+                class="btn btn-ghost root-btn"
+                disabled={!host.trim()}
+                title={host.trim() ? 'Browse the host for a folder' : 'Enter the host first'}
+                on:click={() => (pickerFor = pickerFor === index ? null : index)}>Browse…</button
+              >
+            {/if}
+            {#if multiRoot}
+              <button
+                type="button"
+                class="btn btn-ghost root-btn"
+                aria-label={`Remove folder ${root.label || index + 1}`}
+                on:click={() => removeRoot(index)}>✕</button
+              >
+            {/if}
+          </div>
+          {#if pickerFor === index}
+            <FolderPicker
+              {protocol}
+              {host}
+              {port}
+              credential={buildCredential()}
+              sourceId={isNew ? null : sourceId}
+              startPath={root.path}
+              on:pick={(e) => pickedFolder(index, e.detail)}
+              on:close={() => (pickerFor = null)}
+            />
+          {/if}
+        {/each}
+        {#if basePathHint(protocol)}
+          <p class="hint small">{basePathHint(protocol)}</p>
+        {/if}
+        {#if protocol !== 'agent'}
+          <button type="button" class="btn btn-ghost add-root" on:click={addRoot}>
+            + Add another folder
+          </button>
+          {#if multiRoot}
+            <p class="hint small">
+              Each folder appears in the viewer as a top-level folder named by its label. Rules
+              see those names too: <code>**/*.log</code> covers every folder,
+              <code>IIS/**</code> only one.
+            </p>
+          {/if}
+        {/if}
+        {#if pathsChanged}
+          <p class="warning small">
+            Rules are relative to the base path, so after saving they apply to what's at the new
+            location — check they still match. The source's search index is cleared and rebuilt.
+          </p>
+        {/if}
+      </div>
 
       <label class="checkbox">
         <input type="checkbox" bind:checked={enabled} />
@@ -616,6 +738,40 @@
   .error.indent {
     margin: -0.5rem 0 0;
     font-size: 0.78rem;
+  }
+  .roots {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .root-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-end;
+  }
+  .root-row .grow {
+    flex: 1;
+  }
+  .root-label {
+    flex: 0 0 140px;
+  }
+  .root-btn {
+    flex: 0 0 auto;
+  }
+  .add-root {
+    align-self: flex-start;
+    font-size: 0.8rem;
+    padding: 0.3rem 0.6rem;
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
+  .small {
+    margin: 0;
+    font-size: 0.78rem;
+  }
+  .warning {
+    color: var(--warning, #b58105);
   }
   .override-hint {
     font-size: 0.78rem;

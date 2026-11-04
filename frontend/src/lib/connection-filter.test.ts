@@ -24,6 +24,7 @@ function makeSource(overrides: Partial<Source>): Source {
     agent_last_seen_at: null,
     search_indexing_enabled: false,
     my_capabilities: ['view', 'download'],
+    roots: [],
     ...overrides,
   }
 }

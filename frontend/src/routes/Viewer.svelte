@@ -954,12 +954,6 @@
   .tab.active .tab-label {
     color: var(--text);
   }
-  .file-icon {
-    width: 13px;
-    height: 13px;
-    flex: 0 0 auto;
-    color: var(--text-faint);
-  }
   .tab .close {
     border: none;
     background: none;
