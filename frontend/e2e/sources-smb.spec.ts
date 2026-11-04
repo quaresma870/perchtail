@@ -48,7 +48,10 @@ test('SMB source: create, row-based rules (last-match-wins), browse, delete', as
 
   await page.goto(`/#/viewer/${sourceId}`)
   await expect(page.getByRole('button', { name: 'other.log' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'hello.log' })).toHaveCount(0)
+  // The hello.log tab opened above stays open across navigation (#162), so
+  // only the explorer's listing is checked here.
+  const explorer = page.locator('.explorer')
+  await expect(explorer.getByRole('button', { name: 'hello.log' })).toHaveCount(0)
 
   await page.goto('/#/settings/sources')
   page.once('dialog', (dialog) => dialog.accept())
