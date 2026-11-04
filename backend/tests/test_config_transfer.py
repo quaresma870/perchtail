@@ -222,6 +222,16 @@ def test_moving_a_source_to_another_folder_is_an_update(session, client):
             "Same source",
         ),
         (lambda t: "{{{", "line", "Not valid YAML"),
+        (
+            lambda t: t.replace("- exclude **/debug/**", '- exclude "**/debug/**"'),
+            "rules[1]",
+            "in quotes",
+        ),
+        (
+            lambda t: t.replace("- exclude **/debug/**", "- exclude '**/debug/**'"),
+            "rules[1]",
+            "exclude **/debug/** without them",
+        ),
     ],
 )
 def test_problems_are_reported_with_where_and_nothing_is_written(
@@ -312,3 +322,32 @@ def test_import_cannot_repoint_a_source_and_keep_its_credential(session, client)
     assert any("credential again" in p["message"] for p in result["problems"])
     session.refresh(fs)
     assert fs.host == "attacker.example"
+
+
+def test_quoting_the_whole_rule_is_fine(session, client):
+    """#190: only a quoted *pattern* is refused, not a quoted rule."""
+    result = _import(
+        client, text=TEMPLATE.replace("- exclude **/debug/**", '- "exclude **/debug/**"')
+    )
+    assert result["problems"] == []
+    assert "**/debug/**" in {r.pattern for r in session.exec(select(Rule)).all()}
+
+
+def test_an_imported_source_without_a_credential_still_asks_for_one(session, client):
+    """#196: after applying, a second preview showed the sources as
+    unchanged and stopped offering the credential they still lack."""
+    _import(client)
+    again = _import(client, dry_run=True)
+    needs = {i["key"]: i for i in again["items"] if i["needs_credential"]}
+    assert set(needs) == {"Acme / fs01", "Acme / iis01"}
+    assert needs["Acme / fs01"]["action"] == "unchanged"
+
+    result = _import(
+        client,
+        credentials={"Acme / fs01": {"username": "svc", "password": "pw"}},
+    )
+    item = next(i for i in result["items"] if i["key"] == "Acme / fs01")
+    assert item["action"] == "update" and "credential set" in item["changes"]
+    assert item["needs_credential"] is False
+    fs01 = session.exec(select(Source).where(Source.name == "fs01")).one()
+    assert fs01.credential_ref is not None

@@ -4,7 +4,7 @@
   import { authChecked, currentUser, hasCapability, logout, refreshCurrentUser } from './lib/auth'
   import { currentHash } from './lib/hash'
   import { closeAllTabs } from './lib/viewer-tabs'
-  import { refreshSystemSettings, systemSettings } from './lib/settings'
+  import { refreshSystemSettings, refreshSystemSettingsIfStale, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
   import Sources from './routes/Sources.svelte'
@@ -57,6 +57,15 @@
     await refreshSystemSettings()
   })
 
+  // Re-read system settings on navigation and when the tab is shown again,
+  // so a change an admin makes (e.g. the Connections view) applies without a
+  // reload. Also covers the first navigation after logging in, when the
+  // fetch on mount had no session yet.
+  $: if ($currentUser && $currentHash) refreshSystemSettingsIfStale()
+  function onVisibility() {
+    if (document.visibilityState === 'visible' && $currentUser) refreshSystemSettingsIfStale()
+  }
+
   $: if ($authChecked && !$currentUser && $currentHash !== '/login') {
     push('/login')
   }
@@ -100,6 +109,8 @@
     push('/login')
   }
 </script>
+
+<svelte:document on:visibilitychange={onVisibility} />
 
 <main>
   {#if $authChecked && $currentUser && $currentHash !== '/login'}

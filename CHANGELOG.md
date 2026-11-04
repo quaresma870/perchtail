@@ -32,6 +32,10 @@ release ships (0.x releases may include breaking changes between minors).
   folder. The agent now reports its OS when it connects (shown as **Agent
   OS** on the source's page). Upgrade Windows agents to get this: older
   agents don't report it and keep case-sensitive rules.
+- `DATA_DIR` is now readable by PerchTail's user only: on startup the
+  directory is set to `0700`, and the database (with its WAL/SHM files),
+  the credential salt and `known_hosts` to `0600`. Earlier versions left
+  them `0644`, readable by any local user on a host install.
 
 ### Fixed
 - SMB: a directory symlink in a folder no longer makes the whole listing
@@ -49,13 +53,45 @@ release ships (0.x releases may include breaking changes between minors).
 - Scheduled jobs that start late (a busy worker) now run instead of being
   skipped, and runs that piled up collapse into one. A skipped indexing
   sweep also delayed alerts.
+- Import refuses a rule whose pattern alone is in quotes. In an inline
+  list (`rules: [include **/*, exclude "*/secret/**"]`) the quotes became
+  part of the pattern, so the rule never matched.
+- A folder ZIP over `MAX_FETCH_MB` is refused before anything is
+  downloaded, using the sizes in the listing, and the 413 now gives the
+  folder's size. Before, an SMB folder downloaded up to the limit first.
+- The source page reloads when the source id in the URL changes.
+- Paths the push-agent refuses (a link out of its folder) answer 404, as
+  over SSH, instead of 502.
+- TLS errors say whether the certificate is for another name, has expired
+  or comes from an unknown issuer, instead of always "isn't trusted".
+- Import keeps offering to set a credential for sources that have none,
+  also after they've been imported, and takes an SSH private key as well
+  as a password.
+- Compare shows which source each side comes from.
+- Machines and folders expanded in the explorer stay expanded after
+  visiting Search or Settings, like the tabs.
+- A change to the Connections view (System settings) reaches users who
+  already have PerchTail open on their next navigation, without a reload.
+- The source page shows the plain-HTTP warning for WinRM sources, as the
+  editor does.
+- `startup.data_layout.moved` is logged as a structured event in Docker
+  too, and `logs.retention.size_limit` has the numbers as fields instead
+  of in the event name.
 
 ### Added
+- [docs/install-from-source.md](docs/install-from-source.md): running
+  PerchTail on a Linux host without Docker, with a systemd unit.
 - Releases now carry what's needed to install them (`.github/workflows/release.yml`):
   - push-agent binaries for Linux (amd64, arm64) and Windows (amd64), with `SHA256SUMS`;
   - the Docker image on `ghcr.io/quaresma870/perchtail`, for amd64 and arm64, with provenance and an SBOM;
   - the SBOM, also attached to the release.
   `latest` and `X.Y` image tags move only with full releases. The workflow can also be run by hand for an existing tag, to add these to a release published earlier.
+
+### Changed
+- `backend/requirements.txt` now pins every Python package, transitive
+  ones included, so the image and a source install get exactly the same
+  versions. The version ranges moved to `backend/requirements.in`; see
+  CONTRIBUTING.md for how to regenerate the pins.
 
 ## [0.5.0] - 2026-11-04
 

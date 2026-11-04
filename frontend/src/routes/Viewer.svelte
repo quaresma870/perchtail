@@ -18,7 +18,7 @@
   import { systemSettings } from '../lib/settings'
   import { tabKey } from '../lib/tab-key'
   import type { SeverityPattern, Source } from '../lib/types'
-  import { sourceHue, viewerState, type Tab } from '../lib/viewer-tabs'
+  import { explorerExpanded, setExpanded, sourceHue, viewerState, type Tab } from '../lib/viewer-tabs'
 
   /** The viewer is one explorer across every source the user can see
    * (#162): machines expand in place in the sidebar, and tabs from
@@ -93,24 +93,18 @@
     }
   }
 
-  let expandedTreeIds = new Set<string>()
+  $: expandedTreeIds = new Set(
+    [...$explorerExpanded].filter((k) => k.startsWith('tree:')).map((k) => k.slice(5)),
+  )
   $: connectionTree = buildConnectionTree(filteredAllSources)
 
   function toggleTreeNode(id: string) {
-    const next = new Set(expandedTreeIds)
-    if (next.has(id)) {
-      next.delete(id)
-    } else {
-      next.add(id)
-    }
-    expandedTreeIds = next
+    setExpanded(`tree:${id}`, !expandedTreeIds.has(id))
   }
 
   function revealInTree(source: Source) {
-    const next = new Set(expandedTreeIds)
-    next.add(source.customer_id !== null ? `customer:${source.customer_id}` : 'unassigned')
-    for (const entry of source.folder_path) next.add(`folder:${entry.id}`)
-    expandedTreeIds = next
+    setExpanded(`tree:${source.customer_id !== null ? `customer:${source.customer_id}` : 'unassigned'}`, true)
+    for (const entry of source.folder_path) setExpanded(`tree:folder:${entry.id}`, true)
   }
 
   function setState(patch: Partial<{ tabs: Tab[]; activeKey: string | null }>) {
@@ -233,7 +227,7 @@
         return
       }
       const content = await response.text()
-      const label = sourceId === activeTab?.sourceId ? name : `${sourceLabel(sourceId)} › ${name}`
+      const label = `${sourceLabel(sourceId)} › ${name}`
       compareWith = { name: label, content }
       compareArmed = false
       compareKey += 1
@@ -252,7 +246,7 @@
     if (compareArmed) {
       compareArmed = false
       if (tab.key !== activeKey) {
-        const label = tab.sourceId === activeTab?.sourceId ? tab.name : `${tab.sourceName} › ${tab.name}`
+        const label = `${tab.sourceName} › ${tab.name}`
         compareWith = { name: label, content: tab.content }
         compareKey += 1
       }
@@ -571,7 +565,8 @@
         <div class="pane-toolbar">
           <div class="toolbar-left">
             <span class="hint">
-              Comparing <strong>{activeTab.name}</strong> ↔ <strong>{compareWith.name}</strong>
+              Comparing <strong>{activeTab.sourceName} › {activeTab.name}</strong> ↔
+              <strong>{compareWith.name}</strong>
             </span>
           </div>
           <div class="toolbar-right">
@@ -582,7 +577,7 @@
           <DiffPane
             leftContent={activeTab.content}
             rightContent={compareWith.content}
-            leftLabel={activeTab.name}
+            leftLabel={`${activeTab.sourceName} › ${activeTab.name}`}
             rightLabel={compareWith.name}
           />
         {/key}

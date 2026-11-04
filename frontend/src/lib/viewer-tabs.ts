@@ -36,6 +36,22 @@ export interface ViewerState {
  * and closed on logout (closeAllTabs). Content is never persisted. */
 export const viewerState = writable<ViewerState>({ tabs: [], activeKey: null })
 
+/** Which explorer nodes are open -- machines (`source:<id>`), their folders
+ * (`dir:<id>:<archive>:<path>`) and connection-tree groups -- kept like the
+ * tabs, so going to Search and back doesn't collapse everything (#196).
+ * Memory only; a node reopened this way lists its folder live again. */
+export const explorerExpanded = writable<Set<string>>(new Set())
+
+export function setExpanded(key: string, open: boolean): void {
+  explorerExpanded.update((current) => {
+    if (current.has(key) === open) return current
+    const next = new Set(current)
+    if (open) next.add(key)
+    else next.delete(key)
+    return next
+  })
+}
+
 /** Stable, distinct hue per source for tab badges. */
 export function sourceHue(sourceId: number): number {
   return (sourceId * 137.508) % 360
@@ -47,6 +63,7 @@ export async function closeAllTabs(): Promise<void> {
     tabs = state.tabs
     return { tabs: [], activeKey: null }
   })
+  explorerExpanded.set(new Set())
   await Promise.all(
     tabs
       .filter((t) => t.scratchKey)

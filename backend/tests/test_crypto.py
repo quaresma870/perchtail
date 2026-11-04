@@ -180,3 +180,16 @@ def test_audit_chain_key_singleton_reads_from_settings(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path, key="a-key")
 
     assert audit_chain_key() == _derive_audit_chain_key("a-key")
+
+
+def test_new_salt_is_readable_by_this_user_only(tmp_path):
+    """#193"""
+    import stat
+
+    from app.crypto import _load_or_create_salt
+
+    path = tmp_path / "db" / "credential_salt"
+    salt = _load_or_create_salt(path)
+    assert len(salt) == 16
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert _load_or_create_salt(path) == salt

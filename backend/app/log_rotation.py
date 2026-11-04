@@ -166,13 +166,15 @@ class SizeAndTimeRotatingFileHandler(logging.handlers.BaseRotatingHandler):
             # Logged after the new file is open (doRollover), so this lands
             # in the fresh file rather than the one just archived.
             self._logger.warning(
-                "logs.retention.size_limit: deleted %d log archive(s) up to %s to stay under "
-                "LOG_MAX_TOTAL_MB=%d, before LOG_RETENTION_DAYS=%d would have; consider a lower "
-                "LOG_LEVEL or LOG_QUIET_THIRD_PARTY=true",
-                len(early),
-                max(early).isoformat(),
-                self.max_total_bytes // _MB,
-                self.retention_days,
+                "logs.retention.size_limit",
+                extra={
+                    "deleted_files": len(early),
+                    "newest_deleted_day": max(early).isoformat(),
+                    "max_total_mb": self.max_total_bytes // _MB,
+                    "retention_days": self.retention_days,
+                    "hint": "LOG_MAX_TOTAL_MB deleted logs before LOG_RETENTION_DAYS would "
+                    "have; consider a lower LOG_LEVEL or LOG_QUIET_THIRD_PARTY=true",
+                },
             )
 
 

@@ -199,3 +199,40 @@ def test_check_hides_raw_error_from_view_only_users(session, monkeypatch):
     assert "/var/log/app" in as_viewer["detail"]
     assert "ChrootDirectory" in as_viewer["detail"]
     assert "internal-host" in as_admin["detail"]
+
+
+@pytest.mark.parametrize(
+    "message, expected_name",
+    [
+        ("openat secret: path escapes from parent", "PathOutsideBaseError"),
+        ('unsafe path: "../etc"', "PathOutsideBaseError"),
+        ("open x.log: no such file or directory", "SourceNotFoundError"),
+        ("open x.log: permission denied", "SourcePermissionError"),
+    ],
+)
+def test_agent_refusals_map_like_the_other_connectors(message, expected_name):
+    """F-L: a path the agent refuses (a link out of its base) was a 502;
+    now it's a 404, as over SSH."""
+    from app.agent_registry import AgentCommandError
+
+    assert type(errors.translate_agent(AgentCommandError(message))).__name__ == expected_name
+
+
+@pytest.mark.parametrize(
+    "text, fragment",
+    [
+        (
+            "certificate verify failed: Hostname mismatch, certificate is not valid for 'x'.",
+            "different name",
+        ),
+        ("certificate verify failed: certificate has expired", "expired"),
+        ("certificate verify failed: unable to get local issuer certificate", "issuer is unknown"),
+    ],
+)
+def test_winrm_tls_errors_say_which_check_failed(text, fragment):
+    """F-N: a certificate for another name got the same "isn't trusted" as
+    one from an unknown CA, though the fix is different."""
+    import requests
+
+    mapped = errors.translate_winrm(requests.exceptions.SSLError(text))
+    assert fragment in mapped.public_message

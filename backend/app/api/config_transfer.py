@@ -41,6 +41,7 @@ class PlanItemPublic(BaseModel):
     key: str
     changes: list[str]
     needs_credential: bool
+    protocol: str | None = None
 
 
 class ProblemPublic(BaseModel):

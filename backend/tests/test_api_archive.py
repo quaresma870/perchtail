@@ -594,6 +594,37 @@ def test_folder_zip_over_max_fetch_mb_in_total_is_a_413(app_client, session, tmp
     assert client.get(f"/sources/{source.id}/download-zip").status_code == 413
 
 
+def test_folder_zip_over_the_limit_fails_before_fetching_anything(
+    app_client, session, tmp_path, monkeypatch
+):
+    """#191: the listed sizes are summed first, so an oversized folder gets
+    its 413 (with the folder's size) without downloading up to the limit."""
+    import app.collectors.local as local_connector
+
+    monkeypatch.setattr(get_settings(), "max_fetch_mb", 0.001)  # ~1 KB in total
+    fetched = []
+    real_fetch = local_connector.fetch_file
+    monkeypatch.setattr(
+        local_connector,
+        "fetch_file",
+        lambda *a, **kw: (fetched.append(a[1]), real_fetch(*a, **kw))[1],
+    )
+    app, client = app_client
+    for i in range(3):
+        (tmp_path / f"part{i}.log").write_text("x" * 600)
+    source = _make_local_source(session, tmp_path)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+
+    assert response.status_code == 413
+    detail = response.json()["detail"]
+    assert detail["size_bytes"] == 1800
+    assert detail["message"].startswith("This folder is")
+    assert fetched == []
+
+
 def test_symlink_escaping_base_path_is_a_404_on_browse_and_open(
     app_client, session, monkeypatch, scratch_store
 ):

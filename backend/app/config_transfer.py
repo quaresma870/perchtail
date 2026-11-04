@@ -69,7 +69,11 @@ class PlanItem:
     kind: str  # customer | folder | source
     key: str
     changes: list[str] = field(default_factory=list)
+    # A source with no credential, in the file or saved: the import page
+    # asks for one. True for existing sources too (#196), so a second
+    # preview after applying still offers it.
     needs_credential: bool = False
+    protocol: str | None = None  # sources only, so the page can offer an SSH key
 
 
 @dataclass
@@ -376,6 +380,10 @@ def _parse_credential(
     return resolved
 
 
+def _quoted(raw: str) -> bool:
+    return len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'"
+
+
 def _parse_rules(value: Any, where: str, problems: list[Problem]) -> list[_RuleSpec] | None:
     if value is None:
         return None
@@ -410,6 +418,18 @@ def _parse_rules(value: Any, where: str, problems: list[Problem]) -> list[_RuleS
         raw = raw.strip()
         if not raw:
             problems.append(Problem(rule_where, "The rule has no pattern"))
+            continue
+        if isinstance(item, str) and _quoted(raw):
+            # `[include **/*, exclude "*/secret/**"]` is valid YAML, but each
+            # item is one plain string, so the quotes would be part of the
+            # pattern and the rule would never match (#190).
+            problems.append(
+                Problem(
+                    rule_where,
+                    f"The pattern is in quotes, which would become part of it: write "
+                    f"{rule_type.value} {raw[1:-1]} without them, or quote the whole rule",
+                )
+            )
             continue
         try:
             pattern, kind = parse_pattern(raw)
@@ -550,6 +570,7 @@ def _create_source(session, spec, customer_id, folder_id, credential, apply, use
         changes=[f"{spec.protocol.value}://{spec.host}{':' + str(spec.port) if spec.port else ''}"]
         + ([f"{len(spec.rules)} rules"] if spec.rules else ["no rules (nothing visible)"]),
         needs_credential=spec.protocol in _CREDENTIAL_PROTOCOLS and credential is None,
+        protocol=spec.protocol.value,
     )
     if spec.protocol == Protocol.agent:
         item.changes.append("generate the agent token in the source's settings afterwards")
@@ -640,10 +661,28 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
     if rules_change:
         labels.append(f"rules replaced ({len(current_rules)} → {len(spec.rules)})")
     if credential_change:
-        labels.append("credential replaced")
+        labels.append("credential replaced" if source.credential_ref else "credential set")
+    needs_credential = (
+        spec.protocol in _CREDENTIAL_PROTOCOLS
+        and source.credential_ref is None
+        and credential is None
+    )
     if not labels:
-        return PlanItem("unchanged", "source", spec.key)
-    item = PlanItem("update", "source", spec.key, changes=labels)
+        return PlanItem(
+            "unchanged",
+            "source",
+            spec.key,
+            needs_credential=needs_credential,
+            protocol=spec.protocol.value,
+        )
+    item = PlanItem(
+        "update",
+        "source",
+        spec.key,
+        changes=labels,
+        needs_credential=needs_credential,
+        protocol=spec.protocol.value,
+    )
     if not apply:
         return item
 
