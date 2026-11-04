@@ -19,6 +19,20 @@ Three environment variables, all required:
 | `PERCHTAIL_BASE_PATH` | `/var/log/myapp` | Local root the agent is allowed to read from |
 | `PERCHTAIL_ALLOW_INSECURE` | unset | Set to `true` to allow a plain `ws://` URL. Without it the agent refuses to start unless the URL is `wss://`, because the token and every fetched file travel over this connection. Only for testing or a fully trusted network. |
 
+## Download
+
+Every [GitHub release](https://github.com/quaresma870/perchtail/releases)
+has prebuilt binaries for Linux (amd64, arm64) and Windows (amd64), named
+`perchtail-agent-<version>-<os>-<arch>`, and a `SHA256SUMS` file. Check the
+download before installing it:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+On Windows: `Get-FileHash .\perchtail-agent-<version>-windows-amd64.exe` and
+compare with the line in `SHA256SUMS`.
+
 ## Build
 
 ```sh

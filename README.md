@@ -149,6 +149,19 @@ Then bring it up:
 docker compose up -d
 ```
 
+This builds the image from the checkout. To run a published release
+instead, replace `build: .` in `docker-compose.yml` with the image of that
+version (amd64 and arm64), for example:
+
+```yaml
+    image: ghcr.io/quaresma870/perchtail:0.5.0
+```
+
+Each [GitHub release](https://github.com/quaresma870/perchtail/releases)
+also carries the push-agent binaries, their `SHA256SUMS`, and the image's
+SBOM. `latest` and `X.Y` tags only move with full releases, never with a
+pre-release.
+
 On first startup (only when the database has zero users), PerchTail creates a
 break-glass super-admin account with a randomly generated password and prints
 it once to the container logs — grab it before it scrolls away:

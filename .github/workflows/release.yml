@@ -1,0 +1,167 @@
+name: Release
+
+# Runs when a release (or pre-release) is published on GitHub, and attaches
+# what's needed to install it:
+#   - the push-agent binaries for Linux (amd64, arm64) and Windows (amd64),
+#     plus SHA256SUMS to verify them;
+#   - the Docker image, pushed to ghcr.io/<owner>/perchtail with the
+#     version's tags, and its SBOM (CycloneDX) attached to the release.
+# GitHub adds the source code archives itself.
+#
+# Run it by hand (Actions -> Release -> Run workflow) with an existing tag
+# to add the assets to a release published before this workflow existed,
+# or to retry a failed run. Re-running replaces the assets.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, e.g. v0.5.0"
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${EVENT_TAG:-$INPUT_TAG}"
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$tag' is not a version tag like v0.5.0"
+            exit 1
+          fi
+          if [ -n "$EVENT_TAG" ]; then
+            prerelease="$EVENT_PRERELEASE"
+          else
+            prerelease="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)"
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=${tag#v}"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release $tag (pre-release: $prerelease)"
+
+  agent:
+    needs: meta
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload release assets
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: agent/go.sum
+
+      - name: Build agent binaries
+        working-directory: agent
+        env:
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../dist
+          for target in linux/amd64 linux/arm64 windows/amd64; do
+            os="${target%/*}"; arch="${target#*/}"
+            ext=""; [ "$os" = windows ] && ext=".exe"
+            out="../dist/perchtail-agent-${VERSION}-${os}-${arch}${ext}"
+            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$out" .
+          done
+          cd ../dist
+          sha256sum perchtail-agent-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  image:
+    needs: meta
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the SBOM
+      packages: write # push to ghcr.io
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # 0.5.0 always; 0.5 and latest only for a full release, so a
+      # pre-release is never what `docker pull ...:latest` gets.
+      - id: tags
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.meta.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.meta.outputs.tag }},enable=${{ needs.meta.outputs.prerelease != 'true' }}
+            type=raw,value=latest,enable=${{ needs.meta.outputs.prerelease != 'true' }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: ${{ steps.tags.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      # The package starts out private on ghcr.io, so Trivy pulls with the
+      # same token.
+      - name: Generate SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@v0.35.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+        with:
+          image-ref: ${{ steps.image.outputs.name }}:${{ needs.meta.outputs.version }}
+          format: cyclonedx
+          output: perchtail-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
+
+      - name: Attach the SBOM to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: gh release upload "$TAG" "perchtail-${VERSION}.sbom.cyclonedx.json" --clobber --repo "$GITHUB_REPOSITORY"
