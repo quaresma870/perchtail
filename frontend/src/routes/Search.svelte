@@ -1,11 +1,23 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { push } from 'svelte-spa-router'
+  import { push, replace, router } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
+  import SearchScopePicker from '../lib/components/SearchScopePicker.svelte'
+  import {
+    loadStoredScope,
+    parseScopeParam,
+    scopeKey,
+    scopeParam,
+    searchQueryString,
+    storeScope,
+    type ScopeItem,
+    type SearchScope,
+  } from '../lib/search-scope'
   import { filterSourcesByNameOrHost } from '../lib/source-match'
   import type { SearchHit, Source } from '../lib/types'
 
   let query = ''
+  let scope: SearchScope = { items: [], path: '' }
   let hits: SearchHit[] = []
   let allSources: Source[] = []
   let sourcesById: Record<number, Source> = {}
@@ -31,7 +43,8 @@
     // already-fetched, RBAC-scoped source list (see lib/source-match.ts) —
     // metadata, not indexed content, so it's always current and doesn't
     // need a round-trip of its own.
-    matchingSources = filterSourcesByNameOrHost(allSources, trimmed)
+    matchingSources = filterSourcesByNameOrHost(scopedSources(), trimmed)
+    syncUrl()
     if (!trimmed) {
       hits = []
       return
@@ -39,7 +52,7 @@
     loading = true
     error = ''
     try {
-      hits = await api.get<SearchHit[]>(`/search?q=${encodeURIComponent(trimmed)}`)
+      hits = await api.get<SearchHit[]>(`/search?${searchQueryString(trimmed, scope)}`)
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Search failed'
     } finally {
@@ -60,7 +73,76 @@
     push(`/viewer/${source.id}`)
   }
 
-  onMount(loadSources)
+  // Only what can be named from the user's own source list survives from
+  // a URL or from storage -- a scope item the user can no longer see is
+  // dropped rather than shown as a bare id.
+  function knownItems(): Map<string, ScopeItem> {
+    const known = new Map<string, ScopeItem>()
+    for (const source of allSources) {
+      if (source.customer_id !== null) {
+        const item = { kind: 'customer' as const, id: source.customer_id, name: source.customer_name ?? '' }
+        known.set(scopeKey(item), item)
+      }
+      for (const folder of source.folder_path) {
+        const item = { kind: 'folder' as const, id: folder.id, name: folder.name }
+        known.set(scopeKey(item), item)
+      }
+      known.set(`source:${source.id}`, { kind: 'source', id: source.id, name: source.name })
+    }
+    return known
+  }
+
+  // Sources the name/host matches are limited to: the chosen sources, and
+  // everything under a chosen customer or folder.
+  function scopedSources(): Source[] {
+    if (scope.items.length === 0) return allSources
+    const keys = new Set(scope.items.map(scopeKey))
+    return allSources.filter(
+      (s) =>
+        keys.has(`source:${s.id}`) ||
+        (s.customer_id !== null && keys.has(`customer:${s.customer_id}`)) ||
+        s.folder_path.some((f) => keys.has(`folder:${f.id}`)),
+    )
+  }
+
+  function syncUrl() {
+    const params = new URLSearchParams()
+    if (query.trim()) params.set('q', query.trim())
+    if (scope.items.length) params.set('scope', scopeParam(scope.items))
+    if (scope.path.trim()) params.set('path', scope.path.trim())
+    const qs = params.toString()
+    replace(qs ? `/search?${qs}` : '/search')
+  }
+
+  function changeScope(next: SearchScope) {
+    scope = next
+    storeScope(scope)
+    if (searched && query.trim()) runSearch()
+    else syncUrl()
+  }
+
+  onMount(async () => {
+    await loadSources()
+    const known = knownItems()
+    const params = new URLSearchParams(router.querystring ?? '')
+    const fromUrl = params.has('scope') || params.has('path')
+    const initial = fromUrl
+      ? {
+          items: parseScopeParam(params.get('scope'))
+            .map((i) => known.get(scopeKey(i)))
+            .filter((i): i is ScopeItem => i !== undefined),
+          path: params.get('path') ?? '',
+        }
+      : loadStoredScope()
+    scope = {
+      items: initial.items
+        .map((i) => known.get(scopeKey(i)))
+        .filter((i): i is ScopeItem => i !== undefined),
+      path: initial.path,
+    }
+    query = params.get('q') ?? ''
+    if (query.trim()) runSearch()
+  })
 </script>
 
 <div class="page">
@@ -77,6 +159,12 @@
       {loading ? 'Searching…' : 'Search'}
     </button>
   </form>
+
+  <SearchScopePicker
+    sources={allSources}
+    {scope}
+    on:change={(e) => changeScope(e.detail)}
+  />
 
   {#if error}
     <p class="error">{error}</p>
