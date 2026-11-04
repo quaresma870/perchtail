@@ -30,15 +30,16 @@ See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
   not a substitute for the source itself only granting read access to what
   should be reachable in the first place. Scope both.
 - **Rule matching follows the source's filesystem.** Rules are matched
-  case-insensitively for SMB and WinRM sources, since Windows treats `Logs`
-  and `logs` as the same folder, and case-sensitively everywhere else.
+  case-insensitively for SMB and WinRM sources and for agents running on
+  Windows, since Windows treats `Logs` and `logs` as the same folder, and
+  case-sensitively everywhere else.
   Requests for a non-canonical path (`./x`, `a//b`, backslashes, and on
   Windows trailing dots/spaces or 8.3 short names like `PROGRA~1`) are
   rejected outright, so an exclude rule can't be sidestepped by spelling
-  the same file differently. One gap remains: rules for an **Agent** source
-  are case-sensitive even when the agent runs on Windows, because the
-  backend doesn't know the agent's OS. Write case-insensitive excludes for
-  those as regex, e.g. `re:(?i)^secret/`.
+  the same file differently. An agent reports its OS each time it
+  connects (shown as **Agent OS** on the source's page); agents older than
+  0.5.1 don't, and their rules stay case-sensitive until the agent is
+  upgraded.
 - **Rules decide which folders show up, too.** A folder appears (and can be
   browsed) only if some file below it could be visible under the source's
   rules. `exclude secret/**` hides the `secret` folder entirely, sub-folder

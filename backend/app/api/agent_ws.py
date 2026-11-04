@@ -1,4 +1,5 @@
 import hashlib
+import re
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
 from sqlmodel import Session, select
@@ -16,6 +17,17 @@ router = APIRouter(tags=["agent"])
 
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+AGENT_OS_HEADER = "x-perchtail-agent-os"
+_AGENT_OS_RE = re.compile(r"^[a-z0-9]{1,16}$")
+
+
+def _reported_os(websocket: WebSocket) -> str | None:
+    """The agent's OS from its connect header (#189), or None when absent
+    (an agent older than 0.5.1) or not a plain GOOS name."""
+    value = websocket.headers.get(AGENT_OS_HEADER, "").strip().lower()
+    return value if _AGENT_OS_RE.match(value) else None
 
 
 @router.websocket("/agent/connect")
@@ -56,6 +68,12 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
         except Exception:  # noqa: BLE001 - it may already be gone
             pass
     source.agent_last_seen_at = utcnow()
+    agent_os = _reported_os(websocket)
+    if agent_os is not None and agent_os != source.agent_os:
+        logger.info(
+            "agent.os_reported", source_id=source.id, agent_os=agent_os, previous=source.agent_os
+        )
+        source.agent_os = agent_os
     session.add(source)
     session.commit()
 

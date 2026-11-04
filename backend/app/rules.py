@@ -234,7 +234,11 @@ def is_entry_visible(
 
 
 def rules_case_insensitive(source: Source) -> bool:
-    return source.protocol in _WINDOWS_PROTOCOLS
+    """Windows filesystems ignore case, so rules do too: SMB and WinRM
+    sources, and agents that reported running on Windows (#189)."""
+    if source.protocol in _WINDOWS_PROTOCOLS:
+        return True
+    return source.protocol == Protocol.agent and source.agent_os == "windows"
 
 
 def is_safe_relative_path(path: str) -> bool:

@@ -99,3 +99,32 @@ def test_local_copy_yields_a_temp_path_with_the_fetched_content(monkeypatch):
     )
     with agent_module.local_copy(_source(), "app.log") as path:
         assert path.read_bytes() == content
+
+
+def test_windows_agent_rules_ignore_case(monkeypatch):
+    """#189: NTFS treats SECRET and secret as one folder, so an exclude
+    written as secret/** must hide SECRET/ on a Windows agent, as it does
+    over SMB and WinRM. Other agents keep case-sensitive rules."""
+    from app.rules import rules_case_insensitive
+
+    _mock_registry(
+        monkeypatch,
+        send_command_sync_result={
+            "entries": [
+                {"name": "SECRET", "is_dir": True, "size": 0},
+                {"name": "App.LOG", "is_dir": False, "size": 1},
+            ]
+        },
+    )
+    rules = [
+        _rule(0, RuleType.include, "**/*.log"),
+        _rule(1, RuleType.exclude, "secret/**"),
+    ]
+
+    windows = _source(agent_os="windows")
+    assert rules_case_insensitive(windows) is True
+    assert [e.name for e in agent_module.list_directory(windows, rules)] == ["App.LOG"]
+
+    for other in (_source(agent_os="linux"), _source(agent_os=None)):
+        assert rules_case_insensitive(other) is False
+        assert [e.name for e in agent_module.list_directory(other, rules)] == ["SECRET"]

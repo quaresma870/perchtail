@@ -1,11 +1,17 @@
 package agent
 
 import (
+	"context"
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestHandleCommandList(t *testing.T) {
@@ -86,5 +92,25 @@ func TestHandleCommandUnknownType(t *testing.T) {
 	}
 	if !strings.HasSuffix(errResult.Type, "_error") {
 		t.Errorf("errResult.Type = %q, must end in _error so resolve_response treats it as a failure", errResult.Type)
+	}
+}
+
+func TestConnectSendsOSHeader(t *testing.T) {
+	got := make(chan string, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Get(OSHeader)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err == nil {
+			conn.Close()
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{ServerURL: "ws" + strings.TrimPrefix(server.URL, "http"), Token: "t"}
+	_ = connectAndServe(context.Background(), cfg)
+
+	if reported := <-got; reported != runtime.GOOS {
+		t.Fatalf("OS header = %q, want %q", reported, runtime.GOOS)
 	}
 }

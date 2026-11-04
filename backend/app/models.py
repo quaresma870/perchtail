@@ -118,6 +118,11 @@ class Source(SQLModel, table=True):
     # connection state itself lives in app.agent_registry, not the DB, since
     # it's inherently per-process and shouldn't survive a restart.
     agent_last_seen_at: datetime | None = None
+    # The OS the agent says it runs on (Go's runtime.GOOS: "windows",
+    # "linux", ...), sent on every connect (#189). Decides whether rules are
+    # matched case-insensitively, as for SMB/WinRM. Null until an agent
+    # that reports it (0.5.1 or later) has connected.
+    agent_os: str | None = None
     # Phase 3 full-text search (see app/search_index.py and ROADMAP.md):
     # opt-in, off by default — same "explicit opt-in, not on-by-default"
     # conservatism as the rule engine's zero-rules-matches-nothing default,

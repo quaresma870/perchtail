@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"runtime"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -44,6 +45,9 @@ func Run(ctx context.Context, cfg Config) error {
 func connectAndServe(ctx context.Context, cfg Config) error {
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+cfg.Token)
+	// The backend matches rules case-insensitively for Windows agents, as
+	// NTFS does (#189); it can only know which OS this is if told.
+	header.Set(OSHeader, runtime.GOOS)
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.ServerURL, header)
 	if err != nil {
