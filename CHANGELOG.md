@@ -8,6 +8,17 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-04
+
+Fixes and features from the Hyper-V lab test of 0.4.0. The viewer
+becomes one explorer across every source. Sources can read several
+folders, and their Base path can be picked by browsing the host. Searches
+can be narrowed by customer, folder, source and path. The whole
+configuration can be bulk imported and exported as YAML. Logs are capped
+by size, and the database moves to its own directory. Folder visibility
+now follows the rules (a security fix), and the WinRM docs match what
+the connector really needs.
+
 ### Upgrading from 0.4.x
 
 Database migrations run automatically on startup. Back up the `/data`
