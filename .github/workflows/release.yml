@@ -207,6 +207,9 @@ jobs:
           provenance: true
           sbom: true
 
+      # Trivy doesn't create the output's directory.
+      - run: mkdir -p sbom
+
       # The package may be private on ghcr.io, so Trivy pulls with the
       # same token.
       - name: Generate SBOM (CycloneDX)
