@@ -8,7 +8,7 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.4.1%20%28pre--1.0%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.5.0%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -20,7 +20,7 @@
 
 ## Status
 
-🟢 **v0.4.1 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
+🟢 **v0.5.0 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
 Phase 3 (full-text search, saved-search webhook alerts, IdP
 group-claim-to-role auto-mapping, a detailed health endpoint) are all
 complete** (see [ROADMAP.md](ROADMAP.md) for the full phase breakdown).
@@ -28,9 +28,11 @@ Agentless SSH/SFTP, SMB, and WinRM browsing, a Go push-agent for hosts
 that can't be reached inbound, ephemeral fetch (nothing mirrored),
 rule-scoped RBAC, OIDC single sign-on (local accounts still work
 alongside it), and opt-in full-text search with alerting over indexed
-sources all work end-to-end. The Viewer's home page is a two-column
-"recent connections / all connections" dashboard with a search box
-(folder/customer/host), and deployment-wide feature toggles live under
+sources all work end-to-end. The Viewer is one explorer across every
+source (list or tree), with tabs from several servers side by side and a
+Notepad++-style Find all; sources can read several folders, their Base
+path can be picked by browsing the host, and the whole configuration can
+be bulk imported and exported as YAML. Deployment-wide feature toggles live under
 Settings → System, including a full admin audit log (every login and
 source/rule/role/user/customer/folder/SSO/system-settings change, with
 type/action/date filters and an admin-configurable retention window).
