@@ -68,11 +68,11 @@ jobs:
     permissions:
       contents: write # upload release assets
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.tag }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.24"
           cache-dependency-path: agent/go.sum
@@ -108,7 +108,7 @@ jobs:
       contents: write # attach the SBOM
       packages: write # push to ghcr.io
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.tag }}
 
@@ -150,7 +150,7 @@ jobs:
       # The package starts out private on ghcr.io, so Trivy pulls with the
       # same token.
       - name: Generate SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ github.token }}
