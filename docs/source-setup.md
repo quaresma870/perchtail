@@ -39,6 +39,18 @@ See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
   are case-sensitive even when the agent runs on Windows, because the
   backend doesn't know the agent's OS. Write case-insensitive excludes for
   those as regex, e.g. `re:(?i)^secret/`.
+- **Rules decide which folders show up, too.** A folder appears (and can be
+  browsed) only if some file below it could be visible under the source's
+  rules. `exclude secret/**` hides the `secret` folder entirely, sub-folder
+  names included; with only `include app/**`, other top-level folders don't
+  appear; with no rules at all, nothing does. A later include can still
+  re-open part of an excluded folder, and then only the folders leading to
+  it are shown. This analysis works on **glob** rules: regex rules are
+  treated conservatively (a regex include keeps folders visible, a regex
+  exclude isn't assumed to cover a whole folder), so to hide a folder
+  reliably, use a glob exclude like `folder/**`. On SSH sources, rules are
+  case-sensitive: `secret/**` doesn't hide `SECRET/`; use
+  `re:(?i)^secret/` or a second glob rule for that.
 - **Read-only, always.** The account only ever needs to list directories and
   read file contents. Never grant write, delete, or execute rights beyond
   what the protocol inherently requires to do that.
@@ -91,22 +103,54 @@ sudo chmod 600 /home/perchtail/.ssh/authorized_keys
 Paste the matching **private** key into PerchTail's source credential field.
 Disable password auth for this account (or globally, per your policy).
 
-### 3. Jail it to SFTP and the folder it needs
+### 3. Restrict it to SFTP (required), and optionally chroot it
 
-In `/etc/ssh/sshd_config`:
+With a `nologin` shell, SFTP only works through sshd's **internal**
+SFTP server. The default `Subsystem sftp …/sftp-server` is started through
+the user's shell, so `nologin` prints "This account is currently not
+available." and the client fails with `Received message too long
+1416128883` (that number is "This" read as a length). So this block is
+**required**, not optional:
 
 ```
 Match User perchtail
     ForceCommand internal-sftp
-    ChrootDirectory /var/log/appname   # match the source's base_path
     PermitTTY no
     AllowTcpForwarding no
     X11Forwarding no
 ```
 
-Restart `sshd`. This account can no longer get a shell or forward ports, and
-is chrooted to exactly the tree the source's `base_path` should point at —
-belt-and-suspenders alongside the rule engine.
+**Optional hardening: chroot the account** to the log tree, so the SSH
+account itself can't see anything else on the host. sshd requires every
+component of the chroot path to be owned by root and not writable by group
+or others. On Debian/Ubuntu `/var/log` is `root:syslog 775`, so any chroot
+under `/var/log` is refused ("bad ownership or modes for chroot directory
+component"). Use a read-only bind mount instead:
+
+```
+# /etc/fstab
+/var/log/appname  /srv/sftp/appname  none  bind,ro  0 0
+```
+
+```
+Match User perchtail
+    ForceCommand internal-sftp
+    ChrootDirectory /srv/sftp          # root:root 755
+    PermitTTY no
+    AllowTcpForwarding no
+    X11Forwarding no
+```
+
+**With a chroot, the source's Base path is relative to the chroot**, not the
+real path on disk: `/appname` in this example (or `/` if the chroot is the
+log folder itself). Using the real path (`/var/log/appname`) fails with
+"Not found on the source", and the connection check says so.
+
+On RHEL/Rocky with SELinux enforcing, SFTP reads of `var_log_t` files work
+without extra policy when the account isn't chrooted. A chroot under
+SELinux hasn't been tested yet.
+
+Restart `sshd` after editing.
 
 ### 4. Grant read access to the log directories
 

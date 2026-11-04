@@ -8,6 +8,63 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Security
+- Rules now decide which **folders** are visible, not only which files.
+  Before, every folder was always listed. An excluded folder, and through
+  direct API calls its whole tree of sub-folder names, stayed visible, and
+  a source with no rules showed its complete directory skeleton. A folder
+  is now shown and browsable only if some file below it could be visible
+  under the same ordered, last-match-wins rules. Hidden folders answer 404
+  on browse and folder ZIP, and the search indexer no longer walks them
+  (#164). **Upgrade note:** folders that only contain files your rules
+  don't show now disappear from the tree. Root-level patterns such as
+  `*.log` never cross `/`, so they show no folders at all: use `**/*.log`
+  to include matching files at any depth. Regex rules are analysed
+  conservatively; to hide a folder reliably, use a glob exclude such as
+  `folder/**`.
+- Failed logins, account lockouts and login attempts while locked out are
+  now recorded in the audit log and the app log (`user.login_failed`,
+  `user.locked_out`, `user.login_throttled`), with the attempted username,
+  client IP and reason, never the password. Repeated identical failures
+  within 60 s are folded into one row (#171).
+- Connection checks no longer show raw library errors (UNC paths, host
+  keys, internals) to users who can only view a source. They get an
+  actionable message instead, and users who can manage sources also see
+  the underlying error (#170).
+
+### Fixed
+- Push-agent sources can be browsed and opened again. Browse, open and
+  download answered 501 "protocol agent not yet supported" while the
+  connection check passed. All code paths now share one connector
+  registry (#165).
+- SMB: the live log of a Windows service, held open for writing by
+  another process, can now be opened instead of failing with
+  `STATUS_SHARING_VIOLATION` (#166). A file over `MAX_FETCH_MB` is refused
+  before transferring anything, instead of after downloading up to the
+  limit, which took minutes (#167).
+- WinRM: a folder containing a file with an accented or other non-ASCII
+  name can now be listed. Before, the whole listing failed with a decode
+  error (#168).
+- Predictable source-side failures get their own status and a clear
+  message instead of a bare 500:
+  - no read permission: 403;
+  - not found: 404;
+  - file locked: 409;
+  - unreachable, authentication, SSH host key mismatch or untrusted TLS
+    certificate: 502.
+
+  An SMB Base path that isn't a share now says so (#170).
+- Archives (`.zip`, `.tar.gz`) are browsed as a folder tree instead of a
+  flat list of every member. Members with odd names (`../`, absolute) are
+  shown normalized and still open (#175).
+
+### Documentation
+- SSH/SFTP setup: `ForceCommand internal-sftp` is required with a
+  `nologin` shell; chroot is optional hardening, with the sshd ownership
+  rule and a bind-mount example for Debian/Ubuntu; with a chroot, Base path
+  is relative to it (#173). Folder visibility and SSH rule case-sensitivity
+  are documented with the rule principles.
+
 ## [0.4.1] - 2026-11-03
 
 A security fix release. SSH/SFTP sources no longer follow symlinks out
