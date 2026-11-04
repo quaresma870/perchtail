@@ -122,26 +122,32 @@
   }
 
   onMount(async () => {
-    await loadSources()
-    const known = knownItems()
+    // Read the URL before anything is awaited: setting the query only after
+    // the source list loads would wipe whatever the user typed meanwhile.
     const params = new URLSearchParams(router.querystring ?? '')
     const fromUrl = params.has('scope') || params.has('path')
-    const initial = fromUrl
-      ? {
-          items: parseScopeParam(params.get('scope'))
-            .map((i) => known.get(scopeKey(i)))
-            .filter((i): i is ScopeItem => i !== undefined),
-          path: params.get('path') ?? '',
-        }
-      : loadStoredScope()
-    scope = {
-      items: initial.items
-        .map((i) => known.get(scopeKey(i)))
-        .filter((i): i is ScopeItem => i !== undefined),
-      path: initial.path,
+    const stored = fromUrl ? null : loadStoredScope()
+    const pendingItems = stored ? stored.items : parseScopeParam(params.get('scope'))
+    const pendingPath = stored ? stored.path : (params.get('path') ?? '')
+    if (params.has('q')) query = params.get('q') ?? ''
+    scope = { items: [], path: pendingPath }
+    const untouched = scope
+
+    await loadSources()
+    // Scope items need names from the source list; apply them unless the
+    // user already changed the scope.
+    if (scope === untouched) {
+      const known = knownItems()
+      scope = {
+        items: pendingItems
+          .map((i) => known.get(scopeKey(i)))
+          .filter((i): i is ScopeItem => i !== undefined),
+        path: pendingPath,
+      }
     }
-    query = params.get('q') ?? ''
-    if (query.trim()) runSearch()
+    // A query from the URL, or a search the user ran before the list
+    // arrived, runs (again) with the scope and source names in place.
+    if (query.trim() && (params.has('q') || searched)) runSearch()
   })
 </script>
 
