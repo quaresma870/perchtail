@@ -72,6 +72,7 @@ export interface Source {
   has_agent_token: boolean
   agent_connected: boolean
   agent_last_seen_at: string | null
+  agent_os: string | null
   search_indexing_enabled: boolean
   // What the current user may do on this source (#174); the backend still
   // enforces every action on its own.

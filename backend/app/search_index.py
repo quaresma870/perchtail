@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sqlalchemy import text
+from sqlalchemy.exc import InvalidRequestError
 from sqlmodel import Session, select
 
 from app.archives import (
@@ -168,68 +169,92 @@ def index_source(session: Session, source: Source) -> IndexStats:
     """Indexes (or re-indexes) every rule-visible file in `source`. Safe to
     call repeatedly — unchanged files (by size, see SearchIndexState's
     docstring on why size alone) are skipped, and files no longer present or
-    no longer rule-visible are removed from the index."""
+    no longer rule-visible are removed from the index.
+
+    Each file is committed on its own, and its content is fetched from the
+    source before anything is written (#188). A first sweep of a large
+    source takes minutes; holding one write transaction open across all of
+    it locked SQLite and every login or audit write failed meanwhile. Now
+    the write lock is held only while one file's rows are written.
+
+    Stops early, leaving what's indexed so far, if the source is disabled,
+    opted out or deleted while it runs (rows of a source that's no longer
+    indexed are purged by purge_inactive_source_indexes on the next sweep)."""
     connector = _CONNECTORS.get(source.protocol)
     if connector is None:
         return IndexStats()
 
     settings = get_settings()
     max_bytes = int(settings.search_index_max_file_size_mb * 1024 * 1024)
-    rules = list(session.exec(select(Rule).where(Rule.source_id == source.id)).all())
+    source_id = source.id
+    rules = list(session.exec(select(Rule).where(Rule.source_id == source_id)).all())
 
     stats = IndexStats()
     seen_paths: set[str] = set()
-    existing_by_path = {
-        state.file_path: state
+    # (id, size) rather than the rows themselves: every commit below expires
+    # loaded objects, and reloading each one to compare sizes would cost a
+    # query per unchanged file.
+    known = {
+        state.file_path: (state.id, state.size)
         for state in session.exec(
-            select(SearchIndexState).where(SearchIndexState.source_id == source.id)
+            select(SearchIndexState).where(SearchIndexState.source_id == source_id)
         ).all()
     }
+    session.commit()  # end the read transaction before the slow part
 
     for entry in _iter_files(connector, source, rules):
         seen_paths.add(entry.path)
-        existing = existing_by_path.get(entry.path)
-        if existing is not None and existing.size == entry.size:
+        previous = known.get(entry.path)
+        if previous is not None and previous[1] == entry.size:
             continue
+        if not _still_indexed(session, source):
+            logger.info("search_index.source_stopped", source_id=source_id)
+            return stats
 
         content = _read_text(connector, source, entry, max_bytes)
         if content is None:
             stats.skipped += 1
             continue
 
-        _delete_fts_rows(session, source.id, entry.path)
-        _insert_fts_rows(session, source.id, entry.path, content)
-        if existing is not None:
-            existing.size = entry.size
-            existing.indexed_at = utcnow()
-            session.add(existing)
-        else:
-            session.add(
-                SearchIndexState(
-                    source_id=source.id,
-                    file_path=entry.path,
-                    size=entry.size,
-                    indexed_at=utcnow(),
-                )
-            )
+        _delete_fts_rows(session, source_id, entry.path)
+        _insert_fts_rows(session, source_id, entry.path, content)
+        state = session.get(SearchIndexState, previous[0]) if previous else None
+        if state is None:
+            state = SearchIndexState(source_id=source_id, file_path=entry.path)
+        state.size = entry.size
+        state.indexed_at = utcnow()
+        session.add(state)
+        session.commit()
         stats.indexed += 1
 
-    for path, state in existing_by_path.items():
+    for path, (state_id, _) in known.items():
         if path not in seen_paths:
-            _delete_fts_rows(session, source.id, path)
-            _delete_alert_file_states(session, source.id, path)
-            session.delete(state)
+            _delete_fts_rows(session, source_id, path)
+            _delete_alert_file_states(session, source_id, path)
+            state = session.get(SearchIndexState, state_id)
+            if state is not None:
+                session.delete(state)
             stats.removed += 1
 
     session.commit()
     logger.info(
         "search_index.source_indexed",
-        source_id=source.id,
+        source_id=source_id,
         indexed=stats.indexed,
         skipped=stats.skipped,
         removed=stats.removed,
     )
     return stats
+
+
+def _still_indexed(session: Session, source: Source) -> bool:
+    """Re-reads the source: with a commit per file, an admin can turn
+    indexing off, disable or delete the source while a sweep runs."""
+    try:
+        session.refresh(source)
+    except InvalidRequestError:  # deleted meanwhile
+        return False
+    return bool(source.enabled and source.search_indexing_enabled)
 
 
 def purge_inactive_source_indexes(session: Session) -> int:

@@ -193,7 +193,11 @@ volume (`/data` in the container), one directory per kind of data:
 | `/data/scratch` | `SCRATCH_DIR` | short-lived fetches, purged on close | no |
 
 Each can be mounted as its own volume (for example logs on another disk),
-so a burst of DEBUG logging can't fill the database's disk. Back up the
+so a burst of DEBUG logging can't fill the database's disk. Keep `/data/db`
+on a local disk, not a network share: the database runs in SQLite's WAL
+mode, which needs one (it also leaves `perchtail.db-wal` and
+`perchtail.db-shm` next to the database; back up the whole directory, with
+PerchTail stopped). Back up the
 database and `credential_salt` together. Either one is useless without the
 other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`.
 Upgrading from a release before 0.5.0 moves the database, salt and

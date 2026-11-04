@@ -173,6 +173,16 @@
       {#if source.protocol === 'agent'}
         <dt>Agent</dt>
         <dd>{source.agent_connected ? 'connected' : 'not connected'}</dd>
+        <dt>Agent OS</dt>
+        <dd>
+          {#if source.agent_os === 'windows'}
+            Windows — rules ignore case
+          {:else if source.agent_os}
+            {source.agent_os} — rules are case-sensitive
+          {:else}
+            not reported yet (agent older than 0.5.1, or never connected) — rules are case-sensitive
+          {/if}
+        </dd>
       {/if}
     </dl>
 
