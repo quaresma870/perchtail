@@ -8,12 +8,23 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.5.2-rc.2] - 2026-11-04
+
+Second release candidate for 0.5.2. `v0.5.2-rc.1` was tagged but never
+released: its Release workflow run failed before creating the draft, and
+the e2e tests then found the audit log race below. Everything listed
+under 0.5.2-rc.1 is in this release too; the upgrade notes there apply
+(back up `DATA_DIR`, upgrade push agents).
+
 ### Fixed
 - The audit log could report "Tampering detected" when two requests wrote
   audit entries at the same moment: both could chain from the same
   previous entry. Each writer now takes the database's write lock before
   reading the last entry, so the second waits for the first. More likely
   since the database moved to WAL mode in 0.5.2-rc.1.
+- The Release workflow creates the SBOM's directory before writing it,
+  and the draft job downloads only the agent binaries and the SBOM, not
+  the build record that `docker/build-push-action` uploads.
 
 ## [0.5.2-rc.1] - 2026-11-04
 
