@@ -19,6 +19,7 @@ from app.api.alerts import router as alerts_router
 from app.api.archive import router as archive_router
 from app.api.audit import router as audit_router
 from app.api.auth import router as auth_router
+from app.api.config_transfer import router as config_transfer_router
 from app.api.customers import router as customers_router
 from app.api.errors import install as install_error_handlers
 from app.api.errors import path_outside_base as _path_outside_base
@@ -275,6 +276,7 @@ app.include_router(auth_router)
 app.include_router(alerts_router)
 app.include_router(archive_router)
 app.include_router(audit_router)
+app.include_router(config_transfer_router)
 app.include_router(customers_router)
 app.include_router(folders_router)
 app.include_router(sources_router)

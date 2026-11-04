@@ -1,0 +1,57 @@
+# PerchTail bulk import template (see docs/bulk-import.md).
+#
+# Customers hold folders (nested as deep as you like) and sources; sources
+# with no customer go in the top-level `sources` list. Importing the same
+# file twice changes nothing the second time, and nothing is ever deleted.
+version: 1
+customers:
+  - name: Example Customer
+    folders:
+      - name: production
+        folders:
+          - name: web
+            sources:
+              - name: web01
+                protocol: ssh            # ssh | smb | winrm | local | agent
+                host: web01.example.com
+                port: 22                 # optional, the protocol default otherwise
+                base_path: /var/log/myapp
+                credential:              # optional; never exported
+                  username: svc-perchtail
+                  # Read from the server's environment. Only variables named
+                  # PERCHTAIL_IMPORT_* can be referenced. Or leave the whole
+                  # credential block out and type it in the import screen.
+                  password: ${env:PERCHTAIL_IMPORT_WEB01_PASSWORD}
+                rules:                   # evaluated in order, last match wins
+                  - include **/*.log
+                  - exclude **/debug/**
+                  - type: include
+                    pattern: re:^access.*\.log$
+                    notes: "regex rules start with re:"
+    sources:
+      - name: iis01
+        protocol: winrm
+        host: iis01.example.com
+        # Several folders in one source: each appears as a top-level folder
+        # named by its label, and rules see those names (IIS/**, App/**).
+        roots:
+          - label: IIS
+            path: 'D:\inetpub\logs\LogFiles'
+          - label: App
+            path: 'E:\MyApp\logs'
+        search_indexing_enabled: true
+        rules:
+          - include **/*.log
+      - name: fileserver01
+        protocol: smb
+        host: fs01.example.com
+        base_path: AppLogs             # the share name, optionally \folder inside it
+        rules:
+          - include **/*.log
+sources:
+  - name: dmz-agent
+    protocol: agent                    # push agent: generate its token afterwards
+    host: dmz-host-01
+    base_path: /var/log
+    rules:
+      - include **
