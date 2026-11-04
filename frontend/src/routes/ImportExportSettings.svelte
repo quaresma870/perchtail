@@ -206,7 +206,7 @@
               {#if credentials[item.key].useKey}
                 <textarea
                   class="input mono key-input"
-                  rows="3"
+                  rows="4"
                   placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
                   aria-label={`Private key for ${item.key}`}
                   bind:value={credentials[item.key].privateKey}
@@ -372,6 +372,23 @@
   .key-input {
     font-family: var(--font-mono);
     font-size: 0.72rem;
+    /* A key is one long base64 run: wrap it rather than scroll (#206). */
+    min-height: 4.5rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    resize: vertical;
+  }
+  @media (max-width: 900px) {
+    .cred-row {
+      grid-template-columns: 1fr 1fr;
+    }
+    .cred-row .key {
+      grid-column: 1 / -1;
+    }
+    .cred-row .key-input {
+      grid-column: 1 / -1;
+      order: 3;
+    }
   }
   .key-toggle {
     display: flex;

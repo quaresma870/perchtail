@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -122,5 +123,57 @@ func TestHandleFetchFollowsSymlinkInsideBase(t *testing.T) {
 	content, err := HandleFetch(base, "current.log")
 	if err != nil || string(content) != "ok" {
 		t.Fatalf("content=%q err=%v", content, err)
+	}
+}
+
+func TestHandleListLeavesOutLinksThatLeaveTheBase(t *testing.T) {
+	// #206: `escape -> /etc` was listed, though opening it is refused.
+	outside := t.TempDir()
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "app.log"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(base, "logs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(base, "escape")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink("logs", filepath.Join(base, "inside")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing", filepath.Join(base, "broken")); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := HandleList(base, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, e := range entries {
+		got[e.Name] = e.IsDir
+	}
+	if _, ok := got["escape"]; ok {
+		t.Error("escape (link out of the base) was listed")
+	}
+	if _, ok := got["broken"]; ok {
+		t.Error("broken link was listed")
+	}
+	if isDir, ok := got["inside"]; !ok || !isDir {
+		t.Errorf("inside (link within the base) should be listed as a directory, got %v %v", isDir, ok)
+	}
+	if _, ok := got["app.log"]; !ok {
+		t.Error("app.log missing")
+	}
+}
+
+func TestHandleListOfAFileIsNotADirectory(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "app.log"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := HandleList(base, "app.log"); !errors.Is(err, ErrNotADirectory) {
+		t.Fatalf("got %v, want ErrNotADirectory", err)
 	}
 }

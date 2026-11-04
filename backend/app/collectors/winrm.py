@@ -54,7 +54,7 @@ def _ca_bundle_path(pem: str) -> str:
     directory = Path(get_settings().data_dir) / "winrm_ca"
     path = directory / f"{hashlib.sha256(pem.encode()).hexdigest()}.pem"
     if not path.exists():
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(pem)
         os.replace(tmp, path)

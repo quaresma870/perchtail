@@ -34,6 +34,8 @@
   let loading = !isNew
   let saving = false
   let error = ''
+  // Shown next to the Save button, where the user is looking (#206).
+  let saveError = ''
 
   let name = ''
   let customerId: number | null = null
@@ -258,6 +260,7 @@
 
   async function handleSubmit() {
     error = ''
+    saveError = ''
     saving = true
     try {
       const credential = buildCredential()
@@ -294,7 +297,7 @@
         push(`/settings/sources/${sourceId}`)
       }
     } catch (err) {
-      error = err instanceof ApiError ? err.detail : 'Failed to save source'
+      saveError = err instanceof ApiError ? err.detail : 'Failed to save source'
     } finally {
       saving = false
     }
@@ -682,9 +685,14 @@
         </fieldset>
       {/if}
 
-      <button class="btn btn-primary" type="submit" disabled={saving}>
-        {saving ? 'Saving…' : 'Save'}
-      </button>
+      <div class="save-row">
+        <button class="btn btn-primary" type="submit" disabled={saving}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {#if saveError}
+          <p class="error save-error" role="alert">{saveError}</p>
+        {/if}
+      </div>
     </form>
 
     {#if !isNew && sourceId !== null}
@@ -800,6 +808,17 @@
     color: var(--text-faint);
   }
   .hint.indent,
+  .save-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .save-error {
+    margin: 0;
+    flex: 1;
+    min-width: 14rem;
+  }
   .error.indent {
     margin: -0.5rem 0 0;
     font-size: 0.78rem;
