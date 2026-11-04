@@ -5,15 +5,23 @@ protocol can't be wired into one code path and silently missing from
 another -- which is how agent sources passed /check but answered 501 on
 every browse in v0.4.0 (#165)."""
 
-from types import ModuleType
-
 from app.collectors import agent, local, smb, ssh, winrm
+from app.collectors.errors import (
+    TranslatingConnector,
+    translate_agent,
+    translate_local,
+    translate_smb,
+    translate_ssh,
+    translate_winrm,
+)
 from app.models import Protocol
 
-CONNECTORS: dict[Protocol, ModuleType] = {
-    Protocol.ssh: ssh,
-    Protocol.smb: smb,
-    Protocol.winrm: winrm,
-    Protocol.local: local,
-    Protocol.agent: agent,
+# Each connector raises the SourceError types from collectors/base.py, so
+# callers map them to HTTP statuses in one place (app/api/errors.py).
+CONNECTORS: dict[Protocol, TranslatingConnector] = {
+    Protocol.ssh: TranslatingConnector(ssh, translate_ssh),
+    Protocol.smb: TranslatingConnector(smb, translate_smb),
+    Protocol.winrm: TranslatingConnector(winrm, translate_winrm),
+    Protocol.local: TranslatingConnector(local, translate_local),
+    Protocol.agent: TranslatingConnector(agent, translate_agent),
 }

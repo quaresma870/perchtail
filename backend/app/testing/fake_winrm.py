@@ -31,7 +31,7 @@ FIXTURE_FILES = {
     "other.log": b"winrm other log\n",
 }
 
-_LIST_RE = re.compile(r"Get-ChildItem -LiteralPath '(?P<path>.*)' \|")
+_LIST_RE = re.compile(r"Get-ChildItem -LiteralPath '(?P<path>.*)' \|.*ToBase64String")
 _SIZE_RE = re.compile(r"\(Get-Item -LiteralPath '(?P<path>.*)'\)\.Length")
 _READ_RE = re.compile(
     r"\[IO\.File\]::Open\('(?P<path>.*)', 'Open', 'Read', 'ReadWrite'\).*"
@@ -82,7 +82,7 @@ class _FakeWinRMSession:
             {"Name": name, "PSIsContainer": False, "Length": len(content)}
             for name, content in FIXTURE_FILES.items()
         ]
-        return _FakeResult(std_out=json.dumps(items).encode("utf-8"))
+        return _FakeResult(std_out=base64.b64encode(json.dumps(items).encode("utf-8")))
 
     def _content(self, path: str) -> bytes | None:
         return FIXTURE_FILES.get(path.rsplit("\\", 1)[-1])

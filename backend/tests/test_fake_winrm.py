@@ -22,16 +22,33 @@ def fake_winrm_module(monkeypatch):
     return module
 
 
-def test_list_matches_the_real_list_directory_script_shape(fake_winrm_module):
+def test_list_matches_the_real_list_directory_script_shape(fake_winrm_module, monkeypatch):
+    """Drives the real collector, so the fake can't drift from the script
+    list_directory actually sends."""
+    from app.models import PatternKind, Protocol, Rule, RuleType, Source
+
     session = fake_winrm_module._FakeWinRMSession()
-    script = (
-        f"Get-ChildItem -LiteralPath {winrm_module._ps_quote(fake_winrm_module.FIXTURE_ROOT)} | "
-        "Select-Object Name, PSIsContainer, Length | ConvertTo-Json -Compress"
+    monkeypatch.setattr(winrm_module, "_session", lambda source: session)
+    source = Source(
+        name="win",
+        protocol=Protocol.winrm,
+        host="win",
+        base_path=fake_winrm_module.FIXTURE_ROOT,
+        credential_ref="x",
     )
-    result = session.run_ps(script)
-    assert result.status_code == 0
-    assert b'"Name": "hello.log"' in result.std_out or b'"Name":"hello.log"' in result.std_out
-    assert b"other.log" in result.std_out
+    rules = [
+        Rule(
+            source_id=1,
+            order=0,
+            type=RuleType.include,
+            pattern="**/*",
+            pattern_kind=PatternKind.glob,
+        )
+    ]
+
+    names = {e.name for e in winrm_module.list_directory(source, rules)}
+
+    assert {"hello.log", "other.log"} <= names
 
 
 def test_list_fails_for_an_unknown_path(fake_winrm_module):

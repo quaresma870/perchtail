@@ -93,8 +93,20 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     connect_kwargs = _connect_kwargs(source)
     smbclient.register_session(source.host, **connect_kwargs)
     remote_path = _unc_path(source, relative_path)
-    with smbclient.open_file(remote_path, mode="rb", **connect_kwargs) as src:
-        collector_base.copy_with_limit(src, destination, collector_base.max_fetch_bytes())
+    limit = collector_base.max_fetch_bytes()
+    # Refuse before transferring anything when the size is already over the
+    # cap (#167) -- copy_with_limit stays as the backstop for a file that
+    # grows while it's being read.
+    size = smbclient.stat(remote_path, **connect_kwargs).st_size
+    if size > limit:
+        raise collector_base.too_large(size, limit)
+    # share_access="rwd": a read-only open that tolerates other readers,
+    # writers and deleters (.NET FileShare.ReadWrite | Delete). Without it
+    # the open asks for exclusive access and a log that a service has open
+    # for writing -- the live log, the one people want -- fails with
+    # STATUS_SHARING_VIOLATION (#166).
+    with smbclient.open_file(remote_path, mode="rb", share_access="rwd", **connect_kwargs) as src:
+        collector_base.copy_with_limit(src, destination, limit)
 
 
 @contextmanager

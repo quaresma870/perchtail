@@ -1,4 +1,5 @@
 import io
+from types import SimpleNamespace
 
 import app.collectors.smb as smb_module
 import pytest
@@ -25,6 +26,8 @@ class FakeSMBClient:
         self.sessions: list[tuple] = []
         self.listing: list[FakeSMBDirEntry] = []
         self.files: dict[str, bytes] = {}
+        self.stat_sizes: dict[str, int] = {}
+        self.stat_kwargs: list[dict] = []
         self.requested_paths: list[str] = []
         self.scandir_kwargs: list[dict] = []
         self.open_file_kwargs: list[dict] = []
@@ -36,6 +39,12 @@ class FakeSMBClient:
         self.requested_paths.append(path)
         self.scandir_kwargs.append(kwargs)
         return self.listing
+
+    def stat(self, path, **kwargs):
+        self.stat_kwargs.append(kwargs)
+        if path in self.stat_sizes:
+            return SimpleNamespace(st_size=self.stat_sizes[path])
+        return SimpleNamespace(st_size=len(self.files[path]))
 
     def open_file(self, path, mode="rb", **kwargs):
         self.requested_paths.append(path)
@@ -173,3 +182,31 @@ def test_fetch_file_stops_at_max_fetch_mb(fake_smbclient, tmp_path, monkeypatch)
     with pytest.raises(FetchTooLargeError):
         smb_module.fetch_file(_source(), "big.log", destination)
     assert not destination.exists()
+
+
+def test_fetch_opens_with_full_share_access_so_live_logs_can_be_read(fake_smbclient, tmp_path):
+    """#166: without share_access the open asked for exclusive access and a
+    log another process had open for writing failed with a sharing
+    violation."""
+    fake_smbclient.files[smb_module._unc_path(_source(), "app.log")] = b"live"
+
+    smb_module.fetch_file(_source(), "app.log", tmp_path / "out")
+
+    assert fake_smbclient.open_file_kwargs[0]["share_access"] == "rwd"
+    assert (tmp_path / "out").read_bytes() == b"live"
+
+
+def test_fetch_refuses_an_oversized_file_before_opening_it(fake_smbclient, tmp_path, monkeypatch):
+    """#167: the cap used to be enforced only after downloading up to it."""
+    from app.collectors.base import FetchTooLargeError
+
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 8)
+    path = smb_module._unc_path(_source(), "big.log")
+    fake_smbclient.files[path] = b"x"
+    fake_smbclient.stat_sizes[path] = 100
+
+    with pytest.raises(FetchTooLargeError):
+        smb_module.fetch_file(_source(), "big.log", tmp_path / "out")
+
+    assert fake_smbclient.open_file_kwargs == []
+    assert fake_smbclient.stat_kwargs[0]["port"] == 445
