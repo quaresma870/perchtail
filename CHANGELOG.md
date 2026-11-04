@@ -8,6 +8,31 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Security
+- SMB and WinRM sources no longer follow junctions or symlinks out of the
+  base path. Before, anyone able to write to the log folder on the Windows
+  host could create a junction (no special privilege needed) and expose
+  any folder the service account can read to users with `view` on the
+  source. Junctions and symlinks are now left out of listings, and a path
+  through one answers 404 (`smb.path_outside_base` /
+  `winrm.path_outside_base`). WinRM re-checks with every block it reads.
+- SMB sessions are no longer shared between sources. smbclient's
+  process-wide pool is keyed by host and username, so a source with the
+  wrong password could read with another source's authenticated session,
+  and a passing connection test didn't prove its credential was right.
+  Every SMB request now authenticates with its own connection, which is
+  closed afterwards.
+- Changing a source's host or port now requires entering the credential
+  again (in the editor, the API and bulk import), as the folder picker
+  already did. Before, editing could send the saved credential (for SMB
+  and WinRM, an NTLM exchange) to any new address.
+
+### Fixed
+- SMB: a directory symlink in a folder no longer makes the whole listing
+  fail with `SMBLinkRedirectionError`.
+- WinRM: browsing a path that is a file answers 404 instead of listing the
+  file under a doubled path.
+
 ### Added
 - Releases now carry what's needed to install them (`.github/workflows/release.yml`):
   - push-agent binaries for Linux (amd64, arm64) and Windows (amd64), with `SHA256SUMS`;

@@ -51,6 +51,12 @@ See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
   reliably, use a glob exclude like `folder/**`. On SSH sources, rules are
   case-sensitive: `secret/**` doesn't hide `SECRET/`; use
   `re:(?i)^secret/` or a second glob rule for that.
+- **Links don't lead out of the base path.** Symlinks (SSH, local, agent)
+  and junctions or symlinks (SMB, WinRM) that point outside the base path
+  are left out of listings, and any path that goes through one answers
+  404. On Windows a junction needs no special privilege, so anyone who can
+  write to the log folder could otherwise point it at any folder the
+  service account can read.
 - **Read-only, always.** The account only ever needs to list directories and
   read file contents. Never grant write, delete, or execute rights beyond
   what the protocol inherently requires to do that.
@@ -419,9 +425,10 @@ host and credential in the form and lists folders only, never file names:
 `/` and down over SSH, the drives and then folders over WinRM, and the
 host's shares (the ones the account can see, without `C$`/`ADMIN$`/`IPC$`)
 and then folders over SMB. Browsing is limited to users who can manage
-sources, and each listing is written to the audit log. When editing a
-saved source, its stored credential is reused only for the host and port it
-was saved for; to browse another host, type the credential again.
+sources, and each listing is written to the audit log. A saved source's stored credential is
+only ever sent to the host and port it was saved for: to browse another
+host, or to save the source with a new host or port, type the credential
+again.
 
 Rules are relative to the base path. Changing the base path (or the host or
 port) means the same rules now apply to whatever is at the new location, so

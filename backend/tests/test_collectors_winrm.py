@@ -199,3 +199,63 @@ def test_remote_path_of_a_drive_root_keeps_the_backslash():
     source = _source(base_path="D:\\")
     assert winrm_module._remote_path(source) == "D:\\"
     assert winrm_module._remote_path(source, "Logs/app.log") == "D:\\Logs\\app.log"
+
+
+def test_every_component_below_the_base_is_checked_for_reparse_points(fake_session):
+    seen = []
+
+    def handler(script):
+        seen.append(script)
+        return FakeResult(std_out=base64.b64encode(b"[]"))
+
+    fake_session.handler = handler
+    winrm_module.list_directory(_source(), [_rule(0, RuleType.include, "**")], "jx/deep")
+
+    script = seen[0]
+    assert "[IO.File]::GetAttributes($__c) -band [IO.FileAttributes]::ReparsePoint" in script
+    assert "'C:\\Logs\\AppName\\jx', 'C:\\Logs\\AppName\\jx\\deep'" in script
+    # Junctions and symlinks inside the folder are filtered out, not followed.
+    assert "Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }" in script
+    assert script.index("GetAttributes") < script.index("Get-ChildItem")
+
+
+def test_root_listing_has_no_guard_but_still_filters_links(fake_session):
+    seen = []
+    fake_session.handler = lambda s: seen.append(s) or FakeResult(std_out=b"")
+    winrm_module.list_directory(_source(), [])
+    assert "GetAttributes" not in seen[0]
+    assert "ReparsePoint" in seen[0]
+
+
+def test_a_path_through_a_junction_is_refused(fake_session, tmp_path):
+    from app.collectors.base import PathOutsideBaseError
+
+    fake_session.handler = lambda s: FakeResult(
+        status_code=3, std_out=b"PERCHTAIL_OUTSIDE_BASE\r\n"
+    )
+    with pytest.raises(PathOutsideBaseError):
+        winrm_module.list_directory(_source(), [_rule(0, RuleType.include, "**")], "jx")
+    with pytest.raises(PathOutsideBaseError):
+        winrm_module.fetch_file(_source(), "jx/secret.txt", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_every_read_block_repeats_the_guard(fake_session, tmp_path, monkeypatch):
+    monkeypatch.setattr(winrm_module, "_CHUNK_BYTES", 4)
+    fake_session.handler = _serve_file(b"0123456789")
+    winrm_module.fetch_file(_source(), "nested/app.log", tmp_path / "out")
+    assert (tmp_path / "out").read_bytes() == b"0123456789"
+    assert all("GetAttributes" in s for s in fake_session.scripts_run)
+
+
+def test_listing_a_file_is_not_found(fake_session):
+    from app.collectors.base import SourceNotFoundError
+    from app.collectors.registry import CONNECTORS
+    from app.models import Protocol
+
+    fake_session.handler = lambda s: FakeResult(status_code=4, std_out=b"PERCHTAIL_NOT_A_DIRECTORY")
+    connector = CONNECTORS[Protocol.winrm]
+    original = connector._module._session
+    with pytest.raises(SourceNotFoundError):
+        connector.list_directory(_source(), [_rule(0, RuleType.include, "**")], "jx/secret.txt")
+    assert connector._module._session is original
