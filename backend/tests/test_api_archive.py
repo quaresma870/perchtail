@@ -156,7 +156,7 @@ def test_browse_lists_directory_filtered_by_rules(app_client, session, fake_sftp
     app, client = app_client
     source = _make_source(session)
     _make_user(session, app, is_super_admin=True)
-    _add_rule(session, source, 0, RuleType.include, "*.log")
+    _add_rule(session, source, 0, RuleType.include, "**/*.log")
 
     fake_sftp.listing = [
         FakeAttr("nested", is_dir=True),
@@ -492,6 +492,7 @@ def test_browse_subdirectory_does_not_log_audit_event(app_client, session, fake_
     app, client = app_client
     source = _make_source(session)
     _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
     fake_sftp.listing = [FakeAttr("nested.log", is_dir=False, size=1)]
 
     response = client.get(f"/sources/{source.id}/browse", params={"path": "nested"})
@@ -670,3 +671,79 @@ def test_agent_source_can_be_browsed_and_opened(app_client, session, monkeypatch
     assert [e["name"] for e in browse.json()] == ["app.log"]
     assert opened.status_code == 200, opened.text
     assert opened.content == b"hello"
+
+
+# --- folders hidden by the rules are not browsable (#164) -------------------
+
+
+def test_excluded_folder_is_neither_listed_nor_browsable(app_client, session, fake_sftp):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    _add_rule(session, source, 1, RuleType.exclude, "secret/**")
+    fake_sftp.listing = [FakeAttr("app", is_dir=True), FakeAttr("secret", is_dir=True)]
+
+    root = client.get(f"/sources/{source.id}/browse")
+    inside = client.get(f"/sources/{source.id}/browse", params={"path": "secret"})
+    deeper = client.get(f"/sources/{source.id}/browse", params={"path": "secret/sub"})
+
+    assert {e["name"] for e in root.json()} == {"app"}
+    assert inside.status_code == 404
+    assert deeper.status_code == 404
+
+
+def test_hidden_folder_cannot_be_downloaded_as_zip(app_client, session, fake_sftp):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    _add_rule(session, source, 1, RuleType.exclude, "secret/**")
+
+    response = client.get(f"/sources/{source.id}/download-zip", params={"path": "secret"})
+
+    assert response.status_code == 404
+
+
+# --- archives browse as a folder tree (#175) --------------------------------
+
+
+def test_archive_members_are_listed_as_a_tree(app_client, session, fake_sftp):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/logs.zip"] = _zip_bytes(
+        {"raiz.log": "r", "sub/pasta/membro.log": "m", "sub/outro.log": "o"}
+    )
+
+    top = client.get(f"/sources/{source.id}/browse", params={"path": "logs.zip"})
+    sub = client.get(f"/sources/{source.id}/browse", params={"path": "logs.zip/sub"})
+    deep = client.get(f"/sources/{source.id}/browse", params={"path": "logs.zip/sub/pasta"})
+
+    assert top.status_code == 200, top.text
+    assert [(e["name"], e["is_dir"]) for e in top.json()] == [("sub", True), ("raiz.log", False)]
+    assert [(e["name"], e["is_dir"]) for e in sub.json()] == [
+        ("pasta", True),
+        ("outro.log", False),
+    ]
+    assert [e["path"] for e in deep.json()] == ["logs.zip/sub/pasta/membro.log"]
+
+
+def test_member_with_a_traversal_name_is_shown_normalized_and_opens(
+    app_client, session, fake_sftp, scratch_store
+):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/bad.zip"] = _zip_bytes({"../../evil.txt": "e"})
+
+    listing = client.get(f"/sources/{source.id}/browse", params={"path": "bad.zip"})
+    opened = client.get(
+        f"/sources/{source.id}/open", params={"path": "bad.zip", "member": "evil.txt"}
+    )
+
+    assert [e["path"] for e in listing.json()] == ["bad.zip/evil.txt"]
+    assert opened.status_code == 200
+    assert opened.content == b"e"

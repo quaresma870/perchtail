@@ -19,6 +19,9 @@ from app.archives import (
     is_archive,
     is_transparent_gzip,
     list_members,
+    normalize_member_name,
+    resolve_member_name,
+    tree_children,
 )
 from app.audit import record_audit_event
 from app.auth.models import Capability, User
@@ -31,6 +34,8 @@ from app.db import get_session
 from app.logging_config import get_logger
 from app.models import Protocol, Rule, Source
 from app.rules import (
+    is_dir_visible,
+    is_entry_visible,
     is_safe_relative_path,
     is_safe_windows_relative_path,
     is_visible,
@@ -97,6 +102,27 @@ def _require_safe_path(source: Source, path: str) -> None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid path")
 
 
+def _split_archive_path(path: str) -> tuple[str, str] | None:
+    """For a browse path that goes into an archive (`logs/a.zip` or
+    `logs/a.zip/sub/dir`), returns (archive path, member directory inside
+    it); None for an ordinary directory."""
+    if not path:
+        return None
+    segments = path.split("/")
+    for i, segment in enumerate(segments):
+        if is_archive(segment):
+            return "/".join(segments[: i + 1]), "/".join(segments[i + 1 :])
+    return None
+
+
+def _dir_visible(source: Source, path: str, rules: list[Rule]) -> bool:
+    return is_dir_visible(path, rules, case_insensitive=rules_case_insensitive(source))
+
+
+def _entry_visible(source: Source, path: str, is_dir: bool, rules: list[Rule]) -> bool:
+    return is_entry_visible(path, is_dir, rules, case_insensitive=rules_case_insensitive(source))
+
+
 def _visible(source: Source, path: str, rules: list[Rule]) -> bool:
     return is_visible(path, rules, case_insensitive=rules_case_insensitive(source))
 
@@ -145,12 +171,14 @@ def _materialize(
         # combined virtual path, same convention /browse uses), and a client
         # calling /open or /download directly bypasses whatever the browse
         # listing filtered out, so this has to be checked again here.
-        if not _visible(source, f"{path}/{member}", rules):
+        member = normalize_member_name(member)
+        if not member or not _visible(source, f"{path}/{member}", rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         try:
             with connector.local_copy(source, path) as archive_local:
+                raw_name = resolve_member_name(archive_local, filename, member)
                 extract_member(
-                    archive_local, filename, member, destination, _max_decompressed_bytes()
+                    archive_local, filename, raw_name, destination, _max_decompressed_bytes()
                 )
         except DecompressionLimitError as exc:
             raise _too_large(exc) from exc
@@ -193,27 +221,37 @@ def browse(
     rules = _rules_for(session, source.id)
     connector = _connector(source)
 
-    filename = path.rsplit("/", 1)[-1] if path else ""
-    if path and is_archive(filename):
-        if not _visible(source, path, rules):
+    split = _split_archive_path(path)
+    if split is not None:
+        archive_path, member_dir = split
+        archive_name = archive_path.rsplit("/", 1)[-1]
+        if not _visible(source, archive_path, rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
-        with connector.local_copy(source, path) as archive_local:
-            members = list_members(archive_local, filename)
+        if member_dir and not _dir_visible(source, path, rules):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        with connector.local_copy(source, archive_path) as archive_local:
+            members = list_members(archive_local, archive_name)
+        children = tree_children(members, member_dir)
         return [
             BrowseEntry(
-                name=member.name.rsplit("/", 1)[-1],
-                path=f"{path}/{member.name}",
-                is_dir=member.is_dir,
-                size=member.size,
+                name=child.name.rsplit("/", 1)[-1],
+                path=f"{archive_path}/{child.name}",
+                is_dir=child.is_dir,
+                size=child.size,
                 is_archive=False,
             )
-            for member in members
-            # Same rule as regular directory listing (collectors/*.list_directory):
-            # directories are always shown so the tree stays navigable, only
-            # files are subject to the rule chain. Without this, a rule scoped
-            # to show just the archive itself would leak every file inside it.
-            if member.is_dir or _visible(source, f"{path}/{member.name}", rules)
+            for child in children
+            # Same filter as regular listings: files through the rule chain,
+            # folders only when something below them could be visible. A
+            # rule scoped to show just the archive itself doesn't leak its
+            # members.
+            if _entry_visible(source, f"{archive_path}/{child.name}", child.is_dir, rules)
         ]
+
+    if path and not _dir_visible(source, path, rules):
+        # A folder the rules hide is not browsable at all -- otherwise its
+        # sub-folder names could still be enumerated by calling the API.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
 
     entries = connector.list_directory(source, rules, path)
     return [
@@ -408,6 +446,8 @@ def download_folder_zip(
     file fresh — no different from any other read here, just batched."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
+    if path and not _dir_visible(source, path, rules):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
     connector = _connector(source)
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="perchtail-zip-"))

@@ -85,7 +85,7 @@ def test_list_directory_registers_session_and_filters_files(fake_smbclient):
         FakeSMBDirEntry("secret.txt", is_dir=False, size=5),
     ]
 
-    rules = [_rule(0, RuleType.include, "*.log")]
+    rules = [_rule(0, RuleType.include, "**/*.log")]
     entries = {e.name: e for e in smb_module.list_directory(_source(), rules)}
 
     assert "nested" in entries and entries["nested"].is_dir is True

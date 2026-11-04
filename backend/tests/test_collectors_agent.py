@@ -62,7 +62,7 @@ def test_list_directory_filters_files_through_rules_but_keeps_all_dirs(monkeypat
         },
     )
     source = _source()
-    entries = agent_module.list_directory(source, [_rule(0, RuleType.include, "*.log")])
+    entries = agent_module.list_directory(source, [_rule(0, RuleType.include, "**/*.log")])
     names = {e.name for e in entries}
     assert names == {"app.log", "nested"}
 

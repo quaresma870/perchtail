@@ -8,7 +8,7 @@ from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.crypto import decrypt_credential
 from app.models import Rule, Source
-from app.rules import is_visible
+from app.rules import is_entry_visible
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 
@@ -68,7 +68,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     for info in smbclient.scandir(directory, **connect_kwargs):
         child_path = f"{relative_path}/{info.name}" if relative_path else info.name
         is_dir = info.is_dir()
-        if not is_dir and not is_visible(child_path, rules, case_insensitive=True):
+        if not is_entry_visible(child_path, is_dir, rules, case_insensitive=True):
             continue
         # info.smb_info.end_of_file (not info.stat().st_size) deliberately --
         # smb_info comes straight off the directory listing this project

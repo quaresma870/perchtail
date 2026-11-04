@@ -1,3 +1,4 @@
+import app.rules as rules_module
 import pytest
 from app.models import PatternKind, Rule, RuleType
 from app.rules import InvalidPatternError, is_safe_relative_path, is_visible, parse_pattern
@@ -172,3 +173,86 @@ def test_catastrophic_backtracking_pattern_evaluates_quickly():
     started = time.monotonic()
     assert not is_visible("a" * 26 + "b", rules)
     assert time.monotonic() - started < 0.5
+
+
+# --- directory visibility (#164) -------------------------------------------
+
+
+def _r(order, type_, pattern, kind=PatternKind.glob):
+    return Rule(source_id=1, order=order, type=type_, pattern=pattern, pattern_kind=kind)
+
+
+def test_excluded_folder_is_hidden_with_its_whole_subtree():
+    rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "secret/**")]
+    assert rules_module.is_dir_visible("app", rules)
+    assert not rules_module.is_dir_visible("secret", rules)
+    assert not rules_module.is_dir_visible("secret/deeper/still", rules)
+
+
+def test_folders_outside_every_include_are_hidden():
+    rules = [_r(0, RuleType.include, "app/**")]
+    assert rules_module.is_dir_visible("app", rules)
+    assert rules_module.is_dir_visible("app/x/y", rules)
+    assert not rules_module.is_dir_visible("other", rules)
+
+
+def test_folders_leading_to_a_deep_include_are_shown_and_nothing_else():
+    rules = [_r(0, RuleType.include, "var/app/*.log")]
+    assert rules_module.is_dir_visible("var", rules)
+    assert rules_module.is_dir_visible("var/app", rules)
+    assert not rules_module.is_dir_visible("var/other", rules)
+    assert not rules_module.is_dir_visible("var/app/sub", rules)
+
+
+def test_root_level_glob_shows_no_folders():
+    # `*.log` never crosses `/`, so it can only match files at the root.
+    assert not rules_module.is_dir_visible("nested", [_r(0, RuleType.include, "*.log")])
+
+
+def test_zero_rules_show_no_folders():
+    assert not rules_module.is_dir_visible("anything", [])
+    assert rules_module.is_dir_visible("", [])  # the source root itself
+
+
+def test_a_later_include_reopens_only_the_path_to_it():
+    rules = [
+        _r(0, RuleType.include, "**/*"),
+        _r(1, RuleType.exclude, "secret/**"),
+        _r(2, RuleType.include, "secret/keep/*.log"),
+    ]
+    assert rules_module.is_dir_visible("secret", rules)
+    assert rules_module.is_dir_visible("secret/keep", rules)
+    assert not rules_module.is_dir_visible("secret/other", rules)
+
+
+def test_an_ancestor_exclude_hides_descendants():
+    rules = [_r(0, RuleType.include, "**/*.log"), _r(1, RuleType.exclude, "a/**")]
+    assert not rules_module.is_dir_visible("a/b/c", rules)
+
+
+def test_exclude_order_matters_like_for_files():
+    # An exclude *before* the include doesn't cancel it (last match wins).
+    rules = [_r(0, RuleType.exclude, "secret/**"), _r(1, RuleType.include, "**/*")]
+    assert rules_module.is_dir_visible("secret", rules)
+
+
+def test_case_insensitive_sources_hide_differently_cased_folders():
+    rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "secret/**")]
+    assert rules_module.is_dir_visible("SECRET", rules)
+    assert not rules_module.is_dir_visible("SECRET", rules, case_insensitive=True)
+
+
+def test_regex_rules_are_treated_conservatively():
+    regex_include = [_r(0, RuleType.include, "^app/.*\\.log$", PatternKind.regex)]
+    assert rules_module.is_dir_visible("other", regex_include)  # can't analyse: visible
+    regex_exclude = [
+        _r(0, RuleType.include, "**/*"),
+        _r(1, RuleType.exclude, "^secret/", PatternKind.regex),
+    ]
+    assert rules_module.is_dir_visible("secret", regex_exclude)  # not assumed to cover it
+
+
+def test_glob_exclude_with_wildcards_covers_matching_folders():
+    rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "**/private-*/**")]
+    assert not rules_module.is_dir_visible("x/private-hr", rules)
+    assert rules_module.is_dir_visible("x/public", rules)

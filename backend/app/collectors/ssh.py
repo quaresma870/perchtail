@@ -16,7 +16,7 @@ from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
 from app.models import Rule, Source
-from app.rules import is_visible
+from app.rules import is_entry_visible
 
 __all__ = [
     "DirEntry",
@@ -215,7 +215,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                     mode = target_attr.st_mode or 0
                     size = target_attr.st_size or 0
                 is_dir = stat_module.S_ISDIR(mode)
-                if not is_dir and not is_visible(child_path, rules):
+                if not is_entry_visible(child_path, is_dir, rules, case_insensitive=False):
                     continue
                 entries.append(
                     DirEntry(name=attr.filename, path=child_path, is_dir=is_dir, size=size)

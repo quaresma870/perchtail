@@ -83,7 +83,7 @@ def test_list_directory_always_shows_dirs_but_filters_files(fake_session):
     ).encode()
     fake_session.handler = lambda script: FakeResult(std_out=payload)
 
-    rules = [_rule(0, RuleType.include, "*.log")]
+    rules = [_rule(0, RuleType.include, "**/*.log")]
     entries = {e.name: e for e in winrm_module.list_directory(_source(), rules)}
 
     assert "nested" in entries and entries["nested"].is_dir is True

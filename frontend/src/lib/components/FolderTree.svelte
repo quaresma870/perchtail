@@ -9,10 +9,9 @@
   export let entry: BrowseEntry
   export let depth = 0
   // Path of the nearest ancestor archive we're inside, or null for a normal
-  // filesystem node. The backend only supports one level of archive
-  // expansion (browse can't descend into a sub-path of a virtual archive
-  // folder — see api/archive.py), so a directory-flagged member inside an
-  // archive is a dead end, not further expandable.
+  // filesystem node. Folders inside an archive expand like real ones (the
+  // backend lists archive members as a tree), but an archive nested inside
+  // another archive is not opened.
   export let archiveRoot: string | null = null
   // The tab key of the file currently open in the viewer, so this node can
   // highlight itself the same way an editor's file tree does.
@@ -28,7 +27,7 @@
   let loading = false
   let error = ''
 
-  const canExpand = (entry.is_dir || entry.is_archive) && archiveRoot === null
+  const canExpand = entry.is_dir || (entry.is_archive && archiveRoot === null)
 
   $: ownKey =
     archiveRoot !== null
