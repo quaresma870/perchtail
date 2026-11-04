@@ -68,7 +68,7 @@ jobs:
     permissions:
       contents: write # upload release assets
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.tag }}
 
@@ -108,7 +108,7 @@ jobs:
       contents: write # attach the SBOM
       packages: write # push to ghcr.io
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.tag }}
 
