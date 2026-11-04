@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import secrets
 from functools import lru_cache
 from pathlib import Path
@@ -27,9 +28,16 @@ def _load_or_create_salt(path: Path) -> bytes:
     it changes."""
     if path.exists():
         return path.read_bytes()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     salt = secrets.token_bytes(16)
-    path.write_bytes(salt)
+    # Readable by this user only (#193); O_EXCL so two workers starting at
+    # once can't each write a different salt.
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return path.read_bytes()
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(salt)
     return salt
 
 

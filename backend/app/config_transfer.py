@@ -376,6 +376,10 @@ def _parse_credential(
     return resolved
 
 
+def _quoted(raw: str) -> bool:
+    return len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'"
+
+
 def _parse_rules(value: Any, where: str, problems: list[Problem]) -> list[_RuleSpec] | None:
     if value is None:
         return None
@@ -410,6 +414,18 @@ def _parse_rules(value: Any, where: str, problems: list[Problem]) -> list[_RuleS
         raw = raw.strip()
         if not raw:
             problems.append(Problem(rule_where, "The rule has no pattern"))
+            continue
+        if isinstance(item, str) and _quoted(raw):
+            # `[include **/*, exclude "*/secret/**"]` is valid YAML, but each
+            # item is one plain string, so the quotes would be part of the
+            # pattern and the rule would never match (#190).
+            problems.append(
+                Problem(
+                    rule_where,
+                    f"The pattern is in quotes, which would become part of it: write "
+                    f"{rule_type.value} {raw[1:-1]} without them, or quote the whole rule",
+                )
+            )
             continue
         try:
             pattern, kind = parse_pattern(raw)

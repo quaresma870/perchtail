@@ -21,7 +21,6 @@ place before the original is removed."""
 
 import os
 import shutil
-import sys
 from pathlib import Path
 
 from app.config import Settings, get_settings
@@ -109,9 +108,54 @@ def leftover_legacy_database(settings: Settings | None = None) -> Path | None:
     return None
 
 
+def secure_data_dir(settings: Settings | None = None) -> list[str]:
+    """DATA_DIR holds the database, the credential salt and known_hosts:
+    only the app's own user should be able to read them (#193). Makes the
+    directory 0700 and those files 0600, including ones created by earlier
+    versions with the default 0644. SQLite gives its -wal/-shm files the
+    database's permissions. Returns what couldn't be changed (a file owned
+    by another user, say), for the caller to log."""
+    settings = settings or get_settings()
+    failed: list[str] = []
+    targets: list[tuple[Path, int]] = [(Path(settings.data_dir), 0o700)]
+    db = _sqlite_path(settings.database_url)
+    files = [Path(settings.credential_salt_path), Path(settings.ssh_known_hosts_path)]
+    if db is not None:
+        files += [db] + [db.with_name(db.name + suffix) for suffix in _SQLITE_COMPANIONS]
+    targets += [(path, 0o600) for path in files]
+    for path, mode in targets:
+        try:
+            if path.exists() and (path.stat().st_mode & 0o777) != mode:
+                os.chmod(path, mode)
+        except OSError:
+            failed.append(str(path))
+    return failed
+
+
+def report(settings: Settings | None = None) -> None:
+    """Moves the legacy layout and tightens DATA_DIR's permissions, logging
+    what it did as structured events -- from the container entrypoint as
+    well as the app's lifespan, so `startup.data_layout.moved` is in the
+    logs however the app was started (F-A)."""
+    from app.logging_config import get_logger
+
+    settings = settings or get_settings()
+    logger = get_logger("app.data_layout")
+    for source, dest in migrate_legacy_layout(settings):
+        logger.info("startup.data_layout.moved", source=str(source), dest=str(dest))
+    for path in secure_data_dir(settings):
+        logger.warning(
+            "startup.data_dir_permissions_unchanged",
+            path=path,
+            hint="couldn't make it readable by PerchTail's user only; check its owner",
+        )
+
+
 def main() -> None:
-    for source, dest in migrate_legacy_layout():
-        print(f"perchtail: moved {source} -> {dest}", file=sys.stderr)
+    from app.logging_config import configure_logging
+
+    configure_logging()
+    report()
 
 
 if __name__ == "__main__":

@@ -90,3 +90,52 @@ def test_wal_files_move_with_the_database(tmp_path):
     settings = _settings(tmp_path / "db")
     migrate_legacy_layout(settings)
     assert (tmp_path / "db" / "perchtail.db-wal").read_bytes() == b"wal"
+
+
+def test_data_dir_is_readable_by_the_app_user_only(tmp_path):
+    """#193: the salt, database and known_hosts were 0644 in a 0755
+    directory, readable by any local user on a host install."""
+    import os
+    import stat
+
+    from app.data_layout import secure_data_dir
+
+    data_dir = tmp_path / "db"
+    data_dir.mkdir(mode=0o755)
+    for name in ("perchtail.db", "perchtail.db-wal", "credential_salt", "ssh_known_hosts"):
+        (data_dir / name).write_bytes(b"x")
+        os.chmod(data_dir / name, 0o644)
+    (data_dir / "unrelated.txt").write_bytes(b"x")
+    os.chmod(data_dir / "unrelated.txt", 0o644)
+
+    assert secure_data_dir(_settings(data_dir)) == []
+
+    def mode(name):
+        return stat.S_IMODE((data_dir / name).stat().st_mode)
+
+    assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
+    for name in ("perchtail.db", "perchtail.db-wal", "credential_salt", "ssh_known_hosts"):
+        assert mode(name) == 0o600, name
+    assert mode("unrelated.txt") == 0o644
+
+
+def test_report_logs_moves_as_structured_events(tmp_path, monkeypatch):
+    """F-A: in Docker the entrypoint moved the files first and only printed
+    plain lines, so `startup.data_layout.moved` was never logged."""
+    import app.data_layout as data_layout
+
+    events = []
+
+    class _Logger:
+        def info(self, event, **kw):
+            events.append((event, kw))
+
+        def warning(self, event, **kw):
+            events.append((event, kw))
+
+    monkeypatch.setattr("app.logging_config.get_logger", lambda *a, **kw: _Logger())
+    _legacy(tmp_path)
+    data_layout.report(_settings(tmp_path / "db"))
+
+    moved = [kw["dest"] for event, kw in events if event == "startup.data_layout.moved"]
+    assert any(dest.endswith("perchtail.db") for dest in moved)

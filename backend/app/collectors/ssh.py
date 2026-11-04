@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import os
 import posixpath
 import stat as stat_module
 import tempfile
@@ -150,6 +151,8 @@ def _connect(source: Source) -> paramiko.SSHClient:
 
     with _host_keys_lock:
         client.save_host_keys(str(known_hosts_path))
+        if known_hosts_path.exists():
+            os.chmod(known_hosts_path, 0o600)  # #193: which hosts are trusted
 
     return client
 

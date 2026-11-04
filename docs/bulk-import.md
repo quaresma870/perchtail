@@ -77,6 +77,12 @@ rules:
     notes: access logs
 ```
 
+Don't quote just the pattern. In `rules: [include **/*, exclude "*/secret/**"]`
+each item is a single string, so the quotes would become part of the
+pattern and the rule would never match; the import refuses such a pattern.
+Quote the whole rule if you need to (`- "exclude */secret/**"`), or use the
+list form above.
+
 A new source with no rules shows nothing until rules are added.
 
 Unknown keys are reported as problems rather than ignored, so a typo like

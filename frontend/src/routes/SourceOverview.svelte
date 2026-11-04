@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte'
+  import { onDestroy } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser, hasCapability } from '../lib/auth'
@@ -14,7 +14,9 @@
    * token for agent sources; editing is one click away. */
   export let params: { id?: string } = {}
 
-  const sourceId = Number(params.id)
+  // Reactive, not read once: going from one source's page to another's
+  // (a link, or back/forward) reuses this component with new params (#192).
+  $: sourceId = Number(params.id)
 
   let source: Source | null = null
   let loading = true
@@ -31,20 +33,31 @@
 
   $: canManage = hasCapability($currentUser, 'create_source') && !source?.is_system
 
+  let justCreated: number | null = null
   const unsubscribe = justCreatedSourceId.subscribe((id) => {
-    created = id === sourceId
+    justCreated = id
   })
+  $: created = justCreated === sourceId
 
-  async function load() {
+  $: load(sourceId)
+
+  async function load(id: number) {
     loading = true
     error = ''
+    source = null
+    check = null
+    agentToken = ''
+    tokenError = ''
     try {
-      source = await api.get<Source>(`/sources/${sourceId}`)
-      ruleCount = source.rule_count
+      const loaded = await api.get<Source>(`/sources/${id}`)
+      if (id !== sourceId) return // a newer load took over
+      source = loaded
+      ruleCount = loaded.rule_count
     } catch (err) {
+      if (id !== sourceId) return
       error = err instanceof ApiError ? err.detail : 'Failed to load source'
     } finally {
-      loading = false
+      if (id === sourceId) loading = false
     }
   }
 
@@ -73,7 +86,6 @@
     }
   }
 
-  onMount(load)
   onDestroy(() => {
     unsubscribe()
     justCreatedSourceId.set(null)
@@ -183,11 +195,13 @@
       </fieldset>
     {/if}
 
-    <RuleEditor
-      {sourceId}
-      readOnly={source.is_system}
-      on:change={(e) => (ruleCount = e.detail.count)}
-    />
+    {#key sourceId}
+      <RuleEditor
+        {sourceId}
+        readOnly={source.is_system}
+        on:change={(e) => (ruleCount = e.detail.count)}
+      />
+    {/key}
   {/if}
 </div>
 

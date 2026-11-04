@@ -222,6 +222,16 @@ def test_moving_a_source_to_another_folder_is_an_update(session, client):
             "Same source",
         ),
         (lambda t: "{{{", "line", "Not valid YAML"),
+        (
+            lambda t: t.replace("- exclude **/debug/**", '- exclude "**/debug/**"'),
+            "rules[1]",
+            "in quotes",
+        ),
+        (
+            lambda t: t.replace("- exclude **/debug/**", "- exclude '**/debug/**'"),
+            "rules[1]",
+            "exclude **/debug/** without them",
+        ),
     ],
 )
 def test_problems_are_reported_with_where_and_nothing_is_written(
@@ -312,3 +322,12 @@ def test_import_cannot_repoint_a_source_and_keep_its_credential(session, client)
     assert any("credential again" in p["message"] for p in result["problems"])
     session.refresh(fs)
     assert fs.host == "attacker.example"
+
+
+def test_quoting_the_whole_rule_is_fine(session, client):
+    """#190: only a quoted *pattern* is refused, not a quoted rule."""
+    result = _import(
+        client, text=TEMPLATE.replace("- exclude **/debug/**", '- "exclude **/debug/**"')
+    )
+    assert result["problems"] == []
+    assert "**/debug/**" in {r.pattern for r in session.exec(select(Rule)).all()}

@@ -28,7 +28,7 @@ from app.audit import record_audit_event
 from app.auth.models import Capability, User
 from app.auth.rbac import require_capability
 from app.collectors import local as local_collector
-from app.collectors.base import FetchTooLargeError, max_fetch_bytes
+from app.collectors.base import DirEntry, FetchTooLargeError, max_fetch_bytes
 from app.collectors.registry import CONNECTORS
 from app.config import get_settings
 from app.db import get_session
@@ -143,17 +143,18 @@ def _too_large(exc: DecompressionLimitError) -> HTTPException:
     )
 
 
-def _fetch_too_large(exc: FetchTooLargeError) -> HTTPException:
-    logger.warning("archive.fetch_limit", error=str(exc))
+def _fetch_too_large(exc: FetchTooLargeError, *, folder: bool = False) -> HTTPException:
+    logger.warning("archive.fetch_limit", error=str(exc), size_bytes=exc.size, folder=folder)
     limit = exc.limit if exc.limit is not None else max_fetch_bytes()
     limit_mb = limit / 1024**2
+    what = "folder" if folder else "file"
     if exc.size is not None:
         message = (
-            f"This file is {exc.size / 1024**2:.1f} MB, over this server's "
+            f"This {what} is {exc.size / 1024**2:.1f} MB, over this server's "
             f"{limit_mb:.0f} MB limit (MAX_FETCH_MB)."
         )
     else:
-        message = f"This folder is over this server's {limit_mb:.0f} MB limit (MAX_FETCH_MB)."
+        message = f"This {what} is over this server's {limit_mb:.0f} MB limit (MAX_FETCH_MB)."
     return HTTPException(
         status_code=status.HTTP_413_CONTENT_TOO_LARGE,
         detail={
@@ -424,38 +425,40 @@ class _ZipBudget:
     remaining: int
 
 
+def _zip_entries(connector, source: Source, rules: list[Rule], current_dir: str) -> list[DirEntry]:
+    """Every rule-visible file under `current_dir`, from listings alone --
+    nothing is fetched yet, so the folder's listed total can be checked
+    against MAX_FETCH_MB before the first download (#191). Nested
+    .zip/.tar.gz files are included as raw files rather than expanded --
+    expanding archives-within-a-bulk-zip isn't worth the complexity for
+    what CLAUDE.md asks for here (download a folder)."""
+    out: list[DirEntry] = []
+    for entry in connector.list_directory(source, rules, current_dir):
+        if entry.is_dir:
+            out.extend(_zip_entries(connector, source, rules, entry.path))
+        elif _visible(source, entry.path, rules):
+            out.append(entry)
+    return out
+
+
 def _zip_directory(
     connector,
     source: Source,
-    rules: list[Rule],
+    entries: list[DirEntry],
     request_root: str,
-    current_dir: str,
     zf: zipfile.ZipFile,
     tmp_dir: Path,
     budget: "_ZipBudget",
 ) -> None:
-    """Recursively fetches every rule-visible file under `request_root`
-    straight into the zip, one fresh fetch per file — same always-fresh
-    rule as every other read in this project, just batched into one archive
-    for convenience. Nested .zip/.tar.gz members are included as raw files
-    rather than expanded — expanding archives-within-a-bulk-zip isn't worth
-    the complexity for what CLAUDE.md asks for here (download a folder).
-    `current_dir` walks deeper on each recursive call; arcnames stay
-    relative to the original `request_root` throughout."""
-    for entry in connector.list_directory(source, rules, current_dir):
-        if entry.is_dir:
-            _zip_directory(connector, source, rules, request_root, entry.path, zf, tmp_dir, budget)
-            continue
-        if not _visible(source, entry.path, rules):
-            continue
+    """Fetches each of `entries` fresh, straight into the zip -- same
+    always-fresh rule as every other read in this project, just batched into
+    one archive for convenience. Arcnames are relative to `request_root`.
+    The fetched size is what counts against the budget: a file may have
+    grown since it was listed."""
+    for entry in entries:
         arcname = entry.path[len(request_root) + 1 :] if request_root else entry.path
         with tempfile.NamedTemporaryFile(dir=tmp_dir, delete=False) as tmp_file:
             destination = Path(tmp_file.name)
-        # The listed size is checked first so an obviously-too-big folder
-        # fails before fetching anything; the fetched size is what counts.
-        if entry.size > budget.remaining:
-            destination.unlink()
-            raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
         connector.fetch_file(source, entry.path, destination)
         budget.remaining -= destination.stat().st_size
         if budget.remaining < 0:
@@ -481,16 +484,25 @@ def download_folder_zip(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
     connector = _connector(source)
 
+    limit = max_fetch_bytes()
+    entries = _zip_entries(connector, source, rules, path)
+    listed = sum(entry.size for entry in entries)
+    if listed > limit:
+        raise _fetch_too_large(
+            FetchTooLargeError("folder is over the MAX_FETCH_MB limit", size=listed, limit=limit),
+            folder=True,
+        )
+
     tmp_dir = Path(tempfile.mkdtemp(prefix="perchtail-zip-"))
     zip_path = tmp_dir / "download.zip"
-    budget = _ZipBudget(remaining=max_fetch_bytes())
+    budget = _ZipBudget(remaining=limit)
     try:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            _zip_directory(connector, source, rules, path, path, zf, tmp_dir, budget)
+            _zip_directory(connector, source, entries, path, zf, tmp_dir, budget)
             file_count = len(zf.namelist())
     except FetchTooLargeError as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise _fetch_too_large(exc) from exc
+        raise _fetch_too_large(exc, folder=True) from exc
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
