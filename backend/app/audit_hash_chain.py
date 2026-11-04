@@ -14,22 +14,15 @@ rows written before this feature existed (backfill_chain_if_needed, called
 once at startup) share the same hashing function, so a fresh row and a
 backfilled historical one are indistinguishable to verification.
 
-Note on concurrency: chain_new_entry serializes the "read the current tip,
-compute this row's hash" step with a process-wide lock, which prevents two
-audit-generating requests in the same process from both reading the same
-stale tip. It does not extend to each transaction's eventual commit (that
-would require holding the lock across a whole request's remaining work,
-which record_audit_event's callers don't structure for) -- so a narrow race
-remains between two concurrent writers whose commits interleave after both
-have already passed through this lock, which could in principle surface as
-a false "broken" verification rather than real tampering. Accepted for now
-given how infrequent audit-generating concurrent writes are for this
-tool's typical single-team deployment (same "in-memory, per-process,
-accepted trade-off" reasoning app/login_throttle.py already documents for
-this single-container SQLite model) -- a fully airtight fix would need
-DB-level write serialization (e.g. BEGIN IMMEDIATE) across the whole
-record-and-commit sequence, a larger change deferred unless this proves to
-be a real operational problem.
+Note on concurrency: two requests writing audit rows at once must not both
+chain from the same tip, or verification reports a break that is no
+tampering at all (#213; e2e caught it once SQLite ran in WAL mode, where
+readers no longer wait for writers). So chain_new_entry first takes
+SQLite's write lock for the caller's transaction (a no-op UPDATE), then
+reads the tip: a second writer blocks at that UPDATE until the first
+commits, and then sees its row. The process-wide lock is taken only after
+the database lock, so it can't deadlock against a transaction that already
+holds the write lock and audits a second time.
 """
 
 import hashlib
@@ -38,6 +31,7 @@ import json
 import threading
 from datetime import datetime
 
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.auth.models import AuditChainState, AuditLog
@@ -93,6 +87,15 @@ def current_chain_tip(session: Session) -> str | None:
     return state.anchor_hash if state else None
 
 
+def _take_write_lock(session: Session) -> None:
+    """Starts (or joins) the caller's write transaction before the tip is
+    read, so the tip can't change under it before it commits. On SQLite an
+    UPDATE matching no rows still takes the write lock, which is then held
+    until the caller's commit or rollback."""
+    if session.get_bind().dialect.name == "sqlite":
+        session.execute(text("UPDATE audit_chain_state SET id = id WHERE 0"))
+
+
 def chain_new_entry(key: bytes, session: Session, entry: AuditLog) -> None:
     """Sets prev_hash/row_hash on a not-yet-added AuditLog entry, in place.
     Relies on the session's default autoflush: if an earlier
@@ -102,6 +105,7 @@ def chain_new_entry(key: bytes, session: Session, entry: AuditLog) -> None:
     process-wide lock across the read-tip-then-set step -- see this
     module's own docstring for what that does and doesn't protect against
     across separate transactions."""
+    _take_write_lock(session)
     with _chain_write_lock:
         prev_hash = current_chain_tip(session)
         entry.prev_hash = prev_hash

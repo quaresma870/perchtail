@@ -181,3 +181,56 @@ def test_backfill_twice_is_idempotent(session):
     ]
 
     assert hashes_after_first_pass == hashes_after_second_pass
+
+
+def test_concurrent_writers_never_chain_from_the_same_tip(tmp_path):
+    """#213: a second transaction could read the tip while the first one's
+    row was still uncommitted, so both chained from the same hash and the
+    log looked tampered with. The second writer now waits for the first."""
+    import threading
+    import time
+
+    from app.audit_integrity import verify_chain
+    from app.db import configure_sqlite_connection, ensure_search_schema
+    from sqlalchemy import event
+    from sqlmodel import Session, SQLModel, create_engine
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'audit.db'}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    event.listen(engine, "connect", configure_sqlite_connection)
+    SQLModel.metadata.create_all(engine)
+    ensure_search_schema(engine)
+
+    def entry(action):
+        return AuditLog(user_id=None, action=action, timestamp=utcnow())
+
+    first = Session(engine)
+    row = entry("first")
+    chain_new_entry(KEY, first, row)
+    first.add(row)
+    first.flush()  # written, not committed
+
+    done = threading.Event()
+
+    def second_writer():
+        with Session(engine) as second:
+            other = entry("second")
+            chain_new_entry(KEY, second, other)
+            second.add(other)
+            second.commit()
+        done.set()
+
+    worker = threading.Thread(target=second_writer)
+    worker.start()
+    time.sleep(0.3)
+    assert not done.is_set(), "the second writer must wait for the first to commit"
+    first.commit()
+    first.close()
+    worker.join(timeout=10)
+    assert done.is_set()
+
+    with Session(engine) as check:
+        result = verify_chain(KEY, check)
+    assert result.ok and result.checked_count == 2
