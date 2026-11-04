@@ -8,6 +8,13 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.5.1-rc.1] - 2026-11-04
+
+Release candidate for 0.5.1: fixes for what the Hyper-V lab test of 0.5.0
+found, for the lab to retest before the final release. Back up `DATA_DIR`
+before upgrading; the database switches to WAL mode on first start (see
+"Fixed"). Upgrade Windows push agents so their rules ignore case.
+
 ### Security
 - SMB and WinRM sources no longer follow junctions or symlinks out of the
   base path. Before, anyone able to write to the log folder on the Windows
