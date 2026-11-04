@@ -14,11 +14,15 @@ def fake_winrm_module(monkeypatch):
     `monkeypatch` (not a manual try/finally) so it's undone automatically
     even if a test fails outright, the same guarantee monkeypatch already
     gives every other fixture in this test suite."""
+    # Registered with monkeypatch BEFORE the import/reload patches it, so
+    # teardown restores the real factory (registering afterwards recorded
+    # the fake as the value to restore, and it leaked into later tests).
+    original_session = winrm_module._session
+    monkeypatch.setattr(winrm_module, "_session", original_session)
     import app.testing.fake_winrm as module
 
-    original_session = winrm_module._session
     importlib.reload(module)
-    monkeypatch.setattr(winrm_module, "_session", original_session)
+    winrm_module._session = original_session
     return module
 
 
@@ -69,7 +73,7 @@ def test_fake_serves_the_real_fetch_file_scripts(fake_winrm_module, monkeypatch,
 
     monkeypatch.setattr(winrm_module, "_CHUNK_BYTES", 16)
     monkeypatch.setattr(
-        winrm_module, "decrypt_credential", lambda ref: {"username": "u", "password": "p"}
+        winrm_module, "_session", lambda source: fake_winrm_module._FakeWinRMSession()
     )
     source = Source(
         name="w",
@@ -99,11 +103,8 @@ def test_unrecognized_script_fails_loudly_instead_of_returning_nothing(fake_winr
 
 
 def test_importing_the_module_patches_the_real_collectors_session_factory(monkeypatch):
+    monkeypatch.setattr(winrm_module, "_session", winrm_module._session)
     import app.testing.fake_winrm as module
 
-    original_session = winrm_module._session
     importlib.reload(module)
-    try:
-        assert winrm_module._session(source=None).__class__.__name__ == "_FakeWinRMSession"
-    finally:
-        monkeypatch.setattr(winrm_module, "_session", original_session)
+    assert winrm_module._session(source=None).__class__.__name__ == "_FakeWinRMSession"

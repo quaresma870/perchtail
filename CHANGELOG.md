@@ -17,6 +17,35 @@ release ships (0.x releases may include breaking changes between minors).
   maintainer publishes it; `X.Y` and `latest` move when a full release is
   published. It also refuses a tag whose code carries another version
   (see CONTRIBUTING.md, "Releasing").
+- WinRM TLS errors are decided by OpenSSL's verify code. A certificate
+  issued for another IP address ("IP address mismatch") is now reported
+  as a name mismatch, not as an unknown issuer.
+- Search indexing skips a file it can't read (no permission, rotated away
+  since the listing, grown past the limit) and indexes the rest. Before,
+  one such file failed the whole source's sweep, every sweep.
+- The push agent exits right away on SIGTERM. A connected agent used to
+  wait for the next command, so `systemctl stop` took 90 s and ended in
+  SIGKILL.
+- The push agent leaves out links that lead outside its folder (or are
+  broken), as SSH and local sources do, and browsing a file answers 404
+  instead of 502.
+- "Test connection" and browsing a source with no credential say so
+  instead of showing a Python error.
+- WinRM logs `winrm.path_outside_base` when a later block of a read is
+  refused, not only the first check.
+- Import points a port-only change without a credential at `.port`.
+- The source editor shows a save error next to the Save button.
+- The SSH key field on the import page wraps in narrow windows.
+- System settings say that open sessions pick up a Connections view
+  change within 30 seconds.
+- The source page writes agent OS names properly ("Linux", "Windows").
+- `DATA_DIR/winrm_ca` is `0700`, like the rest of `DATA_DIR`.
+
+### Documentation
+- `docs/install-from-source.md` installs the latest release tag rather
+  than a fixed one, builds as an ordinary user and installs with `sudo`,
+  lists `python3.12-venv`, gets Node.js 22 from nodejs.org with a checksum
+  check, and keeps settings in `/etc/perchtail/perchtail.env`.
 
 ## [0.5.1-rc.1] - 2026-11-04
 

@@ -477,3 +477,31 @@ def test_scheduler_runs_late_jobs_instead_of_skipping_them():
     defaults = scheduler._job_defaults
     assert defaults["misfire_grace_time"] >= 60
     assert defaults["coalesce"] is True
+
+
+def test_an_unreadable_file_is_skipped_not_fatal_to_the_source(tmp_path, monkeypatch):
+    """#204: one file the service account can't read failed the whole
+    source's sweep, every sweep."""
+    import app.search_index as search_index_module
+    from app.collectors.base import SourcePermissionError
+
+    for name in ("a.log", "locked.log", "c.log"):
+        (tmp_path / name).write_text(f"line in {name}\n")
+    engine = _file_engine(tmp_path / "")
+
+    def refuse(relative_path):
+        if relative_path == "locked.log":
+            raise SourcePermissionError("Permission denied")
+
+    monkeypatch.setattr(
+        search_index_module, "_CONNECTORS", {Protocol.local: _HookedLocalConnector(refuse)}
+    )
+    with Session(engine) as session:
+        source = _source(session, tmp_path)
+        _rule(session, source.id, "*.log")
+        stats = index_source(session, source)
+        files = {r.file_path for r in _fts_rows(session, source.id)}
+
+    assert stats.indexed == 2
+    assert stats.unreadable == 1 and stats.skipped == 1
+    assert files == {"a.log", "c.log"}

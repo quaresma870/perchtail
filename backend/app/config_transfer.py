@@ -625,7 +625,8 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
     ):
         from app.api.sources import CREDENTIAL_REQUIRED_FOR_NEW_HOST
 
-        return Problem(f"{spec.where}.host", CREDENTIAL_REQUIRED_FOR_NEW_HOST)
+        field = "host" if spec.host != source.host else "port"
+        return Problem(f"{spec.where}.{field}", CREDENTIAL_REQUIRED_FOR_NEW_HOST)
     wanted = {
         "folder_id": folder_id,
         "host": spec.host,

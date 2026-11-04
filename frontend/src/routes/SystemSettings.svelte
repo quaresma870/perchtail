@@ -223,7 +223,8 @@
           <div class="setting-name">Connections view</div>
           <p class="hint">
             How the viewer's explorer lists sources by default, for everyone: a flat list, or a
-            tree by customer and folder.
+            tree by customer and folder. People who already have PerchTail open see the change
+            on their next page change, within 30 seconds.
           </p>
         </div>
         <select

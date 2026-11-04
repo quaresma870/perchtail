@@ -117,7 +117,11 @@ def secure_data_dir(settings: Settings | None = None) -> list[str]:
     by another user, say), for the caller to log."""
     settings = settings or get_settings()
     failed: list[str] = []
-    targets: list[tuple[Path, int]] = [(Path(settings.data_dir), 0o700)]
+    targets: list[tuple[Path, int]] = [
+        (Path(settings.data_dir), 0o700),
+        # WinRM CA certificates per source (public, but kept like the rest, #206).
+        (Path(settings.data_dir) / "winrm_ca", 0o700),
+    ]
     db = _sqlite_path(settings.database_url)
     files = [Path(settings.credential_salt_path), Path(settings.ssh_known_hosts_path)]
     if db is not None:

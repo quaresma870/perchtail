@@ -102,6 +102,7 @@ def test_data_dir_is_readable_by_the_app_user_only(tmp_path):
 
     data_dir = tmp_path / "db"
     data_dir.mkdir(mode=0o755)
+    (data_dir / "winrm_ca").mkdir(mode=0o755)
     for name in ("perchtail.db", "perchtail.db-wal", "credential_salt", "ssh_known_hosts"):
         (data_dir / name).write_bytes(b"x")
         os.chmod(data_dir / name, 0o644)
@@ -114,6 +115,7 @@ def test_data_dir_is_readable_by_the_app_user_only(tmp_path):
         return stat.S_IMODE((data_dir / name).stat().st_mode)
 
     assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((data_dir / "winrm_ca").stat().st_mode) == 0o700
     for name in ("perchtail.db", "perchtail.db-wal", "credential_salt", "ssh_known_hosts"):
         assert mode(name) == 0o600, name
     assert mode("unrelated.txt") == 0o644

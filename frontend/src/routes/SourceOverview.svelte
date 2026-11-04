@@ -31,6 +31,19 @@
   let generatingToken = false
   let tokenError = ''
 
+  // Go's GOOS values as people write them (#206).
+  const OS_NAMES: Record<string, string> = {
+    linux: 'Linux',
+    windows: 'Windows',
+    darwin: 'macOS',
+    freebsd: 'FreeBSD',
+    openbsd: 'OpenBSD',
+    netbsd: 'NetBSD',
+  }
+  function osName(goos: string): string {
+    return OS_NAMES[goos] ?? goos
+  }
+
   $: canManage = hasCapability($currentUser, 'create_source') && !source?.is_system
 
   let justCreated: number | null = null
@@ -178,7 +191,7 @@
           {#if source.agent_os === 'windows'}
             Windows — rules ignore case
           {:else if source.agent_os}
-            {source.agent_os} — rules are case-sensitive
+            {osName(source.agent_os)} — rules are case-sensitive
           {:else}
             not reported yet (agent older than 0.5.1, or never connected) — rules are case-sensitive
           {/if}

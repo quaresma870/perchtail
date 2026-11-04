@@ -3,6 +3,7 @@ actionable message instead of a bare 500, and view-only users never see
 raw library error text."""
 
 import errno
+import ssl
 import uuid
 
 import pytest
@@ -208,6 +209,7 @@ def test_check_hides_raw_error_from_view_only_users(session, monkeypatch):
         ('unsafe path: "../etc"', "PathOutsideBaseError"),
         ("open x.log: no such file or directory", "SourceNotFoundError"),
         ("open x.log: permission denied", "SourcePermissionError"),
+        ("not a directory", "SourceNotFoundError"),
     ],
 )
 def test_agent_refusals_map_like_the_other_connectors(message, expected_name):
@@ -236,3 +238,45 @@ def test_winrm_tls_errors_say_which_check_failed(text, fragment):
 
     mapped = errors.translate_winrm(requests.exceptions.SSLError(text))
     assert fragment in mapped.public_message
+
+
+def _cert_error(code: int, message: str) -> ssl.SSLCertVerificationError:
+    exc = ssl.SSLCertVerificationError(1, f"[SSL: CERTIFICATE_VERIFY_FAILED] {message}")
+    exc.verify_code = code
+    exc.verify_message = message
+    return exc
+
+
+@pytest.mark.parametrize(
+    "code, message, fragment",
+    [
+        (64, "IP address mismatch, certificate is not valid for '10.0.0.5'.", "different name"),
+        (62, "Hostname mismatch, certificate is not valid for 'x'.", "different name"),
+        (10, "certificate has expired", "expired"),
+        (20, "unable to get local issuer certificate", "issuer is unknown"),
+        (19, "self-signed certificate in certificate chain", "issuer is unknown"),
+    ],
+)
+def test_winrm_tls_errors_are_decided_by_the_verify_code(code, message, fragment):
+    """#203: with an IP host, OpenSSL says "IP address mismatch", which the
+    text match missed. The verify code is checked through the wrapping that
+    requests/urllib3 add."""
+    import requests
+    from urllib3.exceptions import MaxRetryError
+    from urllib3.exceptions import SSLError as Urllib3SSLError
+
+    inner = Urllib3SSLError(_cert_error(code, message))
+    wrapped = requests.exceptions.SSLError(MaxRetryError(None, "/wsman", reason=inner))
+    assert fragment in errors.translate_winrm(wrapped).public_message
+
+
+@pytest.mark.parametrize("protocol", [Protocol.smb, Protocol.winrm, Protocol.ssh])
+def test_a_source_without_a_credential_says_so(protocol):
+    """#206: "Test connection" on an SMB source with no credential showed
+    `'NoneType' object has no attribute …`."""
+    from app.collectors.base import SourceNoCredentialError
+
+    source = Source(name="x", protocol=protocol, host="h", base_path="Logs", credential_ref=None)
+    with pytest.raises(SourceNoCredentialError) as raised:
+        CONNECTORS[protocol].list_directory(source, [], "")
+    assert "no credential" in raised.value.public_message

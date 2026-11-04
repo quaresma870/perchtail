@@ -36,30 +36,65 @@ _NT_SHARING_VIOLATION = 0xC0000043
 _NT_LOGON_FAILURE = 0xC000006D
 
 
-def _tls_error(text: str) -> SourceTLSError:
-    """Says which TLS check failed (F-N): a certificate for another name
-    needs a different fix (the host field) than one from an unknown CA (the
-    CA certificate field) or an expired one."""
+# OpenSSL's X509_V_ERR_* codes, as ssl.SSLCertVerificationError.verify_code.
+_X509_EXPIRED = 10
+_X509_ISSUER_CODES = frozenset({2, 18, 19, 20, 21})
+_X509_NAME_MISMATCH = frozenset({62, 64})  # hostname, IP address
+
+
+def _cert_verify_code(exc: BaseException | None) -> int | None:
+    """The OpenSSL verify code behind a TLS failure, however deeply
+    requests/urllib3 wrapped it (SSLError -> MaxRetryError -> SSLError ->
+    SSLCertVerificationError)."""
+    seen: set[int] = set()
+    stack = [exc]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return current.verify_code
+        stack.extend([current.__cause__, current.__context__, getattr(current, "reason", None)])
+        stack.extend(arg for arg in getattr(current, "args", ()) if isinstance(arg, BaseException))
+    return None
+
+
+def _tls_error(exc: BaseException) -> SourceTLSError:
+    """Says which TLS check failed (F-N, #203): a certificate for another
+    name (host or IP) needs a different fix (the host field, or reissuing
+    it) than one from an unknown CA (the CA certificate field) or an
+    expired one. Decided by OpenSSL's verify code when there is one, by the
+    message otherwise."""
+    text = str(exc)
     lowered = text.lower()
-    if "hostname mismatch" in lowered or "doesn't match" in lowered:
+    code = _cert_verify_code(exc)
+    if code in _X509_NAME_MISMATCH or (
+        code is None
+        and any(m in lowered for m in ("hostname mismatch", "ip address mismatch", "doesn't match"))
+    ):
         return SourceTLSError(
             text,
             public_message="The source's TLS certificate is for a different name: enter the "
-            "host as it appears on the certificate, or reissue the certificate",
+            "host as it appears on the certificate, or reissue the certificate for this host",
         )
-    if "certificate has expired" in lowered:
+    if code == _X509_EXPIRED or (code is None and "certificate has expired" in lowered):
         return SourceTLSError(text, public_message="The source's TLS certificate has expired")
+    if code is None or code in _X509_ISSUER_CODES:
+        return SourceTLSError(
+            text,
+            public_message="The source's TLS certificate isn't trusted: its issuer is unknown, "
+            "so add the issuing CA certificate to the source",
+        )
     return SourceTLSError(
-        text,
-        public_message="The source's TLS certificate isn't trusted: its issuer is unknown, "
-        "so add the issuing CA certificate to the source",
+        text, public_message=f"The source's TLS certificate was refused (verify error {code})"
     )
 
 
 def _common(exc: BaseException) -> SourceError | None:
     text = str(exc)
     if isinstance(exc, ssl.SSLError):
-        return _tls_error(text)
+        return _tls_error(exc)
     if isinstance(exc, PermissionError):
         return SourcePermissionError(text)
     if isinstance(exc, FileNotFoundError | NotADirectoryError):
@@ -143,7 +178,7 @@ def translate_winrm(exc: BaseException) -> SourceError | None:
     if isinstance(exc, winrm_exc.InvalidCredentialsError | winrm_exc.AuthenticationError):
         return SourceAuthError(text)
     if isinstance(exc, requests.exceptions.SSLError):
-        return _tls_error(text)
+        return _tls_error(exc)
     if isinstance(exc, requests.exceptions.ConnectionError | requests.exceptions.Timeout):
         return SourceUnreachableError(text)
     if isinstance(exc, winrm_exc.WSManFaultError) and "access is denied" in text.lower():
@@ -181,6 +216,8 @@ def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | 
         # leaving the base path over SSH, rather than 502 (F-L).
         if "path escapes from parent" in lowered or lowered.startswith("unsafe path"):
             return PathOutsideBaseError(text)
+        if "not a directory" in lowered:  # a list on a file (#206)
+            return SourceNotFoundError(text)
         if "not exist" in lowered or "no such file" in lowered or "not found" in lowered:
             return SourceNotFoundError(text)
         if "permission" in lowered or "denied" in lowered or "outside" in lowered:
