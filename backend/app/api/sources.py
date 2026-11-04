@@ -95,6 +95,7 @@ class SourcePublic(BaseModel):
     has_agent_token: bool
     agent_connected: bool
     agent_last_seen_at: datetime | None
+    agent_os: str | None
     search_indexing_enabled: bool
     # What the requesting user may do on this source (view, download,
     # manage_rules, run_now), so the UI can hide actions it would refuse --
@@ -207,6 +208,7 @@ def _to_public(
             source.protocol == Protocol.agent and get_agent_registry().is_connected(source.id)
         ),
         agent_last_seen_at=source.agent_last_seen_at,
+        agent_os=source.agent_os,
         search_indexing_enabled=source.search_indexing_enabled,
         my_capabilities=(
             [c for c in Capability if resolve_capability(session, user, source, c)]

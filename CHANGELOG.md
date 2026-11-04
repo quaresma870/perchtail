@@ -26,12 +26,29 @@ release ships (0.x releases may include breaking changes between minors).
   again (in the editor, the API and bulk import), as the folder picker
   already did. Before, editing could send the saved credential (for SMB
   and WinRM, an NTLM exchange) to any new address.
+- Rules for an agent running on Windows are now matched case-insensitively,
+  as for SMB and WinRM sources. Before, `exclude secret/**` didn't hide a
+  folder named `SECRET` on disk, though NTFS treats both as the same
+  folder. The agent now reports its OS when it connects (shown as **Agent
+  OS** on the source's page). Upgrade Windows agents to get this: older
+  agents don't report it and keep case-sensitive rules.
 
 ### Fixed
 - SMB: a directory symlink in a folder no longer makes the whole listing
   fail with `SMBLinkRedirectionError`.
 - WinRM: browsing a path that is a file answers 404 instead of listing the
   file under a doubled path.
+- Search indexing no longer locks the database. The first index of a
+  large source kept one write transaction open while it fetched every
+  file, and for those minutes logins and anything else that writes failed
+  with `database is locked` (HTTP 500). Each file is now fetched first and
+  committed on its own, the database uses SQLite's WAL mode so reads don't
+  wait for writes, and a write waits up to 30 s for another to finish
+  instead of failing. Indexing also stops when the source is disabled or
+  taken out of search mid-sweep.
+- Scheduled jobs that start late (a busy worker) now run instead of being
+  skipped, and runs that piled up collapse into one. A skipped indexing
+  sweep also delayed alerts.
 
 ### Added
 - Releases now carry what's needed to install them (`.github/workflows/release.yml`):

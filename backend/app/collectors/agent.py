@@ -7,7 +7,7 @@ from app.agent_registry import get_agent_registry
 from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.models import Rule, Source
-from app.rules import is_entry_visible
+from app.rules import is_entry_visible, rules_case_insensitive
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 
@@ -19,10 +19,13 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     through a connection the agent dialed out to establish rather than one
     this app dials directly."""
     result = get_agent_registry().send_command_sync(source.id, "list", path=relative_path)
+    case_insensitive = rules_case_insensitive(source)
     entries = []
     for raw in result.get("entries", []):
         child_path = f"{relative_path}/{raw['name']}" if relative_path else raw["name"]
-        if not is_entry_visible(child_path, raw["is_dir"], rules):
+        if not is_entry_visible(
+            child_path, raw["is_dir"], rules, case_insensitive=case_insensitive
+        ):
             continue
         entries.append(
             DirEntry(name=raw["name"], path=child_path, is_dir=raw["is_dir"], size=raw["size"])
