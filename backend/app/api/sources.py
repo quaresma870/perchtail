@@ -243,6 +243,12 @@ _DRIVE_PATH = re.compile(r"^[A-Za-z]:([\\/]|$)")
 _ADMIN_SHARE = re.compile(r"^([A-Za-z]\$|ADMIN\$|IPC\$)$", re.IGNORECASE)
 
 
+CREDENTIAL_REQUIRED_FOR_NEW_HOST = (
+    "Enter the credential again to use a different host or port: the saved one is only "
+    "sent to the host and port it was saved for"
+)
+
+
 def _bad_request(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 
@@ -530,10 +536,19 @@ def update_source(
 
     if payload.name is not None:
         source.name = payload.name
-    if payload.host is not None:
-        source.host = payload.host
-    if "port" in fields_set:
-        source.port = payload.port
+    new_host = payload.host if payload.host is not None else source.host
+    new_port = payload.port if "port" in fields_set else source.port
+    if (
+        (new_host, new_port) != (source.host, source.port)
+        and source.credential_ref is not None
+        and payload.credential is None
+    ):
+        # The saved credential is only ever sent to the host and port it was
+        # saved for: repointing a source would otherwise hand it (an NTLM
+        # exchange, a password) to whatever answers at the new address.
+        raise _bad_request(CREDENTIAL_REQUIRED_FOR_NEW_HOST)
+    source.host = new_host
+    source.port = new_port
     if payload.roots is not None:
         # Lowering the limit never locks a source out of editing: it can
         # keep the folders it has, just not add more.
@@ -786,7 +801,7 @@ def _picker_source(session: Session, payload: FolderPickRequest) -> Source:
         # The saved credential is only ever sent to the host it was saved
         # for -- pointing the picker somewhere else needs it typed again.
         if (host, port) != (saved.host, saved.port):
-            raise _bad_request("Enter the credential again to browse a different host or port")
+            raise _bad_request(CREDENTIAL_REQUIRED_FOR_NEW_HOST)
         credential_ref = saved.credential_ref
     else:
         raise _bad_request("Enter the credential first")
@@ -864,8 +879,8 @@ def _pick(source: Source, path: str) -> tuple[str, str | None, str, list[FolderP
 
     # SMB: the top level is the server's shares.
     if not path:
-        with translated(translate_smb):
-            shares = smb_shares.list_shares(source.host, smb_collector._connect_kwargs(source))
+        with translated(translate_smb), smb_collector._connection(source) as kwargs:
+            shares = smb_shares.list_shares(source.host, kwargs)
         return "", None, "shares", [FolderPickEntry(name=s.name, path=s.name) for s in shares]
     names = _list_folders(connector, source, path)
     parent = path.rsplit("\\", 1)[0] if "\\" in path else ""

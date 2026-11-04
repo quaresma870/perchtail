@@ -47,6 +47,7 @@
   let roots: SourceRoot[] = [{ label: '', path: '' }]
   let hadRoots = false
   let originalPaths = ''
+  let originalHostPort = ''
   // Index of the root whose Browse… picker is open.
   let pickerFor: number | null = null
   // Settings -> System -> Folders per source; a source that already has
@@ -191,6 +192,7 @@
           winrmScheme = source.winrm_effective_scheme ?? 'https'
           tlsCaPem = source.tls_ca_pem ?? ''
           originalPaths = JSON.stringify(roots.map((r) => r.path))
+          originalHostPort = `${source.host}:${source.port ?? ''}`
           enabled = source.enabled
           searchIndexingEnabled = source.search_indexing_enabled
         }
@@ -212,6 +214,11 @@
   }
 
   $: multiRoot = roots.length > 1
+  // A saved credential is only sent to the host and port it was saved for,
+  // so pointing the source elsewhere needs it typed again.
+  $: hostPortChanged = !isNew && originalHostPort !== '' && `${host}:${port ?? ''}` !== originalHostPort
+  $: needsCredentialAgain =
+    hostPortChanged && !!source?.has_credential && protocol !== 'agent' && protocol !== 'local'
   $: pathsChanged = !isNew && JSON.stringify(roots.map((r) => r.path)) !== originalPaths
 
   function addRoot() {
@@ -631,7 +638,13 @@
         </fieldset>
       {:else if protocol !== 'local'}
         <fieldset>
-          <legend>Credential {isNew ? '' : '(leave blank to keep current)'}</legend>
+          <legend>Credential {isNew || needsCredentialAgain ? '' : '(leave blank to keep current)'}</legend>
+          {#if needsCredentialAgain}
+            <p class="warning small">
+              The host or port changed: enter the credential again. The saved one is only sent to the
+              host and port it was saved for.
+            </p>
+          {/if}
           <label>
             Username
             <input class="input" bind:value={username} autocomplete="off" />

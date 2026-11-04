@@ -9,13 +9,16 @@ from pathlib import Path
 import winrm
 
 from app.collectors import base as collector_base
-from app.collectors.base import DirEntry
+from app.collectors.base import DirEntry, PathOutsideBaseError
 from app.config import get_settings
 from app.crypto import decrypt_credential
+from app.logging_config import get_logger
 from app.models import Rule, Source
 from app.rules import is_entry_visible
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "list_drives", "local_copy"]
+
+logger = get_logger(__name__)
 
 
 # PowerShell accepts any of these as a single-quote string delimiter, not just
@@ -75,11 +78,39 @@ def _session(source: Source) -> winrm.Session:
     return winrm.Session(target, auth=(creds["username"], creds["password"]), **kwargs)
 
 
+_OUTSIDE_BASE = "PERCHTAIL_OUTSIDE_BASE"
+_NOT_A_DIRECTORY = "PERCHTAIL_NOT_A_DIRECTORY"
+
+
 def _run_ps(source: Source, script: str) -> str:
     result = _session(source).run_ps(script)
+    out = result.std_out.decode("utf-8", errors="replace")
     if result.status_code != 0:
+        if _OUTSIDE_BASE in out:
+            raise PathOutsideBaseError("path outside the base path")
+        if _NOT_A_DIRECTORY in out:
+            raise NotADirectoryError("not a directory")
         raise RuntimeError(result.std_err.decode("utf-8", errors="replace"))
-    return result.std_out.decode("utf-8")
+    return out
+
+
+def _containment_guard(source: Source, relative_path: str) -> str:
+    """PowerShell that stops the script when any component below the base
+    path is a junction or symlink. [IO.File]::GetAttributes reads the
+    attributes of the link itself rather than its target, so nothing is
+    followed. Get-ChildItem, Get-Item and [IO.File]::Open all follow them,
+    which let a junction in the log folder expose anything the account can
+    read. The base path itself is the operator's choice and not checked."""
+    parts = [p for p in relative_path.split("/") if p]
+    if not parts:
+        return ""
+    prefixes = [_remote_path(source, "/".join(parts[:i])) for i in range(1, len(parts) + 1)]
+    quoted = ", ".join(_ps_quote(p) for p in prefixes)
+    return (
+        f"foreach ($__c in @({quoted})) {{ "
+        "if ([IO.File]::GetAttributes($__c) -band [IO.FileAttributes]::ReparsePoint) "
+        f"{{ Write-Output '{_OUTSIDE_BASE}'; exit 3 }} }}; "
+    )
 
 
 def _remote_path(source: Source, relative_path: str = "") -> str:
@@ -102,12 +133,22 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     decode (#168). Base64 sidesteps the code page entirely, the same way
     fetch_file already returns content."""
     path = _remote_path(source, relative_path)
+    # Junctions and symlinks are left out of the listing (never followed),
+    # and listing a file is "not found" rather than the file itself.
     script = (
+        _containment_guard(source, relative_path)
+        + f"if (-not [IO.Directory]::Exists({_ps_quote(path)})) "
+        f"{{ Write-Output '{_NOT_A_DIRECTORY}'; exit 4 }}; "
         f"$j = Get-ChildItem -LiteralPath {_ps_quote(path)} | "
+        "Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | "
         "Select-Object Name, PSIsContainer, Length | ConvertTo-Json -Compress; "
         "if ($j) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)) }"
     )
-    output = _run_ps(source, script).strip()
+    try:
+        output = _run_ps(source, script).strip()
+    except PathOutsideBaseError:
+        logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
+        raise
     if not output:
         return []
 
@@ -154,8 +195,13 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     still writing can be read. Refuses anything over MAX_FETCH_MB before
     transferring a single block."""
     path = _ps_quote(_remote_path(source, relative_path))
+    guard = _containment_guard(source, relative_path)
     limit = collector_base.max_fetch_bytes()
-    size = int(_run_ps(source, f"(Get-Item -LiteralPath {path}).Length").strip() or 0)
+    try:
+        size = int(_run_ps(source, guard + f"(Get-Item -LiteralPath {path}).Length").strip() or 0)
+    except PathOutsideBaseError:
+        logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
+        raise
     if size > limit:
         raise collector_base.too_large(size, limit)
 
@@ -163,7 +209,9 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     try:
         with open(destination, "wb") as dst:
             while written < size:
-                script = (
+                # The guard runs again with every block, so a link swapped in
+                # after the first check is refused too.
+                script = guard + (
                     f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
                     f"try {{ $f.Seek({written}, 'Begin') | Out-Null; "
                     f"$b = New-Object byte[] {_CHUNK_BYTES}; "

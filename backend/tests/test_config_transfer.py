@@ -297,3 +297,18 @@ def test_import_respects_the_configured_folder_limit(session, client):
         p["where"].endswith("sources[0].roots") and "turned off" in p["message"]
         for p in result["problems"]
     ), result["problems"]
+
+
+def test_import_cannot_repoint_a_source_and_keep_its_credential(session, client):
+    _import(client)
+    moved = TEMPLATE.replace("host: fs01.acme.example", "host: attacker.example")
+    _import(client, text=moved, credentials={"Acme / fs01": {"username": "fs", "password": "pw"}})
+    fs = session.exec(select(Source).where(Source.name == "fs01")).one()
+    assert fs.host == "attacker.example"  # typed credential: allowed
+
+    again = TEMPLATE.replace("host: fs01.acme.example", "host: evil.example")
+    result = _import(client, text=again)
+    assert result["applied"] is False
+    assert any("credential again" in p["message"] for p in result["problems"])
+    session.refresh(fs)
+    assert fs.host == "attacker.example"

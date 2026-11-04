@@ -139,11 +139,13 @@ def test_moving_a_source_clears_its_index_and_audits_old_and_new(session, client
     created = _create(client, search_indexing_enabled=True).json()
     _index_something(session, created["id"])
 
+    if "host" in patch or "port" in patch:
+        patch = {**patch, "credential": {"username": "u", "password": "p"}}
     assert client.patch(f"/sources/{created['id']}", json=patch).status_code == 200
 
     assert session.exec(select(SearchIndexState)).all() == []
     event = session.exec(select(AuditLog).where(AuditLog.action == "source.update")).one()
-    (field,) = patch
+    field = next(k for k in patch if k != "credential")
     change = event.event_metadata["changes"][field]
     assert change["to"] == patch[field]
     assert change["from"] != patch[field]
@@ -313,6 +315,15 @@ def test_picker_smb_top_level_lists_shares(client, monkeypatch):
         return [Share("AppLogs", ""), Share("PTLogs", "lab")]
 
     monkeypatch.setattr(smb_shares, "list_shares", list_shares)
+    from contextlib import contextmanager
+
+    from app.collectors import smb as smb_collector
+
+    @contextmanager
+    def connection(source):
+        yield {**smb_collector._connect_kwargs(source), "connection_cache": {}}
+
+    monkeypatch.setattr(smb_collector, "_connection", connection)
     body = client.post(
         "/sources/pick-folder",
         json={
@@ -516,3 +527,25 @@ def test_stored_limit_is_clamped_to_the_hard_cap(session):
     session.add(SystemSetting(key="source_max_roots", value="5000"))
     session.commit()
     assert source_roots.max_roots(session) == source_roots.HARD_MAX_ROOTS == 100
+
+
+@pytest.mark.parametrize("patch", [{"host": "attacker.example.com"}, {"port": 2222}])
+def test_repointing_a_source_needs_the_credential_again(session, client, patch):
+    """The saved credential is only sent to the host and port it was saved
+    for; otherwise editing a source would hand it to any new address."""
+    created = _create(client).json()
+    refused = client.patch(f"/sources/{created['id']}", json=patch)
+    assert refused.status_code == 400
+    assert "credential again" in refused.json()["detail"]
+    assert session.get(Source, created["id"]).host == "h.example.com"
+
+    with_credential = client.patch(
+        f"/sources/{created['id']}",
+        json={**patch, "credential": {"username": "u", "password": "p"}},
+    )
+    assert with_credential.status_code == 200
+
+
+def test_repointing_a_source_without_a_credential_is_allowed(session, client):
+    created = _create(client, protocol="agent", credential=None).json()
+    assert client.patch(f"/sources/{created['id']}", json={"host": "other"}).status_code == 200

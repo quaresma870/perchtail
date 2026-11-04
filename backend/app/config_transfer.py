@@ -597,6 +597,14 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
             f"{spec.name!r} already exists as a {source.protocol.value} source; "
             "the protocol of a source can't be changed",
         )
+    if (
+        (spec.host, spec.port) != (source.host, source.port)
+        and source.credential_ref is not None
+        and credential is None
+    ):
+        from app.api.sources import CREDENTIAL_REQUIRED_FOR_NEW_HOST
+
+        return Problem(f"{spec.where}.host", CREDENTIAL_REQUIRED_FOR_NEW_HOST)
     wanted = {
         "folder_id": folder_id,
         "host": spec.host,
