@@ -16,7 +16,7 @@ See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
 |---|---|---|---|---|
 | SSH/SFTP | Linux | 22 | dedicated OS user, key-based | SFTP-only chroot jail |
 | SMB | Windows shares | 445 | dedicated local/domain user | share + NTFS ACL scoped to one folder |
-| WinRM | Windows (fallback when SMB isn't open) | 5985/5986 | dedicated local/domain user | JEA-constrained, read-only cmdlets |
+| WinRM | Windows (fallback when SMB isn't open) | 5986 (HTTPS) / 5985 | dedicated account with remote-shell rights (admin or `RootSDDL`) | NTFS read ACLs; prefer SMB or the agent (see below) |
 | Agent | Any host not reachable inbound | outbound only, no listener | enrollment token, not a login account | `PERCHTAIL_BASE_PATH` scopes what it can read |
 | Local disk | Directories on the PerchTail host (e.g. a read-only bind mount) | n/a | none | off unless the operator sets `LOCAL_SOURCE_ROOTS` |
 
@@ -183,7 +183,7 @@ IP only.
 ### 6. Host-key pinning
 
 PerchTail keeps every SSH server's host key in `SSH_KNOWN_HOSTS_PATH`
-(`/data/ssh_known_hosts` in Docker). If a pinned key ever changes, the
+(`/data/db/ssh_known_hosts` in Docker). If a pinned key ever changes, the
 connection fails. That is the man-in-the-middle check.
 
 What happens the *first* time PerchTail sees a host depends on
@@ -199,7 +199,7 @@ What happens the *first* time PerchTail sees a host depends on
   before you append:
 
   ```bash
-  ssh-keyscan -p 22 app01.example.com >> /data/ssh_known_hosts
+  ssh-keyscan -p 22 app01.example.com >> /data/db/ssh_known_hosts
   ```
 
 ## SMB (Windows shares)
@@ -234,11 +234,10 @@ defeating the point of a dedicated least-privilege account. A folder-scoped
 custom share avoids both problems at once, no matter which drive it's on.
 
 If logs are genuinely scattered across many unpredictable paths on a host
-and a single custom share can't cover them, prefer adding a
-[WinRM + JEA source](#winrm-windows-fallback-when-smb-isnt-open) for that
-host instead of falling back to `C$` — JEA can constrain the account to
-read-only cmdlets scoped to exactly the paths needed without ever requiring
-local admin rights.
+and a single custom share can't cover them, create one share per log
+folder and add them as [several folders of one source](#several-folders-in-one-source),
+or use the [push agent](#agent-push-agent-for-hosts-not-reachable-inbound).
+Don't fall back to `C$`.
 
 ### 3. Match the NTFS ACL to the share
 
@@ -266,40 +265,65 @@ Allow TCP 445 inbound from the PerchTail connector's IP only.
 
 ## WinRM (Windows, fallback when SMB isn't open)
 
-WinRM is remote PowerShell, not a file-listing protocol — its default
-surface is much broader than "read files," so constraining it well matters
-more here than for SSH or SMB.
+> **Read this before choosing WinRM.** The current WinRM connector runs
+> PowerShell through a WinRS remote shell (pywinrm). Windows only lets an
+> account open that shell if it is a local **Administrator**, or if the
+> WinRM service's `RootSDDL` is widened to grant it (`GXGR`). Either way the
+> credential PerchTail stores has a **full remote shell** on the host: if it
+> leaks, it can do far more than read logs. A Just Enough Administration
+> (JEA) endpoint can't restrict it today, because pywinrm never reaches a
+> PowerShell session configuration (#169, moving to PSRP).
+>
+> Prefer an [SMB share](#smb-windows-shares) of the log folder, or the
+> [push agent](#agent-push-agent-for-hosts-not-reachable-inbound), whenever
+> either is possible. Use WinRM only where neither is, and treat its
+> credential like an administrator's.
 
-### 1. Enable WinRM, prefer HTTPS
+### 1. Enable WinRM over HTTPS
 
 ```powershell
 winrm quickconfig
 ```
 
-Then configure an HTTPS listener with a real certificate rather than leaving
-it on plain HTTP — otherwise traffic crosses the wire without transport
-encryption beyond whatever NTLM itself provides.
+Then add an HTTPS listener (port 5986) with a certificate the PerchTail host
+can verify. In the source editor, set **Scheme** to HTTPS (the default for
+new sources). If the certificate comes from an internal CA or is
+self-signed, paste that CA certificate (PEM) into **CA certificate**. It is
+trusted for that source only, without changing the server-wide trust store
+or setting `REQUESTS_CA_BUNDLE`.
 
-### 2. Create a dedicated account, constrained with JEA
+Plain HTTP (port 5985) still has NTLM encrypt the WinRM messages, but the
+server isn't authenticated, so a machine in the middle can impersonate it.
+Use it only on a network you control.
 
-Do **not** add the PerchTail account to local Administrators, which is
-WinRM's default requirement for remote access. Instead, set up a **Just
-Enough Administration (JEA)** endpoint that exposes only the read-only
-cmdlets PerchTail actually needs (`Get-ChildItem`, `Get-Content`,
-`Get-Item`), and grant the account access to that endpoint only:
+Sources created before 0.5.0 have no scheme stored and keep the old rule
+until edited: HTTPS on port 5986 or with no port, HTTP on any other port.
+Saving the source in the editor stores the scheme explicitly.
 
-```powershell
-Register-PSSessionConfiguration -Name "PerchTailReadOnly" -Path .\PerchTailJEA.pssc
-```
+### 2. Create a dedicated account
 
-This is the single most important control on this protocol — without it, a
-compromised PerchTail credential on a WinRM source has far more reach than
-"browse some log files."
+A dedicated local or domain account, e.g. `svc-perchtail`, used for nothing
+else and for no other host. For the reasons above it needs one of:
+
+- membership of the local **Administrators** group; or
+- an entry in the WinRM `RootSDDL` granting it execute and read (`GXGR`):
+
+  ```powershell
+  winrm configSDDL default
+  ```
+
+  Add the account with read and execute rights in the dialog. This still
+  gives it a remote shell, but keeps it out of Administrators, so it can
+  only read what its NTFS permissions allow.
+
+Grant NTFS read access to the log folders only, as for SMB. Adding the
+account to **Remote Management Users** alone is not enough for this
+connector: it fails with `Access is denied`.
 
 ### 3. Firewall
 
-Allow TCP 5985 (HTTP, only if HTTPS genuinely isn't an option) or 5986
-(HTTPS) inbound from the PerchTail connector's IP only.
+Allow TCP 5986 (HTTPS), or 5985 only if HTTPS genuinely isn't an option,
+inbound from the PerchTail connector's IP only.
 
 ## Agent (push-agent, for hosts not reachable inbound)
 

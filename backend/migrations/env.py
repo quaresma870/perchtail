@@ -3,12 +3,16 @@ from logging.config import fileConfig
 import app.db  # noqa: F401  ensures the sqlite parent directory exists
 from alembic import context
 from app.config import get_settings
+from app.data_layout import migrate_legacy_layout
 from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+# A pre-0.5.0 layout is moved first, so upgrading can never create an empty
+# database next to the real one (app/data_layout.py).
+migrate_legacy_layout()
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
 # Interpret the config file for Python logging.

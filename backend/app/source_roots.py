@@ -61,6 +61,8 @@ def with_base_path(source: Source, base_path: str) -> Source:
         enabled=source.enabled,
         is_system=source.is_system,
         agent_token_hash=source.agent_token_hash,
+        winrm_scheme=source.winrm_scheme,
+        tls_ca_pem=source.tls_ca_pem,
     )
 
 

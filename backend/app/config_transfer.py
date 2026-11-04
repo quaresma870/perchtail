@@ -51,6 +51,8 @@ _SOURCE_KEYS = {
     "search_indexing_enabled",
     "credential",
     "rules",
+    "winrm_scheme",
+    "tls_ca_pem",
 }
 _CONTAINER_KEYS = {"name", "folders", "sources"}
 
@@ -94,6 +96,8 @@ class _SourceSpec:
     search_indexing_enabled: bool
     credential: dict | None
     rules: list[_RuleSpec] | None
+    winrm_scheme: str | None = None
+    tls_ca_pem: str | None = None
 
 
 @dataclass
@@ -207,7 +211,13 @@ def _walk(node: dict, customer: str, path: tuple[str, ...], where: str, parsed: 
 def _parse_source(
     node: Any, customer: str | None, folders: tuple[str, ...], where: str, parsed: Parsed
 ) -> None:
-    from app.api.sources import SourceRootModel, _validate_base_path, _validate_roots
+    from app.api.sources import (
+        SourceRootModel,
+        _validate_base_path,
+        _validate_ca_pem,
+        _validate_roots,
+        _validate_winrm_scheme,
+    )
 
     problems = parsed.problems
     if not isinstance(node, dict):
@@ -280,6 +290,24 @@ def _parse_source(
         problems.append(Problem(f"{where}.base_path", str(exc.detail)))
         return
 
+    scheme = node.get("winrm_scheme")
+    if scheme is not None and scheme not in ("https", "http"):
+        problems.append(Problem(f"{where}.winrm_scheme", "winrm_scheme must be https or http"))
+        return
+    raw_ca = node.get("tls_ca_pem")
+    if raw_ca is not None and not isinstance(raw_ca, str):
+        problems.append(Problem(f"{where}.tls_ca_pem", "tls_ca_pem must be PEM text"))
+        return
+    try:
+        scheme = _validate_winrm_scheme(protocol, scheme)
+        ca_pem = _validate_ca_pem(protocol, raw_ca)
+    except HTTPException as exc:
+        problems.append(Problem(f"{where}.winrm_scheme", str(exc.detail)))
+        return
+    if protocol == Protocol.winrm and scheme is None:
+        # As in the editor: a WinRM source always stores its scheme.
+        scheme = "https" if not port or port == 5986 else "http"
+
     credential = _parse_credential(
         node.get("credential"), protocol, f"{where}.credential", problems
     )
@@ -299,6 +327,8 @@ def _parse_source(
             roots=roots,
             credential=credential,
             rules=rules,
+            winrm_scheme=scheme,
+            tls_ca_pem=ca_pem,
             **flags,
         )
     )
@@ -528,6 +558,8 @@ def _create_source(session, spec, customer_id, folder_id, credential, apply, use
         enabled=spec.enabled,
         search_indexing_enabled=spec.search_indexing_enabled,
         credential_ref=encrypt_credential(credential) if credential else None,
+        winrm_scheme=spec.winrm_scheme,
+        tls_ca_pem=spec.tls_ca_pem,
     )
     session.add(source)
     session.flush()
@@ -564,6 +596,8 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         "roots": spec.roots,
         "enabled": spec.enabled,
         "search_indexing_enabled": spec.search_indexing_enabled,
+        "winrm_scheme": spec.winrm_scheme,
+        "tls_ca_pem": spec.tls_ca_pem,
     }
     changes = {
         k: {"from": getattr(source, k), "to": v}
@@ -577,7 +611,13 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
     credential_change = credential is not None and (
         source.credential_ref is None or decrypt_credential(source.credential_ref) != credential
     )
-    labels = [f"{k}: {v['from']!r} → {v['to']!r}" for k, v in changes.items() if k != "folder_id"]
+    labels = [
+        f"{k}: {v['from']!r} → {v['to']!r}"
+        for k, v in changes.items()
+        if k not in ("folder_id", "tls_ca_pem")
+    ]
+    if "tls_ca_pem" in changes:
+        labels.append("CA certificate " + ("replaced" if spec.tls_ca_pem else "removed"))
     if "folder_id" in changes:
         labels.append("moved to another folder")
     if rules_change:
@@ -601,6 +641,8 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         delete_source_index(session, source.id)
     session.add(source)
     audit_changes = {k: v for k, v in changes.items()}
+    if "tls_ca_pem" in audit_changes:
+        audit_changes["tls_ca_pem"] = "replaced" if spec.tls_ca_pem else "removed"
     if rules_change:
         audit_changes["rules"] = "replaced"
     if credential_change:
@@ -664,6 +706,10 @@ def _source_out(source: Source) -> dict:
         out["roots"] = [{"label": r["label"], "path": r["path"]} for r in source.roots]
     else:
         out["base_path"] = source.base_path
+    if source.protocol == Protocol.winrm and source.winrm_scheme:
+        out["winrm_scheme"] = source.winrm_scheme
+    if source.tls_ca_pem:
+        out["tls_ca_pem"] = source.tls_ca_pem
     if not source.enabled:
         out["enabled"] = False
     if source.search_indexing_enabled:

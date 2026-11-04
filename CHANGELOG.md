@@ -8,6 +8,35 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Upgrading from 0.4.x
+
+Database migrations run automatically on startup. Back up the `/data`
+volume first.
+
+- **The database, credential salt and SSH `known_hosts` move to
+  `/data/db`** (#172). On the first start of 0.5.0 they are moved from
+  `/data` automatically, salt first and database last, and the move is
+  logged (`startup.data_layout.moved`). Nothing to do with the stock
+  `docker-compose.yml`. If you set `DATABASE_URL`, `CREDENTIAL_SALT_PATH`
+  or `SSH_KNOWN_HOSTS_PATH` yourself, those paths are kept as they are.
+  If a database is still found at `/data/perchtail.db` while another one is
+  in use in `/data/db`, startup logs `startup.data_layout.legacy_database_left`:
+  stop PerchTail and move the right one into place. Update your backups to
+  include `/data/db`.
+- **Logs** now rotate at `LOG_MAX_FILE_MB` (100) as well as at midnight, and
+  all logs together are capped at `LOG_MAX_TOTAL_MB` (2048). Archives are
+  named `perchtail.log.<day>.<n>.gz`; existing `perchtail.log.<day>.gz`
+  archives keep expiring under `LOG_RETENTION_DAYS`.
+- **WinRM sources:** the documented JEA setup could never work with this
+  connector, which needs an account with remote-shell rights. The docs now
+  say so; prefer SMB or the push agent where possible (#169). Existing
+  WinRM sources keep inferring HTTPS or HTTP from the port until they are
+  saved in the editor, which stores the scheme explicitly.
+- **SMB and WinRM base paths** are now validated when they change: an SMB
+  source pointing at `C$` or a drive path, or a WinRM source with a
+  relative path, keeps working but must be corrected the next time its
+  path is edited (#159).
+
 ### Added
 - **One explorer across every source** (#162):
   - machines expand in place in the viewer's sidebar, in list or tree
@@ -51,6 +80,18 @@ release ships (0.x releases may include breaking changes between minors).
   containing some text or matching a glob. The scope is applied before the
   result limit, kept in the URL and remembered per browser. The API takes
   `customer_id`, `folder_id`, `source_id` (repeatable) and `path`.
+- **WinRM scheme and CA certificate per source** (#169): an explicit
+  HTTPS/HTTP choice instead of guessing from the port, with each scheme's
+  default port, and an optional CA certificate (PEM) trusted for that
+  source only, for internal PKI or self-signed listeners, without a
+  server-wide `REQUESTS_CA_BUNDLE`.
+- **Log size limits** (#172): `LOG_MAX_FILE_MB` rotates the log before
+  midnight when it grows past it, and `LOG_MAX_TOTAL_MB` caps all logs,
+  deleting the oldest archives first. When that cap deletes logs that
+  `LOG_RETENTION_DAYS` would have kept, a warning is logged and
+  `/monitoring/health` reports `logs.size_limit_deleted_early`.
+  `LOG_QUIET_THIRD_PARTY=true` keeps PerchTail's own DEBUG logging while
+  capping protocol libraries (smbprotocol, spnego, paramiko, ...) at INFO.
 - **Bulk import and export** (#179): Settings → Import / export (super
   admins) creates and updates customers, folders, sources and rules from
   one YAML file, with a preview of every change, credentials from the
@@ -60,6 +101,11 @@ release ships (0.x releases may include breaking changes between minors).
   `docs/bulk-import.md` and `docs/examples/perchtail-import.example.yaml`.
 
 ### Changed
+- State is split by kind (#172): `DATA_DIR` (`/data/db` in the image)
+  holds the database, credential salt and SSH `known_hosts`, apart from
+  `LOG_DIR` (`/data/logs`) and `SCRATCH_DIR` (`/data/scratch`), so each can
+  be its own volume and a log burst can't fill the database's disk. See
+  the upgrade notes above.
 - Base path is checked per protocol when a source is created or its path
   changes (#159): SMB takes a share name (no drive paths like `C:\Logs`,
   no `C$`/`ADMIN$`), WinRM an absolute Windows path on any drive. The
@@ -143,6 +189,15 @@ release ships (0.x releases may include breaking changes between minors).
   shown normalized and still open (#175).
 
 ### Documentation
+- WinRM setup now states what the connector actually needs: an account
+  with remote-shell rights (Administrators, or `GXGR` in the WinRM
+  `RootSDDL`). The JEA instructions, which couldn't work, are gone; moving
+  to PSRP so a JEA endpoint can constrain the account is tracked in #169.
+  SMB or the push agent is recommended where possible.
+- New: base path per protocol, the folder picker and several folders per
+  source (`docs/source-setup.md`), bulk import (`docs/bulk-import.md`),
+  the data directories (README), and the `logs` health fields
+  (`docs/monitoring.md`).
 - SSH/SFTP setup: `ForceCommand internal-sftp` is required with a
   `nologin` shell; chroot is optional hardening, with the sshd ownership
   rule and a bind-mount example for Debian/Ubuntu; with a chroot, Base path

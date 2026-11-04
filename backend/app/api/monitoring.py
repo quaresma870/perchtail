@@ -2,6 +2,7 @@ import hashlib
 import secrets
 from collections import Counter
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ from app.auth.rbac import require_global_capability
 from app.config import get_settings
 from app.db import get_session
 from app.health import last_search_sweep_at, uptime_seconds
+from app.log_rotation import retention_pressure
 from app.logging_config import get_logger
 from app.models import MonitoringToken, Protocol, Source
 from app.scheduler import scheduler
@@ -139,6 +141,18 @@ class SearchIndexHealth(BaseModel):
     overdue: bool
 
 
+class LogsHealth(BaseModel):
+    used_bytes: int
+    max_total_bytes: int
+    retention_days: int
+    # True once the LOG_MAX_TOTAL_MB limit has deleted logs that
+    # LOG_RETENTION_DAYS would still have kept (#172): logging is too
+    # verbose for the space it has. Doesn't change the overall status.
+    size_limit_deleted_early: bool
+    size_limit_deleted_files: int
+    size_limit_newest_deleted_day: str | None
+
+
 class DetailedHealth(BaseModel):
     status: str
     version: str
@@ -149,6 +163,7 @@ class DetailedHealth(BaseModel):
     agent: AgentHealth
     search_index: SearchIndexHealth
     scheduler: SchedulerHealth
+    logs: LogsHealth
 
 
 @router.get(
@@ -226,4 +241,25 @@ def detailed_health(session: Session = Depends(get_session)):
         agent=AgentHealth(configured=agent_configured, connected=agent_connected),
         search_index=SearchIndexHealth(last_sweep_at=last_sweep_iso, overdue=sweep_overdue),
         scheduler=SchedulerHealth(running=scheduler.running, jobs=jobs),
+        logs=_logs_health(settings),
+    )
+
+
+def _logs_health(settings) -> LogsHealth:
+    log_dir = Path(settings.log_dir)
+    used = 0
+    if log_dir.is_dir():
+        used = sum(
+            p.stat().st_size
+            for p in log_dir.iterdir()
+            if p.is_file() and p.name.startswith("perchtail.log")
+        )
+    pressure = retention_pressure()
+    return LogsHealth(
+        used_bytes=used,
+        max_total_bytes=int(settings.log_max_total_mb * 1024 * 1024),
+        retention_days=settings.log_retention_days,
+        size_limit_deleted_early=pressure.deleted_files > 0,
+        size_limit_deleted_files=pressure.deleted_files,
+        size_limit_newest_deleted_day=pressure.newest_deleted_day,
     )

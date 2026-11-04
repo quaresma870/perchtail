@@ -60,6 +60,11 @@ export interface Source {
   // Two or more folders read by this source (#161), shown as top-level
   // folders named by label; empty for an ordinary single-folder source.
   roots: SourceRoot[]
+  // WinRM (#169): the stored scheme (null = still inferred from the port)
+  // and the one in effect; a CA certificate trusted for its HTTPS listener.
+  winrm_scheme: 'https' | 'http' | null
+  winrm_effective_scheme: 'https' | 'http' | null
+  tls_ca_pem: string | null
   enabled: boolean
   is_system: boolean
   rule_count: number

@@ -219,3 +219,32 @@ def test_health_reports_degraded_when_agent_sources_configured_but_none_connecte
     body = response.json()
     assert body["agent"] == {"configured": 1, "connected": 0}
     assert body["status"] == "degraded"
+
+
+def test_health_reports_logs_and_size_limit_pressure(admin_client, tmp_path, monkeypatch):
+    from app import log_rotation
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "log_dir", str(tmp_path))
+    (tmp_path / "perchtail.log").write_bytes(b"x" * 10)
+    (tmp_path / "perchtail.log.2026-11-01.1.gz").write_bytes(b"x" * 5)
+    (tmp_path / "other.txt").write_bytes(b"x" * 100)
+    token = admin_client.post("/monitoring/token").json()["token"]
+
+    def logs():
+        return admin_client.get(
+            "/monitoring/health", headers={"Authorization": f"Bearer {token}"}
+        ).json()["logs"]
+
+    log_rotation.reset_retention_pressure()
+    assert logs()["used_bytes"] == 15
+    assert logs()["size_limit_deleted_early"] is False
+
+    monkeypatch.setattr(
+        log_rotation,
+        "_pressure",
+        log_rotation.RetentionPressure(deleted_files=3, newest_deleted_day="2026-10-30"),
+    )
+    body = logs()
+    assert body["size_limit_deleted_early"] is True
+    assert body["size_limit_newest_deleted_day"] == "2026-10-30"

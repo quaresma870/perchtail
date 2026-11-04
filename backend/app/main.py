@@ -49,6 +49,7 @@ from app.bootstrap import (
 from app.collectors.local import LocalPathNotAllowedError
 from app.config import get_settings
 from app.crypto import audit_chain_key
+from app.data_layout import leftover_legacy_database, migrate_legacy_layout
 from app.db import engine, init_db
 from app.health import mark_started
 from app.logging_config import configure_logging, get_logger
@@ -216,6 +217,17 @@ async def lifespan(app: FastAPI):
             "derived from it, so this can't be silently defaulted."
         )
 
+    for moved_from, moved_to in migrate_legacy_layout(settings):
+        logger.info("startup.data_layout.moved", source=str(moved_from), dest=str(moved_to))
+    leftover = leftover_legacy_database(settings)
+    if leftover is not None:
+        logger.warning(
+            "startup.data_layout.legacy_database_left",
+            legacy=str(leftover),
+            in_use=settings.database_url,
+            hint="a database from before 0.5.0 is still in DATA_DIR's parent; "
+            "if it holds your data, stop PerchTail and move it into DATA_DIR",
+        )
     init_db()
     mark_started()
     get_agent_registry().bind_loop(asyncio.get_running_loop())

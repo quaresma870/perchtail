@@ -169,12 +169,21 @@ scratch cache) lives in the `perchtail-data` Docker volume, so it survives
 `docker compose down`/`up` — only `docker compose down -v` discards it.
 
 **Backups and upgrades.** Everything stateful lives on the `perchtail-data`
-volume (`/data` in the container): the SQLite database, the
-credential-encryption salt (`credential_salt`), SSH `known_hosts`, and the
-app's own logs. Back up the database and `credential_salt` together. Either
-one is useless without the other, and so is the salt without your
-`CREDENTIAL_ENCRYPTION_KEY`. Upgrading from a release before the salt moved
-onto the volume needs one extra step first; see the CHANGELOG.
+volume (`/data` in the container), one directory per kind of data:
+
+| Directory | Setting | Contents | Back up? |
+|---|---|---|---|
+| `/data/db` | `DATA_DIR` | SQLite database, credential-encryption salt (`credential_salt`), SSH `known_hosts` | yes |
+| `/data/logs` | `LOG_DIR` | the app's own logs, rotated by size and day | optional |
+| `/data/scratch` | `SCRATCH_DIR` | short-lived fetches, purged on close | no |
+
+Each can be mounted as its own volume (for example logs on another disk),
+so a burst of DEBUG logging can't fill the database's disk. Back up the
+database and `credential_salt` together. Either one is useless without the
+other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`.
+Upgrading from a release before 0.5.0 moves the database, salt and
+`known_hosts` from `/data` into `/data/db` on first start; see the
+CHANGELOG's upgrade notes.
 
 ## Deployment: reverse proxy (nginx) + TLS
 

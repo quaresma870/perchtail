@@ -1,5 +1,7 @@
 import base64
+import hashlib
 import json
+import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -8,6 +10,7 @@ import winrm
 
 from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
+from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.models import Rule, Source
 from app.rules import is_entry_visible
@@ -29,14 +32,47 @@ def _ps_quote(value: str) -> str:
     return "'" + value + "'"
 
 
+_DEFAULT_PORTS = {"https": 5986, "http": 5985}
+
+
+def endpoint(source: Source) -> tuple[str, int]:
+    """(scheme, port) for a WinRM source. An explicit scheme (#169) picks
+    its own default port; with none set, the pre-0.5.0 rule applies: HTTPS
+    on 5986 or with no port, plain HTTP on any other port."""
+    if source.winrm_scheme in _DEFAULT_PORTS:
+        return source.winrm_scheme, source.port or _DEFAULT_PORTS[source.winrm_scheme]
+    port = source.port or 5986
+    return ("https" if port == 5986 else "http"), port
+
+
+def _ca_bundle_path(pem: str) -> str:
+    """The source's CA certificate as a file for requests to verify against,
+    written once per distinct certificate under DATA_DIR."""
+    directory = Path(get_settings().data_dir) / "winrm_ca"
+    path = directory / f"{hashlib.sha256(pem.encode()).hexdigest()}.pem"
+    if not path.exists():
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(pem)
+        os.replace(tmp, path)
+    return str(path)
+
+
+def session_target(source: Source) -> tuple[str, dict]:
+    """The WSMan URL and the TLS options for a source's session."""
+    scheme, port = endpoint(source)
+    kwargs: dict = {"transport": "ntlm", "server_cert_validation": "validate"}
+    if scheme == "https" and source.tls_ca_pem:
+        kwargs["ca_trust_path"] = _ca_bundle_path(source.tls_ca_pem)
+    return f"{scheme}://{source.host}:{port}/wsman", kwargs
+
+
 def _session(source: Source) -> winrm.Session:
     """A fresh session per call — nothing kept open across requests, same
     fetch-on-open model as the other connectors."""
     creds = decrypt_credential(source.credential_ref)
-    port = source.port or 5986
-    scheme = "https" if port == 5986 else "http"
-    endpoint = f"{scheme}://{source.host}:{port}/wsman"
-    return winrm.Session(endpoint, auth=(creds["username"], creds["password"]), transport="ntlm")
+    target, kwargs = session_target(source)
+    return winrm.Session(target, auth=(creds["username"], creds["password"]), **kwargs)
 
 
 def _run_ps(source: Source, script: str) -> str:

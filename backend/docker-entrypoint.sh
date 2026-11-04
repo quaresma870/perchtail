@@ -13,5 +13,8 @@ if [ "$(id -u)" = "0" ]; then
     --bounding-set=-all "$0" "$@"
 fi
 
+# Moves a pre-0.5.0 /data layout into DATA_DIR before anything opens the
+# database (app/data_layout.py).
+python -m app.data_layout
 python -m alembic upgrade head
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000
