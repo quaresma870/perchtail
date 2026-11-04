@@ -8,6 +8,13 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Fixed
+- The audit log could report "Tampering detected" when two requests wrote
+  audit entries at the same moment: both could chain from the same
+  previous entry. Each writer now takes the database's write lock before
+  reading the last entry, so the second waits for the first. More likely
+  since the database moved to WAL mode in 0.5.2-rc.1.
+
 ## [0.5.2-rc.1] - 2026-11-04
 
 Release candidate for 0.5.2, from the lab retest of 0.5.1-rc.1. There is
