@@ -8,6 +8,57 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Added
+- **One explorer across every source** (#162):
+  - machines expand in place in the viewer's sidebar, in list or tree
+    view, and their folders load lazily;
+  - tabs from several sources stay open side by side, each marked with
+    its source, so the same `app.log` on two servers is two tabs;
+  - Compare works across sources;
+  - open tabs survive visiting Search or Settings and coming back (in
+    memory only, closed on logout);
+  - a source that fails to load shows its error on its own node;
+  - `/viewer/<id>` now expands and reveals that source.
+- **Find all, Notepad++-style** (#155):
+  - one row per matching line, showing the whole line with every match
+    highlighted and a hit count;
+  - rows can be selected with click, Ctrl/Cmd+click, Shift+click or
+    Ctrl/Cmd+A;
+  - a right-click menu copies the selected lines (with or without line
+    numbers), searches within the results, excludes lines matching a
+    pattern (both chainable, with breadcrumbs to go back), and jumps to
+    the line.
+- **Source overview** (#157): creating a source lands on a read-only
+  overview instead of back on its edit form. It shows the details, a
+  prominent "No rules yet" callout, the rules, a connection test and, for
+  agent sources, the enrollment token. Editing moved to
+  `/settings/sources/<id>/edit`.
+- **Settings → System → Connections view** (#156): a default list or tree
+  view for everyone, and whether users may switch between them. When they
+  may, each browser remembers its choice.
+
+### Changed
+- The window itself no longer scrolls (#154). The navigation stays in
+  place, and in the viewer only the log pane, the explorer and the Find
+  all panel scroll. Before, a large log stretched the whole page.
+- A failed open, reload or compare now shows a banner above the editor
+  with the server's reason, e.g. "This file is 100.0 MB, over this
+  server's 64 MB limit (MAX_FETCH_MB)", plus a Try again action when
+  useful. The explorer is no longer wiped. The 413 body now includes
+  `size_bytes` and `limit_bytes` (#160).
+- `/open` is served inline as text instead of as an attachment.
+  Download icons and actions are hidden from users without the
+  `download` capability on that source, using the new
+  `my_capabilities` field of each source (#174).
+
+### Fixed
+- Source editor and role editor form controls: checkboxes and toggles
+  sit next to their labels again (#158).
+- Secret fields (SSH private key, passwords, SSO client secret) opt out
+  of browser spellcheck and grammar extensions such as Grammarly, which
+  could otherwise send their contents to third-party servers. The
+  private key field is monospace without soft wrapping (#158).
+
 ### Security
 - Rules now decide which **folders** are visible, not only which files.
   Before, every folder was always listed. An excluded folder, and through

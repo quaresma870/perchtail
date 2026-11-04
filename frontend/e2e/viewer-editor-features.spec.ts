@@ -46,13 +46,8 @@ function treeFile(page: import('@playwright/test').Page, name: string) {
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/#/viewer')
-  // "All connections" always lists every source regardless of visit
-  // history; "Recent" only gains an entry once a source has actually been
-  // opened -- scoping here avoids a strict-mode collision once this
-  // spec's own earlier tests have made this source show up in *both*
-  // columns.
-  await page.locator('.picker-column.all').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
-  await expect(page).toHaveURL(/#\/viewer\/\d+$/)
+  // The explorer (#162) expands the source in place instead of navigating.
+  await page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
 })
 
 test('beautify and minify reformat the display without touching the raw content', async ({ page }) => {

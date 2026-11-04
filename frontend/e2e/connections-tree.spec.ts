@@ -57,7 +57,7 @@ test('connections-home tree: nests sources by customer/folder and search auto-ex
   await createSource(page, nestedSourceName, { folderLabel: '— Prod' })
 
   await page.goto('/#/viewer')
-  await expect(page.locator('.picker-column.all')).toBeVisible()
+  await expect(page.locator('.explorer')).toBeVisible()
   await page.getByRole('button', { name: 'Tree', exact: true }).click()
 
   const tree = page.locator('.connections-tree-body')

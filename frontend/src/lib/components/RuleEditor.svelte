@@ -1,11 +1,15 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { createEventDispatcher, onMount } from 'svelte'
   import { api, ApiError } from '../api'
   import { parsePatternInput, rulesToRawText } from '../rule-format'
   import type { Rule, RuleType } from '../types'
 
   export let sourceId: number
   export let readOnly = false
+
+  // Fired with the rule count after every (re)load, so a parent can react
+  // (e.g. the source overview's "no rules yet" callout).
+  const dispatch = createEventDispatcher<{ change: { count: number } }>()
 
   let rules: Rule[] = []
   let loading = true
@@ -20,6 +24,7 @@
     error = ''
     try {
       rules = await api.get<Rule[]>(`/sources/${sourceId}/rules`)
+      dispatch('change', { count: rules.length })
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load rules'
     } finally {

@@ -17,6 +17,7 @@ from app.auth.rbac import (
     folder_path_boundary,
     require_capability,
     require_global_capability,
+    resolve_capability,
     visible_source_ids,
 )
 from app.collectors import local as local_collector
@@ -71,6 +72,11 @@ class SourcePublic(BaseModel):
     agent_connected: bool
     agent_last_seen_at: datetime | None
     search_indexing_enabled: bool
+    # What the requesting user may do on this source (view, download,
+    # manage_rules, run_now), so the UI can hide actions it would refuse --
+    # e.g. Download buttons for a view-only role (#174). Informational only:
+    # every endpoint still checks on its own.
+    my_capabilities: list[Capability] = []
 
 
 class SourceCreate(BaseModel):
@@ -133,7 +139,10 @@ def _folder_path(
 
 
 def _to_public(
-    session: Session, source: Source, folder_ctx: FolderVisibilityContext
+    session: Session,
+    source: Source,
+    folder_ctx: FolderVisibilityContext,
+    user: User | None = None,
 ) -> SourcePublic:
     rule_count = len(session.exec(select(Rule).where(Rule.source_id == source.id)).all())
     boundary = folder_path_boundary(folder_ctx, source)
@@ -159,6 +168,11 @@ def _to_public(
         ),
         agent_last_seen_at=source.agent_last_seen_at,
         search_indexing_enabled=source.search_indexing_enabled,
+        my_capabilities=(
+            [c for c in Capability if resolve_capability(session, user, source, c)]
+            if user is not None
+            else []
+        ),
     )
 
 
@@ -214,7 +228,7 @@ def list_sources(
         query = query.order_by(Source.id)
     sources = session.exec(query).all()
     folder_ctx = build_folder_visibility_context(session, user)
-    return [_to_public(session, s, folder_ctx) for s in sources]
+    return [_to_public(session, s, folder_ctx, user) for s in sources]
 
 
 @router.get("/recent", response_model=list[SourcePublic])
@@ -265,7 +279,7 @@ def list_recent_sources(
     }
     folder_ctx = build_folder_visibility_context(session, user)
     return [
-        _to_public(session, sources_by_id[sid], folder_ctx)
+        _to_public(session, sources_by_id[sid], folder_ctx, user)
         for sid in ordered_ids
         if sid in sources_by_id
     ]
@@ -277,7 +291,7 @@ def get_source(
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
-    return _to_public(session, source, build_folder_visibility_context(session, user))
+    return _to_public(session, source, build_folder_visibility_context(session, user), user)
 
 
 @router.post("", response_model=SourcePublic, status_code=status.HTTP_201_CREATED)
@@ -314,7 +328,7 @@ def create_source(
     )
     session.commit()
     session.refresh(source)
-    return _to_public(session, source, build_folder_visibility_context(session, user))
+    return _to_public(session, source, build_folder_visibility_context(session, user), user)
 
 
 @router.patch("/{source_id}", response_model=SourcePublic)
@@ -368,7 +382,7 @@ def update_source(
     )
     session.commit()
     session.refresh(source)
-    return _to_public(session, source, build_folder_visibility_context(session, user))
+    return _to_public(session, source, build_folder_visibility_context(session, user), user)
 
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)

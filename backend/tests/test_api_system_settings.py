@@ -41,6 +41,8 @@ _DEFAULTS = {
     "search_view_enabled": True,
     "audit_view_enabled": True,
     "audit_retention_days": 365,
+    "connections_view_switchable": True,
+    "connections_view_default": "list",
 }
 
 
@@ -139,3 +141,24 @@ def test_explicit_null_is_ignored_not_stored_as_the_string_none(session, client_
     response = client.get("/system-settings")
     assert response.status_code == 200
     assert response.json()["audit_retention_days"] == 365
+
+
+def test_connections_view_settings_default_and_update(session, client_for):
+    admin_client = client_for(_make_user(session, is_super_admin=True))
+    got = admin_client.get("/system-settings").json()
+    assert got["connections_view_default"] == "list"
+    assert got["connections_view_switchable"] is True
+
+    updated = admin_client.patch(
+        "/system-settings",
+        json={"connections_view_default": "tree", "connections_view_switchable": False},
+    ).json()
+
+    assert updated["connections_view_default"] == "tree"
+    assert updated["connections_view_switchable"] is False
+
+
+def test_connections_view_default_rejects_unknown_values(session, client_for):
+    admin_client = client_for(_make_user(session, is_super_admin=True))
+    response = admin_client.patch("/system-settings", json={"connections_view_default": "grid"})
+    assert response.status_code == 422

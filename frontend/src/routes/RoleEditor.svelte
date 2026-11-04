@@ -327,6 +327,7 @@
     color: var(--text-muted);
   }
   .switch-row {
+    display: flex;
     flex-direction: row;
     align-items: center;
     gap: 0.7rem;
@@ -408,6 +409,7 @@
   }
   .chip {
     display: inline-flex;
+    flex-direction: row;
     align-items: center;
     gap: 0.3rem;
     border: 1px solid var(--border);

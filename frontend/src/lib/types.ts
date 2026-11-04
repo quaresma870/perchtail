@@ -65,6 +65,9 @@ export interface Source {
   agent_connected: boolean
   agent_last_seen_at: string | null
   search_indexing_enabled: boolean
+  // What the current user may do on this source (#174); the backend still
+  // enforces every action on its own.
+  my_capabilities: Capability[]
 }
 
 export interface Rule {
@@ -166,6 +169,8 @@ export interface SystemSettings {
   search_view_enabled: boolean
   audit_view_enabled: boolean
   audit_retention_days: number
+  connections_view_switchable: boolean
+  connections_view_default: 'list' | 'tree'
 }
 
 export interface AuditLogEntry {

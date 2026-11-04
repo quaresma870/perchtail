@@ -77,7 +77,13 @@ class PathOutsideBaseError(PermissionError):
 
 class FetchTooLargeError(ValueError):
     """A file (or a folder ZIP's total) is over MAX_FETCH_MB -- refused
-    rather than filling scratch disk or memory with it."""
+    rather than filling scratch disk or memory with it. `size` and `limit`
+    (bytes) are set when known, so the client can say by how much."""
+
+    def __init__(self, message: str, *, size: int | None = None, limit: int | None = None):
+        super().__init__(message)
+        self.size = size
+        self.limit = limit
 
 
 def max_fetch_bytes() -> int:
@@ -85,7 +91,9 @@ def max_fetch_bytes() -> int:
 
 
 def too_large(size: int, limit: int) -> FetchTooLargeError:
-    return FetchTooLargeError(f"{size} bytes is over the {limit}-byte MAX_FETCH_MB limit")
+    return FetchTooLargeError(
+        f"{size} bytes is over the {limit}-byte MAX_FETCH_MB limit", size=size, limit=limit
+    )
 
 
 def copy_with_limit(src: BinaryIO, destination: Path, limit: int) -> int:

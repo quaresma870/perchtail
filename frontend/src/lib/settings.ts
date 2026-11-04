@@ -10,6 +10,8 @@ export const systemSettings = writable<SystemSettings>({
   search_view_enabled: true,
   audit_view_enabled: true,
   audit_retention_days: 365,
+  connections_view_switchable: true,
+  connections_view_default: 'list',
 })
 
 export async function refreshSystemSettings(): Promise<void> {
