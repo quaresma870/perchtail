@@ -8,6 +8,15 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.5.2-rc.1] - 2026-11-04
+
+Release candidate for 0.5.2, from the lab retest of 0.5.1-rc.1. There is
+no 0.5.1 release: the `v0.5.1` tag was used by mistake for an earlier
+pre-release of older code, and releases here are immutable, so 0.5.1-rc.1
+is followed by 0.5.2. This is also the first release built by the new
+draft-first Release workflow. Back up `DATA_DIR` before upgrading, and
+upgrade push agents too (SIGTERM, link handling).
+
 ### Fixed
 - Releases get their assets again. Releases in this repository are
   immutable, and the Release workflow attached the agent binaries,
@@ -46,6 +55,13 @@ release ships (0.x releases may include breaking changes between minors).
   than a fixed one, builds as an ordinary user and installs with `sudo`,
   lists `python3.12-venv`, gets Node.js 22 from nodejs.org with a checksum
   check, and keeps settings in `/etc/perchtail/perchtail.env`.
+
+### Changed
+- Dependencies: actions/checkout, setup-go, setup-node and setup-python 7,
+  trivy-action 0.36.0, @codemirror/language 6.13.1, @codemirror/merge
+  6.12.3, svelte 5.57.3, svelte-check 4.7.8, ruff 0.17.3 and pytest 9.2.0.
+- CI installs the e2e SSH/SMB test servers in their own step, before
+  Playwright starts.
 
 ## [0.5.1-rc.1] - 2026-11-04
 
