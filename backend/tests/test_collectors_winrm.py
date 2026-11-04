@@ -259,3 +259,29 @@ def test_listing_a_file_is_not_found(fake_session):
     with pytest.raises(SourceNotFoundError):
         connector.list_directory(_source(), [_rule(0, RuleType.include, "**")], "jx/secret.txt")
     assert connector._module._session is original
+
+
+def test_a_junction_swapped_in_mid_read_is_refused_and_logged(fake_session, tmp_path, monkeypatch):
+    """#206: the re-check on every block refused it, but only the first
+    check logged winrm.path_outside_base."""
+    from app.collectors.base import PathOutsideBaseError
+
+    monkeypatch.setattr(winrm_module, "_CHUNK_BYTES", 4)
+    serve = _serve_file(b"0123456789")
+
+    def handler(script):
+        if "Seek(4," in script:
+            return FakeResult(status_code=3, std_out=b"PERCHTAIL_OUTSIDE_BASE\r\n")
+        return serve(script)
+
+    fake_session.handler = handler
+    events = []
+    monkeypatch.setattr(
+        winrm_module.logger, "warning", lambda event, **kw: events.append((event, kw))
+    )
+    with pytest.raises(PathOutsideBaseError):
+        winrm_module.fetch_file(_source(), "nested/app.log", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+    assert events == [
+        ("winrm.path_outside_base", {"source_id": None, "path": "nested/app.log", "offset": 4})
+    ]

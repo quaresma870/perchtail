@@ -249,7 +249,7 @@ def _cert_error(code: int, message: str) -> ssl.SSLCertVerificationError:
 @pytest.mark.parametrize(
     "code, message, fragment",
     [
-        (64, "IP address mismatch, certificate is not valid for '192.168.77.10'.", "different name"),
+        (64, "IP address mismatch, certificate is not valid for '10.0.0.5'.", "different name"),
         (62, "Hostname mismatch, certificate is not valid for 'x'.", "different name"),
         (10, "certificate has expired", "expired"),
         (20, "unable to get local issuer certificate", "issuer is unknown"),
@@ -261,8 +261,21 @@ def test_winrm_tls_errors_are_decided_by_the_verify_code(code, message, fragment
     text match missed. The verify code is checked through the wrapping that
     requests/urllib3 add."""
     import requests
-    from urllib3.exceptions import MaxRetryError, SSLError as Urllib3SSLError
+    from urllib3.exceptions import MaxRetryError
+    from urllib3.exceptions import SSLError as Urllib3SSLError
 
     inner = Urllib3SSLError(_cert_error(code, message))
     wrapped = requests.exceptions.SSLError(MaxRetryError(None, "/wsman", reason=inner))
     assert fragment in errors.translate_winrm(wrapped).public_message
+
+
+@pytest.mark.parametrize("protocol", [Protocol.smb, Protocol.winrm, Protocol.ssh])
+def test_a_source_without_a_credential_says_so(protocol):
+    """#206: "Test connection" on an SMB source with no credential showed
+    `'NoneType' object has no attribute …`."""
+    from app.collectors.base import SourceNoCredentialError
+
+    source = Source(name="x", protocol=protocol, host="h", base_path="Logs", credential_ref=None)
+    with pytest.raises(SourceNoCredentialError) as raised:
+        CONNECTORS[protocol].list_directory(source, [], "")
+    assert "no credential" in raised.value.public_message

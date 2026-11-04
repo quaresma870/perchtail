@@ -114,6 +114,7 @@ def _connect(source: Source) -> paramiko.SSHClient:
     doesn't match what the server just presented. Without ever loading or
     saving that file, every connection looked "never seen" and silently
     trusted whatever key showed up, every time."""
+    collector_base.require_credential(source)
     creds = decrypt_credential(source.credential_ref)
 
     client = paramiko.SSHClient()

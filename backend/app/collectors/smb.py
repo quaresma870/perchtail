@@ -40,6 +40,7 @@ def _connect_kwargs(source: Source) -> dict:
     -- pyspnego.exceptions.BadMechanismError ("unable to negotiate common
     mechanism") -- instead of ever falling back to the NTLM this app
     actually authenticates with."""
+    collector_base.require_credential(source)
     creds = decrypt_credential(source.credential_ref)
     return {
         "username": creds["username"],

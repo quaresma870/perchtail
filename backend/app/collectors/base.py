@@ -64,6 +64,21 @@ class SourceHostKeyError(SourceError):
     )
 
 
+class SourceNoCredentialError(SourceAuthError):
+    """The source has no saved credential yet (e.g. imported without one).
+    Raised before connecting, instead of a raw error from decrypting None
+    (#206)."""
+
+    public_message = "This source has no credential yet: set one in its settings"
+
+
+def require_credential(source) -> None:
+    """Raises SourceNoCredentialError for an SSH/SMB/WinRM source with no
+    saved credential, before anything tries to decrypt None."""
+    if not source.credential_ref:
+        raise SourceNoCredentialError("source has no credential")
+
+
 class SourceTLSError(SourceError):
     status_code = 502
     public_message = "The source's TLS certificate isn't trusted"

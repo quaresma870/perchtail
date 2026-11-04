@@ -73,6 +73,7 @@ def session_target(source: Source) -> tuple[str, dict]:
 def _session(source: Source) -> winrm.Session:
     """A fresh session per call — nothing kept open across requests, same
     fetch-on-open model as the other connectors."""
+    collector_base.require_credential(source)
     creds = decrypt_credential(source.credential_ref)
     target, kwargs = session_target(source)
     return winrm.Session(target, auth=(creds["username"], creds["password"]), **kwargs)
@@ -218,7 +219,17 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
                     "$n = $f.Read($b, 0, $b.Length); "
                     "[Convert]::ToBase64String($b, 0, $n) } finally { $f.Close() }"
                 )
-                block = base64.b64decode(_run_ps(source, script).strip())
+                try:
+                    block = base64.b64decode(_run_ps(source, script).strip())
+                except PathOutsideBaseError:
+                    # A link swapped in mid-read: logged like the first check (#206).
+                    logger.warning(
+                        "winrm.path_outside_base",
+                        source_id=source.id,
+                        path=relative_path,
+                        offset=written,
+                    )
+                    raise
                 if not block:
                     break  # the file shrank (rotated) while being read
                 dst.write(block)

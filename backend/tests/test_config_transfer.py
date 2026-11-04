@@ -351,3 +351,12 @@ def test_an_imported_source_without_a_credential_still_asks_for_one(session, cli
     assert item["needs_credential"] is False
     fs01 = session.exec(select(Source).where(Source.name == "fs01")).one()
     assert fs01.credential_ref is not None
+
+
+def test_a_port_change_without_a_credential_points_at_the_port(session, client):
+    """#206: the problem pointed at `.host` when only the port changed."""
+    _import(client, credentials={"Acme / fs01": {"username": "fs", "password": "pw"}})
+    result = _import(client, text=TEMPLATE.replace("port: 4455", "port: 4456"))
+    assert result["applied"] is False
+    wheres = [p["where"] for p in result["problems"] if "credential again" in p["message"]]
+    assert len(wheres) == 1 and wheres[0].endswith(".port")
