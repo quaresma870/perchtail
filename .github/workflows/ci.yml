@@ -103,6 +103,17 @@ jobs:
         working-directory: frontend
         run: npx playwright install --with-deps chromium
 
+      # Installed as its own step, so a slow apt mirror doesn't eat into
+      # Playwright's webServer start-up timeout (it did, twice; the
+      # setup script skips apt when sshd and smbd are already there).
+      - name: Install SSH/SMB test servers
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_SUSPEND: "1"
+        run: |
+          sudo -E apt-get update -qq
+          sudo -E apt-get install -y -qq openssh-server samba samba-common-bin
+
       - name: E2E tests (Playwright)
         working-directory: frontend
         run: npm run test:e2e
