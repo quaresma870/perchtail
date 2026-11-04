@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Optional
 
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
@@ -93,6 +94,10 @@ class Source(SQLModel, table=True):
     # null for the local protocol, which needs no credential.
     credential_ref: str | None = None
     base_path: str
+    # Two or more {"label", "path"} entries when the source reads several
+    # folders (#161; see app/source_roots.py), else null. base_path then
+    # mirrors the first root's path.
+    roots: list[dict] | None = Field(default=None, sa_column=Column(JSON))
     enabled: bool = True
     schedule_cron: str | None = None
     is_system: bool = False

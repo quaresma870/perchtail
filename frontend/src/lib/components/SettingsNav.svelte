@@ -28,6 +28,11 @@
       >Severity indicators</a
     >
   {/if}
+  {#if $currentUser?.is_super_admin}
+    <a href="#/settings/import-export" class:active={isActive('/settings/import-export')}
+      >Import / export</a
+    >
+  {/if}
   {#if hasCapability($currentUser, 'view_audit_log') && $systemSettings.audit_view_enabled}
     <a href="#/settings/audit-log" class:active={isActive('/settings/audit-log')}>Audit log</a>
   {/if}

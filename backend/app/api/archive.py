@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 from starlette.background import BackgroundTask
 
+from app import source_roots
 from app.api.auth import get_current_active_user
 from app.archives import (
     DecompressionLimitError,
@@ -74,7 +75,10 @@ def _require_local_source_allowed(source: Source) -> None:
     if (
         source.protocol == Protocol.local
         and not source.is_system
-        and not local_collector.base_path_allowed(source.base_path)
+        and not all(
+            local_collector.base_path_allowed(path)
+            for path in [source.base_path] + [r["path"] for r in source_roots.roots_of(source)]
+        )
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -304,6 +308,9 @@ def _resolve_content(
 
     if not needs_scratch:
         _require_local_source_allowed(source)
+        if source_roots.is_multi_root(source):
+            rooted, inner = source_roots.split(source, path)
+            return local_collector.resolve_path(rooted, inner), filename, None
         return local_collector.resolve_path(source, path), filename, None
 
     store = get_scratch_store()

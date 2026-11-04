@@ -12,6 +12,7 @@
   import SourceOverview from './routes/SourceOverview.svelte'
   import Folders from './routes/Folders.svelte'
   import Viewer from './routes/Viewer.svelte'
+  import ImportExportSettings from './routes/ImportExportSettings.svelte'
   import Search from './routes/Search.svelte'
   import Alerts from './routes/Alerts.svelte'
   import SettingsIndex from './routes/SettingsIndex.svelte'
@@ -48,6 +49,7 @@
     '/settings/sessions': SessionsSettings,
     '/settings/security': SecuritySettings,
     '/settings/audit-log': AuditLogSettings,
+    '/settings/import-export': ImportExportSettings,
   }
 
   onMount(async () => {

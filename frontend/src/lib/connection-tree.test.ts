@@ -22,6 +22,7 @@ function source(overrides: Partial<Source> & { id: number; name: string }): Sour
     agent_last_seen_at: null,
     search_indexing_enabled: false,
     my_capabilities: ['view', 'download'],
+    roots: [],
     ...overrides,
   }
 }

@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from types import ModuleType
 
+from app import source_roots
 from app.collectors.base import (
     FetchTooLargeError,
     PathOutsideBaseError,
@@ -193,19 +194,29 @@ class TranslatingConnector:
     def __getattr__(self, name: str):
         return getattr(self._module, name)
 
-    def list_directory(self, *args, **kwargs):
-        with translated(self._translate):
-            return self._module.list_directory(*args, **kwargs)
+    # A source with several roots (#161) is mapped here, once, so every
+    # caller (browse, open, download, ZIP, search, alerts) sees the same
+    # virtual `label/...` tree.
 
-    def fetch_file(self, *args, **kwargs):
+    def list_directory(self, source, rules, relative_path: str = ""):
         with translated(self._translate):
-            return self._module.fetch_file(*args, **kwargs)
+            if source_roots.is_multi_root(source):
+                return source_roots.list_directory(self._module, source, rules, relative_path)
+            return self._module.list_directory(source, rules, relative_path)
+
+    def fetch_file(self, source, relative_path: str, destination):
+        with translated(self._translate):
+            if source_roots.is_multi_root(source):
+                source, relative_path = source_roots.split(source, relative_path)
+            return self._module.fetch_file(source, relative_path, destination)
 
     @contextmanager
-    def local_copy(self, *args, **kwargs):
+    def local_copy(self, source, relative_path: str):
         # Only the fetch is translated; exceptions from the caller's `with`
         # body propagate unchanged.
         with ExitStack() as stack:
             with translated(self._translate):
-                local = stack.enter_context(self._module.local_copy(*args, **kwargs))
+                if source_roots.is_multi_root(source):
+                    source, relative_path = source_roots.split(source, relative_path)
+                local = stack.enter_context(self._module.local_copy(source, relative_path))
             yield local

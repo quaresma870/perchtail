@@ -36,8 +36,39 @@ release ships (0.x releases may include breaking changes between minors).
 - **Settings → System → Connections view** (#156): a default list or tree
   view for everyone, and whether users may switch between them. When they
   may, each browser remembers its choice.
+- **Pick the Base path by browsing the host** (#159): **Browse…** next to
+  the field lists folders over SSH, drives then folders over WinRM, and the
+  host's shares then folders over SMB (share listing via SRVSVC, with no
+  new dependency). Folders only, never file names; limited to users who
+  can manage sources and audited. A saved credential is only reused for
+  the host and port it was saved for.
+- **Several folders in one source** (#161): up to 20 labelled folders on
+  the same host, each shown at the top level of the source's tree. Rules
+  see the labelled paths (`**/*.log` for all, `IIS/**` for one), and the
+  connection test checks each folder. Push-agent sources stay single-folder.
+- **Search scope** (#163): narrow a search to any mix of customers,
+  folders (with their sub-folders) and sources, and to file paths
+  containing some text or matching a glob. The scope is applied before the
+  result limit, kept in the URL and remembered per browser. The API takes
+  `customer_id`, `folder_id`, `source_id` (repeatable) and `path`.
+- **Bulk import and export** (#179): Settings → Import / export (super
+  admins) creates and updates customers, folders, sources and rules from
+  one YAML file, with a preview of every change, credentials from the
+  file, `${env:PERCHTAIL_IMPORT_*}` or typed in, and an all-or-nothing
+  apply. Importing the same file again changes nothing; nothing is ever
+  deleted. Export writes the same format, without credentials. See
+  `docs/bulk-import.md` and `docs/examples/perchtail-import.example.yaml`.
 
 ### Changed
+- Base path is checked per protocol when a source is created or its path
+  changes (#159): SMB takes a share name (no drive paths like `C:\Logs`,
+  no `C$`/`ADMIN$`), WinRM an absolute Windows path on any drive. The
+  editor shows a protocol-specific placeholder and hint. Existing sources
+  aren't re-checked until their path is edited.
+- Changing a source's host, port, base path or folders clears its search
+  index and alert positions, since the files are no longer the same, and
+  the `source.update` audit entry now records old and new values (the
+  credential only as "replaced").
 - The window itself no longer scrolls (#154). The navigation stays in
   place, and in the viewer only the log pane, the explorer and the Find
   all panel scroll. Before, a large log stretched the whole page.
@@ -52,6 +83,8 @@ release ships (0.x releases may include breaking changes between minors).
   `my_capabilities` field of each source (#174).
 
 ### Fixed
+- WinRM sources whose base path is a drive root (`D:\`) listed the
+  current directory on that drive instead of its root.
 - Source editor and role editor form controls: checkboxes and toggles
   sit next to their labels again (#158).
 - Secret fields (SSH private key, passwords, SSO client secret) opt out

@@ -377,9 +377,47 @@ something an admin can change from the web UI: otherwise anyone allowed to
 create sources could point one at PerchTail's own database or secrets.
 Mount only what you mean to expose, and mount it read-only.
 
+## Base path
+
+What goes in **Base path** depends on the protocol, and PerchTail refuses
+the kinds of path that can never work when you save the source:
+
+| Protocol | Base path | Example |
+|---|---|---|
+| SSH/SFTP | absolute path on the host (relative to the chroot, if the account has one) | `/var/log/myapp` |
+| SMB | the **share name**, optionally followed by a folder inside it. Not a drive path, and not an administrative share (`C$`, `ADMIN$`) | `AppLogs` or `AppLogs\iis` |
+| WinRM | absolute Windows path, on any drive | `D:\Logs\MyApp` |
+| Local disk | a directory under `LOCAL_SOURCE_ROOTS` | `/mnt/logs/app` |
+| Agent | documentation only: the agent's `PERCHTAIL_BASE_PATH` is what counts | |
+
+Instead of typing it, use **Browse…** next to the field. It connects with the
+host and credential in the form and lists folders only, never file names:
+`/` and down over SSH, the drives and then folders over WinRM, and the
+host's shares (the ones the account can see, without `C$`/`ADMIN$`/`IPC$`)
+and then folders over SMB. Browsing is limited to users who can manage
+sources, and each listing is written to the audit log. When editing a
+saved source, its stored credential is reused only for the host and port it
+was saved for; to browse another host, type the credential again.
+
+Rules are relative to the base path. Changing the base path (or the host or
+port) means the same rules now apply to whatever is at the new location, so
+check they still match; the source's search index and alert positions are
+cleared, and the audit log records the old and new values.
+
+### Several folders in one source
+
+A source can read up to 20 folders on the same host with the same
+credential, for example IIS logs on `D:` and application logs on `E:`. Use
+**+ Add another folder** in the source editor and give each folder a
+label. In the viewer each folder appears at the top level under its label,
+and rules see the same paths, so `**/*.log` applies to every folder and
+`IIS/**` to one. The connection test checks each folder and names the ones
+that fail. Push-agent sources serve a single folder and can't have several.
+
 ## Testing a source
 
 Once configured, add the source in PerchTail's admin UI with the matching
-protocol, host, port, credential, and `base_path`, then use the run-now /
+protocol, host, port, credential, and `base_path`, then use the
 test-connection action to confirm reachability and permissions before
-attaching rules.
+attaching rules. To add many sources at once, see
+[bulk import](bulk-import.md).

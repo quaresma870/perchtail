@@ -307,8 +307,22 @@ def _escape_snippet(raw: str) -> str:
     return escaped.replace(_HIGHLIGHT_START, "<mark>").replace(_HIGHLIGHT_END, "</mark>")
 
 
+def _path_filter_sql(path_filter: str) -> tuple[str, str]:
+    """A wildcard filter (`*`, `?`) is a GLOB over the whole path; anything
+    else matches as a case-insensitive substring (#163)."""
+    if "*" in path_filter or "?" in path_filter:
+        return " AND file_path GLOB :path_filter", path_filter
+    escaped = path_filter.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return " AND file_path LIKE :path_filter ESCAPE '\\'", f"%{escaped}%"
+
+
 def search(
-    session: Session, query: str, source_ids: set[int] | None, limit: int = 50
+    session: Session,
+    query: str,
+    source_ids: set[int] | None,
+    limit: int = 50,
+    *,
+    path_filter: str = "",
 ) -> list[SearchHit]:
     """Runs `query` against the FTS5 index, scoped to `source_ids` (None
     means "all", per auth.rbac.visible_source_ids' convention — reserved for
@@ -355,6 +369,9 @@ def search(
         placeholders = ", ".join(f":sid{i}" for i in range(len(source_ids)))
         sql += f" AND source_id IN ({placeholders})"
         params.update({f"sid{i}": sid for i, sid in enumerate(source_ids)})
+    if path_filter:
+        clause, params["path_filter"] = _path_filter_sql(path_filter)
+        sql += clause
     sql += " ORDER BY rank LIMIT :raw_limit"
 
     rows = session.execute(text(sql), params).all()

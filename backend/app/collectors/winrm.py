@@ -12,7 +12,7 @@ from app.crypto import decrypt_credential
 from app.models import Rule, Source
 from app.rules import is_entry_visible
 
-__all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
+__all__ = ["DirEntry", "fetch_file", "list_directory", "list_drives", "local_copy"]
 
 
 # PowerShell accepts any of these as a single-quote string delimiter, not just
@@ -49,7 +49,9 @@ def _run_ps(source: Source, script: str) -> str:
 def _remote_path(source: Source, relative_path: str = "") -> str:
     base = source.base_path.rstrip("\\")
     if not relative_path:
-        return base
+        # A bare "D:" is the current directory on D: in PowerShell, not the
+        # drive's root.
+        return base + "\\" if len(base) == 2 and base[1] == ":" else base
     return f"{base}\\{relative_path.replace('/', chr(92))}"
 
 
@@ -87,6 +89,21 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         size = 0 if is_dir else int(item.get("Length") or 0)
         entries.append(DirEntry(name=name, path=child_path, is_dir=is_dir, size=size))
     return entries
+
+
+def list_drives(source: Source) -> list[str]:
+    """The host's file-system drive roots (`C:\\`, `D:\\`), for the Base path
+    picker (#159)."""
+    script = (
+        "$j = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root | "
+        "ConvertTo-Json -Compress; "
+        "if ($j) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)) }"
+    )
+    output = _run_ps(source, script).strip()
+    if not output:
+        return []
+    raw = json.loads(base64.b64decode(output).decode("utf-8"))
+    return sorted([raw] if isinstance(raw, str) else raw)
 
 
 # Each WinRM round trip returns one base64-encoded block, so a large file is

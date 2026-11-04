@@ -57,6 +57,9 @@ export interface Source {
   host: string
   port: number | null
   base_path: string
+  // Two or more folders read by this source (#161), shown as top-level
+  // folders named by label; empty for an ordinary single-folder source.
+  roots: SourceRoot[]
   enabled: boolean
   is_system: boolean
   rule_count: number
@@ -68,6 +71,25 @@ export interface Source {
   // What the current user may do on this source (#174); the backend still
   // enforces every action on its own.
   my_capabilities: Capability[]
+}
+
+export interface SourceRoot {
+  label: string
+  path: string
+}
+
+export interface FolderPickEntry {
+  name: string
+  path: string
+}
+
+export interface FolderPickResult {
+  protocol: Protocol
+  path: string
+  parent: string | null
+  kind: 'folders' | 'shares' | 'drives'
+  entries: FolderPickEntry[]
+  truncated: boolean
 }
 
 export interface Rule {
