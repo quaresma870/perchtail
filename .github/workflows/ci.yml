@@ -207,7 +207,7 @@ jobs:
       # tags were force-pushed to credential-stealing code; v0.35.0 is the
       # first release published after that cleanup.
       - name: Scan image for vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: perchtail:ci
           severity: "HIGH,CRITICAL"
@@ -217,7 +217,7 @@ jobs:
       # SBOM as a build artifact of every CI run. Releases get their own,
       # for the published multi-arch image (.github/workflows/release.yml).
       - name: Generate SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: perchtail:ci
           format: cyclonedx
