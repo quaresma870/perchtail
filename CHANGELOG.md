@@ -8,6 +8,16 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Fixed
+- Releases get their assets again. Releases in this repository are
+  immutable, and the Release workflow attached the agent binaries,
+  `SHA256SUMS` and SBOM after publication, which an immutable release
+  refuses, so `v0.5.1-rc.1` has none. The workflow now builds everything
+  into a **draft** release, from a tag push or a manual run, and a
+  maintainer publishes it; `X.Y` and `latest` move when a full release is
+  published. It also refuses a tag whose code carries another version
+  (see CONTRIBUTING.md, "Releasing").
+
 ## [0.5.1-rc.1] - 2026-11-04
 
 Release candidate for 0.5.1: fixes for what the Hyper-V lab test of 0.5.0

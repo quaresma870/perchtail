@@ -1,76 +1,136 @@
 name: Release
 
-# Runs when a release (or pre-release) is published on GitHub, and attaches
-# what's needed to install it:
+# Builds everything a release needs and leaves it as a DRAFT for the
+# maintainer to review and publish:
 #   - the push-agent binaries for Linux (amd64, arm64) and Windows (amd64),
 #     plus SHA256SUMS to verify them;
-#   - the Docker image, pushed to ghcr.io/<owner>/perchtail with the
-#     version's tags, and its SBOM (CycloneDX) attached to the release.
-# GitHub adds the source code archives itself.
+#   - the Docker image, pushed to ghcr.io/<owner>/perchtail:<version>, and
+#     its SBOM (CycloneDX);
+#   - release notes taken from the version's CHANGELOG.md section.
+# GitHub adds the source code archives itself when the release is published.
 #
-# Run it by hand (Actions -> Release -> Run workflow) with an existing tag
-# to add the assets to a release published before this workflow existed,
-# or to retry a failed run. Re-running replaces the assets.
+# Releases in this repository are immutable: once published, a release
+# accepts no new assets and its tag can't be reused (#201). So assets are
+# attached while the release is still a draft, and nothing here ever
+# publishes it.
+#
+# Start it either way:
+#   - push a version tag:  git tag v0.5.2-rc.1 <commit> && git push origin v0.5.2-rc.1
+#   - or Actions -> Release -> Run workflow, with the tag and the branch or
+#     commit to tag (the workflow creates the tag if it doesn't exist yet).
+# A tag with a suffix (v0.5.2-rc.1) becomes a pre-release. Re-running for a
+# tag whose release is still a draft replaces the draft's assets.
+#
+# When a full (non-pre-) release is published, the image's X.Y and latest
+# tags are moved to it (the `promote` job), so `docker pull ...:latest`
+# never gets a version before it's actually released.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag, e.g. v0.5.0"
+        description: "Version tag, e.g. v0.5.2-rc.1 (created if it doesn't exist)"
         required: true
+      target:
+        description: "Branch or commit to tag when the tag doesn't exist yet"
+        required: false
+        default: dev
+  release:
+    types: [published]
 
 permissions: {}
 
 concurrency:
-  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   meta:
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # create the tag on a manual run
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
+      sha: ${{ steps.meta.outputs.sha }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
       - id: meta
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_TAG: ${{ github.event.release.tag_name }}
-          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
-          tag="${EVENT_TAG:-$INPUT_TAG}"
-          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::'$tag' is not a version tag like v0.5.0"
+          if [ "$EVENT_NAME" = push ]; then tag="$REF_NAME"; else tag="$INPUT_TAG"; fi
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$tag' is not a version tag like v0.5.2 or v0.5.2-rc.1"
             exit 1
           fi
-          if [ -n "$EVENT_TAG" ]; then
-            prerelease="$EVENT_PRERELEASE"
+          version="${tag#v}"
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+
+          # A published release is immutable: nothing can be added to it.
+          state="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo none)"
+          if [ "$state" = false ]; then
+            echo "::error::Release $tag is already published; an immutable release can't take new assets. Use a new version."
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            sha="$(git rev-list -n 1 "$tag")"
           else
-            prerelease="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)"
+            if [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "::error::tag $tag not found"; exit 1
+            fi
+            sha="$(git rev-parse --verify "origin/$INPUT_TARGET^{commit}" 2>/dev/null || git rev-parse --verify "$INPUT_TARGET^{commit}")"
+          fi
+
+          # The code being released must carry this version, so a tag can't
+          # point at an older release's code by mistake (v0.5.1 did, #201).
+          app_version="$(git show "$sha:backend/app/version.py" | sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p')"
+          ui_version="$(git show "$sha:frontend/package.json" | jq -r .version)"
+          if [ "$app_version" != "$version" ] || [ "$ui_version" != "$version" ]; then
+            echo "::error::$tag doesn't match the code at ${sha:0:7}: backend/app/version.py says '$app_version', frontend/package.json says '$ui_version'"
+            exit 1
+          fi
+          if ! git show "$sha:CHANGELOG.md" | grep -q "^## \[$version\]"; then
+            echo "::error::CHANGELOG.md at ${sha:0:7} has no '## [$version]' section"
+            exit 1
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            git tag "$tag" "$sha"
+            git push origin "refs/tags/$tag"
+            echo "Created tag $tag at $sha"
           fi
           {
             echo "tag=$tag"
-            echo "version=${tag#v}"
+            echo "version=$version"
             echo "prerelease=$prerelease"
+            echo "sha=$sha"
           } >> "$GITHUB_OUTPUT"
-          echo "Release $tag (pre-release: $prerelease)"
+          echo "Release $tag at ${sha:0:7} (pre-release: $prerelease)"
 
   agent:
     needs: meta
     runs-on: ubuntu-latest
     permissions:
-      contents: write # upload release assets
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.meta.outputs.tag }}
+          ref: ${{ needs.meta.outputs.sha }}
 
       - uses: actions/setup-go@v7
         with:
@@ -95,22 +155,22 @@ jobs:
           sha256sum perchtail-agent-* > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Attach to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.meta.outputs.tag }}
-        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent
+          path: dist/
+          if-no-files-found: error
 
   image:
     needs: meta
     runs-on: ubuntu-latest
     permissions:
-      contents: write # attach the SBOM
+      contents: read
       packages: write # push to ghcr.io
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.meta.outputs.tag }}
+          ref: ${{ needs.meta.outputs.sha }}
 
       - id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
@@ -125,29 +185,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      # 0.5.0 always; 0.5 and latest only for a full release, so a
-      # pre-release is never what `docker pull ...:latest` gets.
-      - id: tags
-        uses: docker/metadata-action@v5
+      # Only the exact version here; X.Y and latest move when a full
+      # release is published (see `promote`).
+      - uses: docker/metadata-action@v5
+        id: labels
         with:
           images: ${{ steps.image.outputs.name }}
           flavor: latest=false
-          tags: |
-            type=semver,pattern={{version}},value=${{ needs.meta.outputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ needs.meta.outputs.tag }},enable=${{ needs.meta.outputs.prerelease != 'true' }}
-            type=raw,value=latest,enable=${{ needs.meta.outputs.prerelease != 'true' }}
+          tags: type=raw,value=${{ needs.meta.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.meta.outputs.sha }}
 
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          labels: ${{ steps.tags.outputs.labels }}
+          tags: ${{ steps.labels.outputs.tags }}
+          labels: ${{ steps.labels.outputs.labels }}
           provenance: true
           sbom: true
 
-      # The package starts out private on ghcr.io, so Trivy pulls with the
+      # The package may be private on ghcr.io, so Trivy pulls with the
       # same token.
       - name: Generate SBOM (CycloneDX)
         uses: aquasecurity/trivy-action@v0.36.0
@@ -157,11 +217,102 @@ jobs:
         with:
           image-ref: ${{ steps.image.outputs.name }}:${{ needs.meta.outputs.version }}
           format: cyclonedx
-          output: perchtail-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
+          output: sbom/perchtail-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
 
-      - name: Attach the SBOM to the release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/
+          if-no-files-found: error
+
+  draft:
+    needs: [meta, agent, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create or update the draft release
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          {
+            echo
+            echo "### Install"
+            echo "- Docker: \`${IMAGE,,}:${VERSION}\` (amd64, arm64)"
+            echo "- Push agent: the binaries below; check them with \`sha256sum -c SHA256SUMS\`"
+            echo "- From source: [docs/install-from-source.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/install-from-source.md)"
+          } >> notes.md
+          cat notes.md
+
+      - name: Create or update the draft
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.meta.outputs.tag }}
           VERSION: ${{ needs.meta.outputs.version }}
-        run: gh release upload "$TAG" "perchtail-${VERSION}.sbom.cyclonedx.json" --clobber --repo "$GITHUB_REPOSITORY"
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          ls -l assets
+          state="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo none)"
+          case "$state" in
+            none)
+              gh release create "$TAG" assets/* --repo "$GITHUB_REPOSITORY" \
+                --draft --verify-tag --title "PerchTail $TAG" --notes-file notes.md \
+                --prerelease="$PRERELEASE"
+              ;;
+            true)
+              # Only the assets are replaced: the draft's notes may already
+              # have been edited by hand.
+              gh release upload "$TAG" assets/* --clobber --repo "$GITHUB_REPOSITORY"
+              ;;
+            *)
+              echo "::error::Release $TAG was published while this ran; it can't take assets now."
+              exit 1
+              ;;
+          esac
+          echo "Draft ready: review the notes and assets, then publish it." >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Point X.Y and latest at this release
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          if ! [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' isn't a full release version"; exit 1
+          fi
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          docker buildx imagetools create \
+            -t "$image:$minor" -t "$image:latest" "$image:$version"
+          echo "$image:$minor and :latest -> $version" >> "$GITHUB_STEP_SUMMARY"
