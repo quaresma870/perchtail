@@ -36,10 +36,30 @@ _NT_SHARING_VIOLATION = 0xC0000043
 _NT_LOGON_FAILURE = 0xC000006D
 
 
+def _tls_error(text: str) -> SourceTLSError:
+    """Says which TLS check failed (F-N): a certificate for another name
+    needs a different fix (the host field) than one from an unknown CA (the
+    CA certificate field) or an expired one."""
+    lowered = text.lower()
+    if "hostname mismatch" in lowered or "doesn't match" in lowered:
+        return SourceTLSError(
+            text,
+            public_message="The source's TLS certificate is for a different name: enter the "
+            "host as it appears on the certificate, or reissue the certificate",
+        )
+    if "certificate has expired" in lowered:
+        return SourceTLSError(text, public_message="The source's TLS certificate has expired")
+    return SourceTLSError(
+        text,
+        public_message="The source's TLS certificate isn't trusted: its issuer is unknown, "
+        "so add the issuing CA certificate to the source",
+    )
+
+
 def _common(exc: BaseException) -> SourceError | None:
     text = str(exc)
     if isinstance(exc, ssl.SSLError):
-        return SourceTLSError(text)
+        return _tls_error(text)
     if isinstance(exc, PermissionError):
         return SourcePermissionError(text)
     if isinstance(exc, FileNotFoundError | NotADirectoryError):
@@ -123,7 +143,7 @@ def translate_winrm(exc: BaseException) -> SourceError | None:
     if isinstance(exc, winrm_exc.InvalidCredentialsError | winrm_exc.AuthenticationError):
         return SourceAuthError(text)
     if isinstance(exc, requests.exceptions.SSLError):
-        return SourceTLSError(text)
+        return _tls_error(text)
     if isinstance(exc, requests.exceptions.ConnectionError | requests.exceptions.Timeout):
         return SourceUnreachableError(text)
     if isinstance(exc, winrm_exc.WSManFaultError) and "access is denied" in text.lower():
@@ -139,7 +159,7 @@ def translate_winrm(exc: BaseException) -> SourceError | None:
     return _common(exc)
 
 
-def translate_agent(exc: BaseException) -> SourceError | None:
+def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | None:
     from app.agent_registry import (
         AgentCommandError,
         AgentNotConnectedError,
@@ -155,6 +175,12 @@ def translate_agent(exc: BaseException) -> SourceError | None:
         return SourceUnreachableError(text, public_message="The agent didn't answer in time")
     if isinstance(exc, AgentCommandError):
         lowered = text.lower()
+        # Go's os.Root refuses a path through a symlink that leaves the base
+        # ("openat x: path escapes from parent"), and the agent refuses
+        # non-canonical paths itself: answered as 404, the same as a link
+        # leaving the base path over SSH, rather than 502 (F-L).
+        if "path escapes from parent" in lowered or lowered.startswith("unsafe path"):
+            return PathOutsideBaseError(text)
         if "not exist" in lowered or "no such file" in lowered or "not found" in lowered:
             return SourceNotFoundError(text)
         if "permission" in lowered or "denied" in lowered or "outside" in lowered:

@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # Backend (backend/requirements.txt, backend/requirements-dev.txt)
+  # Backend (backend/requirements.in -> requirements.txt pins, requirements-dev.txt)
   - package-ecosystem: pip
     directory: /backend
     target-branch: dev

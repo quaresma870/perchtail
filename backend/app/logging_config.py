@@ -35,7 +35,10 @@ def configure_logging() -> None:
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             structlog.processors.JSONRenderer(),
         ],
-        foreign_pre_chain=shared_processors,
+        # ExtraAdder: a stdlib logger's `extra={...}` become JSON fields, so
+        # events logged without structlog (app.log_rotation, F-J) keep the
+        # same `event` + fields shape as everything else.
+        foreign_pre_chain=shared_processors + [structlog.stdlib.ExtraAdder()],
     )
 
     stream_handler = logging.StreamHandler(sys.stdout)

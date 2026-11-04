@@ -108,7 +108,12 @@ def test_total_size_limit_deletes_oldest_first_and_reports_pressure(tmp_path, ca
     pressure = log_rotation.retention_pressure()
     assert pressure.deleted_files == 1
     assert pressure.newest_deleted_day == "2026-11-01"
-    assert "LOG_MAX_TOTAL_MB" in caplog.text
+    # F-J: the event name alone, with the numbers as fields.
+    record = next(r for r in caplog.records if r.name == "app.log_rotation")
+    assert record.getMessage() == "logs.retention.size_limit"
+    assert record.deleted_files == 1
+    assert record.newest_deleted_day == "2026-11-01"
+    assert "LOG_MAX_TOTAL_MB" in record.hint
 
 
 def test_a_leftover_file_is_archived_under_its_own_day(tmp_path):
