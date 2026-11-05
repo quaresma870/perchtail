@@ -225,7 +225,14 @@ def test_integrity_status_unknown_before_any_check_has_run(session, client_for):
     response = client.get("/audit/integrity")
     assert response.status_code == 200
     body = response.json()
-    assert body == {"status": "unknown", "last_checked_at": None, "broken_row_id": None}
+    assert body == {
+        "status": "unknown",
+        "last_checked_at": None,
+        "broken_row_id": None,
+        "race_break_count": 0,
+        "known_break_count": 0,
+        "known_breaks_recorded_at": None,
+    }
 
 
 def test_plain_user_cannot_read_integrity_status(session, client_for):
@@ -296,3 +303,62 @@ def test_manual_verify_is_cooldown_throttled(session, client_for):
 
     second = client.post("/audit/integrity/verify")
     assert second.json()["status"] == "ok"
+
+
+def _race_forks(session, user_id):
+    """Two rows chained from the same tip, as the #213 race wrote them."""
+    from app.audit_hash_chain import compute_row_hash
+    from app.auth.models import AuditChainState, AuditLog
+    from app.crypto import audit_chain_key
+
+    tip, _ = _seed(session, user_id, count=2)
+    fork = AuditLog(user_id=None, action="source.open")
+    fork.prev_hash = tip.row_hash
+    fork.row_hash = compute_row_hash(
+        audit_chain_key(),
+        tip.row_hash,
+        user_id=None,
+        action="source.open",
+        target_type=None,
+        target_id=None,
+        timestamp=fork.timestamp,
+        metadata=None,
+    )
+    session.add(fork)
+    session.commit()
+    session.add(AuditChainState(known_break_cutoff_row_id=fork.id))
+    session.commit()
+    return fork
+
+
+def test_super_admin_records_race_breaks_as_known(session, client_for):
+    admin = _make_user(session, is_super_admin=True)
+    fork = _race_forks(session, admin.id)
+    client = client_for(admin)
+
+    verified = client.post("/audit/integrity/verify").json()
+    assert (verified["status"], verified["race_break_count"]) == ("race_breaks", 1)
+    assert verified["broken_row_id"] == fork.id
+
+    response = client.post("/audit/integrity/known-breaks")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["known_break_count"] == 1
+    assert body["known_breaks_recorded_at"] is not None
+
+
+def test_recording_known_breaks_is_for_super_admins_only(session, client_for):
+    viewer = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    _race_forks(session, viewer.id)
+
+    response = client_for(viewer).post("/audit/integrity/known-breaks")
+    assert response.status_code == 403
+
+
+def test_recording_known_breaks_with_none_to_record_is_a_conflict(session, client_for):
+    admin = _make_user(session, is_super_admin=True)
+    _seed(session, admin.id, count=2)
+
+    response = client_for(admin).post("/audit/integrity/known-breaks")
+    assert response.status_code == 409
