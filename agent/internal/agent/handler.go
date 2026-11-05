@@ -92,6 +92,80 @@ func HandleFetch(basePath, relPath string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
+// Chunk sizes the agent accepts from the backend: small enough to keep
+// every message well under the backend's WebSocket message limit (16 MiB
+// in uvicorn by default), large enough not to waste time on overhead.
+const (
+	minChunkSize = 4 << 10
+	maxChunkSize = 4 << 20
+)
+
+// TooLargeError refuses a streamed fetch over the backend's limit.
+type TooLargeError struct {
+	Size  int64
+	Limit int64
+}
+
+func (e *TooLargeError) Error() string {
+	return fmt.Sprintf("file is %d bytes, over the %d-byte limit", e.Size, e.Limit)
+}
+
+// StreamFetch reads relPath under basePath in chunks of at most chunkSize
+// bytes and passes each one to send, in order (#205). Only one chunk is
+// held at a time, however large the file. maxBytes > 0 refuses a file
+// larger than that: up front from its size, and again while reading,
+// since a log can grow while it's being read. It returns the number of
+// chunks and bytes sent. An error from send is returned as is.
+func StreamFetch(
+	basePath, relPath string, chunkSize, maxBytes int64, send func([]byte) error,
+) (chunks int, size int64, err error) {
+	if !IsSafeRelativePath(relPath) {
+		return 0, 0, fmt.Errorf("unsafe path: %q", relPath)
+	}
+	chunkSize = min(max(chunkSize, minChunkSize), maxChunkSize)
+	root, err := os.OpenRoot(basePath)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer root.Close()
+	f, err := root.Open(rootName(relPath))
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return 0, 0, err
+	}
+	if st.IsDir() {
+		return 0, 0, fmt.Errorf("%s: is a directory", relPath)
+	}
+	if maxBytes > 0 && st.Size() > maxBytes {
+		return 0, 0, &TooLargeError{Size: st.Size(), Limit: maxBytes}
+	}
+
+	buf := make([]byte, chunkSize)
+	for {
+		n, readErr := io.ReadFull(f, buf)
+		if n > 0 {
+			size += int64(n)
+			if maxBytes > 0 && size > maxBytes {
+				return chunks, size, &TooLargeError{Size: size, Limit: maxBytes}
+			}
+			if err := send(buf[:n]); err != nil {
+				return chunks, size, err
+			}
+			chunks++
+		}
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			return chunks, size, nil
+		}
+		if readErr != nil {
+			return chunks, size, readErr
+		}
+	}
+}
+
 // rootName turns a backend-supplied relative path into a name for os.Root,
 // which resolves it -- symlinks included -- without ever leaving basePath.
 // IsSafeRelativePath stays as the first, lexical check; os.Root is what

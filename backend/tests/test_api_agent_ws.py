@@ -134,3 +134,64 @@ def test_connect_records_the_os_the_agent_reports(session):
         assert _wait_until(lambda: not registry.is_connected(source.id))
         session.refresh(source)
         assert source.agent_os == "windows"
+
+
+def test_a_streamed_fetch_through_the_endpoint_lands_in_the_destination(session, tmp_path):
+    """#205 end to end: the backend asks for chunks, the agent's
+    fetch_chunk messages go through the WebSocket endpoint into the file."""
+    import asyncio
+    import base64
+    import threading
+
+    from app.collectors import agent as agent_collector
+
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    previous_loop = registry._loop
+    content = b"first chunk|" + b"second chunk"
+    destination = tmp_path / "fetched"
+    errors: list[Exception] = []
+
+    def fetch():
+        try:
+            agent_collector.fetch_file(source, "app.log", destination)
+        except Exception as exc:  # noqa: BLE001 - reported by the assert below
+            errors.append(exc)
+
+    try:
+        with _client(session) as client:
+            registry.bind_loop(client.portal.call(asyncio.get_running_loop))
+            with client.websocket_connect(
+                "/agent/connect", headers={"authorization": "Bearer s3cret"}
+            ) as ws:
+                assert _wait_until(lambda: registry.is_connected(source.id))
+                thread = threading.Thread(target=fetch)
+                thread.start()
+
+                command = ws.receive_json()
+                assert command["type"] == "fetch" and command["path"] == "app.log"
+                assert command["chunk_size"] == agent_collector.FETCH_CHUNK_BYTES
+                for seq, part in enumerate([content[:12], content[12:]]):
+                    ws.send_json(
+                        {
+                            "type": "fetch_chunk",
+                            "id": command["id"],
+                            "seq": seq,
+                            "data_b64": base64.b64encode(part).decode(),
+                        }
+                    )
+                ws.send_json(
+                    {
+                        "type": "fetch_result",
+                        "id": command["id"],
+                        "streamed": True,
+                        "chunks": 2,
+                        "size": len(content),
+                    }
+                )
+                thread.join(timeout=5)
+    finally:
+        registry.bind_loop(previous_loop)
+
+    assert errors == []
+    assert destination.read_bytes() == content

@@ -442,6 +442,12 @@ they come before any connector or UI work, not after.
   command returns `{"name", "is_dir", "size"}` entries, a `fetch` command
   returns base64-encoded content (`content_b64`), matching the existing
   `collectors/winrm.py` convention for wire-transferring file bytes.
+  Since 0.5.3 (#205) the backend adds `chunk_size` and `max_bytes` to
+  `fetch`, and the agent answers with `fetch_chunk` messages
+  (`{"seq", "data_b64"}`) and a closing `fetch_result` with
+  `"streamed": true`, so neither side holds a whole file and no message
+  comes near uvicorn's 16 MiB WebSocket limit. An agent that ignores
+  `chunk_size` (older than 0.5.3) still answers with `content_b64`.
 - **`IsSafeRelativePath` re-implements `rules.is_safe_relative_path`
   independently in Go**, rather than trusting the backend's own validation —
   the agent is the last line of defense against a `..`/absolute-path/
