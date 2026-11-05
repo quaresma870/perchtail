@@ -204,7 +204,7 @@ jobs:
       # push: false, load: true -- built into the runner's local Docker
       # daemon only, so Trivy below can scan it. Publishing to ghcr.io is
       # done by .github/workflows/release.yml when a release is published.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: false
