@@ -19,9 +19,10 @@ before 0.5.3, which can't be backfilled (the hash chain covers them);
 the page marks those as current names, not recorded ones."""
 
 from sqlalchemy import inspect
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session, SQLModel, select
 
 from app.auth.models import Role, RoleGrant, ScopeType, SSOGroupRoleMapping, SSOProviderConfig, User
+from app.json_values import as_int
 from app.logging_config import get_logger
 from app.models import Alert, Customer, Folder, Rule, SeverityPattern, Source
 
@@ -37,7 +38,7 @@ def _get(session: Session, model: type[SQLModel], row_id) -> SQLModel | None:
     """The row, also when it was deleted earlier in this same transaction:
     delete endpoints record their event right after session.delete(), and
     the name must still be found then."""
-    if not isinstance(row_id, int) or isinstance(row_id, bool):
+    if as_int(row_id) is None:
         return None
     for pending in session.deleted:
         identity = inspect(pending).identity  # no attribute load
@@ -159,6 +160,77 @@ NAMED_TARGET_TYPES = frozenset(
         "sso_group_mapping",
     }
 )
+
+
+_TARGET_MODELS: dict[str, type[SQLModel]] = {
+    "source": Source,
+    "customer": Customer,
+    "folder": Folder,
+    "user": User,
+    "role": Role,
+    "role_grant": RoleGrant,
+    "rule": Rule,
+    "severity_pattern": SeverityPattern,
+    "alert": Alert,
+    "sso_provider": SSOProviderConfig,
+    "sso_group_mapping": SSOGroupRoleMapping,
+}
+
+
+def _load(session: Session, model: type[SQLModel], ids) -> list:
+    ids = {row_id for row_id in ids if as_int(row_id) is not None}
+    if not ids:
+        return []
+    return list(session.exec(select(model).where(model.id.in_(ids))).all())
+
+
+def prefetch_targets(session: Session, targets) -> list:
+    """Loads, in a handful of IN queries, every row describe_target needs
+    for these (target_type, target_id) pairs: the targets, then what they
+    point at (sources, roles, scopes, customers, and all the folders of
+    those customers, for folder paths). describe_target's lookups then come
+    from the session's identity map instead of several queries per target.
+    The identity map holds rows weakly, so the caller keeps the returned
+    list alive while it describes."""
+    by_type: dict[str, set] = {}
+    for target_type, target_id in targets:
+        if target_type in _TARGET_MODELS and target_id is not None:
+            by_type.setdefault(target_type, set()).add(target_id)
+    loaded = {kind: _load(session, _TARGET_MODELS[kind], ids) for kind, ids in by_type.items()}
+    keep = [row for rows in loaded.values() for row in rows]
+
+    grants = loaded.get("role_grant", [])
+    scope_ids = {kind: set() for kind in (ScopeType.customer, ScopeType.folder, ScopeType.source)}
+    for grant in grants:
+        if grant.scope_type in scope_ids:
+            scope_ids[grant.scope_type].add(grant.scope_id)
+    source_ids = scope_ids[ScopeType.source] | {
+        row.source_id
+        for kind in ("rule", "severity_pattern", "alert")
+        for row in loaded.get(kind, [])
+        if row.source_id is not None
+    }
+    sources = loaded.get("source", []) + _load(session, Source, source_ids)
+    keep += sources
+    keep += _load(
+        session,
+        Role,
+        {
+            row.role_id
+            for kind in ("role_grant", "sso_group_mapping")
+            for row in loaded.get(kind, [])
+        },
+    )
+    folders = loaded.get("folder", []) + _load(session, Folder, scope_ids[ScopeType.folder])
+    customer_ids = (
+        {s.customer_id for s in sources if s.customer_id is not None}
+        | {f.customer_id for f in folders}
+        | scope_ids[ScopeType.customer]
+    )
+    keep += _load(session, Customer, customer_ids)
+    if customer_ids:
+        keep += session.exec(select(Folder).where(Folder.customer_id.in_(customer_ids))).all()
+    return keep
 
 
 def describe_target(session: Session, target_type: str | None, target_id) -> dict:

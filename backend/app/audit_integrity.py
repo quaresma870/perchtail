@@ -37,6 +37,7 @@ from sqlmodel import Session, select
 
 from app.audit_hash_chain import compute_row_hash
 from app.auth.models import AuditChainState, AuditLog
+from app.json_values import as_int
 from app.logging_config import get_logger
 from app.timeutils import utcnow
 
@@ -93,10 +94,6 @@ def _hashes_match(stored: str | None, expected: str | None) -> bool:
     return hmac.compare_digest(stored, expected)
 
 
-def _as_int(value) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
 def _recorded_known_breaks(session: Session) -> tuple[dict[int, dict], dict[int, str]]:
     """Every row recorded by record_known_breaks so far: break rows (id ->
     {"row_hash", "parent_id"}) and leaves (id -> row_hash). The entries
@@ -111,12 +108,12 @@ def _recorded_known_breaks(session: Session) -> tuple[dict[int, dict], dict[int,
         if not isinstance(metadata, dict):
             continue
         for item in metadata.get("breaks") or []:
-            row_id = _as_int(item.get("id")) if isinstance(item, dict) else None
+            row_id = as_int(item.get("id")) if isinstance(item, dict) else None
             row_hash = item.get("row_hash") if row_id is not None else None
             if isinstance(row_hash, str):
-                breaks[row_id] = {"row_hash": row_hash, "parent_id": _as_int(item.get("parent_id"))}
+                breaks[row_id] = {"row_hash": row_hash, "parent_id": as_int(item.get("parent_id"))}
         for item in metadata.get("leaves") or []:
-            row_id = _as_int(item.get("id")) if isinstance(item, dict) else None
+            row_id = as_int(item.get("id")) if isinstance(item, dict) else None
             row_hash = item.get("row_hash") if row_id is not None else None
             if isinstance(row_hash, str):
                 leaves[row_id] = row_hash

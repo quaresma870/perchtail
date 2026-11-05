@@ -41,7 +41,9 @@ release ships (0.x releases may include breaking changes between minors).
   30 seconds, not after 30 seconds in all. **Upgrade the agents** to get
   this: an agent older than 0.5.3 still works with this backend, but
   sends whole files as before, and a 0.5.3 agent works with an older
-  backend the old way.
+  backend the old way. The agent also answers commands in parallel, so a
+  long download no longer holds up browsing on the same agent, and stops
+  reading a file when the backend gives up on it.
 - Search indexing: one large source no longer holds the whole sweep (#218).
   A first index of a source with thousands of files took minutes, and
   meanwhile every other source's index, and the alerts that ride on it,
@@ -49,7 +51,8 @@ release ships (0.x releases may include breaking changes between minors).
   `SEARCH_INDEX_SOURCE_BUDGET_SECONDS` (default 120) of reading per sweep
   and carries on where it left off in the next one. New files are read
   first, then the least recently indexed, so a source with many growing
-  logs still works through all of them.
+  logs still works through all of them. Files that can't be indexed
+  (binary, unreadable) are retried only when their size changes.
 - Viewer: "⌕ Find" in the toolbar is now a button that opens the search
   panel. It looked clickable before but was only a hint for Ctrl/Cmd+F
   (#218).

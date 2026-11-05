@@ -6,9 +6,9 @@ from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlmodel import Session, func, select
 
-from app.api.auth import get_current_active_user
+from app.api.auth import get_current_active_user, require_super_admin
 from app.audit_integrity import NoRaceBreaksError, record_known_breaks, verify_chain
-from app.audit_labels import describe_target
+from app.audit_labels import describe_target, prefetch_targets
 from app.auth.models import AuditChainState, AuditLog, GlobalCapability, User
 from app.auth.rbac import require_global_capability
 from app.crypto import audit_chain_key
@@ -114,6 +114,8 @@ def list_audit_log(
             u.id: u.username for u in session.exec(select(User).where(User.id.in_(user_ids))).all()
         }
 
+    # Rows for every target on the page, in a few queries (see prefetch_targets).
+    _loaded = prefetch_targets(session, [(row.target_type, row.target_id) for row in rows])
     current: dict[tuple, dict] = {}
     items = []
     for row in rows:
@@ -245,7 +247,7 @@ def run_audit_integrity_verification(
 
 @router.post("/integrity/known-breaks", response_model=AuditIntegrityStatus)
 def record_audit_known_breaks(
-    user: User = Depends(get_current_active_user),
+    user: User = Depends(require_super_admin),
     session: Session = Depends(get_session),
 ):
     """Records the breaks that match the #213 race as known (#217), so
@@ -253,8 +255,6 @@ def record_audit_known_breaks(
     only: unlike "Verify now", this changes what verification accepts.
     Only breaks that match the race signature can be recorded; anything
     else stays reported as tampering."""
-    if not user.role.is_super_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admins only")
     with _manual_verify_lock:
         try:
             record_known_breaks(audit_chain_key(), session, user.id)

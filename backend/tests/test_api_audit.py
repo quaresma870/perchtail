@@ -409,3 +409,54 @@ def test_older_entries_fall_back_to_the_current_name(session, client_for, monkey
     session.commit()
     item = client.get("/audit").json()["items"][0]
     assert (item["target_name"], item["target_exists"]) == (None, False)
+
+
+def test_a_page_of_entries_is_named_in_a_few_queries(session, client_for):
+    """Review of #239: naming took several queries per entry (the target,
+    its customer, each folder up the tree)."""
+    from app.models import Customer, Folder, Protocol, Source
+    from sqlalchemy import event
+
+    viewer = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    customer = Customer(name="Vodacom")
+    session.add(customer)
+    session.commit()
+    parent = None
+    for depth in range(3):
+        folder = Folder(name=f"level{depth}", customer_id=customer.id, parent_folder_id=parent)
+        session.add(folder)
+        session.commit()
+        parent = folder.id
+    for index in range(30):
+        source = Source(
+            name=f"app{index}",
+            protocol=Protocol.ssh,
+            host=f"app{index}",
+            base_path="/var/log",
+            customer_id=customer.id,
+            folder_id=parent,
+        )
+        session.add(source)
+        session.commit()
+        record_audit_event(
+            session,
+            user_id=viewer.id,
+            action="source.open",
+            target_type="source",
+            target_id=source.id,
+            metadata={},
+        )
+    session.commit()
+    session.expire_all()  # as in a fresh request: nothing loaded yet
+
+    statements = []
+    engine = session.get_bind()
+    listener = lambda *args: statements.append(args[2])  # noqa: E731
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        items = client_for(viewer).get("/audit").json()["items"]
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+
+    assert {item["target_context"] for item in items} == {"Vodacom / level0 / level1 / level2"}
+    assert len(statements) < 15, statements

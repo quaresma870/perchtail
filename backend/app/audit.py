@@ -29,6 +29,8 @@ def record_audit_event(
     metadata as the event is written (#239, see app/audit_labels.py), so
     the entry still says what it was about after a rename or a delete.
     Keys the caller sets win."""
+    # Before chain_new_entry: the name lookups must run before it takes
+    # SQLite's write lock, so they never lengthen the time it's held.
     labels = audit_labels(session, target_type, target_id, metadata)
     if labels:
         metadata = {**labels, **(metadata or {})}

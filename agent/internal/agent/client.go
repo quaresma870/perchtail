@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -73,6 +74,22 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 		}
 	}()
 
+	// Each command runs on its own goroutine, so a long streamed fetch
+	// doesn't hold up a browse or another open on the same agent; writes
+	// are serialized, since a websocket.Conn allows one writer at a time.
+	// The backend sends "cancel" for a fetch it gave up on (timeout, size
+	// limit), so the file isn't read to the end for nothing.
+	connCtx, cancelAll := context.WithCancel(ctx)
+	defer cancelAll()
+	var writeMu sync.Mutex
+	send := func(msg any) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.WriteJSON(msg)
+	}
+	running := newInflight()
+	slots := make(chan struct{}, maxParallelCommands)
+
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -84,9 +101,61 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 			}
 			return fmt.Errorf("read: %w", err)
 		}
-		if err := serveCommand(cfg, cmd, func(msg any) error { return conn.WriteJSON(msg) }); err != nil {
-			return fmt.Errorf("write: %w", err)
+		if cmd.Type == "cancel" {
+			running.cancel(cmd.ID)
+			continue
 		}
+		cmdCtx := running.start(connCtx, cmd.ID)
+		go func(cmd Command) {
+			defer running.finish(cmd.ID)
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			if err := serveCommand(cmdCtx, cfg, cmd, send); err != nil {
+				// The connection is broken: closing it ends the read loop,
+				// and Run reconnects.
+				log.Printf("agent: write failed (%v), dropping the connection", err)
+				conn.Close()
+			}
+		}(cmd)
+	}
+}
+
+// maxParallelCommands bounds how many commands read files at once.
+const maxParallelCommands = 8
+
+// errCancelled stops a streamed fetch the backend cancelled.
+var errCancelled = errors.New("cancelled by the backend")
+
+// inflight tracks the running commands by id, so "cancel" can stop one.
+type inflight struct {
+	mu      sync.Mutex
+	cancels map[string]context.CancelFunc
+}
+
+func newInflight() *inflight { return &inflight{cancels: map[string]context.CancelFunc{}} }
+
+func (r *inflight) start(parent context.Context, id string) context.Context {
+	ctx, cancel := context.WithCancel(parent)
+	r.mu.Lock()
+	r.cancels[id] = cancel
+	r.mu.Unlock()
+	return ctx
+}
+
+func (r *inflight) cancel(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cancel, ok := r.cancels[id]; ok {
+		cancel()
+	}
+}
+
+func (r *inflight) finish(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cancel, ok := r.cancels[id]; ok {
+		cancel()
+		delete(r.cancels, id)
 	}
 }
 
@@ -95,8 +164,9 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 // fetch_chunk messages and a closing FetchEnd (#205); everything else is a
 // single message from handleCommand. Only an error from send, meaning the
 // connection is broken, is returned; a failed command is answered with an
-// ErrorResult instead.
-func serveCommand(cfg Config, cmd Command, send func(any) error) error {
+// ErrorResult instead. When ctx is cancelled (the backend sent "cancel"),
+// a streamed fetch stops at the next chunk and sends nothing more.
+func serveCommand(ctx context.Context, cfg Config, cmd Command, send func(any) error) error {
 	if cmd.Type != "fetch" || cmd.ChunkSize <= 0 {
 		return send(handleCommand(cfg, cmd))
 	}
@@ -105,6 +175,9 @@ func serveCommand(cfg Config, cmd Command, send func(any) error) error {
 	seq := 0
 	chunks, size, err := StreamFetch(cfg.BasePath, cmd.Path, cmd.ChunkSize, cmd.MaxBytes,
 		func(data []byte) error {
+			if ctx.Err() != nil {
+				return errCancelled
+			}
 			sendErr = send(FetchChunk{
 				Type:    "fetch_chunk",
 				ID:      cmd.ID,
@@ -116,6 +189,9 @@ func serveCommand(cfg Config, cmd Command, send func(any) error) error {
 		})
 	if sendErr != nil {
 		return sendErr
+	}
+	if errors.Is(err, errCancelled) {
+		return nil
 	}
 	if err != nil {
 		result := ErrorResult{Type: "fetch_error", ID: cmd.ID, Error: err.Error()}

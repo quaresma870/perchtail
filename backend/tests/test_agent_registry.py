@@ -334,11 +334,11 @@ def test_a_stream_that_ends_short_fails_the_fetch(loop_in_thread, streaming_regi
 
 def test_a_stream_times_out_only_when_chunks_stop(loop_in_thread, streaming_registry):
     registry, ws = streaming_registry
-    # Five chunks 0.15 s apart take longer than the 0.4 s timeout in all,
+    # Five chunks 0.3 s apart take longer than the 1 s timeout in all,
     # but no single wait does.
     chunks = [_chunk(seq, b"abcd") for seq in range(5)]
     result, written, _ = _streamed_fetch(
-        loop_in_thread, registry, ws, [*chunks, _end(5, 20)], timeout=0.4, delay=0.15
+        loop_in_thread, registry, ws, [*chunks, _end(5, 20)], timeout=1.0, delay=0.3
     )
     assert len(written) == 20 and result["streamed"] is True
 
@@ -347,3 +347,23 @@ def test_a_stalled_stream_times_out(loop_in_thread, streaming_registry):
     registry, ws = streaming_registry
     with pytest.raises(AgentTimeoutError):
         _streamed_fetch(loop_in_thread, registry, ws, [_chunk(0, b"abcd")], timeout=0.3)
+
+
+def test_giving_up_on_a_stream_tells_the_agent_to_cancel(loop_in_thread, streaming_registry):
+    """Review of #205: without it the agent read the file to the end."""
+    registry, ws = streaming_registry
+    with pytest.raises(AgentCommandError):
+        _streamed_fetch(
+            loop_in_thread,
+            registry,
+            ws,
+            [_chunk(0, b"abcd"), _chunk(1, b"efgh"), _end(2, 8)],
+            limit=6,
+        )
+    assert {"type": "cancel", "id": ws.sent[0]["id"]} in ws.sent
+
+
+def test_a_completed_stream_sends_no_cancel(loop_in_thread, streaming_registry):
+    registry, ws = streaming_registry
+    _streamed_fetch(loop_in_thread, registry, ws, [_chunk(0, b"abcd"), _end(1, 4)])
+    assert [message["type"] for message in ws.sent] == ["fetch"]

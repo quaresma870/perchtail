@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from app import config_transfer
-from app.api.auth import get_current_active_user
+from app.api.auth import require_super_admin
 from app.audit import record_audit_event
 from app.auth.models import User
 from app.db import get_session
@@ -19,12 +19,6 @@ from app.logging_config import get_logger
 
 router = APIRouter(prefix="/admin/config", tags=["config"])
 logger = get_logger(__name__)
-
-
-def require_super_admin(user: User = Depends(get_current_active_user)) -> User:
-    if not user.role.is_super_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admins only")
-    return user
 
 
 class ImportRequest(BaseModel):

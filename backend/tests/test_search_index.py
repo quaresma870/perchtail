@@ -633,3 +633,25 @@ def test_one_large_source_does_not_hold_the_sweep_for_the_others(tmp_path, monke
     with Session(engine) as session:
         assert len(_fts_rows(session, big_id)) == 1
         assert len(_fts_rows(session, small_id)) == 1
+
+
+def test_a_skipped_file_is_retried_only_when_its_size_changes(session, tmp_path, monkeypatch):
+    """Review of #218: binary and unreadable files were never recorded, so
+    every sweep treated them as new, put them first and fetched them again."""
+    fetched = _fetch_recorder(monkeypatch)
+    (tmp_path / "blob.log").write_bytes(b"\x00\x01binary")
+    (tmp_path / "app.log").write_text("text\n")
+    source = _source(session, tmp_path)
+    _rule(session, source.id, "*.log")
+
+    index_source(session, source)
+    assert sorted(fetched) == ["app.log", "blob.log"]
+
+    fetched.clear()
+    index_source(session, source)
+    assert fetched == []  # nothing changed, nothing fetched
+
+    with open(tmp_path / "blob.log", "ab") as handle:
+        handle.write(b"\x00more")
+    index_source(session, source)
+    assert fetched == ["blob.log"]

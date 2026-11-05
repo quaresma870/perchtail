@@ -61,13 +61,10 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
                 sink=sink,
                 limit=limit,
             )
-    except AgentCommandError as exc:
-        destination.unlink(missing_ok=True)
-        if exc.code == "too_large":
+    except BaseException as exc:
+        destination.unlink(missing_ok=True)  # no partial file left behind
+        if isinstance(exc, AgentCommandError) and exc.code == "too_large":
             raise collector_base.too_large(exc.size or limit + 1, limit) from exc
-        raise
-    except BaseException:
-        destination.unlink(missing_ok=True)
         raise
     if result.get("streamed"):
         return
