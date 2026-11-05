@@ -59,13 +59,21 @@ cd ..
 sudo useradd --system --home-dir /opt/perchtail --no-create-home --shell /usr/sbin/nologin perchtail
 
 sudo mkdir -p /opt/perchtail
-sudo rsync -a --delete --exclude .git --exclude frontend/node_modules ~/perchtail-build/ /opt/perchtail/
+sudo rsync -a --chown=root:root --delete --exclude .git --exclude frontend/node_modules ~/perchtail-build/ /opt/perchtail/
 
 sudo python3.12 -m venv /opt/perchtail-venv
 sudo /opt/perchtail-venv/bin/pip install -r /opt/perchtail/backend/requirements.txt
 ```
 
 The code and the venv belong to root, and the service only reads them.
+`--chown=root:root` matters: `rsync -a` would otherwise keep the build
+account as the owner, and that account could then change the code the
+service runs. Check that nothing else owns a file there:
+
+```bash
+sudo find /opt/perchtail /opt/perchtail-venv ! -user root   # must print nothing
+```
+
 `backend/requirements.txt` pins every package to the same versions the
 Docker image installs. The version ranges they're generated from are in
 `backend/requirements.in`.
@@ -181,10 +189,14 @@ git fetch --tags && git checkout "$PERCHTAIL_TAG"
 
 sudo systemctl stop perchtail
 sudo cp -a /var/lib/perchtail/db "/var/lib/perchtail/db.backup-$(date +%F)"
-sudo rsync -a --delete --exclude .git --exclude frontend/node_modules ~/perchtail-build/ /opt/perchtail/
+sudo rsync -a --chown=root:root --delete --exclude .git --exclude frontend/node_modules ~/perchtail-build/ /opt/perchtail/
 sudo /opt/perchtail-venv/bin/pip install -r /opt/perchtail/backend/requirements.txt
 sudo systemctl start perchtail          # migrates on start
 ```
 
 Read the release's CHANGELOG entry first; it says when an upgrade needs
 anything more than this.
+
+If you installed with this guide before 0.5.2, `/opt/perchtail` belongs
+to your build account. Fix it once with
+`sudo chown -R root:root /opt/perchtail`.

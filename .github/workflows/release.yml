@@ -279,6 +279,9 @@ jobs:
           TAG: ${{ needs.meta.outputs.tag }}
           VERSION: ${{ needs.meta.outputs.version }}
           PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+          # Without it, GitHub records the default branch as the release's
+          # target even when the tag is on dev.
+          SHA: ${{ needs.meta.outputs.sha }}
         run: |
           set -euo pipefail
           ls -l assets
@@ -286,7 +289,7 @@ jobs:
           case "$state" in
             none)
               gh release create "$TAG" assets/* --repo "$GITHUB_REPOSITORY" \
-                --draft --verify-tag --title "PerchTail $TAG" --notes-file notes.md \
+                --draft --verify-tag --target "$SHA" --title "PerchTail $TAG" --notes-file notes.md \
                 --prerelease="$PRERELEASE"
               ;;
             true)

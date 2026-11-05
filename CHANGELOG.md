@@ -8,6 +8,15 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Fixed
+- Installing from source left `/opt/perchtail` owned by the account that
+  built it, not root, so that account could change the code the service
+  runs. Both `rsync` commands in `docs/install-from-source.md` now pass
+  `--chown=root:root`, and the guide shows how to check and how to fix an
+  existing install.
+- A release's target commit is the tagged one; before, GitHub recorded the
+  default branch for a tag on `dev`.
+
 ## [0.5.2-rc.2] - 2026-11-04
 
 Second release candidate for 0.5.2. `v0.5.2-rc.1` was tagged but never
