@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import { currentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import type {
     AuditIntegrityStatus,
@@ -28,8 +29,19 @@
   let since = ''
   let until = ''
 
-  let integrity: AuditIntegrityStatus = { status: 'unknown', last_checked_at: null, broken_row_id: null }
+  let integrity: AuditIntegrityStatus = {
+    status: 'unknown',
+    last_checked_at: null,
+    broken_row_id: null,
+    race_break_count: 0,
+    known_break_count: 0,
+    known_breaks_recorded_at: null,
+  }
   let verifying = false
+  let recordingKnownBreaks = false
+
+  $: isSuperAdmin = $currentUser?.is_super_admin ?? false
+  $: raceBreakText = `${integrity.race_break_count} ${integrity.race_break_count === 1 ? 'break matches' : 'breaks match'}`
 
   function buildQuery(): string {
     const params = new URLSearchParams()
@@ -82,6 +94,25 @@
       error = err instanceof ApiError ? err.detail : 'Failed to verify audit log integrity'
     } finally {
       verifying = false
+    }
+  }
+
+  async function recordKnownBreaks() {
+    const confirmed = confirm(
+      `Record the ${integrity.race_break_count} ${integrity.race_break_count === 1 ? 'break' : 'breaks'} ` +
+        'from the #213 race as known? Verification will then accept ' +
+        'exactly these rows. Any other break is still reported as tampering. This is ' +
+        'itself written to the audit log.',
+    )
+    if (!confirmed) return
+    recordingKnownBreaks = true
+    try {
+      integrity = await api.post<AuditIntegrityStatus>('/audit/integrity/known-breaks')
+      await load()
+    } catch (err) {
+      error = err instanceof ApiError ? err.detail : 'Failed to record the known breaks'
+    } finally {
+      recordingKnownBreaks = false
     }
   }
 
@@ -153,17 +184,34 @@
   <div
     class="integrity-banner"
     class:broken={integrity.status === 'broken'}
+    class:race={integrity.status === 'race_breaks'}
     class:unknown={integrity.status === 'unknown'}
   >
     {#if integrity.status === 'broken'}
       <span class="integrity-text">
         ⚠ Tampering detected: the audit log's hash chain breaks at row {integrity.broken_row_id}.
         Everything from that row onward can no longer be trusted as an unaltered record.
+        {#if integrity.race_break_count > 0}
+          Separately, {raceBreakText} the #213 race (concurrent writes before 0.5.2).
+        {/if}
+      </span>
+    {:else if integrity.status === 'race_breaks'}
+      <span class="integrity-text">
+        ⚠ {raceBreakText} the #213 race, starting at row {integrity.broken_row_id}: concurrent
+        audit writes before 0.5.2 forked the chain. These rows were written by PerchTail itself, so
+        this isn't tampering, but verification can't accept them until a super admin records them
+        as known.
       </span>
     {:else if integrity.status === 'ok'}
       <span class="integrity-text">
         ✓ Audit log integrity verified -- chain intact as of
         {integrity.last_checked_at ? formatTimestamp(integrity.last_checked_at) : 'unknown'}.
+        {#if integrity.known_break_count > 0}
+          {integrity.known_break_count} known
+          {integrity.known_break_count === 1 ? 'break' : 'breaks'} from the #213 race recorded{integrity.known_breaks_recorded_at
+            ? ` on ${formatTimestamp(integrity.known_breaks_recorded_at)}`
+            : ''}.
+        {/if}
       </span>
     {:else}
       <span class="integrity-text">
@@ -171,9 +219,21 @@
         schedule (Settings → System), or verify it now.
       </span>
     {/if}
-    <button type="button" class="btn btn-ghost" on:click={verifyIntegrityNow} disabled={verifying}>
-      {verifying ? 'Verifying…' : 'Verify now'}
-    </button>
+    <div class="integrity-actions">
+      {#if isSuperAdmin && integrity.race_break_count > 0}
+        <button
+          type="button"
+          class="btn btn-ghost"
+          on:click={recordKnownBreaks}
+          disabled={recordingKnownBreaks || verifying}
+        >
+          {recordingKnownBreaks ? 'Recording…' : 'Mark as known'}
+        </button>
+      {/if}
+      <button type="button" class="btn btn-ghost" on:click={verifyIntegrityNow} disabled={verifying}>
+        {verifying ? 'Verifying…' : 'Verify now'}
+      </button>
+    </div>
   </div>
 
   <div class="filters card">
@@ -308,8 +368,16 @@
   .integrity-banner.broken {
     background: var(--danger-soft);
   }
+  .integrity-banner.race {
+    background: var(--warning-soft);
+  }
   .integrity-banner.unknown {
     background: var(--border-soft);
+  }
+  .integrity-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
   }
   .integrity-text {
     color: var(--text);

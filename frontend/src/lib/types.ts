@@ -225,9 +225,14 @@ export interface AuditLogFilterOptions {
 }
 
 export interface AuditIntegrityStatus {
-  status: 'unknown' | 'ok' | 'broken'
+  // 'race_breaks': the only breaks match the #213 race and a super admin can
+  // record them as known (#217).
+  status: 'unknown' | 'ok' | 'broken' | 'race_breaks'
   last_checked_at: string | null
   broken_row_id: number | null
+  race_break_count: number
+  known_break_count: number
+  known_breaks_recorded_at: string | null
 }
 
 export interface AuthSessionInfo {

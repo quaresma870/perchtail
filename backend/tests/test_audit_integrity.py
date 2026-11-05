@@ -167,3 +167,221 @@ def test_run_audit_integrity_check_persists_broken_status(monkeypatch):
         state = session.exec(select(AuditChainState)).first()
         assert state.status == "broken"
         assert state.broken_row_id == entry_id
+
+
+# --- #217: known breaks from the #213 race --------------------------------
+
+
+def _forked_row(session, parent: AuditLog, action: str) -> AuditLog:
+    """A row the #213 race wrote: valid under the key, chained from an
+    earlier row instead of the tip."""
+    from app.audit_hash_chain import compute_row_hash
+
+    entry = AuditLog(user_id=None, action=action)
+    entry.prev_hash = parent.row_hash
+    entry.row_hash = compute_row_hash(
+        KEY,
+        parent.row_hash,
+        user_id=None,
+        action=action,
+        target_type=None,
+        target_id=None,
+        timestamp=entry.timestamp,
+        metadata=None,
+    )
+    session.add(entry)
+    session.commit()
+    return entry
+
+
+def _set_cutoff(session, row_id):
+    state = session.exec(select(AuditChainState)).first()
+    if state is None:
+        state = AuditChainState()
+    state.known_break_cutoff_row_id = row_id
+    session.add(state)
+    session.commit()
+
+
+def _lab_case(session):
+    """The lab's case: three rows written in the same millisecond, all
+    chained from one tip, then a normal row on top."""
+    record_audit_event(session, user_id=None, action="before")
+    tip = record_audit_event(session, user_id=None, action="tip")
+    first = record_audit_event(session, user_id=None, action="source.open")
+    session.commit()
+    second = _forked_row(session, tip, "source.open")
+    third = _forked_row(session, tip, "source.open")
+    after = record_audit_event(session, user_id=None, action="after")
+    session.commit()
+    _set_cutoff(session, third.id)
+    return first, second, third, after
+
+
+def _verify(session):
+    result = verify_chain(KEY, session)
+    session.commit()
+    return result
+
+
+def test_race_breaks_are_reported_apart_from_tampering(session):
+    _, second, third, _ = _lab_case(session)
+
+    result = _verify(session)
+
+    assert result.ok is False
+    assert result.race_break_ids == [second.id, third.id]
+    state = session.exec(select(AuditChainState)).first()
+    assert (state.status, state.broken_row_id, state.race_break_count) == (
+        "race_breaks",
+        second.id,
+        2,
+    )
+
+
+def test_recorded_race_breaks_verify_as_intact(session):
+    from app.audit_integrity import KNOWN_BREAKS_ACTION, record_known_breaks
+
+    first, second, third, _ = _lab_case(session)
+
+    result = record_known_breaks(KEY, session, user_id=None)
+    session.commit()
+
+    assert result.ok is True
+    assert result.known_break_count == 2
+    state = session.exec(select(AuditChainState)).first()
+    assert state.status == "ok" and state.known_breaks_recorded_at is not None
+    entry = session.exec(select(AuditLog).where(AuditLog.action == KNOWN_BREAKS_ACTION)).one()
+    assert [item["id"] for item in entry.event_metadata["breaks"]] == [second.id, third.id]
+    assert [item["id"] for item in entry.event_metadata["leaves"]] == [first.id]
+    # And it stays intact on the next check, with new rows on top.
+    record_audit_event(session, user_id=None, action="later")
+    session.commit()
+    assert _verify(session).ok is True
+
+
+def test_an_edited_row_does_not_match_and_cannot_be_recorded(session):
+    import pytest
+    from app.audit_integrity import NoRaceBreaksError, record_known_breaks
+
+    _, second, _, _ = _lab_case(session)
+    _set_cutoff(session, second.id)  # only `second` is in range
+    second.action = "edited"
+    session.add(second)
+    session.commit()
+
+    result = _verify(session)
+    assert result.ok is False
+    assert result.broken_row_id == second.id
+    assert result.race_break_ids == []
+    with pytest.raises(NoRaceBreaksError):
+        record_known_breaks(KEY, session, user_id=None)
+
+
+def test_an_edited_row_is_still_tampering_next_to_recordable_breaks(session):
+    _, second, third, after = _lab_case(session)
+    after.action = "edited"
+    session.add(after)
+    session.commit()
+
+    result = _verify(session)
+
+    assert result.broken_row_id == after.id
+    assert result.race_break_ids == [second.id, third.id]
+    assert session.exec(select(AuditChainState)).first().status == "broken"
+
+
+def test_a_deleted_recorded_break_row_is_a_break(session):
+    from app.audit_integrity import record_known_breaks
+
+    _, second, _, _ = _lab_case(session)
+    record_known_breaks(KEY, session, user_id=None)
+    session.commit()
+    second_id = second.id
+
+    session.delete(second)
+    session.commit()
+
+    result = _verify(session)
+    assert result.ok is False
+    assert result.broken_row_id == second_id
+
+
+def test_a_deleted_fork_leaf_is_a_break(session):
+    """`first` is a leaf: nothing chains from it, so without recording it,
+    deleting it would leave the chain looking intact."""
+    from app.audit_integrity import record_known_breaks
+
+    first, _, _, _ = _lab_case(session)
+    record_known_breaks(KEY, session, user_id=None)
+    session.commit()
+    first_id = first.id
+
+    session.delete(first)
+    session.commit()
+
+    result = _verify(session)
+    assert result.ok is False
+    assert result.broken_row_id == first_id
+
+
+def test_a_deleted_row_that_was_not_recorded_is_still_a_break(session):
+    from app.audit_integrity import record_known_breaks
+
+    _, _, _, after = _lab_case(session)
+    following = record_audit_event(session, user_id=None, action="following")
+    session.commit()
+    record_known_breaks(KEY, session, user_id=None)
+    session.commit()
+
+    session.delete(after)
+    session.commit()
+
+    result = _verify(session)
+    assert result.ok is False
+    assert result.broken_row_id == following.id
+
+
+def test_a_fork_after_the_cutoff_is_not_offered_for_recording(session):
+    import pytest
+    from app.audit_integrity import NoRaceBreaksError, record_known_breaks
+
+    _, second, _, _ = _lab_case(session)
+    _set_cutoff(session, second.id - 1)
+
+    result = _verify(session)
+    assert result.race_break_ids == []
+    assert session.exec(select(AuditChainState)).first().status == "broken"
+    with pytest.raises(NoRaceBreaksError):
+        record_known_breaks(KEY, session, user_id=None)
+
+
+def test_without_a_cutoff_nothing_is_offered(session):
+    """A fresh install on 0.5.3 or later can't have race breaks."""
+    _lab_case(session)
+    _set_cutoff(session, None)
+
+    result = _verify(session)
+    assert result.race_break_ids == []
+    assert session.exec(select(AuditChainState)).first().status == "broken"
+
+
+def test_recorded_breaks_survive_a_retention_purge_of_their_parent(session):
+    from app.audit_integrity import record_known_breaks
+    from sqlmodel import delete
+
+    _, second, _, _ = _lab_case(session)
+    record_known_breaks(KEY, session, user_id=None)
+    session.commit()
+
+    # What app.audit_purge does: anchor at the newest purged row, then
+    # delete the prefix. Here that cuts through the fork.
+    newest_purged = session.get(AuditLog, second.id - 1)
+    state = session.exec(select(AuditChainState)).first()
+    state.anchor_row_id = newest_purged.id
+    state.anchor_hash = newest_purged.row_hash
+    session.add(state)
+    session.exec(delete(AuditLog).where(AuditLog.id < second.id))
+    session.commit()
+
+    assert _verify(session).ok is True

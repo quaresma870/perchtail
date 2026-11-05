@@ -8,6 +8,18 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Added
+- Audit log: breaks in the hash chain left by the #213 race (concurrent
+  writes before 0.5.2) are no longer reported as tampering forever (#217).
+  "Verify now" reports them apart, as "N breaks match the #213 race", when
+  each row is valid under the chain's key, chains from an existing earlier
+  row, and was written before the upgrade to 0.5.3. A super admin can
+  "Mark as known": this writes a chained `audit.chain.known_breaks_recorded`
+  entry listing those rows and the fork's other rows, and verification
+  then reports the chain as intact, with N known breaks. Any other break is
+  still tampering, and so is a recorded row that later goes missing or
+  changes.
+
 ### Fixed
 - Search indexing: one large source no longer holds the whole sweep (#218).
   A first index of a source with thousands of files took minutes, and

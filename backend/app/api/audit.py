@@ -1,13 +1,13 @@
 import threading
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlmodel import Session, func, select
 
 from app.api.auth import get_current_active_user
-from app.audit_integrity import verify_chain
+from app.audit_integrity import NoRaceBreaksError, record_known_breaks, verify_chain
 from app.auth.models import AuditChainState, AuditLog, GlobalCapability, User
 from app.auth.rbac import require_global_capability
 from app.crypto import audit_chain_key
@@ -139,9 +139,14 @@ def get_audit_log_filters(
 class AuditIntegrityStatus(BaseModel):
     # "unknown" until the first check ever runs -- see AuditChainState's
     # docstring in app/auth/models.py.
+    # "race_breaks": the only breaks match the #213 race and can be
+    # recorded as known (#217, see app/audit_integrity.py).
     status: str
     last_checked_at: datetime | None
     broken_row_id: int | None
+    race_break_count: int = 0
+    known_break_count: int = 0
+    known_breaks_recorded_at: datetime | None = None
 
 
 def _read_integrity_status(session: Session) -> AuditIntegrityStatus:
@@ -152,6 +157,9 @@ def _read_integrity_status(session: Session) -> AuditIntegrityStatus:
         status=state.status,
         last_checked_at=state.last_checked_at,
         broken_row_id=state.broken_row_id,
+        race_break_count=state.race_break_count,
+        known_break_count=state.known_break_count,
+        known_breaks_recorded_at=state.known_breaks_recorded_at,
     )
 
 
@@ -205,5 +213,29 @@ def run_audit_integrity_verification(
                 return _read_integrity_status(session)
 
         verify_chain(audit_chain_key(), session)
+        session.commit()
+        return _read_integrity_status(session)
+
+
+@router.post("/integrity/known-breaks", response_model=AuditIntegrityStatus)
+def record_audit_known_breaks(
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    """Records the breaks that match the #213 race as known (#217), so
+    verification accepts exactly those rows from then on. Super admins
+    only: unlike "Verify now", this changes what verification accepts.
+    Only breaks that match the race signature can be recorded; anything
+    else stays reported as tampering."""
+    if not user.role.is_super_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admins only")
+    with _manual_verify_lock:
+        try:
+            record_known_breaks(audit_chain_key(), session, user.id)
+        except NoRaceBreaksError:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="No breaks match the #213 race, so there is nothing to record.",
+            ) from None
         session.commit()
         return _read_integrity_status(session)
