@@ -76,7 +76,10 @@ you don't want to reason about every sub-metric yourself:
 - `degraded` — scratch usage is at or above 90% of `scratch_max_gb`, an
   APScheduler job isn't running or has no next-run time, the search-indexing
   sweep is overdue (hasn't completed in over twice
-  `search_index_interval_seconds`), or at least one `agent`-protocol source
+  `search_index_interval_seconds`; each source gets at most
+  `search_index_source_budget_seconds` of reading per sweep, so with many
+  large sources being indexed for the first time, raise the interval or
+  lower the budget), or at least one `agent`-protocol source
   is configured but none are currently connected.
 - `ok` — none of the above.
 

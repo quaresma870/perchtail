@@ -584,7 +584,13 @@
       {:else if activeTab}
         <div class="pane-toolbar">
           <div class="toolbar-left">
-            <span class="hint" title="Ctrl/Cmd+F to search, Ctrl/Cmd+G to go to line">⌕ Find</span>
+            <button
+              class="btn-toggle"
+              title="Search this file (Ctrl/Cmd+F). Ctrl/Cmd+G goes to a line."
+              on:click={() => paneRef?.openSearch()}
+            >
+              ⌕ Find
+            </button>
             <button
               class="btn-toggle"
               class:active={findAllOpen}

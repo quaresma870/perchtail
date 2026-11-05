@@ -107,3 +107,13 @@ test('follow picks up appended content while enabled, and stops once disabled', 
   await page.waitForTimeout(2500)
   await expect(page.locator('.cm-content')).not.toContainText('should not appear')
 })
+
+test('the Find button opens the search panel, same as Ctrl/Cmd+F', async ({ page }) => {
+  await treeFile(page, fileA).click()
+  await expect(page.locator('.cm-content')).toContainText('"service"')
+  await expect(page.locator('.cm-search')).toHaveCount(0)
+
+  await page.getByRole('button', { name: '⌕ Find', exact: true }).click()
+
+  await expect(page.locator('.cm-search input[main-field]')).toBeFocused()
+})
