@@ -155,7 +155,7 @@ jobs:
           sha256sum perchtail-agent-* > SHA256SUMS
           cat SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: agent
           path: dist/
@@ -175,11 +175,11 @@ jobs:
       - id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -187,7 +187,7 @@ jobs:
 
       # Only the exact version here; X.Y and latest move when a full
       # release is published (see `promote`).
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: labels
         with:
           images: ${{ steps.image.outputs.name }}
@@ -197,7 +197,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
             org.opencontainers.image.revision=${{ needs.meta.outputs.sha }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         env:
           # No build-record artifact: the draft job only wants agent + sbom.
           DOCKER_BUILD_RECORD_UPLOAD: "false"
@@ -225,7 +225,7 @@ jobs:
           format: cyclonedx
           output: sbom/perchtail-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: sbom/
@@ -243,12 +243,12 @@ jobs:
 
       # By name: the run also holds other artifacts (build records), and
       # downloading everything failed on one of those.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: agent
           path: assets
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sbom
           path: assets
@@ -310,9 +310,9 @@ jobs:
     permissions:
       packages: write
     steps:
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
