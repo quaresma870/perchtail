@@ -89,9 +89,6 @@ First release candidate for 0.5.3. Upgrade notes:
 - Dependabot no longer proposes sqlmodel 0.0.45 or later: those versions
   reject the naive datetimes PerchTail stores, so `requirements.in` keeps
   it below 0.0.45.
-- `.gitignore` and `.dockerignore` exclude the local `.claude/` folder, so
-  per-developer Claude Code settings never reach the repository or the
-  Docker build context.
 
 ## [0.5.2] - 2026-11-05
 

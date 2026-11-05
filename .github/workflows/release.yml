@@ -289,7 +289,7 @@ jobs:
           case "$state" in
             none)
               gh release create "$TAG" assets/* --repo "$GITHUB_REPOSITORY" \
-                --draft --verify-tag --target "$SHA" --title "PerchTail $TAG" --notes-file notes.md \
+                --draft --verify-tag --target "$SHA" --title "$TAG" --notes-file notes.md \
                 --prerelease="$PRERELEASE"
               ;;
             true)
