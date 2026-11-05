@@ -8,6 +8,11 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Changed
+- `.gitignore` and `.dockerignore` exclude the local `.claude/` folder, so
+  per-developer Claude Code settings never reach the repository or the
+  Docker build context.
+
 ## [0.5.2] - 2026-11-05
 
 The release after 0.5.0. There is no 0.5.1: its tag was used by mistake
