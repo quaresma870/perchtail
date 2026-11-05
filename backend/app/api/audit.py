@@ -8,6 +8,7 @@ from sqlmodel import Session, func, select
 
 from app.api.auth import get_current_active_user
 from app.audit_integrity import NoRaceBreaksError, record_known_breaks, verify_chain
+from app.audit_labels import describe_target
 from app.auth.models import AuditChainState, AuditLog, GlobalCapability, User
 from app.auth.rbac import require_global_capability
 from app.crypto import audit_chain_key
@@ -33,6 +34,14 @@ class AuditLogEntryPublic(BaseModel):
     target_id: int | None
     timestamp: datetime
     metadata: dict | None
+    # What the entry is about, by name (#239): as recorded when it was
+    # written, or, for entries older than 0.5.3, the object's current name
+    # (target_name_is_current), since those can't be backfilled.
+    target_name: str | None = None
+    target_context: str | None = None
+    target_name_is_current: bool = False
+    # Whether the object still exists, so the page can link to it.
+    target_exists: bool = False
 
 
 class AuditLogPage(BaseModel):
@@ -105,20 +114,37 @@ def list_audit_log(
             u.id: u.username for u in session.exec(select(User).where(User.id.in_(user_ids))).all()
         }
 
-    items = [
-        AuditLogEntryPublic(
-            id=row.id,
-            user_id=row.user_id,
-            username=usernames.get(row.user_id) if row.user_id is not None else None,
-            action=row.action,
-            target_type=row.target_type,
-            target_id=row.target_id,
-            timestamp=row.timestamp,
-            metadata=row.event_metadata,
+    current: dict[tuple, dict] = {}
+    items = []
+    for row in rows:
+        key = (row.target_type, row.target_id)
+        if row.target_id is not None and key not in current:
+            current[key] = describe_target(session, row.target_type, row.target_id)
+        now = current.get(key, {})
+        recorded = row.event_metadata if isinstance(row.event_metadata, dict) else {}
+        use_current = "target_name" not in recorded and "target_name" in now
+        names = now if use_current else recorded
+        items.append(
+            AuditLogEntryPublic(
+                id=row.id,
+                user_id=row.user_id,
+                username=usernames.get(row.user_id) if row.user_id is not None else None,
+                action=row.action,
+                target_type=row.target_type,
+                target_id=row.target_id,
+                timestamp=row.timestamp,
+                metadata=row.event_metadata,
+                target_name=_as_text(names.get("target_name")),
+                target_context=_as_text(names.get("target_context")),
+                target_name_is_current=use_current,
+                target_exists="target_name" in now,
+            )
         )
-        for row in rows
-    ]
     return AuditLogPage(items=items, total=total)
+
+
+def _as_text(value) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 @router.get("/filters", response_model=AuditLogFilterOptions)

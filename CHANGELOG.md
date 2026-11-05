@@ -9,6 +9,15 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Added
+- Audit log: entries name what they're about (#239). Each event now
+  records the target's name and where it sits (a source's "customer /
+  folder", a rule's source, a grant's role), and the names next to ids it
+  already held (`source_name`, `role_name`, `customer_name`,
+  `scope_name`), so an entry still makes sense after the object is
+  renamed or deleted. The table shows a readable Target column, linked
+  when the object still exists, and the details as key/value pairs.
+  Entries from before this release can't be changed (the hash chain
+  covers them), so they show the object's current name, marked as such.
 - Audit log: breaks in the hash chain left by the #213 race (concurrent
   writes before 0.5.2) are no longer reported as tampering forever (#217).
   "Verify now" reports them apart, as "N breaks match the #213 race", when

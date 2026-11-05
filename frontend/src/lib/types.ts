@@ -212,6 +212,12 @@ export interface AuditLogEntry {
   target_id: number | null
   timestamp: string
   metadata: Record<string, unknown> | null
+  // #239: the target by name, as recorded, or its current name for entries
+  // older than 0.5.3 (target_name_is_current).
+  target_name: string | null
+  target_context: string | null
+  target_name_is_current: boolean
+  target_exists: boolean
 }
 
 export interface AuditLogPage {
