@@ -8,6 +8,21 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.5.3-rc.1] - 2026-11-05
+
+First release candidate for 0.5.3. Upgrade notes:
+- **Back up `DATA_DIR` first**, as for every release. One migration
+  runs on start (`audit known breaks`): it adds columns to the audit
+  chain state and records the newest audit row at the time of the
+  upgrade, which is how 0.5.3 tells old race breaks apart (see below).
+- **Upgrade the push agents** to get chunked fetches, parallel commands
+  and cancel. Agents older than 0.5.3 keep working with this backend, but
+  send whole files in one message, which fails above about 12 MiB.
+- Optional new setting: `SEARCH_INDEX_SOURCE_BUDGET_SECONDS` (default 120).
+- If "Verify now" reports "Tampering detected" because of the race fixed
+  in 0.5.2, it now shows those breaks apart, and a super admin can mark
+  them as known (see the 0.5.2 known issue).
+
 ### Added
 - Audit log: entries name what they're about (#239). Each event now
   records the target's name and where it sits (a source's "customer /
