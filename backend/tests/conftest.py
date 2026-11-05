@@ -3,6 +3,7 @@ import socket
 
 import pytest
 from app import (
+    auth_events,
     login_throttle,
     models,  # noqa: F401  registers tables on SQLModel.metadata
 )
@@ -54,8 +55,10 @@ def _reset_login_throttle():
     # docstring), so one test's failed-login attempts would otherwise bleed
     # into the next test that reuses the same username.
     login_throttle.reset_for_tests()
+    auth_events.reset_for_tests()
     yield
     login_throttle.reset_for_tests()
+    auth_events.reset_for_tests()
 
 
 @pytest.fixture()

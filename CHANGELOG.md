@@ -8,6 +8,442 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-05
+
+The release after 0.5.0. There is no 0.5.1: its tag was used by mistake
+for a pre-release of older code, and releases here are immutable. This
+release carries everything from the pre-releases 0.5.1-rc.1 and
+0.5.2-rc.2 (0.5.2-rc.1 was tagged but never released). Their sections in
+[CHANGELOG.md](https://github.com/quaresma870/perchtail/blob/v0.5.2/CHANGELOG.md)
+list every change. Both were retested in the lab on Linux and Windows
+sources.
+
+### Upgrading from 0.5.0
+- **Back up `DATA_DIR` first**, with PerchTail stopped: copy the whole
+  directory.
+- A migration adds `source.agent_os`; it runs on start.
+- The database switches to SQLite's WAL mode: `perchtail.db-wal` and
+  `perchtail.db-shm` appear next to it. Keep `DATA_DIR` on a local disk,
+  not a network share.
+- **Upgrade the push agents** too: Windows agents need this version for
+  their rules to ignore case, and all agents get the SIGTERM and link
+  fixes.
+- Installed from source? `/opt/perchtail` was owned by your build
+  account; run `sudo chown -R root:root /opt/perchtail` once (see
+  `docs/install-from-source.md`).
+
+### Highlights
+- **Security:** SMB and WinRM no longer follow junctions or symlinks out
+  of the base path; SMB sessions are no longer shared between sources;
+  changing a source's host or port requires its credential again; rules
+  for Windows agents ignore case; `DATA_DIR` is readable by PerchTail's
+  user only.
+- **Search indexing** no longer locks the database, and skips a file it
+  can't read instead of failing the whole source.
+- **Audit log:** two requests writing at the same moment can no longer
+  break the hash chain.
+- **Push agent:** stops at once on SIGTERM, and leaves out links that
+  lead outside its folder.
+- **Releases** are built as a draft with the agent binaries,
+  `SHA256SUMS` and an SBOM attached, then published.
+
+### Known issue: audit chain breaks from before this release
+Before 0.5.2, two requests writing audit entries at the same moment could
+both chain from the same previous entry (fixed by #213). An install where
+that happened keeps showing "Tampering detected" in Settings → Audit log
+→ "Verify now", at the first such row. A break of this kind has a
+recognisable signature in the database (`auditlog` table): the reported
+row and the row before it have the **same `prev_hash`**, timestamps
+**within the same second**, and are dated **before your upgrade to
+0.5.2**. Treat any other break, or one dated after the upgrade, as
+tampering. 0.5.3 will let a super admin record these breaks as known
+(#217).
+
+### Fixed (since 0.5.2-rc.2)
+- Installing from source left `/opt/perchtail` owned by the account that
+  built it, not root, so that account could change the code the service
+  runs. Both `rsync` commands in `docs/install-from-source.md` now pass
+  `--chown=root:root`, and the guide shows how to check and how to fix an
+  existing install.
+- A release's target commit is the tagged one; before, GitHub recorded the
+  default branch for a tag on `dev`.
+
+## [0.5.2-rc.2] - 2026-11-04
+
+Second release candidate for 0.5.2. `v0.5.2-rc.1` was tagged but never
+released: its Release workflow run failed before creating the draft, and
+the e2e tests then found the audit log race below. Everything listed
+under 0.5.2-rc.1 is in this release too; the upgrade notes there apply
+(back up `DATA_DIR`, upgrade push agents).
+
+### Fixed
+- The audit log could report "Tampering detected" when two requests wrote
+  audit entries at the same moment: both could chain from the same
+  previous entry. Each writer now takes the database's write lock before
+  reading the last entry, so the second waits for the first. More likely
+  since the database moved to WAL mode in 0.5.2-rc.1.
+- The Release workflow creates the SBOM's directory before writing it,
+  and the draft job downloads only the agent binaries and the SBOM, not
+  the build record that `docker/build-push-action` uploads.
+
+## [0.5.2-rc.1] - 2026-11-04
+
+Release candidate for 0.5.2, from the lab retest of 0.5.1-rc.1. There is
+no 0.5.1 release: the `v0.5.1` tag was used by mistake for an earlier
+pre-release of older code, and releases here are immutable, so 0.5.1-rc.1
+is followed by 0.5.2. This is also the first release built by the new
+draft-first Release workflow. Back up `DATA_DIR` before upgrading, and
+upgrade push agents too (SIGTERM, link handling).
+
+### Fixed
+- Releases get their assets again. Releases in this repository are
+  immutable, and the Release workflow attached the agent binaries,
+  `SHA256SUMS` and SBOM after publication, which an immutable release
+  refuses, so `v0.5.1-rc.1` has none. The workflow now builds everything
+  into a **draft** release, from a tag push or a manual run, and a
+  maintainer publishes it; `X.Y` and `latest` move when a full release is
+  published. It also refuses a tag whose code carries another version
+  (see CONTRIBUTING.md, "Releasing").
+- WinRM TLS errors are decided by OpenSSL's verify code. A certificate
+  issued for another IP address ("IP address mismatch") is now reported
+  as a name mismatch, not as an unknown issuer.
+- Search indexing skips a file it can't read (no permission, rotated away
+  since the listing, grown past the limit) and indexes the rest. Before,
+  one such file failed the whole source's sweep, every sweep.
+- The push agent exits right away on SIGTERM. A connected agent used to
+  wait for the next command, so `systemctl stop` took 90 s and ended in
+  SIGKILL.
+- The push agent leaves out links that lead outside its folder (or are
+  broken), as SSH and local sources do, and browsing a file answers 404
+  instead of 502.
+- "Test connection" and browsing a source with no credential say so
+  instead of showing a Python error.
+- WinRM logs `winrm.path_outside_base` when a later block of a read is
+  refused, not only the first check.
+- Import points a port-only change without a credential at `.port`.
+- The source editor shows a save error next to the Save button.
+- The SSH key field on the import page wraps in narrow windows.
+- System settings say that open sessions pick up a Connections view
+  change within 30 seconds.
+- The source page writes agent OS names properly ("Linux", "Windows").
+- `DATA_DIR/winrm_ca` is `0700`, like the rest of `DATA_DIR`.
+
+### Documentation
+- `docs/install-from-source.md` installs the latest release tag rather
+  than a fixed one, builds as an ordinary user and installs with `sudo`,
+  lists `python3.12-venv`, gets Node.js 22 from nodejs.org with a checksum
+  check, and keeps settings in `/etc/perchtail/perchtail.env`.
+
+### Changed
+- Dependencies: actions/checkout, setup-go, setup-node and setup-python 7,
+  trivy-action 0.36.0, @codemirror/language 6.13.1, @codemirror/merge
+  6.12.3, svelte 5.57.3, svelte-check 4.7.8, ruff 0.17.3 and pytest 9.2.0.
+- CI installs the e2e SSH/SMB test servers in their own step, before
+  Playwright starts.
+
+## [0.5.1-rc.1] - 2026-11-04
+
+Release candidate for 0.5.1: fixes for what the Hyper-V lab test of 0.5.0
+found, for the lab to retest before the final release. Back up `DATA_DIR`
+before upgrading; the database switches to WAL mode on first start (see
+"Fixed"). Upgrade Windows push agents so their rules ignore case.
+
+### Security
+- SMB and WinRM sources no longer follow junctions or symlinks out of the
+  base path. Before, anyone able to write to the log folder on the Windows
+  host could create a junction (no special privilege needed) and expose
+  any folder the service account can read to users with `view` on the
+  source. Junctions and symlinks are now left out of listings, and a path
+  through one answers 404 (`smb.path_outside_base` /
+  `winrm.path_outside_base`). WinRM re-checks with every block it reads.
+- SMB sessions are no longer shared between sources. smbclient's
+  process-wide pool is keyed by host and username, so a source with the
+  wrong password could read with another source's authenticated session,
+  and a passing connection test didn't prove its credential was right.
+  Every SMB request now authenticates with its own connection, which is
+  closed afterwards.
+- Changing a source's host or port now requires entering the credential
+  again (in the editor, the API and bulk import), as the folder picker
+  already did. Before, editing could send the saved credential (for SMB
+  and WinRM, an NTLM exchange) to any new address.
+- Rules for an agent running on Windows are now matched case-insensitively,
+  as for SMB and WinRM sources. Before, `exclude secret/**` didn't hide a
+  folder named `SECRET` on disk, though NTFS treats both as the same
+  folder. The agent now reports its OS when it connects (shown as **Agent
+  OS** on the source's page). Upgrade Windows agents to get this: older
+  agents don't report it and keep case-sensitive rules.
+- `DATA_DIR` is now readable by PerchTail's user only: on startup the
+  directory is set to `0700`, and the database (with its WAL/SHM files),
+  the credential salt and `known_hosts` to `0600`. Earlier versions left
+  them `0644`, readable by any local user on a host install.
+
+### Fixed
+- SMB: a directory symlink in a folder no longer makes the whole listing
+  fail with `SMBLinkRedirectionError`.
+- WinRM: browsing a path that is a file answers 404 instead of listing the
+  file under a doubled path.
+- Search indexing no longer locks the database. The first index of a
+  large source kept one write transaction open while it fetched every
+  file, and for those minutes logins and anything else that writes failed
+  with `database is locked` (HTTP 500). Each file is now fetched first and
+  committed on its own, the database uses SQLite's WAL mode so reads don't
+  wait for writes, and a write waits up to 30 s for another to finish
+  instead of failing. Indexing also stops when the source is disabled or
+  taken out of search mid-sweep.
+- Scheduled jobs that start late (a busy worker) now run instead of being
+  skipped, and runs that piled up collapse into one. A skipped indexing
+  sweep also delayed alerts.
+- Import refuses a rule whose pattern alone is in quotes. In an inline
+  list (`rules: [include **/*, exclude "*/secret/**"]`) the quotes became
+  part of the pattern, so the rule never matched.
+- A folder ZIP over `MAX_FETCH_MB` is refused before anything is
+  downloaded, using the sizes in the listing, and the 413 now gives the
+  folder's size. Before, an SMB folder downloaded up to the limit first.
+- The source page reloads when the source id in the URL changes.
+- Paths the push-agent refuses (a link out of its folder) answer 404, as
+  over SSH, instead of 502.
+- TLS errors say whether the certificate is for another name, has expired
+  or comes from an unknown issuer, instead of always "isn't trusted".
+- Import keeps offering to set a credential for sources that have none,
+  also after they've been imported, and takes an SSH private key as well
+  as a password.
+- Compare shows which source each side comes from.
+- Machines and folders expanded in the explorer stay expanded after
+  visiting Search or Settings, like the tabs.
+- A change to the Connections view (System settings) reaches users who
+  already have PerchTail open on their next navigation, without a reload.
+- The source page shows the plain-HTTP warning for WinRM sources, as the
+  editor does.
+- `startup.data_layout.moved` is logged as a structured event in Docker
+  too, and `logs.retention.size_limit` has the numbers as fields instead
+  of in the event name.
+
+### Added
+- [docs/install-from-source.md](docs/install-from-source.md): running
+  PerchTail on a Linux host without Docker, with a systemd unit.
+- Releases now carry what's needed to install them (`.github/workflows/release.yml`):
+  - push-agent binaries for Linux (amd64, arm64) and Windows (amd64), with `SHA256SUMS`;
+  - the Docker image on `ghcr.io/quaresma870/perchtail`, for amd64 and arm64, with provenance and an SBOM;
+  - the SBOM, also attached to the release.
+  `latest` and `X.Y` image tags move only with full releases. The workflow can also be run by hand for an existing tag, to add these to a release published earlier.
+
+### Changed
+- `backend/requirements.txt` now pins every Python package, transitive
+  ones included, so the image and a source install get exactly the same
+  versions. The version ranges moved to `backend/requirements.in`; see
+  CONTRIBUTING.md for how to regenerate the pins.
+
+## [0.5.0] - 2026-11-04
+
+Fixes and features from the Hyper-V lab test of 0.4.0. The viewer
+becomes one explorer across every source. Sources can read several
+folders, and their Base path can be picked by browsing the host. Searches
+can be narrowed by customer, folder, source and path. The whole
+configuration can be bulk imported and exported as YAML. Logs are capped
+by size, and the database moves to its own directory. Folder visibility
+now follows the rules (a security fix), and the WinRM docs match what
+the connector really needs.
+
+### Upgrading from 0.4.x
+
+Database migrations run automatically on startup. Back up the `/data`
+volume first.
+
+- **The database, credential salt and SSH `known_hosts` move to
+  `/data/db`** (#172). On the first start of 0.5.0 they are moved from
+  `/data` automatically, salt first and database last, and the move is
+  logged (`startup.data_layout.moved`). Nothing to do with the stock
+  `docker-compose.yml`. If you set `DATABASE_URL`, `CREDENTIAL_SALT_PATH`
+  or `SSH_KNOWN_HOSTS_PATH` yourself, those paths are kept as they are.
+  If a database is still found at `/data/perchtail.db` while another one is
+  in use in `/data/db`, startup logs `startup.data_layout.legacy_database_left`:
+  stop PerchTail and move the right one into place. Update your backups to
+  include `/data/db`.
+- **Logs** now rotate at `LOG_MAX_FILE_MB` (100) as well as at midnight, and
+  all logs together are capped at `LOG_MAX_TOTAL_MB` (2048). Archives are
+  named `perchtail.log.<day>.<n>.gz`; existing `perchtail.log.<day>.gz`
+  archives keep expiring under `LOG_RETENTION_DAYS`.
+- **WinRM sources:** the documented JEA setup could never work with this
+  connector, which needs an account with remote-shell rights. The docs now
+  say so; prefer SMB or the push agent where possible (#169). Existing
+  WinRM sources keep inferring HTTPS or HTTP from the port until they are
+  saved in the editor, which stores the scheme explicitly.
+- **SMB and WinRM base paths** are now validated when they change: an SMB
+  source pointing at `C$` or a drive path, or a WinRM source with a
+  relative path, keeps working but must be corrected the next time its
+  path is edited (#159).
+
+### Added
+- **One explorer across every source** (#162):
+  - machines expand in place in the viewer's sidebar, in list or tree
+    view, and their folders load lazily;
+  - tabs from several sources stay open side by side, each marked with
+    its source, so the same `app.log` on two servers is two tabs;
+  - Compare works across sources;
+  - open tabs survive visiting Search or Settings and coming back (in
+    memory only, closed on logout);
+  - a source that fails to load shows its error on its own node;
+  - `/viewer/<id>` now expands and reveals that source.
+- **Find all, Notepad++-style** (#155):
+  - one row per matching line, showing the whole line with every match
+    highlighted and a hit count;
+  - rows can be selected with click, Ctrl/Cmd+click, Shift+click or
+    Ctrl/Cmd+A;
+  - a right-click menu copies the selected lines (with or without line
+    numbers), searches within the results, excludes lines matching a
+    pattern (both chainable, with breadcrumbs to go back), and jumps to
+    the line.
+- **Source overview** (#157): creating a source lands on a read-only
+  overview instead of back on its edit form. It shows the details, a
+  prominent "No rules yet" callout, the rules, a connection test and, for
+  agent sources, the enrollment token. Editing moved to
+  `/settings/sources/<id>/edit`.
+- **Settings → System → Connections view** (#156): a default list or tree
+  view for everyone, and whether users may switch between them. When they
+  may, each browser remembers its choice.
+- **Pick the Base path by browsing the host** (#159): **Browse…** next to
+  the field lists folders over SSH, drives then folders over WinRM, and the
+  host's shares then folders over SMB (share listing via SRVSVC, with no
+  new dependency). Folders only, never file names; limited to users who
+  can manage sources and audited. A saved credential is only reused for
+  the host and port it was saved for.
+- **Several folders in one source** (#161): labelled folders on the same
+  host, each shown at the top level of the source's tree. Rules see the
+  labelled paths (`**/*.log` for all, `IIS/**` for one), and the connection
+  test checks each folder. Push-agent sources stay single-folder. How many
+  folders a source may have is set in Settings → System → Folders per
+  source: 20 by default, 1 turns the feature off, 100 at most. Lowering it
+  never locks an existing source out: it keeps its folders but can't add
+  more.
+- **Search scope** (#163): narrow a search to any mix of customers,
+  folders (with their sub-folders) and sources, and to file paths
+  containing some text or matching a glob. The scope is applied before the
+  result limit, kept in the URL and remembered per browser. The API takes
+  `customer_id`, `folder_id`, `source_id` (repeatable) and `path`.
+- **WinRM scheme and CA certificate per source** (#169): an explicit
+  HTTPS/HTTP choice instead of guessing from the port, with each scheme's
+  default port, and an optional CA certificate (PEM) trusted for that
+  source only, for internal PKI or self-signed listeners, without a
+  server-wide `REQUESTS_CA_BUNDLE`.
+- **Log size limits** (#172): `LOG_MAX_FILE_MB` rotates the log before
+  midnight when it grows past it, and `LOG_MAX_TOTAL_MB` caps all logs,
+  deleting the oldest archives first. When that cap deletes logs that
+  `LOG_RETENTION_DAYS` would have kept, a warning is logged and
+  `/monitoring/health` reports `logs.size_limit_deleted_early`.
+  `LOG_QUIET_THIRD_PARTY=true` keeps PerchTail's own DEBUG logging while
+  capping protocol libraries (smbprotocol, spnego, paramiko, ...) at INFO.
+- **Bulk import and export** (#179): Settings → Import / export (super
+  admins) creates and updates customers, folders, sources and rules from
+  one YAML file, with a preview of every change, credentials from the
+  file, `${env:PERCHTAIL_IMPORT_*}` or typed in, and an all-or-nothing
+  apply. Importing the same file again changes nothing; nothing is ever
+  deleted. Export writes the same format, without credentials. See
+  `docs/bulk-import.md` and `docs/examples/perchtail-import.example.yaml`.
+
+### Changed
+- State is split by kind (#172): `DATA_DIR` (`/data/db` in the image)
+  holds the database, credential salt and SSH `known_hosts`, apart from
+  `LOG_DIR` (`/data/logs`) and `SCRATCH_DIR` (`/data/scratch`), so each can
+  be its own volume and a log burst can't fill the database's disk. See
+  the upgrade notes above.
+- Base path is checked per protocol when a source is created or its path
+  changes (#159): SMB takes a share name (no drive paths like `C:\Logs`,
+  no `C$`/`ADMIN$`), WinRM an absolute Windows path on any drive. The
+  editor shows a protocol-specific placeholder and hint. Existing sources
+  aren't re-checked until their path is edited.
+- Changing a source's host, port, base path or folders clears its search
+  index and alert positions, since the files are no longer the same, and
+  the `source.update` audit entry now records old and new values (the
+  credential only as "replaced").
+- The window itself no longer scrolls (#154). The navigation stays in
+  place, and in the viewer only the log pane, the explorer and the Find
+  all panel scroll. Before, a large log stretched the whole page.
+- A failed open, reload or compare now shows a banner above the editor
+  with the server's reason, e.g. "This file is 100.0 MB, over this
+  server's 64 MB limit (MAX_FETCH_MB)", plus a Try again action when
+  useful. The explorer is no longer wiped. The 413 body now includes
+  `size_bytes` and `limit_bytes` (#160).
+- `/open` is served inline as text instead of as an attachment.
+  Download icons and actions are hidden from users without the
+  `download` capability on that source, using the new
+  `my_capabilities` field of each source (#174).
+
+### Fixed
+- WinRM sources whose base path is a drive root (`D:\`) listed the
+  current directory on that drive instead of its root.
+- Source editor and role editor form controls: checkboxes and toggles
+  sit next to their labels again (#158).
+- Secret fields (SSH private key, passwords, SSO client secret) opt out
+  of browser spellcheck and grammar extensions such as Grammarly, which
+  could otherwise send their contents to third-party servers. The
+  private key field is monospace without soft wrapping (#158).
+
+### Security
+- Rules now decide which **folders** are visible, not only which files.
+  Before, every folder was always listed. An excluded folder, and through
+  direct API calls its whole tree of sub-folder names, stayed visible, and
+  a source with no rules showed its complete directory skeleton. A folder
+  is now shown and browsable only if some file below it could be visible
+  under the same ordered, last-match-wins rules. Hidden folders answer 404
+  on browse and folder ZIP, and the search indexer no longer walks them
+  (#164). **Upgrade note:** folders that only contain files your rules
+  don't show now disappear from the tree. Root-level patterns such as
+  `*.log` never cross `/`, so they show no folders at all: use `**/*.log`
+  to include matching files at any depth. Regex rules are analysed
+  conservatively; to hide a folder reliably, use a glob exclude such as
+  `folder/**`.
+- Failed logins, account lockouts and login attempts while locked out are
+  now recorded in the audit log and the app log (`user.login_failed`,
+  `user.locked_out`, `user.login_throttled`), with the attempted username,
+  client IP and reason, never the password. Repeated identical failures
+  within 60 s are folded into one row (#171).
+- Connection checks no longer show raw library errors (UNC paths, host
+  keys, internals) to users who can only view a source. They get an
+  actionable message instead, and users who can manage sources also see
+  the underlying error (#170).
+
+### Fixed
+- Push-agent sources can be browsed and opened again. Browse, open and
+  download answered 501 "protocol agent not yet supported" while the
+  connection check passed. All code paths now share one connector
+  registry (#165).
+- SMB: the live log of a Windows service, held open for writing by
+  another process, can now be opened instead of failing with
+  `STATUS_SHARING_VIOLATION` (#166). A file over `MAX_FETCH_MB` is refused
+  before transferring anything, instead of after downloading up to the
+  limit, which took minutes (#167).
+- WinRM: a folder containing a file with an accented or other non-ASCII
+  name can now be listed. Before, the whole listing failed with a decode
+  error (#168).
+- Predictable source-side failures get their own status and a clear
+  message instead of a bare 500:
+  - no read permission: 403;
+  - not found: 404;
+  - file locked: 409;
+  - unreachable, authentication, SSH host key mismatch or untrusted TLS
+    certificate: 502.
+
+  An SMB Base path that isn't a share now says so (#170).
+- Archives (`.zip`, `.tar.gz`) are browsed as a folder tree instead of a
+  flat list of every member. Members with odd names (`../`, absolute) are
+  shown normalized and still open (#175).
+
+### Documentation
+- WinRM setup now states what the connector actually needs: an account
+  with remote-shell rights (Administrators, or `GXGR` in the WinRM
+  `RootSDDL`). The JEA instructions, which couldn't work, are gone; moving
+  to PSRP so a JEA endpoint can constrain the account is tracked in #169.
+  SMB or the push agent is recommended where possible.
+- New: base path per protocol, the folder picker and several folders per
+  source (`docs/source-setup.md`), bulk import (`docs/bulk-import.md`),
+  the data directories (README), and the `logs` health fields
+  (`docs/monitoring.md`).
+- SSH/SFTP setup: `ForceCommand internal-sftp` is required with a
+  `nologin` shell; chroot is optional hardening, with the sshd ownership
+  rule and a bind-mount example for Debian/Ubuntu; with a chroot, Base path
+  is relative to it (#173). Folder visibility and SSH rule case-sensitivity
+  are documented with the rule principles.
+
 ## [0.4.1] - 2026-11-03
 
 A security fix release. SSH/SFTP sources no longer follow symlinks out

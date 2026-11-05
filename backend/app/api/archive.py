@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 from starlette.background import BackgroundTask
 
+from app import source_roots
 from app.api.auth import get_current_active_user
 from app.archives import (
     DecompressionLimitError,
@@ -19,20 +20,23 @@ from app.archives import (
     is_archive,
     is_transparent_gzip,
     list_members,
+    normalize_member_name,
+    resolve_member_name,
+    tree_children,
 )
 from app.audit import record_audit_event
 from app.auth.models import Capability, User
 from app.auth.rbac import require_capability
 from app.collectors import local as local_collector
-from app.collectors import smb as smb_collector
-from app.collectors import ssh as ssh_collector
-from app.collectors import winrm as winrm_collector
-from app.collectors.base import FetchTooLargeError, max_fetch_bytes
+from app.collectors.base import DirEntry, FetchTooLargeError, max_fetch_bytes
+from app.collectors.registry import CONNECTORS
 from app.config import get_settings
 from app.db import get_session
 from app.logging_config import get_logger
 from app.models import Protocol, Rule, Source
 from app.rules import (
+    is_dir_visible,
+    is_entry_visible,
     is_safe_relative_path,
     is_safe_windows_relative_path,
     is_visible,
@@ -43,12 +47,7 @@ from app.scratch import get_scratch_store
 router = APIRouter(prefix="/sources/{source_id}", tags=["archive"])
 logger = get_logger(__name__)
 
-_CONNECTORS = {
-    Protocol.ssh: ssh_collector,
-    Protocol.smb: smb_collector,
-    Protocol.winrm: winrm_collector,
-    Protocol.local: local_collector,
-}
+_CONNECTORS = CONNECTORS
 
 
 class BrowseEntry(BaseModel):
@@ -76,7 +75,10 @@ def _require_local_source_allowed(source: Source) -> None:
     if (
         source.protocol == Protocol.local
         and not source.is_system
-        and not local_collector.base_path_allowed(source.base_path)
+        and not all(
+            local_collector.base_path_allowed(path)
+            for path in [source.base_path] + [r["path"] for r in source_roots.roots_of(source)]
+        )
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -104,6 +106,27 @@ def _require_safe_path(source: Source, path: str) -> None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid path")
 
 
+def _split_archive_path(path: str) -> tuple[str, str] | None:
+    """For a browse path that goes into an archive (`logs/a.zip` or
+    `logs/a.zip/sub/dir`), returns (archive path, member directory inside
+    it); None for an ordinary directory."""
+    if not path:
+        return None
+    segments = path.split("/")
+    for i, segment in enumerate(segments):
+        if is_archive(segment):
+            return "/".join(segments[: i + 1]), "/".join(segments[i + 1 :])
+    return None
+
+
+def _dir_visible(source: Source, path: str, rules: list[Rule]) -> bool:
+    return is_dir_visible(path, rules, case_insensitive=rules_case_insensitive(source))
+
+
+def _entry_visible(source: Source, path: str, is_dir: bool, rules: list[Rule]) -> bool:
+    return is_entry_visible(path, is_dir, rules, case_insensitive=rules_case_insensitive(source))
+
+
 def _visible(source: Source, path: str, rules: list[Rule]) -> bool:
     return is_visible(path, rules, case_insensitive=rules_case_insensitive(source))
 
@@ -120,11 +143,26 @@ def _too_large(exc: DecompressionLimitError) -> HTTPException:
     )
 
 
-def _fetch_too_large(exc: FetchTooLargeError) -> HTTPException:
-    logger.warning("archive.fetch_limit", error=str(exc))
+def _fetch_too_large(exc: FetchTooLargeError, *, folder: bool = False) -> HTTPException:
+    logger.warning("archive.fetch_limit", error=str(exc), size_bytes=exc.size, folder=folder)
+    limit = exc.limit if exc.limit is not None else max_fetch_bytes()
+    limit_mb = limit / 1024**2
+    what = "folder" if folder else "file"
+    if exc.size is not None:
+        message = (
+            f"This {what} is {exc.size / 1024**2:.1f} MB, over this server's "
+            f"{limit_mb:.0f} MB limit (MAX_FETCH_MB)."
+        )
+    else:
+        message = f"This {what} is over this server's {limit_mb:.0f} MB limit (MAX_FETCH_MB)."
     return HTTPException(
         status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-        detail="File or folder is too large to fetch (MAX_FETCH_MB)",
+        detail={
+            "message": message,
+            "error_code": "fetch_too_large",
+            "size_bytes": exc.size,
+            "limit_bytes": limit,
+        },
     )
 
 
@@ -152,12 +190,14 @@ def _materialize(
         # combined virtual path, same convention /browse uses), and a client
         # calling /open or /download directly bypasses whatever the browse
         # listing filtered out, so this has to be checked again here.
-        if not _visible(source, f"{path}/{member}", rules):
+        member = normalize_member_name(member)
+        if not member or not _visible(source, f"{path}/{member}", rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         try:
             with connector.local_copy(source, path) as archive_local:
+                raw_name = resolve_member_name(archive_local, filename, member)
                 extract_member(
-                    archive_local, filename, member, destination, _max_decompressed_bytes()
+                    archive_local, filename, raw_name, destination, _max_decompressed_bytes()
                 )
         except DecompressionLimitError as exc:
             raise _too_large(exc) from exc
@@ -200,27 +240,37 @@ def browse(
     rules = _rules_for(session, source.id)
     connector = _connector(source)
 
-    filename = path.rsplit("/", 1)[-1] if path else ""
-    if path and is_archive(filename):
-        if not _visible(source, path, rules):
+    split = _split_archive_path(path)
+    if split is not None:
+        archive_path, member_dir = split
+        archive_name = archive_path.rsplit("/", 1)[-1]
+        if not _visible(source, archive_path, rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
-        with connector.local_copy(source, path) as archive_local:
-            members = list_members(archive_local, filename)
+        if member_dir and not _dir_visible(source, path, rules):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        with connector.local_copy(source, archive_path) as archive_local:
+            members = list_members(archive_local, archive_name)
+        children = tree_children(members, member_dir)
         return [
             BrowseEntry(
-                name=member.name.rsplit("/", 1)[-1],
-                path=f"{path}/{member.name}",
-                is_dir=member.is_dir,
-                size=member.size,
+                name=child.name.rsplit("/", 1)[-1],
+                path=f"{archive_path}/{child.name}",
+                is_dir=child.is_dir,
+                size=child.size,
                 is_archive=False,
             )
-            for member in members
-            # Same rule as regular directory listing (collectors/*.list_directory):
-            # directories are always shown so the tree stays navigable, only
-            # files are subject to the rule chain. Without this, a rule scoped
-            # to show just the archive itself would leak every file inside it.
-            if member.is_dir or _visible(source, f"{path}/{member.name}", rules)
+            for child in children
+            # Same filter as regular listings: files through the rule chain,
+            # folders only when something below them could be visible. A
+            # rule scoped to show just the archive itself doesn't leak its
+            # members.
+            if _entry_visible(source, f"{archive_path}/{child.name}", child.is_dir, rules)
         ]
+
+    if path and not _dir_visible(source, path, rules):
+        # A folder the rules hide is not browsable at all -- otherwise its
+        # sub-folder names could still be enumerated by calling the API.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
 
     entries = connector.list_directory(source, rules, path)
     return [
@@ -259,6 +309,9 @@ def _resolve_content(
 
     if not needs_scratch:
         _require_local_source_allowed(source)
+        if source_roots.is_multi_root(source):
+            rooted, inner = source_roots.split(source, path)
+            return local_collector.resolve_path(rooted, inner), filename, None
         return local_collector.resolve_path(source, path), filename, None
 
     store = get_scratch_store()
@@ -303,7 +356,17 @@ def open_file(
     )
     session.commit()
     headers = {"X-Scratch-Key": key} if key else {}
-    return FileResponse(served_path, filename=filename, headers=headers)
+    # Inline, not an attachment: this is what the viewer reads to display a
+    # file, not a download endpoint (downloads go through /download, gated
+    # by the `download` capability -- #174). nosniff (set app-wide) keeps
+    # a browser from rendering it as HTML.
+    return FileResponse(
+        served_path,
+        filename=filename,
+        headers=headers,
+        media_type="text/plain; charset=utf-8",
+        content_disposition_type="inline",
+    )
 
 
 class CloseRequest(BaseModel):
@@ -362,38 +425,40 @@ class _ZipBudget:
     remaining: int
 
 
+def _zip_entries(connector, source: Source, rules: list[Rule], current_dir: str) -> list[DirEntry]:
+    """Every rule-visible file under `current_dir`, from listings alone --
+    nothing is fetched yet, so the folder's listed total can be checked
+    against MAX_FETCH_MB before the first download (#191). Nested
+    .zip/.tar.gz files are included as raw files rather than expanded --
+    expanding archives-within-a-bulk-zip isn't worth the complexity for
+    what CLAUDE.md asks for here (download a folder)."""
+    out: list[DirEntry] = []
+    for entry in connector.list_directory(source, rules, current_dir):
+        if entry.is_dir:
+            out.extend(_zip_entries(connector, source, rules, entry.path))
+        elif _visible(source, entry.path, rules):
+            out.append(entry)
+    return out
+
+
 def _zip_directory(
     connector,
     source: Source,
-    rules: list[Rule],
+    entries: list[DirEntry],
     request_root: str,
-    current_dir: str,
     zf: zipfile.ZipFile,
     tmp_dir: Path,
     budget: "_ZipBudget",
 ) -> None:
-    """Recursively fetches every rule-visible file under `request_root`
-    straight into the zip, one fresh fetch per file — same always-fresh
-    rule as every other read in this project, just batched into one archive
-    for convenience. Nested .zip/.tar.gz members are included as raw files
-    rather than expanded — expanding archives-within-a-bulk-zip isn't worth
-    the complexity for what CLAUDE.md asks for here (download a folder).
-    `current_dir` walks deeper on each recursive call; arcnames stay
-    relative to the original `request_root` throughout."""
-    for entry in connector.list_directory(source, rules, current_dir):
-        if entry.is_dir:
-            _zip_directory(connector, source, rules, request_root, entry.path, zf, tmp_dir, budget)
-            continue
-        if not _visible(source, entry.path, rules):
-            continue
+    """Fetches each of `entries` fresh, straight into the zip -- same
+    always-fresh rule as every other read in this project, just batched into
+    one archive for convenience. Arcnames are relative to `request_root`.
+    The fetched size is what counts against the budget: a file may have
+    grown since it was listed."""
+    for entry in entries:
         arcname = entry.path[len(request_root) + 1 :] if request_root else entry.path
         with tempfile.NamedTemporaryFile(dir=tmp_dir, delete=False) as tmp_file:
             destination = Path(tmp_file.name)
-        # The listed size is checked first so an obviously-too-big folder
-        # fails before fetching anything; the fetched size is what counts.
-        if entry.size > budget.remaining:
-            destination.unlink()
-            raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
         connector.fetch_file(source, entry.path, destination)
         budget.remaining -= destination.stat().st_size
         if budget.remaining < 0:
@@ -415,18 +480,29 @@ def download_folder_zip(
     file fresh — no different from any other read here, just batched."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
+    if path and not _dir_visible(source, path, rules):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
     connector = _connector(source)
+
+    limit = max_fetch_bytes()
+    entries = _zip_entries(connector, source, rules, path)
+    listed = sum(entry.size for entry in entries)
+    if listed > limit:
+        raise _fetch_too_large(
+            FetchTooLargeError("folder is over the MAX_FETCH_MB limit", size=listed, limit=limit),
+            folder=True,
+        )
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="perchtail-zip-"))
     zip_path = tmp_dir / "download.zip"
-    budget = _ZipBudget(remaining=max_fetch_bytes())
+    budget = _ZipBudget(remaining=limit)
     try:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            _zip_directory(connector, source, rules, path, path, zf, tmp_dir, budget)
+            _zip_directory(connector, source, entries, path, zf, tmp_dir, budget)
             file_count = len(zf.namelist())
     except FetchTooLargeError as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise _fetch_too_large(exc) from exc
+        raise _fetch_too_large(exc, folder=True) from exc
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise

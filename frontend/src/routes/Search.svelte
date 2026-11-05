@@ -1,11 +1,23 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { push } from 'svelte-spa-router'
+  import { push, replace, router } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
+  import SearchScopePicker from '../lib/components/SearchScopePicker.svelte'
+  import {
+    loadStoredScope,
+    parseScopeParam,
+    scopeKey,
+    scopeParam,
+    searchQueryString,
+    storeScope,
+    type ScopeItem,
+    type SearchScope,
+  } from '../lib/search-scope'
   import { filterSourcesByNameOrHost } from '../lib/source-match'
   import type { SearchHit, Source } from '../lib/types'
 
   let query = ''
+  let scope: SearchScope = { items: [], path: '' }
   let hits: SearchHit[] = []
   let allSources: Source[] = []
   let sourcesById: Record<number, Source> = {}
@@ -31,7 +43,8 @@
     // already-fetched, RBAC-scoped source list (see lib/source-match.ts) —
     // metadata, not indexed content, so it's always current and doesn't
     // need a round-trip of its own.
-    matchingSources = filterSourcesByNameOrHost(allSources, trimmed)
+    matchingSources = filterSourcesByNameOrHost(scopedSources(), trimmed)
+    syncUrl()
     if (!trimmed) {
       hits = []
       return
@@ -39,7 +52,7 @@
     loading = true
     error = ''
     try {
-      hits = await api.get<SearchHit[]>(`/search?q=${encodeURIComponent(trimmed)}`)
+      hits = await api.get<SearchHit[]>(`/search?${searchQueryString(trimmed, scope)}`)
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Search failed'
     } finally {
@@ -60,7 +73,82 @@
     push(`/viewer/${source.id}`)
   }
 
-  onMount(loadSources)
+  // Only what can be named from the user's own source list survives from
+  // a URL or from storage -- a scope item the user can no longer see is
+  // dropped rather than shown as a bare id.
+  function knownItems(): Map<string, ScopeItem> {
+    const known = new Map<string, ScopeItem>()
+    for (const source of allSources) {
+      if (source.customer_id !== null) {
+        const item = { kind: 'customer' as const, id: source.customer_id, name: source.customer_name ?? '' }
+        known.set(scopeKey(item), item)
+      }
+      for (const folder of source.folder_path) {
+        const item = { kind: 'folder' as const, id: folder.id, name: folder.name }
+        known.set(scopeKey(item), item)
+      }
+      known.set(`source:${source.id}`, { kind: 'source', id: source.id, name: source.name })
+    }
+    return known
+  }
+
+  // Sources the name/host matches are limited to: the chosen sources, and
+  // everything under a chosen customer or folder.
+  function scopedSources(): Source[] {
+    if (scope.items.length === 0) return allSources
+    const keys = new Set(scope.items.map(scopeKey))
+    return allSources.filter(
+      (s) =>
+        keys.has(`source:${s.id}`) ||
+        (s.customer_id !== null && keys.has(`customer:${s.customer_id}`)) ||
+        s.folder_path.some((f) => keys.has(`folder:${f.id}`)),
+    )
+  }
+
+  function syncUrl() {
+    const params = new URLSearchParams()
+    if (query.trim()) params.set('q', query.trim())
+    if (scope.items.length) params.set('scope', scopeParam(scope.items))
+    if (scope.path.trim()) params.set('path', scope.path.trim())
+    const qs = params.toString()
+    replace(qs ? `/search?${qs}` : '/search')
+  }
+
+  function changeScope(next: SearchScope) {
+    scope = next
+    storeScope(scope)
+    if (searched && query.trim()) runSearch()
+    else syncUrl()
+  }
+
+  onMount(async () => {
+    // Read the URL before anything is awaited: setting the query only after
+    // the source list loads would wipe whatever the user typed meanwhile.
+    const params = new URLSearchParams(router.querystring ?? '')
+    const fromUrl = params.has('scope') || params.has('path')
+    const stored = fromUrl ? null : loadStoredScope()
+    const pendingItems = stored ? stored.items : parseScopeParam(params.get('scope'))
+    const pendingPath = stored ? stored.path : (params.get('path') ?? '')
+    if (params.has('q')) query = params.get('q') ?? ''
+    scope = { items: [], path: pendingPath }
+    const untouched = scope
+
+    await loadSources()
+    // Scope items need names from the source list; apply them unless the
+    // user already changed the scope.
+    if (scope === untouched) {
+      const known = knownItems()
+      scope = {
+        items: pendingItems
+          .map((i) => known.get(scopeKey(i)))
+          .filter((i): i is ScopeItem => i !== undefined),
+        path: pendingPath,
+      }
+    }
+    // A query from the URL, or a search the user ran before the list
+    // arrived, runs (again) with the scope and source names in place.
+    if (query.trim() && (params.has('q') || searched)) runSearch()
+  })
 </script>
 
 <div class="page">
@@ -77,6 +165,12 @@
       {loading ? 'Searching…' : 'Search'}
     </button>
   </form>
+
+  <SearchScopePicker
+    sources={allSources}
+    {scope}
+    on:change={(e) => changeScope(e.detail)}
+  />
 
   {#if error}
     <p class="error">{error}</p>

@@ -14,9 +14,9 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -50,9 +50,9 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -76,9 +76,9 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -87,7 +87,7 @@ jobs:
       - name: Install backend dependencies
         run: pip install -r backend/requirements-dev.txt
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -102,6 +102,17 @@ jobs:
       - name: Install Playwright browser
         working-directory: frontend
         run: npx playwright install --with-deps chromium
+
+      # Installed as its own step, so a slow apt mirror doesn't eat into
+      # Playwright's webServer start-up timeout (it did, twice; the
+      # setup script skips apt when sshd and smbd are already there).
+      - name: Install SSH/SMB test servers
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_SUSPEND: "1"
+        run: |
+          sudo -E apt-get update -qq
+          sudo -E apt-get install -y -qq openssh-server samba samba-common-bin
 
       - name: E2E tests (Playwright)
         working-directory: frontend
@@ -136,9 +147,9 @@ jobs:
       run:
         working-directory: agent
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.24"
           cache-dependency-path: agent/go.sum
@@ -186,14 +197,13 @@ jobs:
   docker-image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v3
 
       # push: false, load: true -- built into the runner's local Docker
-      # daemon only, so Trivy below can scan it. Nothing is published to a
-      # registry here; that's a separate concern for when a release
-      # pipeline exists.
+      # daemon only, so Trivy below can scan it. Publishing to ghcr.io is
+      # done by .github/workflows/release.yml when a release is published.
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -208,19 +218,17 @@ jobs:
       # tags were force-pushed to credential-stealing code; v0.35.0 is the
       # first release published after that cleanup.
       - name: Scan image for vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: perchtail:ci
           severity: "HIGH,CRITICAL"
           exit-code: "1"
           ignore-unfixed: true
 
-      # SBOM as a build artifact for now, not yet attached to a GitHub
-      # Release -- there's no release-publishing workflow in this repo yet
-      # (see ROADMAP.md), so "alongside releases" is a follow-up once one
-      # exists rather than invented here.
+      # SBOM as a build artifact of every CI run. Releases get their own,
+      # for the published multi-arch image (.github/workflows/release.yml).
       - name: Generate SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: perchtail:ci
           format: cyclonedx

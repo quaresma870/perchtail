@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte'
+  import { createEventDispatcher, onMount } from 'svelte'
+  import { get } from 'svelte/store'
+  import { explorerExpanded, setExpanded } from '../viewer-tabs'
   import { api, ApiError } from '../api'
   import { tabKey, memberPath } from '../tab-key'
   import { downloadHref } from '../download-href'
@@ -9,14 +11,17 @@
   export let entry: BrowseEntry
   export let depth = 0
   // Path of the nearest ancestor archive we're inside, or null for a normal
-  // filesystem node. The backend only supports one level of archive
-  // expansion (browse can't descend into a sub-path of a virtual archive
-  // folder — see api/archive.py), so a directory-flagged member inside an
-  // archive is a dead end, not further expandable.
+  // filesystem node. Folders inside an archive expand like real ones (the
+  // backend lists archive members as a tree), but an archive nested inside
+  // another archive is not opened.
   export let archiveRoot: string | null = null
   // The tab key of the file currently open in the viewer, so this node can
   // highlight itself the same way an editor's file tree does.
   export let activeKey: string | null = null
+  // Whether the user holds `download` on this source -- without it the
+  // per-entry download icon isn't shown (the endpoint would refuse anyway,
+  // #174).
+  export let canDownload = true
 
   const dispatch = createEventDispatcher<{
     open: { path: string; member: string | null; name: string }
@@ -28,15 +33,16 @@
   let loading = false
   let error = ''
 
-  const canExpand = (entry.is_dir || entry.is_archive) && archiveRoot === null
+  const canExpand = entry.is_dir || (entry.is_archive && archiveRoot === null)
+  const expandKey = `dir:${sourceId}:${archiveRoot ?? ''}:${entry.path}`
 
   $: ownKey =
     archiveRoot !== null
-      ? tabKey(archiveRoot, memberPath(entry.path, archiveRoot))
-      : tabKey(entry.path, null)
+      ? tabKey(sourceId, archiveRoot, memberPath(entry.path, archiveRoot))
+      : tabKey(sourceId, entry.path, null)
   $: isActive = !entry.is_dir && activeKey === ownKey
 
-  $: ownDownloadHref = downloadHref(sourceId, entry, archiveRoot)
+  $: ownDownloadHref = canDownload ? downloadHref(sourceId, entry, archiveRoot) : null
 
   async function toggle() {
     if (canExpand) {
@@ -55,6 +61,7 @@
         }
       }
       expanded = !expanded
+      setExpanded(expandKey, expanded)
     } else if (!entry.is_dir) {
       if (archiveRoot !== null) {
         const member = memberPath(entry.path, archiveRoot)
@@ -64,6 +71,10 @@
       }
     }
   }
+
+  onMount(() => {
+    if (canExpand && get(explorerExpanded).has(expandKey)) toggle()
+  })
 </script>
 
 <div class="node">
@@ -126,6 +137,7 @@
           depth={depth + 1}
           archiveRoot={entry.is_archive ? entry.path : archiveRoot}
           {activeKey}
+          {canDownload}
           on:open
         />
       {/each}

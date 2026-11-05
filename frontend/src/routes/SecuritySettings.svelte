@@ -182,7 +182,10 @@
       {#if showRegenerateForm}
         <label>
           Current password
-          <input class="input" type="password" bind:value={regeneratePassword} />
+          <input class="input" type="password"
+          spellcheck="false"
+          data-gramm="false"
+          data-enable-grammarly="false" bind:value={regeneratePassword} />
         </label>
         <div class="actions">
           <button
@@ -203,7 +206,10 @@
       {:else if showDisableForm}
         <label>
           Current password
-          <input class="input" type="password" bind:value={disablePassword} />
+          <input class="input" type="password"
+          spellcheck="false"
+          data-gramm="false"
+          data-enable-grammarly="false" bind:value={disablePassword} />
         </label>
         <div class="actions">
           <button
@@ -238,7 +244,10 @@
       {#if showEnrollForm}
         <label>
           Current password
-          <input class="input" type="password" bind:value={enrollPassword} />
+          <input class="input" type="password"
+          spellcheck="false"
+          data-gramm="false"
+          data-enable-grammarly="false" bind:value={enrollPassword} />
         </label>
         <div class="actions">
           <button

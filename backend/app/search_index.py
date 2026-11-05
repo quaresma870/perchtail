@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sqlalchemy import text
+from sqlalchemy.exc import InvalidRequestError
 from sqlmodel import Session, select
 
 from app.archives import (
@@ -25,27 +26,23 @@ from app.archives import (
     is_archive,
     is_transparent_gzip,
 )
-from app.collectors import agent as agent_collector
-from app.collectors import local as local_collector
-from app.collectors import smb as smb_collector
-from app.collectors import ssh as ssh_collector
-from app.collectors import winrm as winrm_collector
-from app.collectors.base import DirEntry
+from app.collectors.base import (
+    DirEntry,
+    FetchTooLargeError,
+    PathOutsideBaseError,
+    SourceNotFoundError,
+    SourcePermissionError,
+)
+from app.collectors.registry import CONNECTORS
 from app.config import get_settings
 from app.health import record_search_sweep
 from app.logging_config import get_logger
-from app.models import AlertFileState, Protocol, Rule, SearchIndexState, Source
+from app.models import AlertFileState, Rule, SearchIndexState, Source
 from app.timeutils import utcnow
 
 logger = get_logger(__name__)
 
-_CONNECTORS = {
-    Protocol.ssh: ssh_collector,
-    Protocol.smb: smb_collector,
-    Protocol.winrm: winrm_collector,
-    Protocol.local: local_collector,
-    Protocol.agent: agent_collector,
-}
+_CONNECTORS = CONNECTORS
 
 # Enough to reliably catch binary content without reading an entire large
 # file just to decide whether to skip it.
@@ -60,6 +57,9 @@ class IndexStats:
     indexed: int = 0
     skipped: int = 0
     removed: int = 0
+    # Files that couldn't be read this sweep (no permission, gone since the
+    # listing, grown past the limit); also counted in `skipped` (#204).
+    unreadable: int = 0
 
 
 @dataclass
@@ -174,72 +174,114 @@ def delete_source_index(session: Session, source_id: int) -> None:
     _delete_alert_file_states(session, source_id)
 
 
+_UNREADABLE = (SourcePermissionError, SourceNotFoundError, PathOutsideBaseError, FetchTooLargeError)
+
+
 def index_source(session: Session, source: Source) -> IndexStats:
     """Indexes (or re-indexes) every rule-visible file in `source`. Safe to
     call repeatedly — unchanged files (by size, see SearchIndexState's
     docstring on why size alone) are skipped, and files no longer present or
-    no longer rule-visible are removed from the index."""
+    no longer rule-visible are removed from the index.
+
+    Each file is committed on its own, and its content is fetched from the
+    source before anything is written (#188). A first sweep of a large
+    source takes minutes; holding one write transaction open across all of
+    it locked SQLite and every login or audit write failed meanwhile. Now
+    the write lock is held only while one file's rows are written.
+
+    Stops early, leaving what's indexed so far, if the source is disabled,
+    opted out or deleted while it runs (rows of a source that's no longer
+    indexed are purged by purge_inactive_source_indexes on the next sweep)."""
     connector = _CONNECTORS.get(source.protocol)
     if connector is None:
         return IndexStats()
 
     settings = get_settings()
     max_bytes = int(settings.search_index_max_file_size_mb * 1024 * 1024)
-    rules = list(session.exec(select(Rule).where(Rule.source_id == source.id)).all())
+    source_id = source.id
+    rules = list(session.exec(select(Rule).where(Rule.source_id == source_id)).all())
 
     stats = IndexStats()
     seen_paths: set[str] = set()
-    existing_by_path = {
-        state.file_path: state
+    # (id, size) rather than the rows themselves: every commit below expires
+    # loaded objects, and reloading each one to compare sizes would cost a
+    # query per unchanged file.
+    known = {
+        state.file_path: (state.id, state.size)
         for state in session.exec(
-            select(SearchIndexState).where(SearchIndexState.source_id == source.id)
+            select(SearchIndexState).where(SearchIndexState.source_id == source_id)
         ).all()
     }
+    session.commit()  # end the read transaction before the slow part
 
     for entry in _iter_files(connector, source, rules):
         seen_paths.add(entry.path)
-        existing = existing_by_path.get(entry.path)
-        if existing is not None and existing.size == entry.size:
+        previous = known.get(entry.path)
+        if previous is not None and previous[1] == entry.size:
             continue
+        if not _still_indexed(session, source):
+            logger.info("search_index.source_stopped", source_id=source_id)
+            return stats
 
-        content = _read_text(connector, source, entry, max_bytes)
+        try:
+            content = _read_text(connector, source, entry, max_bytes)
+        except _UNREADABLE as exc:
+            # One file the service account can't read, or that rotated away
+            # since the listing, mustn't fail the whole source (#204). The
+            # previous index of that file, if any, is kept.
+            logger.debug(
+                "search_index.file_unreadable",
+                source_id=source_id,
+                path=entry.path,
+                error=type(exc).__name__,
+            )
+            stats.skipped += 1
+            stats.unreadable += 1
+            continue
         if content is None:
             stats.skipped += 1
             continue
 
-        _delete_fts_rows(session, source.id, entry.path)
-        _insert_fts_rows(session, source.id, entry.path, content)
-        if existing is not None:
-            existing.size = entry.size
-            existing.indexed_at = utcnow()
-            session.add(existing)
-        else:
-            session.add(
-                SearchIndexState(
-                    source_id=source.id,
-                    file_path=entry.path,
-                    size=entry.size,
-                    indexed_at=utcnow(),
-                )
-            )
+        _delete_fts_rows(session, source_id, entry.path)
+        _insert_fts_rows(session, source_id, entry.path, content)
+        state = session.get(SearchIndexState, previous[0]) if previous else None
+        if state is None:
+            state = SearchIndexState(source_id=source_id, file_path=entry.path)
+        state.size = entry.size
+        state.indexed_at = utcnow()
+        session.add(state)
+        session.commit()
         stats.indexed += 1
 
-    for path, state in existing_by_path.items():
+    for path, (state_id, _) in known.items():
         if path not in seen_paths:
-            _delete_fts_rows(session, source.id, path)
-            _delete_alert_file_states(session, source.id, path)
-            session.delete(state)
+            _delete_fts_rows(session, source_id, path)
+            _delete_alert_file_states(session, source_id, path)
+            state = session.get(SearchIndexState, state_id)
+            if state is not None:
+                session.delete(state)
             stats.removed += 1
 
     session.commit()
     logger.info(
         "search_index.source_indexed",
-        source_id=source.id,
+        source_id=source_id,
         indexed=stats.indexed,
         skipped=stats.skipped,
+        unreadable=stats.unreadable,
         removed=stats.removed,
     )
     return stats
+
+
+def _still_indexed(session: Session, source: Source) -> bool:
+    """Re-reads the source: with a commit per file, an admin can turn
+    indexing off, disable or delete the source while a sweep runs."""
+    try:
+        session.refresh(source)
+    except InvalidRequestError:  # deleted meanwhile
+        return False
+    return bool(source.enabled and source.search_indexing_enabled)
 
 
 def purge_inactive_source_indexes(session: Session) -> int:
@@ -317,8 +359,22 @@ def _escape_snippet(raw: str) -> str:
     return escaped.replace(_HIGHLIGHT_START, "<mark>").replace(_HIGHLIGHT_END, "</mark>")
 
 
+def _path_filter_sql(path_filter: str) -> tuple[str, str]:
+    """A wildcard filter (`*`, `?`) is a GLOB over the whole path; anything
+    else matches as a case-insensitive substring (#163)."""
+    if "*" in path_filter or "?" in path_filter:
+        return " AND file_path GLOB :path_filter", path_filter
+    escaped = path_filter.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return " AND file_path LIKE :path_filter ESCAPE '\\'", f"%{escaped}%"
+
+
 def search(
-    session: Session, query: str, source_ids: set[int] | None, limit: int = 50
+    session: Session,
+    query: str,
+    source_ids: set[int] | None,
+    limit: int = 50,
+    *,
+    path_filter: str = "",
 ) -> list[SearchHit]:
     """Runs `query` against the FTS5 index, scoped to `source_ids` (None
     means "all", per auth.rbac.visible_source_ids' convention — reserved for
@@ -365,6 +421,9 @@ def search(
         placeholders = ", ".join(f":sid{i}" for i in range(len(source_ids)))
         sql += f" AND source_id IN ({placeholders})"
         params.update({f"sid{i}": sid for i, sid in enumerate(source_ids)})
+    if path_filter:
+        clause, params["path_filter"] = _path_filter_sql(path_filter)
+        sql += clause
     sql += " ORDER BY rank LIMIT :raw_limit"
 
     rows = session.execute(text(sql), params).all()

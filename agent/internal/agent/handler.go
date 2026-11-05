@@ -1,11 +1,17 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 )
+
+// ErrNotADirectory is returned when a list targets a file; the backend
+// answers 404 for it, as for SMB and WinRM (#206).
+var ErrNotADirectory = errors.New("not a directory")
 
 // HandleList lists the immediate children of relPath under basePath. Rule
 // filtering (which files are actually visible per the source's rule chain)
@@ -27,6 +33,11 @@ func HandleList(basePath, relPath string) ([]DirEntryWire, error) {
 		return nil, err
 	}
 	defer dir.Close()
+	if st, err := dir.Stat(); err != nil {
+		return nil, err
+	} else if !st.IsDir() {
+		return nil, ErrNotADirectory
+	}
 	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return nil, err
@@ -38,11 +49,24 @@ func HandleList(basePath, relPath string) ([]DirEntryWire, error) {
 		if err != nil {
 			return nil, err
 		}
+		isDir := entry.IsDir()
+		// Symlinks, and junctions on Windows (reported as irregular), are
+		// listed only when they resolve inside basePath, with their
+		// target's type and size. One that leads out (escape -> /etc), is
+		// broken or can't be read is left out: opening it would be refused
+		// by os.Root anyway (#206), as SSH and local sources already do.
+		if entry.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+			target, err := root.Stat(path.Join(rootName(relPath), entry.Name()))
+			if err != nil {
+				continue
+			}
+			info, isDir = target, target.IsDir()
+		}
 		size := info.Size()
-		if entry.IsDir() {
+		if isDir {
 			size = 0
 		}
-		result = append(result, DirEntryWire{Name: entry.Name(), IsDir: entry.IsDir(), Size: size})
+		result = append(result, DirEntryWire{Name: entry.Name(), IsDir: isDir, Size: size})
 	}
 	return result, nil
 }

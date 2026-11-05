@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Optional
 
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
@@ -93,6 +94,17 @@ class Source(SQLModel, table=True):
     # null for the local protocol, which needs no credential.
     credential_ref: str | None = None
     base_path: str
+    # Two or more {"label", "path"} entries when the source reads several
+    # folders (#161; see app/source_roots.py), else null. base_path then
+    # mirrors the first root's path.
+    roots: list[dict] | None = Field(default=None, sa_column=Column(JSON))
+    # WinRM only (#169): "https" or "http". Null keeps the pre-0.5.0 rule of
+    # inferring it from the port (HTTPS on 5986 or no port, HTTP otherwise).
+    winrm_scheme: str | None = None
+    # PEM CA certificate(s) trusted for this source's TLS listener (WinRM
+    # over HTTPS) -- internal PKI or a self-signed certificate, without a
+    # server-wide REQUESTS_CA_BUNDLE. Public data, not a secret.
+    tls_ca_pem: str | None = None
     enabled: bool = True
     schedule_cron: str | None = None
     is_system: bool = False
@@ -106,6 +118,11 @@ class Source(SQLModel, table=True):
     # connection state itself lives in app.agent_registry, not the DB, since
     # it's inherently per-process and shouldn't survive a restart.
     agent_last_seen_at: datetime | None = None
+    # The OS the agent says it runs on (Go's runtime.GOOS: "windows",
+    # "linux", ...), sent on every connect (#189). Decides whether rules are
+    # matched case-insensitively, as for SMB/WinRM. Null until an agent
+    # that reports it (0.5.1 or later) has connected.
+    agent_os: str | None = None
     # Phase 3 full-text search (see app/search_index.py and ROADMAP.md):
     # opt-in, off by default — same "explicit opt-in, not on-by-default"
     # conservatism as the rule engine's zero-rules-matches-nothing default,

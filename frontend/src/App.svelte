@@ -3,13 +3,16 @@
   import { onMount } from 'svelte'
   import { authChecked, currentUser, hasCapability, logout, refreshCurrentUser } from './lib/auth'
   import { currentHash } from './lib/hash'
-  import { refreshSystemSettings, systemSettings } from './lib/settings'
+  import { closeAllTabs } from './lib/viewer-tabs'
+  import { refreshSystemSettings, refreshSystemSettingsIfStale, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
   import Sources from './routes/Sources.svelte'
   import SourceEditor from './routes/SourceEditor.svelte'
+  import SourceOverview from './routes/SourceOverview.svelte'
   import Folders from './routes/Folders.svelte'
   import Viewer from './routes/Viewer.svelte'
+  import ImportExportSettings from './routes/ImportExportSettings.svelte'
   import Search from './routes/Search.svelte'
   import Alerts from './routes/Alerts.svelte'
   import SettingsIndex from './routes/SettingsIndex.svelte'
@@ -33,7 +36,8 @@
     '/settings': SettingsIndex,
     '/settings/sources': Sources,
     '/settings/sources/new': SourceEditor,
-    '/settings/sources/:id': SourceEditor,
+    '/settings/sources/:id/edit': SourceEditor,
+    '/settings/sources/:id': SourceOverview,
     '/settings/folders': Folders,
     '/settings/roles': Roles,
     '/settings/roles/new': RoleEditor,
@@ -45,12 +49,22 @@
     '/settings/sessions': SessionsSettings,
     '/settings/security': SecuritySettings,
     '/settings/audit-log': AuditLogSettings,
+    '/settings/import-export': ImportExportSettings,
   }
 
   onMount(async () => {
     await refreshCurrentUser()
     await refreshSystemSettings()
   })
+
+  // Re-read system settings on navigation and when the tab is shown again,
+  // so a change an admin makes (e.g. the Connections view) applies without a
+  // reload. Also covers the first navigation after logging in, when the
+  // fetch on mount had no session yet.
+  $: if ($currentUser && $currentHash) refreshSystemSettingsIfStale()
+  function onVisibility() {
+    if (document.visibilityState === 'visible' && $currentUser) refreshSystemSettingsIfStale()
+  }
 
   $: if ($authChecked && !$currentUser && $currentHash !== '/login') {
     push('/login')
@@ -90,10 +104,13 @@
   const isActive = (prefix: string) => $currentHash === prefix || $currentHash.startsWith(prefix + '/')
 
   async function handleLogout() {
+    await closeAllTabs()
     await logout()
     push('/login')
   }
 </script>
+
+<svelte:document on:visibilitychange={onVisibility} />
 
 <main>
   {#if $authChecked && $currentUser && $currentHash !== '/login'}
@@ -122,10 +139,15 @@
 </main>
 
 <style>
+  /* The window itself never scrolls (#154): the nav stays put, ordinary
+     pages scroll inside .content, and the viewer fills .content and
+     scrolls only its own panes. */
   main {
     display: flex;
     flex-direction: column;
-    min-height: 100vh;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
   }
   nav {
     display: flex;
@@ -171,5 +193,6 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    overflow: auto;
   }
 </style>

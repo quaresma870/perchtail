@@ -19,7 +19,10 @@ from app.api.alerts import router as alerts_router
 from app.api.archive import router as archive_router
 from app.api.audit import router as audit_router
 from app.api.auth import router as auth_router
+from app.api.config_transfer import router as config_transfer_router
 from app.api.customers import router as customers_router
+from app.api.errors import install as install_error_handlers
+from app.api.errors import path_outside_base as _path_outside_base
 from app.api.folders import router as folders_router
 from app.api.monitoring import router as monitoring_router
 from app.api.roles import router as roles_router
@@ -43,10 +46,11 @@ from app.bootstrap import (
     seed_severity_patterns,
     seed_system_log_source,
 )
-from app.collectors.base import PathOutsideBaseError
 from app.collectors.local import LocalPathNotAllowedError
 from app.config import get_settings
 from app.crypto import audit_chain_key
+from app.data_layout import leftover_legacy_database
+from app.data_layout import report as report_data_layout
 from app.db import engine, init_db
 from app.health import mark_started
 from app.logging_config import configure_logging, get_logger
@@ -214,6 +218,16 @@ async def lifespan(app: FastAPI):
             "derived from it, so this can't be silently defaulted."
         )
 
+    report_data_layout(settings)
+    leftover = leftover_legacy_database(settings)
+    if leftover is not None:
+        logger.warning(
+            "startup.data_layout.legacy_database_left",
+            legacy=str(leftover),
+            in_use=settings.database_url,
+            hint="a database from before 0.5.0 is still in DATA_DIR's parent; "
+            "if it holds your data, stop PerchTail and move it into DATA_DIR",
+        )
     init_db()
     mark_started()
     get_agent_registry().bind_loop(asyncio.get_running_loop())
@@ -274,6 +288,7 @@ app.include_router(auth_router)
 app.include_router(alerts_router)
 app.include_router(archive_router)
 app.include_router(audit_router)
+app.include_router(config_transfer_router)
 app.include_router(customers_router)
 app.include_router(folders_router)
 app.include_router(sources_router)
@@ -294,10 +309,9 @@ async def local_path_not_allowed(request: Request, exc: LocalPathNotAllowedError
     return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 
-@app.exception_handler(PathOutsideBaseError)
-async def path_outside_base(request: Request, exc: PathOutsideBaseError):
-    # Same answer as a rule-hidden path: nothing about the target leaks.
-    return JSONResponse(status_code=404, content={"detail": "not found"})
+install_error_handlers(app)
+# Kept importable for tests that build a bare app around one router.
+path_outside_base = _path_outside_base
 
 
 @app.get("/healthz")

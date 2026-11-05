@@ -343,3 +343,165 @@ def test_sweep_purges_snippets_left_behind_by_an_opted_out_source(tmp_path, monk
     with Session(engine) as session:
         assert _fts_rows(session, source_id) == []
         assert session.exec(select(SearchIndexState)).all() == []
+
+
+class _HookedLocalConnector:
+    """The local connector, with a callback run while each file is fetched
+    -- the point where a remote fetch spends its time."""
+
+    def __init__(self, on_fetch):
+        from app.collectors import local
+
+        self._local = local
+        self._on_fetch = on_fetch
+
+    def list_directory(self, source, rules, relative_path=""):
+        return self._local.list_directory(source, rules, relative_path)
+
+    def local_copy(self, source, relative_path):
+        self._on_fetch(relative_path)
+        return self._local.local_copy(source, relative_path)
+
+
+def _file_engine(tmp_path):
+    from app.db import configure_sqlite_connection
+    from sqlalchemy import event
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'perchtail.db'}", connect_args={"check_same_thread": False}
+    )
+    event.listen(engine, "connect", configure_sqlite_connection)
+    SQLModel.metadata.create_all(engine)
+    ensure_search_schema(engine)
+    return engine
+
+
+def test_indexing_does_not_hold_the_write_lock_while_fetching(tmp_path, monkeypatch):
+    """#188: the first sweep of a large source kept one write transaction
+    open for minutes and every login failed with "database is locked".
+    Another writer that won't wait at all must get through while a file is
+    being fetched, after earlier files were already written."""
+    import sqlite3
+
+    import app.search_index as search_index_module
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for name in ("a.log", "b.log", "c.log"):
+        (logs / name).write_text(f"line in {name}\n")
+    engine = _file_engine(tmp_path)
+    writes = []
+
+    def write_elsewhere(relative_path):
+        other = sqlite3.connect(tmp_path / "perchtail.db", timeout=0)
+        try:
+            other.execute("UPDATE source SET name = ?", (relative_path,))
+            other.commit()
+            writes.append(relative_path)
+        finally:
+            other.close()
+
+    monkeypatch.setattr(
+        search_index_module, "_CONNECTORS", {Protocol.local: _HookedLocalConnector(write_elsewhere)}
+    )
+    with Session(engine) as session:
+        source = _source(session, logs)
+        _rule(session, source.id, "*.log")
+        stats = index_source(session, source)
+
+    assert stats.indexed == 3
+    assert writes == ["a.log", "b.log", "c.log"]
+    with sqlite3.connect(tmp_path / "perchtail.db") as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_indexing_stops_when_turned_off_mid_sweep(tmp_path, monkeypatch):
+    import sqlite3
+
+    import app.search_index as search_index_module
+
+    for name in ("a.log", "b.log", "c.log"):
+        (tmp_path / name).write_text(f"line in {name}\n")
+    engine = _file_engine(tmp_path)
+    db = tmp_path / "perchtail.db"
+
+    def turn_off(relative_path):
+        if relative_path == "a.log":
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE source SET search_indexing_enabled = 0")
+
+    monkeypatch.setattr(
+        search_index_module, "_CONNECTORS", {Protocol.local: _HookedLocalConnector(turn_off)}
+    )
+    with Session(engine) as session:
+        source = _source(session, tmp_path)
+        _rule(session, source.id, "*.log")
+        stats = index_source(session, source)
+
+    assert stats.indexed == 1
+
+
+def test_indexing_stops_when_the_source_is_deleted_mid_sweep(tmp_path, monkeypatch):
+    import sqlite3
+
+    import app.search_index as search_index_module
+
+    for name in ("a.log", "b.log"):
+        (tmp_path / name).write_text(f"line in {name}\n")
+    engine = _file_engine(tmp_path)
+    db = tmp_path / "perchtail.db"
+
+    def delete_source(relative_path):
+        with sqlite3.connect(db) as conn:
+            conn.execute("DELETE FROM rule")
+            conn.execute("DELETE FROM source")
+
+    monkeypatch.setattr(
+        search_index_module,
+        "_CONNECTORS",
+        {Protocol.local: _HookedLocalConnector(delete_source)},
+    )
+    with Session(engine) as session:
+        source = _source(session, tmp_path)
+        _rule(session, source.id, "*.log")
+        stats = index_source(session, source)
+
+    assert stats.indexed == 1
+
+
+def test_scheduler_runs_late_jobs_instead_of_skipping_them():
+    """F-I: the default one-second grace skipped indexing sweeps (and the
+    alert evaluation riding on them) whenever the worker was busy."""
+    from app.scheduler import scheduler
+
+    defaults = scheduler._job_defaults
+    assert defaults["misfire_grace_time"] >= 60
+    assert defaults["coalesce"] is True
+
+
+def test_an_unreadable_file_is_skipped_not_fatal_to_the_source(tmp_path, monkeypatch):
+    """#204: one file the service account can't read failed the whole
+    source's sweep, every sweep."""
+    import app.search_index as search_index_module
+    from app.collectors.base import SourcePermissionError
+
+    for name in ("a.log", "locked.log", "c.log"):
+        (tmp_path / name).write_text(f"line in {name}\n")
+    engine = _file_engine(tmp_path / "")
+
+    def refuse(relative_path):
+        if relative_path == "locked.log":
+            raise SourcePermissionError("Permission denied")
+
+    monkeypatch.setattr(
+        search_index_module, "_CONNECTORS", {Protocol.local: _HookedLocalConnector(refuse)}
+    )
+    with Session(engine) as session:
+        source = _source(session, tmp_path)
+        _rule(session, source.id, "*.log")
+        stats = index_source(session, source)
+        files = {r.file_path for r in _fts_rows(session, source.id)}
+
+    assert stats.indexed == 2
+    assert stats.unreadable == 1 and stats.skipped == 1
+    assert files == {"a.log", "c.log"}

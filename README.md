@@ -8,7 +8,7 @@
 > nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.4.1%20%28pre--1.0%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.5.0%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -20,7 +20,7 @@
 
 ## Status
 
-🟢 **v0.4.1 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
+🟢 **v0.5.0 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
 Phase 3 (full-text search, saved-search webhook alerts, IdP
 group-claim-to-role auto-mapping, a detailed health endpoint) are all
 complete** (see [ROADMAP.md](ROADMAP.md) for the full phase breakdown).
@@ -28,9 +28,11 @@ Agentless SSH/SFTP, SMB, and WinRM browsing, a Go push-agent for hosts
 that can't be reached inbound, ephemeral fetch (nothing mirrored),
 rule-scoped RBAC, OIDC single sign-on (local accounts still work
 alongside it), and opt-in full-text search with alerting over indexed
-sources all work end-to-end. The Viewer's home page is a two-column
-"recent connections / all connections" dashboard with a search box
-(folder/customer/host), and deployment-wide feature toggles live under
+sources all work end-to-end. The Viewer is one explorer across every
+source (list or tree), with tabs from several servers side by side and a
+Notepad++-style Find all; sources can read several folders, their Base
+path can be picked by browsing the host, and the whole configuration can
+be bulk imported and exported as YAML. Deployment-wide feature toggles live under
 Settings → System, including a full admin audit log (every login and
 source/rule/role/user/customer/folder/SSO/system-settings change, with
 type/action/date filters and an admin-configurable retention window).
@@ -147,6 +149,19 @@ Then bring it up:
 docker compose up -d
 ```
 
+This builds the image from the checkout. To run a published release
+instead, replace `build: .` in `docker-compose.yml` with the image of that
+version (amd64 and arm64), for example:
+
+```yaml
+    image: ghcr.io/quaresma870/perchtail:0.5.0
+```
+
+Each [GitHub release](https://github.com/quaresma870/perchtail/releases)
+also carries the push-agent binaries, their `SHA256SUMS`, and the image's
+SBOM, attached before the release is published. `latest` and `X.Y` tags
+only move when a full release is published, never with a pre-release.
+
 On first startup (only when the database has zero users), PerchTail creates a
 break-glass super-admin account with a randomly generated password and prints
 it once to the container logs — grab it before it scrolls away:
@@ -169,12 +184,25 @@ scratch cache) lives in the `perchtail-data` Docker volume, so it survives
 `docker compose down`/`up` — only `docker compose down -v` discards it.
 
 **Backups and upgrades.** Everything stateful lives on the `perchtail-data`
-volume (`/data` in the container): the SQLite database, the
-credential-encryption salt (`credential_salt`), SSH `known_hosts`, and the
-app's own logs. Back up the database and `credential_salt` together. Either
-one is useless without the other, and so is the salt without your
-`CREDENTIAL_ENCRYPTION_KEY`. Upgrading from a release before the salt moved
-onto the volume needs one extra step first; see the CHANGELOG.
+volume (`/data` in the container), one directory per kind of data:
+
+| Directory | Setting | Contents | Back up? |
+|---|---|---|---|
+| `/data/db` | `DATA_DIR` | SQLite database, credential-encryption salt (`credential_salt`), SSH `known_hosts` | yes |
+| `/data/logs` | `LOG_DIR` | the app's own logs, rotated by size and day | optional |
+| `/data/scratch` | `SCRATCH_DIR` | short-lived fetches, purged on close | no |
+
+Each can be mounted as its own volume (for example logs on another disk),
+so a burst of DEBUG logging can't fill the database's disk. Keep `/data/db`
+on a local disk, not a network share: the database runs in SQLite's WAL
+mode, which needs one (it also leaves `perchtail.db-wal` and
+`perchtail.db-shm` next to the database; back up the whole directory, with
+PerchTail stopped). Back up the
+database and `credential_salt` together. Either one is useless without the
+other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`.
+Upgrading from a release before 0.5.0 moves the database, salt and
+`known_hosts` from `/data` into `/data/db` on first start; see the
+CHANGELOG's upgrade notes.
 
 ## Deployment: reverse proxy (nginx) + TLS
 
@@ -261,6 +289,8 @@ publish in `docker-compose.yml` entirely rather than binding it to loopback.
 
 - [CLAUDE.md](CLAUDE.md) — full design/architecture reference and build plan
 - [ROADMAP.md](ROADMAP.md) — phased milestones and what's next
+- [docs/install-from-source.md](docs/install-from-source.md) — running
+  PerchTail on a Linux host without Docker, with a systemd unit
 - [docs/source-setup.md](docs/source-setup.md) — how to prepare a Linux or
   Windows server so PerchTail can reach it over SSH/SFTP, SMB, or WinRM
 - [docs/sso-setup.md](docs/sso-setup.md) — registering PerchTail as an OIDC

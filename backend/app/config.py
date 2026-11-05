@@ -1,6 +1,8 @@
+import os
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,13 +12,29 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_dir: str = "./data/logs"
     log_retention_days: int = 30
-    database_url: str = "sqlite:///./data/perchtail.db"
+    # The active log file rotates at this size or at midnight, whichever
+    # comes first; all logs together are kept under LOG_MAX_TOTAL_MB by
+    # deleting the oldest archives (#172, app/log_rotation.py). 0 disables
+    # either limit.
+    log_max_file_mb: float = 100
+    log_max_total_mb: float = 2048
+    # Caps protocol libraries (smbprotocol, paramiko, ...) at INFO while the
+    # app itself logs at DEBUG; their packet dumps are most of DEBUG's volume.
+    log_quiet_third_party: bool = False
+    # The state that must be backed up: the database, the credential salt
+    # and SSH known_hosts, unless DATABASE_URL / CREDENTIAL_SALT_PATH /
+    # SSH_KNOWN_HOSTS_PATH point elsewhere. Kept apart from LOG_DIR and
+    # SCRATCH_DIR so those can live on another disk and a runaway log can't
+    # fill the database's space (#172). Before 0.5.0 these files sat in
+    # DATA_DIR's parent; see app/data_layout.py for the move.
+    data_dir: str = "./data/db"
+    database_url: str = ""
     credential_encryption_key: str = "changeme"
     # Per-install random salt for deriving the Fernet key from
     # credential_encryption_key (see app/crypto.py) — generated on first use
     # and persisted here, not stored in the DB, since crypto.py has no DB
     # session and needs this before any request touches the database.
-    credential_salt_path: str = "./data/credential_salt"
+    credential_salt_path: str = ""
     # Escape hatch for a deployment whose original salt is permanently lost:
     # by default startup refuses to generate a fresh salt while the database
     # already holds data encrypted under the old one (see
@@ -28,7 +46,7 @@ class Settings(BaseSettings):
     # changed since the last connection (see app/collectors/ssh.py) — a
     # fresh SSHClient is created per call with no persistence otherwise,
     # so every connection would silently trust whatever key is presented.
-    ssh_known_hosts_path: str = "./data/ssh_known_hosts"
+    ssh_known_hosts_path: str = ""
     # What to do with a host that has no key in ssh_known_hosts yet: "tofu"
     # pins it on first connect (and logs the fingerprint), "strict" refuses
     # to connect until an operator adds the key to the file by hand.
@@ -106,6 +124,25 @@ class Settings(BaseSettings):
     # seconds (31536000) is unreadable at a glance and APScheduler's
     # IntervalTrigger accepts a `days=` kwarg directly.
     audit_integrity_check_interval_days: int = 365
+
+    # Which of the three DATA_DIR paths were left to default, so the legacy
+    # layout move (app/data_layout.py) never touches an explicit setting.
+    derived_from_data_dir: frozenset[str] = frozenset()
+
+    @model_validator(mode="after")
+    def _derive_paths(self) -> "Settings":
+        derived = set()
+        if not self.database_url:
+            self.database_url = f"sqlite:///{os.path.join(self.data_dir, 'perchtail.db')}"
+            derived.add("database")
+        if not self.credential_salt_path:
+            self.credential_salt_path = os.path.join(self.data_dir, "credential_salt")
+            derived.add("credential_salt")
+        if not self.ssh_known_hosts_path:
+            self.ssh_known_hosts_path = os.path.join(self.data_dir, "ssh_known_hosts")
+            derived.add("ssh_known_hosts")
+        self.derived_from_data_dir = frozenset(derived)
+        return self
 
 
 @lru_cache

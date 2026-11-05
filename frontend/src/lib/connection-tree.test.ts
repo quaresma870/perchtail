@@ -20,7 +20,13 @@ function source(overrides: Partial<Source> & { id: number; name: string }): Sour
     has_agent_token: false,
     agent_connected: false,
     agent_last_seen_at: null,
+    agent_os: null,
     search_indexing_enabled: false,
+    my_capabilities: ['view', 'download'],
+    roots: [],
+    winrm_scheme: null,
+    winrm_effective_scheme: null,
+    tls_ca_pem: null,
     ...overrides,
   }
 }

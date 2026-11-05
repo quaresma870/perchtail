@@ -110,3 +110,27 @@ def test_reconnecting_agent_stays_connected_when_the_old_socket_closes(session):
         time.sleep(0.2)
         assert registry.is_connected(source.id)
     assert _wait_until(lambda: not registry.is_connected(source.id))
+
+
+def test_connect_records_the_os_the_agent_reports(session):
+    """#189: rules for a Windows agent are matched case-insensitively, so
+    the backend needs to know which OS the agent runs on."""
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    headers = {"authorization": "Bearer s3cret", "x-perchtail-agent-os": "Windows"}
+    with client.websocket_connect("/agent/connect", headers=headers):
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        session.refresh(source)
+        assert source.agent_os == "windows"
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+
+    # An older agent (no header) or a malformed value keeps what's known.
+    for extra in ({}, {"x-perchtail-agent-os": "win dows; drop"}):
+        with client.websocket_connect(
+            "/agent/connect", headers={"authorization": "Bearer s3cret", **extra}
+        ):
+            assert _wait_until(lambda: registry.is_connected(source.id))
+        assert _wait_until(lambda: not registry.is_connected(source.id))
+        session.refresh(source)
+        assert source.agent_os == "windows"

@@ -52,7 +52,10 @@ test('SSH source: create, rule editor (rows + raw paste), browse, delete', async
 
   await page.goto(`/#/viewer/${sourceId}`)
   await expect(page.getByRole('button', { name: 'other.log' })).toBeVisible({ timeout: 20_000 })
-  await expect(page.getByRole('button', { name: 'hello.log' })).toHaveCount(0)
+  // The hello.log tab opened above stays open across navigation (#162), so
+  // only the explorer's listing is checked here.
+  const explorer = page.locator('.explorer')
+  await expect(explorer.getByRole('button', { name: 'hello.log' })).toHaveCount(0)
 
   // Cleanup.
   await page.goto('/#/settings/sources')

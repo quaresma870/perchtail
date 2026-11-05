@@ -57,6 +57,14 @@ export interface Source {
   host: string
   port: number | null
   base_path: string
+  // Two or more folders read by this source (#161), shown as top-level
+  // folders named by label; empty for an ordinary single-folder source.
+  roots: SourceRoot[]
+  // WinRM (#169): the stored scheme (null = still inferred from the port)
+  // and the one in effect; a CA certificate trusted for its HTTPS listener.
+  winrm_scheme: 'https' | 'http' | null
+  winrm_effective_scheme: 'https' | 'http' | null
+  tls_ca_pem: string | null
   enabled: boolean
   is_system: boolean
   rule_count: number
@@ -64,7 +72,30 @@ export interface Source {
   has_agent_token: boolean
   agent_connected: boolean
   agent_last_seen_at: string | null
+  agent_os: string | null
   search_indexing_enabled: boolean
+  // What the current user may do on this source (#174); the backend still
+  // enforces every action on its own.
+  my_capabilities: Capability[]
+}
+
+export interface SourceRoot {
+  label: string
+  path: string
+}
+
+export interface FolderPickEntry {
+  name: string
+  path: string
+}
+
+export interface FolderPickResult {
+  protocol: Protocol
+  path: string
+  parent: string | null
+  kind: 'folders' | 'shares' | 'drives'
+  entries: FolderPickEntry[]
+  truncated: boolean
 }
 
 export interface Rule {
@@ -166,6 +197,10 @@ export interface SystemSettings {
   search_view_enabled: boolean
   audit_view_enabled: boolean
   audit_retention_days: number
+  // Folders one source may read (#161): 1 = feature off, 100 at most.
+  source_max_roots: number
+  connections_view_switchable: boolean
+  connections_view_default: 'list' | 'tree'
 }
 
 export interface AuditLogEntry {

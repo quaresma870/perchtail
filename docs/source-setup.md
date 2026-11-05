@@ -16,7 +16,7 @@ See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
 |---|---|---|---|---|
 | SSH/SFTP | Linux | 22 | dedicated OS user, key-based | SFTP-only chroot jail |
 | SMB | Windows shares | 445 | dedicated local/domain user | share + NTFS ACL scoped to one folder |
-| WinRM | Windows (fallback when SMB isn't open) | 5985/5986 | dedicated local/domain user | JEA-constrained, read-only cmdlets |
+| WinRM | Windows (fallback when SMB isn't open) | 5986 (HTTPS) / 5985 | dedicated account with remote-shell rights (admin or `RootSDDL`) | NTFS read ACLs; prefer SMB or the agent (see below) |
 | Agent | Any host not reachable inbound | outbound only, no listener | enrollment token, not a login account | `PERCHTAIL_BASE_PATH` scopes what it can read |
 | Local disk | Directories on the PerchTail host (e.g. a read-only bind mount) | n/a | none | off unless the operator sets `LOCAL_SOURCE_ROOTS` |
 
@@ -30,15 +30,34 @@ See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
   not a substitute for the source itself only granting read access to what
   should be reachable in the first place. Scope both.
 - **Rule matching follows the source's filesystem.** Rules are matched
-  case-insensitively for SMB and WinRM sources, since Windows treats `Logs`
-  and `logs` as the same folder, and case-sensitively everywhere else.
+  case-insensitively for SMB and WinRM sources and for agents running on
+  Windows, since Windows treats `Logs` and `logs` as the same folder, and
+  case-sensitively everywhere else.
   Requests for a non-canonical path (`./x`, `a//b`, backslashes, and on
   Windows trailing dots/spaces or 8.3 short names like `PROGRA~1`) are
   rejected outright, so an exclude rule can't be sidestepped by spelling
-  the same file differently. One gap remains: rules for an **Agent** source
-  are case-sensitive even when the agent runs on Windows, because the
-  backend doesn't know the agent's OS. Write case-insensitive excludes for
-  those as regex, e.g. `re:(?i)^secret/`.
+  the same file differently. An agent reports its OS each time it
+  connects (shown as **Agent OS** on the source's page); agents older than
+  0.5.1 don't, and their rules stay case-sensitive until the agent is
+  upgraded.
+- **Rules decide which folders show up, too.** A folder appears (and can be
+  browsed) only if some file below it could be visible under the source's
+  rules. `exclude secret/**` hides the `secret` folder entirely, sub-folder
+  names included; with only `include app/**`, other top-level folders don't
+  appear; with no rules at all, nothing does. A later include can still
+  re-open part of an excluded folder, and then only the folders leading to
+  it are shown. This analysis works on **glob** rules: regex rules are
+  treated conservatively (a regex include keeps folders visible, a regex
+  exclude isn't assumed to cover a whole folder), so to hide a folder
+  reliably, use a glob exclude like `folder/**`. On SSH sources, rules are
+  case-sensitive: `secret/**` doesn't hide `SECRET/`; use
+  `re:(?i)^secret/` or a second glob rule for that.
+- **Links don't lead out of the base path.** Symlinks (SSH, local, agent)
+  and junctions or symlinks (SMB, WinRM) that point outside the base path
+  are left out of listings, and any path that goes through one answers
+  404. On Windows a junction needs no special privilege, so anyone who can
+  write to the log folder could otherwise point it at any folder the
+  service account can read.
 - **Read-only, always.** The account only ever needs to list directories and
   read file contents. Never grant write, delete, or execute rights beyond
   what the protocol inherently requires to do that.
@@ -91,22 +110,54 @@ sudo chmod 600 /home/perchtail/.ssh/authorized_keys
 Paste the matching **private** key into PerchTail's source credential field.
 Disable password auth for this account (or globally, per your policy).
 
-### 3. Jail it to SFTP and the folder it needs
+### 3. Restrict it to SFTP (required), and optionally chroot it
 
-In `/etc/ssh/sshd_config`:
+With a `nologin` shell, SFTP only works through sshd's **internal**
+SFTP server. The default `Subsystem sftp …/sftp-server` is started through
+the user's shell, so `nologin` prints "This account is currently not
+available." and the client fails with `Received message too long
+1416128883` (that number is "This" read as a length). So this block is
+**required**, not optional:
 
 ```
 Match User perchtail
     ForceCommand internal-sftp
-    ChrootDirectory /var/log/appname   # match the source's base_path
     PermitTTY no
     AllowTcpForwarding no
     X11Forwarding no
 ```
 
-Restart `sshd`. This account can no longer get a shell or forward ports, and
-is chrooted to exactly the tree the source's `base_path` should point at —
-belt-and-suspenders alongside the rule engine.
+**Optional hardening: chroot the account** to the log tree, so the SSH
+account itself can't see anything else on the host. sshd requires every
+component of the chroot path to be owned by root and not writable by group
+or others. On Debian/Ubuntu `/var/log` is `root:syslog 775`, so any chroot
+under `/var/log` is refused ("bad ownership or modes for chroot directory
+component"). Use a read-only bind mount instead:
+
+```
+# /etc/fstab
+/var/log/appname  /srv/sftp/appname  none  bind,ro  0 0
+```
+
+```
+Match User perchtail
+    ForceCommand internal-sftp
+    ChrootDirectory /srv/sftp          # root:root 755
+    PermitTTY no
+    AllowTcpForwarding no
+    X11Forwarding no
+```
+
+**With a chroot, the source's Base path is relative to the chroot**, not the
+real path on disk: `/appname` in this example (or `/` if the chroot is the
+log folder itself). Using the real path (`/var/log/appname`) fails with
+"Not found on the source", and the connection check says so.
+
+On RHEL/Rocky with SELinux enforcing, SFTP reads of `var_log_t` files work
+without extra policy when the account isn't chrooted. A chroot under
+SELinux hasn't been tested yet.
+
+Restart `sshd` after editing.
 
 ### 4. Grant read access to the log directories
 
@@ -139,7 +190,7 @@ IP only.
 ### 6. Host-key pinning
 
 PerchTail keeps every SSH server's host key in `SSH_KNOWN_HOSTS_PATH`
-(`/data/ssh_known_hosts` in Docker). If a pinned key ever changes, the
+(`/data/db/ssh_known_hosts` in Docker). If a pinned key ever changes, the
 connection fails. That is the man-in-the-middle check.
 
 What happens the *first* time PerchTail sees a host depends on
@@ -155,7 +206,7 @@ What happens the *first* time PerchTail sees a host depends on
   before you append:
 
   ```bash
-  ssh-keyscan -p 22 app01.example.com >> /data/ssh_known_hosts
+  ssh-keyscan -p 22 app01.example.com >> /data/db/ssh_known_hosts
   ```
 
 ## SMB (Windows shares)
@@ -190,11 +241,10 @@ defeating the point of a dedicated least-privilege account. A folder-scoped
 custom share avoids both problems at once, no matter which drive it's on.
 
 If logs are genuinely scattered across many unpredictable paths on a host
-and a single custom share can't cover them, prefer adding a
-[WinRM + JEA source](#winrm-windows-fallback-when-smb-isnt-open) for that
-host instead of falling back to `C$` — JEA can constrain the account to
-read-only cmdlets scoped to exactly the paths needed without ever requiring
-local admin rights.
+and a single custom share can't cover them, create one share per log
+folder and add them as [several folders of one source](#several-folders-in-one-source),
+or use the [push agent](#agent-push-agent-for-hosts-not-reachable-inbound).
+Don't fall back to `C$`.
 
 ### 3. Match the NTFS ACL to the share
 
@@ -222,40 +272,65 @@ Allow TCP 445 inbound from the PerchTail connector's IP only.
 
 ## WinRM (Windows, fallback when SMB isn't open)
 
-WinRM is remote PowerShell, not a file-listing protocol — its default
-surface is much broader than "read files," so constraining it well matters
-more here than for SSH or SMB.
+> **Read this before choosing WinRM.** The current WinRM connector runs
+> PowerShell through a WinRS remote shell (pywinrm). Windows only lets an
+> account open that shell if it is a local **Administrator**, or if the
+> WinRM service's `RootSDDL` is widened to grant it (`GXGR`). Either way the
+> credential PerchTail stores has a **full remote shell** on the host: if it
+> leaks, it can do far more than read logs. A Just Enough Administration
+> (JEA) endpoint can't restrict it today, because pywinrm never reaches a
+> PowerShell session configuration (#169, moving to PSRP).
+>
+> Prefer an [SMB share](#smb-windows-shares) of the log folder, or the
+> [push agent](#agent-push-agent-for-hosts-not-reachable-inbound), whenever
+> either is possible. Use WinRM only where neither is, and treat its
+> credential like an administrator's.
 
-### 1. Enable WinRM, prefer HTTPS
+### 1. Enable WinRM over HTTPS
 
 ```powershell
 winrm quickconfig
 ```
 
-Then configure an HTTPS listener with a real certificate rather than leaving
-it on plain HTTP — otherwise traffic crosses the wire without transport
-encryption beyond whatever NTLM itself provides.
+Then add an HTTPS listener (port 5986) with a certificate the PerchTail host
+can verify. In the source editor, set **Scheme** to HTTPS (the default for
+new sources). If the certificate comes from an internal CA or is
+self-signed, paste that CA certificate (PEM) into **CA certificate**. It is
+trusted for that source only, without changing the server-wide trust store
+or setting `REQUESTS_CA_BUNDLE`.
 
-### 2. Create a dedicated account, constrained with JEA
+Plain HTTP (port 5985) still has NTLM encrypt the WinRM messages, but the
+server isn't authenticated, so a machine in the middle can impersonate it.
+Use it only on a network you control.
 
-Do **not** add the PerchTail account to local Administrators, which is
-WinRM's default requirement for remote access. Instead, set up a **Just
-Enough Administration (JEA)** endpoint that exposes only the read-only
-cmdlets PerchTail actually needs (`Get-ChildItem`, `Get-Content`,
-`Get-Item`), and grant the account access to that endpoint only:
+Sources created before 0.5.0 have no scheme stored and keep the old rule
+until edited: HTTPS on port 5986 or with no port, HTTP on any other port.
+Saving the source in the editor stores the scheme explicitly.
 
-```powershell
-Register-PSSessionConfiguration -Name "PerchTailReadOnly" -Path .\PerchTailJEA.pssc
-```
+### 2. Create a dedicated account
 
-This is the single most important control on this protocol — without it, a
-compromised PerchTail credential on a WinRM source has far more reach than
-"browse some log files."
+A dedicated local or domain account, e.g. `svc-perchtail`, used for nothing
+else and for no other host. For the reasons above it needs one of:
+
+- membership of the local **Administrators** group; or
+- an entry in the WinRM `RootSDDL` granting it execute and read (`GXGR`):
+
+  ```powershell
+  winrm configSDDL default
+  ```
+
+  Add the account with read and execute rights in the dialog. This still
+  gives it a remote shell, but keeps it out of Administrators, so it can
+  only read what its NTFS permissions allow.
+
+Grant NTFS read access to the log folders only, as for SMB. Adding the
+account to **Remote Management Users** alone is not enough for this
+connector: it fails with `Access is denied`.
 
 ### 3. Firewall
 
-Allow TCP 5985 (HTTP, only if HTTPS genuinely isn't an option) or 5986
-(HTTPS) inbound from the PerchTail connector's IP only.
+Allow TCP 5986 (HTTPS), or 5985 only if HTTPS genuinely isn't an option,
+inbound from the PerchTail connector's IP only.
 
 ## Agent (push-agent, for hosts not reachable inbound)
 
@@ -333,9 +408,51 @@ something an admin can change from the web UI: otherwise anyone allowed to
 create sources could point one at PerchTail's own database or secrets.
 Mount only what you mean to expose, and mount it read-only.
 
+## Base path
+
+What goes in **Base path** depends on the protocol, and PerchTail refuses
+the kinds of path that can never work when you save the source:
+
+| Protocol | Base path | Example |
+|---|---|---|
+| SSH/SFTP | absolute path on the host (relative to the chroot, if the account has one) | `/var/log/myapp` |
+| SMB | the **share name**, optionally followed by a folder inside it. Not a drive path, and not an administrative share (`C$`, `ADMIN$`) | `AppLogs` or `AppLogs\iis` |
+| WinRM | absolute Windows path, on any drive | `D:\Logs\MyApp` |
+| Local disk | a directory under `LOCAL_SOURCE_ROOTS` | `/mnt/logs/app` |
+| Agent | documentation only: the agent's `PERCHTAIL_BASE_PATH` is what counts | |
+
+Instead of typing it, use **Browse…** next to the field. It connects with the
+host and credential in the form and lists folders only, never file names:
+`/` and down over SSH, the drives and then folders over WinRM, and the
+host's shares (the ones the account can see, without `C$`/`ADMIN$`/`IPC$`)
+and then folders over SMB. Browsing is limited to users who can manage
+sources, and each listing is written to the audit log. A saved source's stored credential is
+only ever sent to the host and port it was saved for: to browse another
+host, or to save the source with a new host or port, type the credential
+again.
+
+Rules are relative to the base path. Changing the base path (or the host or
+port) means the same rules now apply to whatever is at the new location, so
+check they still match; the source's search index and alert positions are
+cleared, and the audit log records the old and new values.
+
+### Several folders in one source
+
+A source can read several folders on the same host with the same
+credential, for example IIS logs on `D:` and application logs on `E:`. How
+many is set in **Settings → System → Folders per source**: 20 by default,
+1 turns the feature off, and 100 at most. Lowering the limit doesn't
+affect sources that already have more folders, but they can't add any. Use
+**+ Add another folder** in the source editor and give each folder a
+label. In the viewer each folder appears at the top level under its label,
+and rules see the same paths, so `**/*.log` applies to every folder and
+`IIS/**` to one. The connection test checks each folder and names the ones
+that fail. Push-agent sources serve a single folder and can't have several.
+
 ## Testing a source
 
 Once configured, add the source in PerchTail's admin UI with the matching
-protocol, host, port, credential, and `base_path`, then use the run-now /
+protocol, host, port, credential, and `base_path`, then use the
 test-connection action to confirm reachability and permissions before
-attaching rules.
+attaching rules. To add many sources at once, see
+[bulk import](bulk-import.md).

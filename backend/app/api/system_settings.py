@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlmodel import Session
@@ -8,6 +10,7 @@ from app.audit import record_audit_event
 from app.auth.models import GlobalCapability, User
 from app.auth.rbac import require_global_capability
 from app.db import get_session
+from app.source_roots import HARD_MAX_ROOTS, max_roots
 
 router = APIRouter(prefix="/system-settings", tags=["system-settings"])
 
@@ -20,6 +23,9 @@ class SystemSettingsPublic(BaseModel):
     search_view_enabled: bool
     audit_view_enabled: bool
     audit_retention_days: int
+    source_max_roots: int
+    connections_view_switchable: bool
+    connections_view_default: Literal["list", "tree"]
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -27,12 +33,19 @@ class SystemSettingsUpdate(BaseModel):
     audit_view_enabled: bool | None = None
     # 0 means "keep forever" -- see system_settings.INT_DEFAULTS's docstring.
     audit_retention_days: int | None = Field(default=None, ge=0)
+    # Folders per source (#161): 1 turns several folders off; 100 is the
+    # hard cap (source_roots.HARD_MAX_ROOTS).
+    source_max_roots: int | None = Field(default=None, ge=1, le=HARD_MAX_ROOTS)
+    connections_view_switchable: bool | None = None
+    connections_view_default: Literal["list", "tree"] | None = None
 
 
 def _read_all(session: Session) -> SystemSettingsPublic:
     return SystemSettingsPublic(
         **system_settings.get_all_bool(session),
         audit_retention_days=system_settings.get_int(session, "audit_retention_days"),
+        source_max_roots=max_roots(session),
+        connections_view_default=system_settings.get_choice(session, "connections_view_default"),
     )
 
 
@@ -58,8 +71,9 @@ def update_system_settings(
     # set_int/set_bool, which would stringify it into a value the getters
     # can't parse back (int("None") raises) on every read after this.
     changed = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
-    if "audit_retention_days" in changed:
-        system_settings.set_int(session, "audit_retention_days", changed["audit_retention_days"])
+    for key in system_settings.INT_DEFAULTS:
+        if key in changed:
+            system_settings.set_int(session, key, changed[key])
     # Iterates BOOL_DEFAULTS itself, not a hardcoded tuple of key names, so a
     # future bool SystemSetting can't be added to BOOL_DEFAULTS/the two
     # Pydantic models above and then silently no-op here because someone
@@ -67,6 +81,9 @@ def update_system_settings(
     for key in system_settings.BOOL_DEFAULTS:
         if key in changed:
             system_settings.set_bool(session, key, changed[key])
+    for key in system_settings.CHOICE_DEFAULTS:
+        if key in changed:
+            system_settings.set_choice(session, key, changed[key])
     record_audit_event(
         session,
         user_id=user.id,

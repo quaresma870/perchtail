@@ -21,6 +21,19 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
+Python dependencies: `backend/requirements.in` lists what the backend needs,
+with version ranges; `backend/requirements.txt` pins every package
+(transitive ones included) and is what the Docker image and a from-source
+install use. To add or upgrade a package, edit `requirements.in`, then
+regenerate the pins with [uv](https://docs.astral.sh/uv/) and commit both:
+
+```bash
+cd backend
+uv pip compile requirements.in --universal --python-version 3.12 -o requirements.txt
+```
+
+To bump everything within the ranges, add `--upgrade`.
+
 Frontend (Vite + Svelte), in a separate terminal from the repo root:
 
 ```bash
@@ -73,6 +86,38 @@ up to date as the source of truth for design decisions.
 3. Update [CHANGELOG.md](CHANGELOG.md) under `Unreleased`.
 4. Describe what changed and why in the PR description — link the issue if there
    is one.
+
+## Releasing (maintainers)
+
+Releases are immutable once published: a published release accepts no new
+assets and its tag can't be reused. `.github/workflows/release.yml`
+therefore prepares a **draft**, and a maintainer publishes it.
+
+1. Merge a PR into `dev` that sets the version in `backend/app/version.py`
+   and `frontend/package.json` (`cd frontend && npm version --no-git-tag-version X.Y.Z`)
+   and adds a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md`.
+   Use a suffix such as `X.Y.Z-rc.1` for a pre-release.
+2. Start the Release workflow, either way:
+   - Push the tag: `git tag vX.Y.Z <commit> && git push origin vX.Y.Z`.
+   - Or Actions → Release → Run workflow, choosing `dev` under "Use
+     workflow from", with the tag (`vX.Y.Z`) and the branch or commit to
+     tag (default `dev`). The workflow creates the tag. GitHub only shows
+     this button once `release.yml` is on the default branch (`main`); until
+     then, push the tag, or dispatch the workflow through the API with
+     `ref: dev`.
+
+   It refuses a tag whose code carries another version or has no
+   CHANGELOG section, and a tag whose release is already published.
+3. It builds the agent binaries and `SHA256SUMS`, pushes
+   `ghcr.io/quaresma870/perchtail:X.Y.Z` with its SBOM, and creates a
+   draft release with all of them attached and the CHANGELOG section as
+   notes. A tag with a suffix becomes a pre-release.
+4. Review the draft (notes, assets), edit the notes if needed, and
+   publish it. Publishing a full release moves the image's `X.Y` and
+   `latest` tags to it; a pre-release never does.
+
+To fix a draft, push the fix, delete the draft and its tag, and run the
+workflow again. Once a release is published, a fix needs a new version.
 
 ## Security-sensitive areas
 

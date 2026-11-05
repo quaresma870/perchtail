@@ -13,8 +13,14 @@
   let auditViewEnabled = true
   let auditRetentionDays = 365
   let retentionInput = '365'
+  let connectionsViewDefault: 'list' | 'tree' = 'list'
+  let connectionsViewSwitchable = true
   let retentionSaving = false
   let retentionError = ''
+  let maxRoots = 20
+  let maxRootsInput = '20'
+  let maxRootsSaving = false
+  let maxRootsError = ''
 
   let monitoringConfigured = false
   let monitoringToken = ''
@@ -28,6 +34,10 @@
       auditViewEnabled = settings.audit_view_enabled
       auditRetentionDays = settings.audit_retention_days
       retentionInput = String(settings.audit_retention_days)
+      maxRoots = settings.source_max_roots
+      maxRootsInput = String(settings.source_max_roots)
+      connectionsViewDefault = settings.connections_view_default
+      connectionsViewSwitchable = settings.connections_view_switchable
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load system settings'
     } finally {
@@ -53,6 +63,21 @@
       monitoringTokenError = err instanceof ApiError ? err.detail : 'Failed to generate token'
     } finally {
       generatingMonitoringToken = false
+    }
+  }
+
+  async function patchConnectionsView(patch: Partial<SystemSettings>) {
+    saving = true
+    error = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', patch)
+      connectionsViewDefault = settings.connections_view_default
+      connectionsViewSwitchable = settings.connections_view_switchable
+      systemSettings.set(settings)
+    } catch (err) {
+      error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
+    } finally {
+      saving = false
     }
   }
 
@@ -87,6 +112,28 @@
       error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
     } finally {
       saving = false
+    }
+  }
+
+  async function saveMaxRoots() {
+    const parsed = Number(maxRootsInput)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+      maxRootsError = 'Enter a whole number from 1 to 100.'
+      return
+    }
+    maxRootsError = ''
+    maxRootsSaving = true
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        source_max_roots: parsed,
+      })
+      maxRoots = settings.source_max_roots
+      maxRootsInput = String(settings.source_max_roots)
+      systemSettings.set(settings)
+    } catch (err) {
+      maxRootsError = err instanceof ApiError ? err.detail : 'Failed to update the folder limit'
+    } finally {
+      maxRootsSaving = false
     }
   }
 
@@ -171,6 +218,49 @@
         </label>
       </div>
 
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Connections view</div>
+          <p class="hint">
+            How the viewer's explorer lists sources by default, for everyone: a flat list, or a
+            tree by customer and folder. People who already have PerchTail open see the change
+            on their next page change, within 30 seconds.
+          </p>
+        </div>
+        <select
+          class="input view-select"
+          value={connectionsViewDefault}
+          disabled={saving}
+          on:change={(e) =>
+            patchConnectionsView({
+              connections_view_default: e.currentTarget.value === 'tree' ? 'tree' : 'list',
+            })}
+        >
+          <option value="list">List</option>
+          <option value="tree">Tree</option>
+        </select>
+      </div>
+
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Let users switch between list and tree</div>
+          <p class="hint">
+            When on, each user can switch and their browser remembers the choice. When off, the
+            switch is hidden and everyone sees the default view above.
+          </p>
+        </div>
+        <label class="switch">
+          <input
+            type="checkbox"
+            checked={connectionsViewSwitchable}
+            disabled={saving}
+            on:change={() =>
+              patchConnectionsView({ connections_view_switchable: !connectionsViewSwitchable })}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+
       <div class="setting-row column">
         <div>
           <div class="setting-name">Audit log retention</div>
@@ -198,6 +288,39 @@
             disabled={retentionSaving || Number(retentionInput) === auditRetentionDays}
           >
             {retentionSaving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Folders per source</div>
+          <p class="hint">
+            How many folders one source may read. 1 turns several folders per source off. At most
+            100. Sources that already have more keep them, but can't add more.
+          </p>
+        </div>
+        {#if maxRootsError}
+          <p class="error">{maxRootsError}</p>
+        {/if}
+        <div class="limit-row">
+          <input
+            class="input limit-input"
+            type="number"
+            min="1"
+            max="100"
+            step="1"
+            aria-label="Folders per source"
+            bind:value={maxRootsInput}
+          />
+          <span class="hint">folders</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={saveMaxRoots}
+            disabled={maxRootsSaving || Number(maxRootsInput) === maxRoots}
+          >
+            {maxRootsSaving ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>
@@ -289,12 +412,14 @@
   .setting-row.column .btn {
     align-self: flex-start;
   }
-  .retention-row {
+  .retention-row,
+  .limit-row {
     display: flex;
     align-items: center;
     gap: 0.5rem;
   }
-  .retention-input {
+  .retention-input,
+  .limit-input {
     width: 6rem;
   }
   .token-box {
@@ -312,5 +437,9 @@
   .error {
     color: var(--danger);
     margin: 0;
+  }
+  .view-select {
+    width: auto;
+    min-width: 7rem;
   }
 </style>

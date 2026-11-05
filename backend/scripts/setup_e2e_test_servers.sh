@@ -32,8 +32,8 @@ fi
 
 # --- packages -----------------------------------------------------------
 if ! command -v sshd >/dev/null || ! command -v smbd >/dev/null; then
-  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+  $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get update -qq
+  $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
     openssh-server samba samba-common-bin
 fi
 

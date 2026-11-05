@@ -8,6 +8,7 @@ const backendTarget = 'http://127.0.0.1:8000'
 // backend and serves everything else as the SPA — mirrored here so `npm run
 // dev` behaves the same way without a `/api` prefix rewrite.
 const apiPrefixes = [
+  '/admin',
   '/auth',
   '/customers',
   '/folders',

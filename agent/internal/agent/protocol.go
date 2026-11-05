@@ -1,5 +1,9 @@
 package agent
 
+// OSHeader carries runtime.GOOS on the WebSocket handshake, read by
+// backend/app/api/agent_ws.py.
+const OSHeader = "X-PerchTail-Agent-OS"
+
 // Command is a single instruction relayed from the backend down the
 // persistent WebSocket connection — the wire format's other end is
 // backend/app/agent_registry.py's send_command_sync and

@@ -3,19 +3,25 @@ import { memberPath, tabKey } from './tab-key'
 
 describe('tabKey', () => {
   it('keys a plain file by its path with an empty member', () => {
-    expect(tabKey('/var/log/error.log', null)).toBe('/var/log/error.log::')
+    expect(tabKey(3, '/var/log/error.log', null)).toBe('3::/var/log/error.log::')
   })
 
   it('keys an archive member by the archive path plus the member name', () => {
-    expect(tabKey('/var/log/archive.zip', 'nested/error.log')).toBe(
-      '/var/log/archive.zip::nested/error.log',
+    expect(tabKey(3, '/var/log/archive.zip', 'nested/error.log')).toBe(
+      '3::/var/log/archive.zip::nested/error.log',
     )
   })
 
   it('never collides an archive-member key with the whole-archive key', () => {
-    const wholeArchive = tabKey('/var/log/archive.zip', null)
-    const oneMember = tabKey('/var/log/archive.zip', 'inner.log')
+    const wholeArchive = tabKey(3, '/var/log/archive.zip', null)
+    const oneMember = tabKey(3, '/var/log/archive.zip', 'inner.log')
     expect(wholeArchive).not.toBe(oneMember)
+  })
+})
+
+describe('tabKey across sources', () => {
+  it('keeps the same path on two sources as two different tabs', () => {
+    expect(tabKey(1, 'app.log', null)).not.toBe(tabKey(2, 'app.log', null))
   })
 })
 

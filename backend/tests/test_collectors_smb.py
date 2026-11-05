@@ -1,22 +1,30 @@
 import io
+from types import SimpleNamespace
 
 import app.collectors.smb as smb_module
 import pytest
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 
+REPARSE = 0x400
+
 
 class FakeSMBInfo:
-    def __init__(self, size: int):
+    def __init__(self, size: int, attributes: int):
         self.end_of_file = size
+        self.file_attributes = attributes
 
 
 class FakeSMBDirEntry:
-    def __init__(self, name: str, is_dir: bool, size: int = 0):
+    def __init__(self, name: str, is_dir: bool, size: int = 0, reparse: bool = False):
         self.name = name
         self._is_dir = is_dir
-        self.smb_info = FakeSMBInfo(size)
+        self._reparse = reparse
+        self.smb_info = FakeSMBInfo(size, (0x10 if is_dir else 0x80) | (REPARSE if reparse else 0))
 
     def is_dir(self) -> bool:
+        if self._reparse:
+            # What smbclient does for a symlink it can't redirect.
+            raise OSError("SMBLinkRedirectionError: cannot be redirected")
         return self._is_dir
 
 
@@ -25,17 +33,43 @@ class FakeSMBClient:
         self.sessions: list[tuple] = []
         self.listing: list[FakeSMBDirEntry] = []
         self.files: dict[str, bytes] = {}
+        self.stat_sizes: dict[str, int] = {}
+        self.stat_kwargs: list[dict] = []
         self.requested_paths: list[str] = []
         self.scandir_kwargs: list[dict] = []
         self.open_file_kwargs: list[dict] = []
+        self.reparse_paths: set[str] = set()
+        self.caches: list[dict] = []
+        self.reset_caches: list[dict] = []
 
-    def register_session(self, host, username=None, password=None, port=None, auth_protocol=None):
+    def register_session(
+        self,
+        host,
+        username=None,
+        password=None,
+        port=None,
+        auth_protocol=None,
+        connection_cache=None,
+    ):
         self.sessions.append((host, username, password, port, auth_protocol))
+        self.caches.append(connection_cache)
+
+    def reset_connection_cache(self, fail_on_error=True, connection_cache=None):
+        self.reset_caches.append(connection_cache)
+
+    def lstat(self, path, **kwargs):
+        return SimpleNamespace(st_file_attributes=REPARSE if path in self.reparse_paths else 0x10)
 
     def scandir(self, path, **kwargs):
         self.requested_paths.append(path)
         self.scandir_kwargs.append(kwargs)
         return self.listing
+
+    def stat(self, path, **kwargs):
+        self.stat_kwargs.append(kwargs)
+        if path in self.stat_sizes:
+            return SimpleNamespace(st_size=self.stat_sizes[path])
+        return SimpleNamespace(st_size=len(self.files[path]))
 
     def open_file(self, path, mode="rb", **kwargs):
         self.requested_paths.append(path)
@@ -85,7 +119,7 @@ def test_list_directory_registers_session_and_filters_files(fake_smbclient):
         FakeSMBDirEntry("secret.txt", is_dir=False, size=5),
     ]
 
-    rules = [_rule(0, RuleType.include, "*.log")]
+    rules = [_rule(0, RuleType.include, "**/*.log")]
     entries = {e.name: e for e in smb_module.list_directory(_source(), rules)}
 
     assert "nested" in entries and entries["nested"].is_dir is True
@@ -173,3 +207,76 @@ def test_fetch_file_stops_at_max_fetch_mb(fake_smbclient, tmp_path, monkeypatch)
     with pytest.raises(FetchTooLargeError):
         smb_module.fetch_file(_source(), "big.log", destination)
     assert not destination.exists()
+
+
+def test_fetch_opens_with_full_share_access_so_live_logs_can_be_read(fake_smbclient, tmp_path):
+    """#166: without share_access the open asked for exclusive access and a
+    log another process had open for writing failed with a sharing
+    violation."""
+    fake_smbclient.files[smb_module._unc_path(_source(), "app.log")] = b"live"
+
+    smb_module.fetch_file(_source(), "app.log", tmp_path / "out")
+
+    assert fake_smbclient.open_file_kwargs[0]["share_access"] == "rwd"
+    assert (tmp_path / "out").read_bytes() == b"live"
+
+
+def test_fetch_refuses_an_oversized_file_before_opening_it(fake_smbclient, tmp_path, monkeypatch):
+    """#167: the cap used to be enforced only after downloading up to it."""
+    from app.collectors.base import FetchTooLargeError
+
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 8)
+    path = smb_module._unc_path(_source(), "big.log")
+    fake_smbclient.files[path] = b"x"
+    fake_smbclient.stat_sizes[path] = 100
+
+    with pytest.raises(FetchTooLargeError):
+        smb_module.fetch_file(_source(), "big.log", tmp_path / "out")
+
+    assert fake_smbclient.open_file_kwargs == []
+    assert fake_smbclient.stat_kwargs[0]["port"] == 445
+
+
+def test_every_request_authenticates_with_its_own_session(fake_smbclient, tmp_path):
+    """Two sources for the same host and username used to share smbclient's
+    global session pool, so one with the wrong password read with the
+    other's authenticated session."""
+    fake_smbclient.listing = [FakeSMBDirEntry("app.log", is_dir=False, size=1)]
+    fake_smbclient.files[smb_module._unc_path(_source(), "app.log")] = b"x"
+
+    smb_module.list_directory(_source(), [_rule(0, RuleType.include, "**")])
+    smb_module.fetch_file(_source(), "app.log", tmp_path / "out")
+
+    first, second = fake_smbclient.caches
+    assert isinstance(first, dict) and isinstance(second, dict)
+    assert first is not second
+    assert fake_smbclient.reset_caches == [first, second]
+    assert all(kw["connection_cache"] is first for kw in fake_smbclient.scandir_kwargs)
+    assert fake_smbclient.open_file_kwargs[0]["connection_cache"] is second
+
+
+def test_junctions_and_symlinks_are_left_out_of_listings(fake_smbclient):
+    """A reparse point used to be listed (and followed by the server) or,
+    for a symlink smbclient can't redirect, fail the whole listing."""
+    fake_smbclient.listing = [
+        FakeSMBDirEntry("jx", is_dir=True, reparse=True),
+        FakeSMBDirEntry("sx", is_dir=True, reparse=True),
+        FakeSMBDirEntry("app.log", is_dir=False, size=1),
+    ]
+    entries = smb_module.list_directory(_source(), [_rule(0, RuleType.include, "**")])
+    assert [e.name for e in entries] == ["app.log"]
+
+
+@pytest.mark.parametrize("path", ["jx", "jx/secret.txt", "jx/deeper/secret.txt"])
+def test_paths_through_a_reparse_point_are_refused(fake_smbclient, tmp_path, path):
+    from app.collectors.base import PathOutsideBaseError
+
+    fake_smbclient.reparse_paths = {smb_module._unc_path(_source(), "jx")}
+    fake_smbclient.files[smb_module._unc_path(_source(), path)] = b"FORA DA SHARE"
+
+    with pytest.raises(PathOutsideBaseError):
+        smb_module.list_directory(_source(), [_rule(0, RuleType.include, "**")], path)
+    with pytest.raises(PathOutsideBaseError):
+        smb_module.fetch_file(_source(), path, tmp_path / "out")
+    assert fake_smbclient.open_file_kwargs == []
+    assert len(fake_smbclient.reset_caches) == 2

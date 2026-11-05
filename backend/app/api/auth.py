@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
+from app import auth_events
 from app.audit import record_audit_event
 from app.auth import mfa
 from app.auth.models import AuthSession, GlobalCapability, Role, SSOProviderConfig, User
@@ -150,6 +151,20 @@ def _clear_sso_state_cookie(response: Response) -> None:
     )
 
 
+def _record_failed_login(
+    session: Session, username: str, client_ip: str | None, reason: str
+) -> None:
+    """Counts the failure toward the lockout, audits it, and audits the
+    lockout itself when this failure is the one that triggers it."""
+    record_failure(username)
+    auth_events.login_failed(session, username=username, client_ip=client_ip, reason=reason)
+    remaining = seconds_until_unlocked(username)
+    if remaining is not None:
+        auth_events.locked_out(
+            session, username=username, client_ip=client_ip, lock_seconds=remaining
+        )
+
+
 @router.post("/login", response_model=UserPublic)
 def login(
     payload: LoginRequest,
@@ -157,8 +172,10 @@ def login(
     response: Response,
     session: Session = Depends(get_session),
 ):
+    client_ip = request.client.host if request.client else None
     remaining = seconds_until_unlocked(payload.username)
     if remaining is not None:
+        auth_events.login_throttled(session, username=payload.username, client_ip=client_ip)
         retry_after = math.ceil(remaining)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -168,7 +185,7 @@ def login(
 
     user = LocalPasswordProvider().authenticate(session, payload.username, payload.password)
     if user is None:
-        record_failure(payload.username)
+        _record_failed_login(session, payload.username, client_ip, "bad_credentials")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     if user.mfa_enabled:
@@ -185,7 +202,7 @@ def login(
                 },
             )
         if not mfa.verify_mfa_code(session, user, payload.mfa_code):
-            record_failure(payload.username)
+            _record_failed_login(session, payload.username, client_ip, "mfa_invalid_code")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={

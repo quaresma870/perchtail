@@ -8,13 +8,8 @@ const SYSTEM_SOURCE_NAME = 'PerchTail application logs'
 test('opening the built-in log source lists and displays its own log file', async ({ page }) => {
   await page.goto('/#/viewer')
 
-  // "All connections" always lists every source regardless of visit
-  // history; "Recent" only gains an entry once a source has actually been
-  // opened, so scoping to "All connections" stays a single match
-  // regardless of whether an earlier spec in this run already opened this
-  // same built-in source.
-  await page.locator('.picker-column.all').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
-  await expect(page).toHaveURL(/#\/viewer\/\d+$/)
+  // The explorer (#162) expands the source in place instead of navigating.
+  await page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
 
   // TimedRotatingFileHandler (app/logging_config.py) opens perchtail.log
   // immediately on startup, so it's already there and non-empty by the
@@ -25,4 +20,30 @@ test('opening the built-in log source lists and displays its own log file', asyn
 
   await expect(page.locator('.tab.active .tab-label')).toContainText('perchtail.log')
   await expect(page.locator('.cm-content')).not.toBeEmpty()
+})
+
+test('tabs from the viewer survive a visit to Settings and back', async ({ page }) => {
+  await page.goto('/#/viewer')
+  await page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
+  await page.locator('.tree-body').getByRole('button', { name: 'perchtail.log' }).click()
+  await expect(page.locator('.tab.active .tab-label')).toContainText('perchtail.log')
+
+  await page.goto('/#/settings/sources')
+  await page.goto('/#/viewer')
+
+  await expect(page.locator('.tab .tab-label')).toContainText('perchtail.log')
+  // The machine stays expanded too (#196), not just the tabs.
+  await expect(page.locator('.tree-body').getByRole('button', { name: 'perchtail.log' })).toBeVisible()
+})
+
+test('the page itself never scrolls: only the log pane does', async ({ page }) => {
+  await page.goto('/#/viewer')
+  await page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
+  await page.locator('.tree-body').getByRole('button', { name: 'perchtail.log' }).click()
+  await expect(page.locator('.cm-content')).not.toBeEmpty()
+
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollHeight - document.documentElement.clientHeight,
+  )
+  expect(overflow).toBeLessThanOrEqual(1)
 })

@@ -81,9 +81,9 @@ def test_list_directory_always_shows_dirs_but_filters_files(fake_session):
             {"Name": "secret.txt", "PSIsContainer": False, "Length": 5},
         ]
     ).encode()
-    fake_session.handler = lambda script: FakeResult(std_out=payload)
+    fake_session.handler = lambda script: FakeResult(std_out=base64.b64encode(payload))
 
-    rules = [_rule(0, RuleType.include, "*.log")]
+    rules = [_rule(0, RuleType.include, "**/*.log")]
     entries = {e.name: e for e in winrm_module.list_directory(_source(), rules)}
 
     assert "nested" in entries and entries["nested"].is_dir is True
@@ -95,7 +95,7 @@ def test_list_directory_handles_a_single_result_object(fake_session):
     # Get-ChildItem | ConvertTo-Json emits a bare object, not a list, when
     # there's exactly one match.
     payload = json.dumps({"Name": "app.log", "PSIsContainer": False, "Length": 10}).encode()
-    fake_session.handler = lambda script: FakeResult(std_out=payload)
+    fake_session.handler = lambda script: FakeResult(std_out=base64.b64encode(payload))
 
     entries = winrm_module.list_directory(_source(), [_rule(0, RuleType.include, "*.log")])
     assert entries[0].name == "app.log"
@@ -168,3 +168,120 @@ def test_local_copy_fetches_into_a_temp_path(fake_session):
 
     with winrm_module.local_copy(_source(), "app.log") as path:
         assert path.read_bytes() == content
+
+
+def test_list_directory_decodes_non_ascii_names(fake_session):
+    """#168: an accented name used to break the whole listing, because the
+    console wrote it in the OEM code page and the bytes weren't UTF-8."""
+    payload = json.dumps(
+        [
+            {"Name": "ação-é.log", "PSIsContainer": False, "Length": 3},
+            {"Name": "aspas ’curvas“ ”.log", "PSIsContainer": False, "Length": 4},
+        ],
+        ensure_ascii=False,
+    ).encode("utf-8")
+    seen = []
+
+    def handler(script):
+        seen.append(script)
+        return FakeResult(std_out=base64.b64encode(payload))
+
+    fake_session.handler = handler
+
+    entries = winrm_module.list_directory(_source(), [_rule(0, RuleType.include, "**/*")])
+
+    assert {e.name for e in entries} == {"ação-é.log", "aspas ’curvas“ ”.log"}
+    assert "ToBase64String" in seen[0] and "UTF8" in seen[0]
+
+
+def test_remote_path_of_a_drive_root_keeps_the_backslash():
+    """ "D:" alone is the current directory on D:, not its root."""
+    source = _source(base_path="D:\\")
+    assert winrm_module._remote_path(source) == "D:\\"
+    assert winrm_module._remote_path(source, "Logs/app.log") == "D:\\Logs\\app.log"
+
+
+def test_every_component_below_the_base_is_checked_for_reparse_points(fake_session):
+    seen = []
+
+    def handler(script):
+        seen.append(script)
+        return FakeResult(std_out=base64.b64encode(b"[]"))
+
+    fake_session.handler = handler
+    winrm_module.list_directory(_source(), [_rule(0, RuleType.include, "**")], "jx/deep")
+
+    script = seen[0]
+    assert "[IO.File]::GetAttributes($__c) -band [IO.FileAttributes]::ReparsePoint" in script
+    assert "'C:\\Logs\\AppName\\jx', 'C:\\Logs\\AppName\\jx\\deep'" in script
+    # Junctions and symlinks inside the folder are filtered out, not followed.
+    assert "Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }" in script
+    assert script.index("GetAttributes") < script.index("Get-ChildItem")
+
+
+def test_root_listing_has_no_guard_but_still_filters_links(fake_session):
+    seen = []
+    fake_session.handler = lambda s: seen.append(s) or FakeResult(std_out=b"")
+    winrm_module.list_directory(_source(), [])
+    assert "GetAttributes" not in seen[0]
+    assert "ReparsePoint" in seen[0]
+
+
+def test_a_path_through_a_junction_is_refused(fake_session, tmp_path):
+    from app.collectors.base import PathOutsideBaseError
+
+    fake_session.handler = lambda s: FakeResult(
+        status_code=3, std_out=b"PERCHTAIL_OUTSIDE_BASE\r\n"
+    )
+    with pytest.raises(PathOutsideBaseError):
+        winrm_module.list_directory(_source(), [_rule(0, RuleType.include, "**")], "jx")
+    with pytest.raises(PathOutsideBaseError):
+        winrm_module.fetch_file(_source(), "jx/secret.txt", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_every_read_block_repeats_the_guard(fake_session, tmp_path, monkeypatch):
+    monkeypatch.setattr(winrm_module, "_CHUNK_BYTES", 4)
+    fake_session.handler = _serve_file(b"0123456789")
+    winrm_module.fetch_file(_source(), "nested/app.log", tmp_path / "out")
+    assert (tmp_path / "out").read_bytes() == b"0123456789"
+    assert all("GetAttributes" in s for s in fake_session.scripts_run)
+
+
+def test_listing_a_file_is_not_found(fake_session):
+    from app.collectors.base import SourceNotFoundError
+    from app.collectors.registry import CONNECTORS
+    from app.models import Protocol
+
+    fake_session.handler = lambda s: FakeResult(status_code=4, std_out=b"PERCHTAIL_NOT_A_DIRECTORY")
+    connector = CONNECTORS[Protocol.winrm]
+    original = connector._module._session
+    with pytest.raises(SourceNotFoundError):
+        connector.list_directory(_source(), [_rule(0, RuleType.include, "**")], "jx/secret.txt")
+    assert connector._module._session is original
+
+
+def test_a_junction_swapped_in_mid_read_is_refused_and_logged(fake_session, tmp_path, monkeypatch):
+    """#206: the re-check on every block refused it, but only the first
+    check logged winrm.path_outside_base."""
+    from app.collectors.base import PathOutsideBaseError
+
+    monkeypatch.setattr(winrm_module, "_CHUNK_BYTES", 4)
+    serve = _serve_file(b"0123456789")
+
+    def handler(script):
+        if "Seek(4," in script:
+            return FakeResult(status_code=3, std_out=b"PERCHTAIL_OUTSIDE_BASE\r\n")
+        return serve(script)
+
+    fake_session.handler = handler
+    events = []
+    monkeypatch.setattr(
+        winrm_module.logger, "warning", lambda event, **kw: events.append((event, kw))
+    )
+    with pytest.raises(PathOutsideBaseError):
+        winrm_module.fetch_file(_source(), "nested/app.log", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+    assert events == [
+        ("winrm.path_outside_base", {"source_id": None, "path": "nested/app.log", "offset": 4})
+    ]

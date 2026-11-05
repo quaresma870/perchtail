@@ -128,8 +128,117 @@ def is_visible(path: str, rules: list[Rule], *, case_insensitive: bool = False) 
     return verdict
 
 
+def _segment_matches(pattern_segment: str, name: str, ignore_case: bool) -> bool:
+    """One glob path segment (`*`, `?` and literals, never crossing `/`)
+    against one path segment -- the per-segment half of _compile_glob."""
+    return _compile_glob(pattern_segment, ignore_case).match(name) is not None
+
+
+def _glob_could_match_below(pattern: str, dir_segments: list[str], ignore_case: bool) -> bool:
+    """Whether glob `pattern` could match some path strictly below the
+    directory `dir_segments` (i.e. `dir/<at least one more segment>`)."""
+    parts = pattern.split("/")
+    if any("**" in p and p != "**" for p in parts):
+        return True  # `a**b` spans segments in ways this walk doesn't model
+
+    def walk(pi: int, si: int) -> bool:
+        if si == len(dir_segments):
+            return pi < len(parts)  # something left to match a child
+        if pi == len(parts):
+            return False
+        if parts[pi] == "**":
+            return walk(pi + 1, si) or walk(pi, si + 1)
+        return _segment_matches(parts[pi], dir_segments[si], ignore_case) and walk(pi + 1, si + 1)
+
+    return walk(0, 0)
+
+
+def _glob_matches_exactly(parts: list[str], segments: list[str], ignore_case: bool) -> bool:
+    def walk(pi: int, si: int) -> bool:
+        if pi == len(parts):
+            return si == len(segments)
+        if parts[pi] == "**":
+            return walk(pi + 1, si) or (si < len(segments) and walk(pi, si + 1))
+        return (
+            si < len(segments)
+            and _segment_matches(parts[pi], segments[si], ignore_case)
+            and walk(pi + 1, si + 1)
+        )
+
+    return walk(0, 0)
+
+
+def _glob_covers_everything_below(pattern: str, dir_segments: list[str], ignore_case: bool) -> bool:
+    """Whether glob `pattern` matches *every* path below the directory --
+    true for `X/**` where X matches the directory or one of its ancestors
+    (and for a bare `**`)."""
+    parts = pattern.split("/")
+    if parts[-1] != "**" or any("**" in p and p != "**" for p in parts):
+        return False
+    prefix = parts[:-1]
+    return any(
+        _glob_matches_exactly(prefix, dir_segments[:k], ignore_case)
+        for k in range(len(dir_segments) + 1)
+    )
+
+
+def is_dir_visible(dir_path: str, rules: list[Rule], *, case_insensitive: bool = False) -> bool:
+    """Whether a directory should be shown (and be browsable): only if some
+    file below it could end up visible under the rule chain. Derived from
+    the same ordered, last-match-wins rules files use, without listing the
+    remote tree:
+
+    - an include rule that can't match anything below the directory doesn't
+      keep it visible (`app/**` hides every other top-level folder);
+    - an include that *can* is cancelled by a later exclude that covers the
+      whole directory (`secret/**`, an ancestor's `X/**`, or `**`), so an
+      excluded folder disappears -- name, sub-folders and all;
+    - a later include can still re-open part of an excluded folder, and then
+      only the folders leading to it are shown.
+
+    Regex rules can't be analysed this way: a regex include is assumed to
+    possibly match anywhere (keeps folders visible) and a regex exclude is
+    never assumed to cover a whole folder. To hide a folder reliably, use a
+    glob exclude such as `folder/**`. The source root ("") is always
+    visible; with zero rules its listing is simply empty."""
+    if dir_path == "":
+        return True
+    segments = dir_path.split("/")
+    ordered = sorted(rules, key=lambda r: r.order)
+    for i, rule in enumerate(ordered):
+        if rule.type != RuleType.include:
+            continue
+        if rule.pattern_kind == PatternKind.glob and not _glob_could_match_below(
+            rule.pattern, segments, case_insensitive
+        ):
+            continue
+        covered = any(
+            later.type == RuleType.exclude
+            and later.pattern_kind == PatternKind.glob
+            and _glob_covers_everything_below(later.pattern, segments, case_insensitive)
+            for later in ordered[i + 1 :]
+        )
+        if not covered:
+            return True
+    return False
+
+
+def is_entry_visible(
+    path: str, is_dir: bool, rules: list[Rule], *, case_insensitive: bool = False
+) -> bool:
+    """Listing filter shared by every connector: files go through the rule
+    chain, directories through is_dir_visible."""
+    if is_dir:
+        return is_dir_visible(path, rules, case_insensitive=case_insensitive)
+    return is_visible(path, rules, case_insensitive=case_insensitive)
+
+
 def rules_case_insensitive(source: Source) -> bool:
-    return source.protocol in _WINDOWS_PROTOCOLS
+    """Windows filesystems ignore case, so rules do too: SMB and WinRM
+    sources, and agents that reported running on Windows (#189)."""
+    if source.protocol in _WINDOWS_PROTOCOLS:
+        return True
+    return source.protocol == Protocol.agent and source.agent_os == "windows"
 
 
 def is_safe_relative_path(path: str) -> bool:

@@ -2,11 +2,26 @@
   import { onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
-  import RuleEditor from '../lib/components/RuleEditor.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import FolderPicker from '../lib/components/FolderPicker.svelte'
   import SeverityPatternEditor from '../lib/components/SeverityPatternEditor.svelte'
+  import {
+    basePathHint,
+    basePathPlaceholder,
+    canPickFolder,
+    suggestRootLabel,
+  } from '../lib/base-path'
   import { nestFoldersFlat } from '../lib/folder-tree'
-  import type { AgentTokenResult, Customer, Folder, Protocol, Source } from '../lib/types'
+  import { systemSettings } from '../lib/settings'
+  import { justCreatedSourceId } from '../lib/source-created'
+  import type {
+    AgentTokenResult,
+    Customer,
+    Folder,
+    Protocol,
+    Source,
+    SourceRoot,
+  } from '../lib/types'
 
   export let params: { id?: string } = {}
 
@@ -19,6 +34,8 @@
   let loading = !isNew
   let saving = false
   let error = ''
+  // Shown next to the Save button, where the user is looking (#206).
+  let saveError = ''
 
   let name = ''
   let customerId: number | null = null
@@ -26,7 +43,21 @@
   let protocol: Protocol = 'ssh'
   let host = ''
   let port: number | null = null
-  let basePath = ''
+  // The folder(s) this source reads. One entry is an ordinary source
+  // (its path is the Base path); two or more each get a label and show up
+  // as top-level folders in the viewer (#161).
+  let roots: SourceRoot[] = [{ label: '', path: '' }]
+  let hadRoots = false
+  let originalPaths = ''
+  let originalHostPort = ''
+  // Index of the root whose Browse… picker is open.
+  let pickerFor: number | null = null
+  // Settings -> System -> Folders per source; a source that already has
+  // more than the limit keeps them but can't add more.
+  let hadRootsCount = 0
+  $: rootsLimit = $systemSettings.source_max_roots
+  let winrmScheme: 'https' | 'http' = 'https'
+  let tlsCaPem = ''
   let enabled = true
   let searchIndexingEnabled = false
   let username = ''
@@ -154,7 +185,16 @@
           protocol = source.protocol
           host = source.host
           port = source.port
-          basePath = source.base_path
+          roots =
+            source.roots.length > 0
+              ? source.roots.map((r) => ({ ...r }))
+              : [{ label: '', path: source.base_path }]
+          hadRoots = source.roots.length > 0
+          hadRootsCount = source.roots.length
+          winrmScheme = source.winrm_effective_scheme ?? 'https'
+          tlsCaPem = source.tls_ca_pem ?? ''
+          originalPaths = JSON.stringify(roots.map((r) => r.path))
+          originalHostPort = `${source.host}:${source.port ?? ''}`
           enabled = source.enabled
           searchIndexingEnabled = source.search_indexing_enabled
         }
@@ -175,8 +215,52 @@
     return Object.keys(cred).length > 0 ? cred : null
   }
 
+  $: multiRoot = roots.length > 1
+  // A saved credential is only sent to the host and port it was saved for,
+  // so pointing the source elsewhere needs it typed again.
+  $: hostPortChanged = !isNew && originalHostPort !== '' && `${host}:${port ?? ''}` !== originalHostPort
+  $: needsCredentialAgain =
+    hostPortChanged && !!source?.has_credential && protocol !== 'agent' && protocol !== 'local'
+  $: pathsChanged = !isNew && JSON.stringify(roots.map((r) => r.path)) !== originalPaths
+
+  function addRoot() {
+    if (roots.length === 1 && !roots[0].label) {
+      roots[0].label = suggestRootLabel(roots[0].path, [])
+    }
+    roots = [...roots, { label: '', path: '' }]
+  }
+
+  function removeRoot(index: number) {
+    roots = roots.filter((_, i) => i !== index)
+    if (pickerFor !== null) pickerFor = null
+  }
+
+  function pickedFolder(index: number, path: string) {
+    roots[index].path = path
+    if (roots.length > 1 && !roots[index].label) {
+      roots[index].label = suggestRootLabel(
+        path,
+        roots.filter((_, i) => i !== index).map((r) => r.label),
+      )
+    }
+    pickerFor = null
+  }
+
+  function winrmPayload(): Record<string, string> {
+    if (protocol !== 'winrm') return {}
+    return { winrm_scheme: winrmScheme, tls_ca_pem: winrmScheme === 'https' ? tlsCaPem : '' }
+  }
+
+  function locationPayload() {
+    const cleaned = roots.map((r) => ({ label: r.label.trim(), path: r.path.trim() }))
+    if (cleaned.length > 1) return { base_path: cleaned[0].path, roots: cleaned }
+    // Sending a single root turns a multi-root source back into a plain one.
+    return { base_path: cleaned[0].path, ...(hadRoots ? { roots: cleaned } : {}) }
+  }
+
   async function handleSubmit() {
     error = ''
+    saveError = ''
     saving = true
     try {
       const credential = buildCredential()
@@ -188,11 +272,14 @@
           protocol,
           host,
           port,
-          base_path: basePath,
+          ...locationPayload(),
+          ...winrmPayload(),
           enabled,
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
         })
+        // Land on the read-only overview, not back on this form (#157).
+        justCreatedSourceId.set(created.id)
         push(`/settings/sources/${created.id}`)
       } else {
         await api.patch(`/sources/${sourceId}`, {
@@ -201,15 +288,16 @@
           folder_id: folderId,
           host,
           port,
-          base_path: basePath,
+          ...locationPayload(),
+          ...winrmPayload(),
           enabled,
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
         })
-        push('/settings/sources')
+        push(`/settings/sources/${sourceId}`)
       }
     } catch (err) {
-      error = err instanceof ApiError ? err.detail : 'Failed to save source'
+      saveError = err instanceof ApiError ? err.detail : 'Failed to save source'
     } finally {
       saving = false
     }
@@ -236,8 +324,10 @@
 <div class="page">
   <div class="header">
     <h1>{isNew ? 'New source' : `Edit ${name}`}</h1>
-    <button class="btn btn-ghost" on:click={() => push('/settings/sources')}
-      >← back to sources</button
+    <button
+      class="btn btn-ghost"
+      on:click={() => push(isNew ? '/settings/sources' : `/settings/sources/${sourceId}`)}
+      >{isNew ? '← back to sources' : '← back to source'}</button
     >
   </div>
 
@@ -381,31 +471,129 @@
             placeholder={protocol === 'agent' ? 'friendly name for the agent host' : undefined}
           />
         </label>
+        {#if protocol === 'winrm'}
+          <label class="narrow">
+            Scheme
+            <select class="input" bind:value={winrmScheme}>
+              <option value="https">HTTPS</option>
+              <option value="http">HTTP</option>
+            </select>
+          </label>
+        {/if}
         {#if protocol !== 'agent'}
           <label class="narrow">
             Port
-            <input class="input" type="number" bind:value={port} placeholder="default" />
+            <input
+              class="input"
+              type="number"
+              bind:value={port}
+              placeholder={protocol === 'winrm' ? (winrmScheme === 'https' ? '5986' : '5985') : 'default'}
+            />
           </label>
         {/if}
       </div>
-
-      <label>
-        Base path
-        <input
-          class="input"
-          bind:value={basePath}
-          required
-          placeholder={protocol === 'agent'
-            ? 'documented for reference — the agent enforces its own root'
-            : '/var/log/appname'}
-        />
-      </label>
-      {#if protocol === 'local'}
-        <p class="hint">
-          Must be under a directory the server operator allows via <code>LOCAL_SOURCE_ROOTS</code> —
-          see docs/source-setup.md.
+      {#if protocol === 'winrm' && winrmScheme === 'https'}
+        <label>
+          CA certificate (PEM, optional)
+          <textarea
+            class="input mono"
+            rows="3"
+            wrap="off"
+            bind:value={tlsCaPem}
+            placeholder="-----BEGIN CERTIFICATE-----  for an internal CA or a self-signed listener"
+            spellcheck="false"
+            autocomplete="off"
+            data-gramm="false"
+          ></textarea>
+        </label>
+      {:else if protocol === 'winrm'}
+        <p class="warning small">
+          Plain HTTP: NTLM still encrypts the WinRM messages, but the server isn't authenticated.
+          Prefer HTTPS.
         </p>
       {/if}
+
+      <div class="roots">
+        {#each roots as root, index (index)}
+          <div class="root-row">
+            {#if multiRoot}
+              <label class="root-label">
+                Label
+                <input
+                  class="input"
+                  bind:value={root.label}
+                  required
+                  maxlength="64"
+                  placeholder="e.g. IIS"
+                />
+              </label>
+            {/if}
+            <label class="grow">
+              {index === 0 ? 'Base path' : 'Path'}
+              <input
+                class="input mono"
+                bind:value={root.path}
+                required={protocol !== 'agent'}
+                placeholder={basePathPlaceholder(protocol)}
+                spellcheck="false"
+                autocomplete="off"
+                data-gramm="false"
+              />
+            </label>
+            {#if canPickFolder(protocol)}
+              <button
+                type="button"
+                class="btn btn-ghost root-btn"
+                disabled={!host.trim()}
+                title={host.trim() ? 'Browse the host for a folder' : 'Enter the host first'}
+                on:click={() => (pickerFor = pickerFor === index ? null : index)}>Browse…</button
+              >
+            {/if}
+            {#if multiRoot}
+              <button
+                type="button"
+                class="btn btn-ghost root-btn"
+                aria-label={`Remove folder ${root.label || index + 1}`}
+                on:click={() => removeRoot(index)}>✕</button
+              >
+            {/if}
+          </div>
+          {#if pickerFor === index}
+            <FolderPicker
+              {protocol}
+              {host}
+              {port}
+              credential={buildCredential()}
+              sourceId={isNew ? null : sourceId}
+              winrm={protocol === 'winrm' ? winrmPayload() : null}
+              startPath={root.path}
+              on:pick={(e) => pickedFolder(index, e.detail)}
+              on:close={() => (pickerFor = null)}
+            />
+          {/if}
+        {/each}
+        {#if basePathHint(protocol)}
+          <p class="hint small">{basePathHint(protocol)}</p>
+        {/if}
+        {#if protocol !== 'agent' && roots.length < Math.max(rootsLimit, hadRootsCount)}
+          <button type="button" class="btn btn-ghost add-root" on:click={addRoot}>
+            + Add another folder
+          </button>
+          {#if multiRoot}
+            <p class="hint small">
+              Each folder appears in the viewer as a top-level folder named by its label. Rules
+              see those names too: <code>**/*.log</code> covers every folder,
+              <code>IIS/**</code> only one.
+            </p>
+          {/if}
+        {/if}
+        {#if pathsChanged}
+          <p class="warning small">
+            Rules are relative to the base path, so after saving they apply to what's at the new
+            location — check they still match. The source's search index is cleared and rebuilt.
+          </p>
+        {/if}
+      </div>
 
       <label class="checkbox">
         <input type="checkbox" bind:checked={enabled} />
@@ -453,7 +641,13 @@
         </fieldset>
       {:else if protocol !== 'local'}
         <fieldset>
-          <legend>Credential {isNew ? '' : '(leave blank to keep current)'}</legend>
+          <legend>Credential {isNew || needsCredentialAgain ? '' : '(leave blank to keep current)'}</legend>
+          {#if needsCredentialAgain}
+            <p class="warning small">
+              The host or port changed: enter the credential again. The saved one is only sent to the
+              host and port it was saved for.
+            </p>
+          {/if}
           <label>
             Username
             <input class="input" bind:value={username} autocomplete="off" />
@@ -462,23 +656,46 @@
             <label>
               Private key: ed25519, ECDSA or RSA, without a passphrase (leave blank to
               use password instead)
-              <textarea class="input" rows="4" bind:value={privateKey}></textarea>
+              <textarea
+                class="input mono"
+                rows="4"
+                wrap="off"
+                bind:value={privateKey}
+                spellcheck="false"
+                autocomplete="off"
+                autocapitalize="off"
+                data-gramm="false"
+                data-gramm_editor="false"
+                data-enable-grammarly="false"
+              ></textarea>
             </label>
           {/if}
           <label>
             Password
-            <input class="input" type="password" bind:value={password} autocomplete="new-password" />
+            <input
+              class="input"
+              type="password"
+              bind:value={password}
+              autocomplete="new-password"
+              spellcheck="false"
+              data-gramm="false"
+              data-enable-grammarly="false"
+            />
           </label>
         </fieldset>
       {/if}
 
-      <button class="btn btn-primary" type="submit" disabled={saving}>
-        {saving ? 'Saving…' : 'Save'}
-      </button>
+      <div class="save-row">
+        <button class="btn btn-primary" type="submit" disabled={saving}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {#if saveError}
+          <p class="error save-error" role="alert">{saveError}</p>
+        {/if}
+      </div>
     </form>
 
     {#if !isNew && sourceId !== null}
-      <RuleEditor {sourceId} readOnly={source?.is_system ?? false} />
       <p class="hint override-hint">
         Adding a pattern below overrides the global severity indicators (Settings → Severity
         indicators) for this source specifically — its own set replaces the global one entirely
@@ -529,7 +746,9 @@
     gap: 0.5rem;
     color: var(--text);
   }
-  input,
+  /* Full width for text fields only -- checkboxes and radios keep their
+     natural size, so they sit right next to their label (#158). */
+  input:not([type='checkbox']):not([type='radio']),
   select,
   textarea {
     width: 100%;
@@ -589,9 +808,54 @@
     color: var(--text-faint);
   }
   .hint.indent,
+  .save-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .save-error {
+    margin: 0;
+    flex: 1;
+    min-width: 14rem;
+  }
   .error.indent {
     margin: -0.5rem 0 0;
     font-size: 0.78rem;
+  }
+  .roots {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .root-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-end;
+  }
+  .root-row .grow {
+    flex: 1;
+  }
+  .root-label {
+    flex: 0 0 140px;
+  }
+  .root-btn {
+    flex: 0 0 auto;
+  }
+  .add-root {
+    align-self: flex-start;
+    font-size: 0.8rem;
+    padding: 0.3rem 0.6rem;
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
+  .small {
+    margin: 0;
+    font-size: 0.78rem;
+  }
+  .warning {
+    color: var(--warning, #b58105);
   }
   .override-hint {
     font-size: 0.78rem;

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"runtime"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -44,6 +45,9 @@ func Run(ctx context.Context, cfg Config) error {
 func connectAndServe(ctx context.Context, cfg Config) error {
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+cfg.Token)
+	// The backend matches rules case-insensitively for Windows agents, as
+	// NTFS does (#189); it can only know which OS this is if told.
+	header.Set(OSHeader, runtime.GOOS)
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.ServerURL, header)
 	if err != nil {
@@ -52,12 +56,31 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 	defer conn.Close()
 	log.Printf("agent: connected to %s", cfg.ServerURL)
 
+	// ReadJSON blocks until the backend sends something, so a stop signal
+	// (ctx cancelled) wouldn't be noticed until then and `systemctl stop`
+	// waited out its timeout (#205). Closing the connection unblocks it.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent stopping"),
+				time.Now().Add(time.Second))
+			conn.Close()
+		case <-done:
+		}
+	}()
+
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 		var cmd Command
 		if err := conn.ReadJSON(&cmd); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("read: %w", err)
 		}
 		if err := conn.WriteJSON(handleCommand(cfg, cmd)); err != nil {
