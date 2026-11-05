@@ -8,6 +8,19 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Fixed
+- Search indexing: one large source no longer holds the whole sweep (#218).
+  A first index of a source with thousands of files took minutes, and
+  meanwhile every other source's index, and the alerts that ride on it,
+  went stale. Each source now gets at most
+  `SEARCH_INDEX_SOURCE_BUDGET_SECONDS` (default 120) of reading per sweep
+  and carries on where it left off in the next one. New files are read
+  first, then the least recently indexed, so a source with many growing
+  logs still works through all of them.
+- Viewer: "⌕ Find" in the toolbar is now a button that opens the search
+  panel. It looked clickable before but was only a hint for Ctrl/Cmd+F
+  (#218).
+
 ### Changed
 - Dependencies: docker/setup-qemu-action and setup-buildx-action 4,
   docker/metadata-action 6, docker/build-push-action 7, docker/login-action
