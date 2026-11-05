@@ -9,6 +9,11 @@ updates:
     labels:
       - dependencies
       - backend
+    ignore:
+      # Capped in requirements.in: 0.0.45+ rejects naive datetimes, which
+      # app/timeutils.py stores on purpose. Lift together with that cap.
+      - dependency-name: sqlmodel
+        versions: [">=0.0.45"]
 
   # Frontend (frontend/package.json)
   - package-ecosystem: npm

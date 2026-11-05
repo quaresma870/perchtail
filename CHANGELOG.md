@@ -9,6 +9,15 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Changed
+- Dependencies: docker/setup-qemu-action and setup-buildx-action 4,
+  docker/metadata-action 6, docker/build-push-action 7, docker/login-action
+  4, actions/upload-artifact 7 and download-artifact 8 (all actions in the
+  CI and Release workflows now run on Node 24), @codemirror/commands
+  6.11.1, @codemirror/autocomplete 6.20.4, @sveltejs/vite-plugin-svelte
+  7.3.1, @playwright/test 1.64.1 and black 26.10.1.
+- Dependabot no longer proposes sqlmodel 0.0.45 or later: those versions
+  reject the naive datetimes PerchTail stores, so `requirements.in` keeps
+  it below 0.0.45.
 - `.gitignore` and `.dockerignore` exclude the local `.claude/` folder, so
   per-developer Claude Code settings never reach the repository or the
   Docker build context.
