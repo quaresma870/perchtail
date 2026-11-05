@@ -151,3 +151,14 @@ def test_deactivate_is_soft_delete(session, admin_client):
     target = session.get(User, created["id"])
     assert target is not None
     assert target.active is False
+
+
+def test_user_list_includes_sign_in_method_and_last_login(session, admin_client):
+    """#238: the Users list sorts and filters by these."""
+    role = _make_target_role(session)
+    admin_client.post(
+        "/users", json={"username": "jdoe@example.com", "password": "s3cret!", "role_id": role.id}
+    )
+    listed = {u["username"]: u for u in admin_client.get("/users").json()}
+    assert listed["jdoe@example.com"]["auth_provider"] == "local"
+    assert listed["jdoe@example.com"]["last_login_at"] is None

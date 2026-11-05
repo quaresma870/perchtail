@@ -1,4 +1,5 @@
 import secrets
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
@@ -6,7 +7,7 @@ from sqlmodel import Session, select
 
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
-from app.auth.models import GlobalCapability, Role, User
+from app.auth.models import AuthProviderType, GlobalCapability, Role, User
 from app.auth.providers.local import create_local_user, hash_password
 from app.auth.rbac import require_global_capability, require_role_within_authority
 from app.auth.sessions import revoke_all_sessions
@@ -25,6 +26,9 @@ class UserPublic(BaseModel):
     role_id: int
     active: bool
     must_change_password: bool
+    # For sorting and filtering the Users list (#238).
+    auth_provider: AuthProviderType
+    last_login_at: datetime | None
 
 
 class UserCreate(BaseModel):
