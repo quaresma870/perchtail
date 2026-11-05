@@ -267,20 +267,16 @@ def index_source(session: Session, source: Source, deadline: float | None = None
             )
             stats.skipped += 1
             stats.unreadable += 1
+            _record_attempt(session, source_id, entry, previous)
             continue
         if content is None:
             stats.skipped += 1
+            _record_attempt(session, source_id, entry, previous)
             continue
 
         _delete_fts_rows(session, source_id, entry.path)
         _insert_fts_rows(session, source_id, entry.path, content)
-        state = session.get(SearchIndexState, previous[0]) if previous else None
-        if state is None:
-            state = SearchIndexState(source_id=source_id, file_path=entry.path)
-        state.size = entry.size
-        state.indexed_at = utcnow()
-        session.add(state)
-        session.commit()
+        _record_attempt(session, source_id, entry, previous)
         stats.indexed += 1
 
     # The listing above is complete even when time ran out, so files that
@@ -305,6 +301,22 @@ def index_source(session: Session, source: Source, deadline: float | None = None
         deferred=stats.deferred,
     )
     return stats
+
+
+def _record_attempt(session: Session, source_id: int, entry: DirEntry, previous) -> None:
+    """Records that `entry` was handled at its current size, whether it was
+    indexed, skipped (binary, a .gz that won't decompress) or unreadable.
+    A skipped or unreadable file is then retried only when its size
+    changes, instead of counting as new on every sweep, going first in the
+    queue and using up the source's time budget (#218). Its earlier index
+    rows, if any, are kept. Commits."""
+    state = session.get(SearchIndexState, previous[0]) if previous else None
+    if state is None:
+        state = SearchIndexState(source_id=source_id, file_path=entry.path)
+    state.size = entry.size
+    state.indexed_at = utcnow()
+    session.add(state)
+    session.commit()
 
 
 def _still_indexed(session: Session, source: Source) -> bool:

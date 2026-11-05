@@ -21,6 +21,7 @@ from typing import BinaryIO
 
 from fastapi import WebSocket
 
+from app.json_values import as_int
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -70,10 +71,6 @@ class _AgentConnection:
     websocket: WebSocket
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
     streams: dict[str, _Stream] = field(default_factory=dict)
-
-
-def _as_int(value) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _fail_pending(connection: _AgentConnection, reason: str) -> None:
@@ -160,14 +157,14 @@ class AgentRegistry:
                 AgentCommandError(
                     str(message.get("error", "agent command failed")),
                     code=code if isinstance(code, str) else None,
-                    size=_as_int(message.get("size")),
+                    size=as_int(message.get("size")),
                 )
             )
             return
         stream = connection.streams.get(request_id)
         if stream is not None and message.get("streamed"):
-            complete = _as_int(message.get("chunks")) == stream.next_seq and (
-                _as_int(message.get("size")) == stream.written
+            complete = as_int(message.get("chunks")) == stream.next_seq and (
+                as_int(message.get("size")) == stream.written
             )
             if not complete:
                 future.set_exception(AgentError("agent's streamed fetch ended incomplete"))
@@ -194,7 +191,7 @@ class AgentRegistry:
         if future is None or future.done() or stream is None:
             return
 
-        if _as_int(message.get("seq")) != stream.next_seq:
+        if as_int(message.get("seq")) != stream.next_seq:
             future.set_exception(AgentError("agent sent fetch chunks out of order"))
             return
         try:
@@ -238,6 +235,7 @@ class AgentRegistry:
         future: asyncio.Future = self._loop.create_future()
         connection.pending[request_id] = future
         stream = None
+        completed = False
         if sink is not None:
             stream = _Stream(sink=sink, limit=limit)
             connection.streams[request_id] = stream
@@ -261,10 +259,20 @@ class AgentRegistry:
                     )
                 done, _ = await asyncio.wait({future}, timeout=remaining)
                 if done:
-                    return future.result()
+                    result = future.result()
+                    completed = True
+                    return result
         finally:
             connection.pending.pop(request_id, None)
             connection.streams.pop(request_id, None)
+            if stream is not None and not completed:
+                # Gave up (timeout, size limit, bad chunk): tell the agent
+                # to stop reading the file. Best effort; an agent older
+                # than 0.5.3 answers with an unknown_error nobody awaits.
+                try:
+                    await connection.websocket.send_json({"type": "cancel", "id": request_id})
+                except Exception:  # noqa: BLE001 - the connection may be gone
+                    pass
 
     def send_command_sync(
         self,

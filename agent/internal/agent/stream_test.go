@@ -2,11 +2,18 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // #205: a fetch the backend asks to stream goes out in chunks, so the
@@ -99,7 +106,7 @@ func TestServeCommandStreamsWhenAskedTo(t *testing.T) {
 	writeFile(t, base, "app.log", content)
 
 	var sent []any
-	err := serveCommand(Config{BasePath: base},
+	err := serveCommand(context.Background(), Config{BasePath: base},
 		Command{Type: "fetch", ID: "req-7", Path: "app.log", ChunkSize: minChunkSize},
 		func(msg any) error { sent = append(sent, msg); return nil })
 	if err != nil {
@@ -131,7 +138,7 @@ func TestServeCommandReportsTooLargeWithACode(t *testing.T) {
 	writeFile(t, base, "big.log", make([]byte, 5000))
 
 	var sent []any
-	_ = serveCommand(Config{BasePath: base},
+	_ = serveCommand(context.Background(), Config{BasePath: base},
 		Command{Type: "fetch", ID: "req-8", Path: "big.log", ChunkSize: minChunkSize, MaxBytes: 4000},
 		func(msg any) error { sent = append(sent, msg); return nil })
 	if len(sent) != 1 {
@@ -150,7 +157,7 @@ func TestServeCommandWithoutChunkSizeKeepsTheSingleMessage(t *testing.T) {
 	writeFile(t, base, "app.log", []byte("hello"))
 
 	var sent []any
-	_ = serveCommand(Config{BasePath: base}, Command{Type: "fetch", ID: "req-9", Path: "app.log"},
+	_ = serveCommand(context.Background(), Config{BasePath: base}, Command{Type: "fetch", ID: "req-9", Path: "app.log"},
 		func(msg any) error { sent = append(sent, msg); return nil })
 	if len(sent) != 1 {
 		t.Fatalf("sent %d messages, want 1", len(sent))
@@ -158,4 +165,108 @@ func TestServeCommandWithoutChunkSizeKeepsTheSingleMessage(t *testing.T) {
 	if result, ok := sent[0].(FetchResult); !ok || result.ContentB64 != base64.StdEncoding.EncodeToString([]byte("hello")) {
 		t.Errorf("result = %+v", sent[0])
 	}
+}
+
+func TestServeCommandSendsNothingOnceCancelled(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "app.log", make([]byte, 3*minChunkSize))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var sent []any
+	err := serveCommand(ctx, Config{BasePath: base},
+		Command{Type: "fetch", ID: "req-10", Path: "app.log", ChunkSize: minChunkSize},
+		func(msg any) error { sent = append(sent, msg); return nil })
+	if err != nil || len(sent) != 0 {
+		t.Errorf("err=%v sent=%d, want nothing sent for a cancelled fetch", err, len(sent))
+	}
+}
+
+// fakeBackend runs a WebSocket server that hands the connection to script,
+// and the agent's connectAndServe against it.
+func fakeBackend(t *testing.T, base string, script func(conn *websocket.Conn)) {
+	t.Helper()
+	upgrader := websocket.Upgrader{}
+	finished := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		script(conn)
+		close(finished)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := Config{ServerURL: "ws" + strings.TrimPrefix(server.URL, "http"), Token: "t", BasePath: base}
+	go func() { _ = connectAndServe(ctx, cfg) }()
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fake backend didn't finish")
+	}
+}
+
+func readType(t *testing.T, conn *websocket.Conn) map[string]any {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var msg map[string]any
+	if err := conn.ReadJSON(&msg); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	return msg
+}
+
+func TestAListIsAnsweredWhileALargeFetchStreams(t *testing.T) {
+	// Review of #205: commands ran one at a time, so a long fetch held up
+	// every browse on the same agent.
+	base := t.TempDir()
+	writeFile(t, base, "big.log", make([]byte, 1024*minChunkSize))
+	fakeBackend(t, base, func(conn *websocket.Conn) {
+		_ = conn.WriteJSON(Command{Type: "fetch", ID: "f", Path: "big.log", ChunkSize: minChunkSize})
+		first := readType(t, conn) // the stream has started
+		if first["type"] != "fetch_chunk" {
+			t.Errorf("first message = %v", first["type"])
+		}
+		_ = conn.WriteJSON(Command{Type: "list", ID: "l", Path: ""})
+		for {
+			msg := readType(t, conn)
+			if msg["type"] == "list_result" {
+				return
+			}
+			if msg["type"] == "fetch_result" {
+				t.Error("the list was answered only after the whole fetch")
+				return
+			}
+		}
+	})
+}
+
+func TestACancelledFetchStopsStreaming(t *testing.T) {
+	base := t.TempDir()
+	total := 2048
+	writeFile(t, base, "big.log", make([]byte, total*minChunkSize))
+	fakeBackend(t, base, func(conn *websocket.Conn) {
+		_ = conn.WriteJSON(Command{Type: "fetch", ID: "f", Path: "big.log", ChunkSize: minChunkSize})
+		readType(t, conn)
+		_ = conn.WriteJSON(Command{Type: "cancel", ID: "f"})
+		chunks := 1
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+			var msg map[string]any
+			if err := conn.ReadJSON(&msg); err != nil {
+				break // quiet for a second: the stream stopped
+			}
+			if msg["type"] == "fetch_result" {
+				t.Error("a cancelled fetch still ended normally")
+				return
+			}
+			chunks++
+		}
+		if chunks >= total {
+			t.Errorf("sent all %d chunks despite the cancel", chunks)
+		}
+	})
 }

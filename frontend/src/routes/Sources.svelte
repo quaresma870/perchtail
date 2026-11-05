@@ -115,6 +115,12 @@
   $: visible = sortRows(filtered, view.sort, accessors)
   $: filtering = Boolean(view.text || view.protocol || view.status)
   $: presentProtocols = [...new Set(sources.map((s) => s.protocol))]
+  // A protocol filter kept from earlier in the session can name a protocol
+  // no source uses any more: the select would show "All protocols" while
+  // the filter still hid every row. Drop it once the list has loaded.
+  $: if (!loading && view.protocol && !presentProtocols.includes(view.protocol as Protocol)) {
+    view = { ...view, protocol: '' }
+  }
 
   const sortBy = (key: string) => (view = { ...view, sort: nextSort(view.sort, key) })
   const clearFilters = () => (view = { ...view, text: '', protocol: '', status: '' })

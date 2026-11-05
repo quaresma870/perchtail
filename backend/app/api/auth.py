@@ -127,6 +127,14 @@ def get_current_active_user(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+def require_super_admin(user: User = Depends(get_current_active_user)) -> User:
+    """For endpoints only a super admin may use (config import/export,
+    recording known audit-chain breaks)."""
+    if not user.role.is_super_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admins only")
+    return user
+
+
 def _set_session_cookie(response: Response, token: str) -> None:
     settings = get_settings()
     response.set_cookie(
