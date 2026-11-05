@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -83,10 +84,48 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 			}
 			return fmt.Errorf("read: %w", err)
 		}
-		if err := conn.WriteJSON(handleCommand(cfg, cmd)); err != nil {
+		if err := serveCommand(cfg, cmd, func(msg any) error { return conn.WriteJSON(msg) }); err != nil {
 			return fmt.Errorf("write: %w", err)
 		}
 	}
+}
+
+// serveCommand answers one command through send, which writes a message
+// to the connection. A fetch the backend asked to stream goes out as
+// fetch_chunk messages and a closing FetchEnd (#205); everything else is a
+// single message from handleCommand. Only an error from send, meaning the
+// connection is broken, is returned; a failed command is answered with an
+// ErrorResult instead.
+func serveCommand(cfg Config, cmd Command, send func(any) error) error {
+	if cmd.Type != "fetch" || cmd.ChunkSize <= 0 {
+		return send(handleCommand(cfg, cmd))
+	}
+
+	var sendErr error
+	seq := 0
+	chunks, size, err := StreamFetch(cfg.BasePath, cmd.Path, cmd.ChunkSize, cmd.MaxBytes,
+		func(data []byte) error {
+			sendErr = send(FetchChunk{
+				Type:    "fetch_chunk",
+				ID:      cmd.ID,
+				Seq:     seq,
+				DataB64: base64.StdEncoding.EncodeToString(data),
+			})
+			seq++
+			return sendErr
+		})
+	if sendErr != nil {
+		return sendErr
+	}
+	if err != nil {
+		result := ErrorResult{Type: "fetch_error", ID: cmd.ID, Error: err.Error()}
+		var tooLarge *TooLargeError
+		if errors.As(err, &tooLarge) {
+			result.Code, result.Size = "too_large", tooLarge.Size
+		}
+		return send(result)
+	}
+	return send(FetchEnd{Type: "fetch_result", ID: cmd.ID, Streamed: true, Chunks: chunks, Size: size})
 }
 
 // handleCommand dispatches a single command to the matching handler and

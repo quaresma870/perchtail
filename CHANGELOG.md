@@ -21,6 +21,18 @@ release ships (0.x releases may include breaking changes between minors).
   changes.
 
 ### Fixed
+- Push agent: files are fetched in 1 MiB chunks, written to the scratch
+  file as they arrive (#205). Before, the agent read the whole file and
+  sent it base64-encoded in one WebSocket message: a ~100 MB log took
+  hundreds of MB of agent memory, and anything over about 12 MiB was
+  larger than the backend's 16 MiB message limit, so the open failed and
+  the agent's connection dropped. A file over `MAX_FETCH_MB` is now
+  refused by the agent before it reads anything (HTTP 413, as for the
+  other connectors). The fetch only times out when no chunk arrives for
+  30 seconds, not after 30 seconds in all. **Upgrade the agents** to get
+  this: an agent older than 0.5.3 still works with this backend, but
+  sends whole files as before, and a 0.5.3 agent works with an older
+  backend the old way.
 - Search indexing: one large source no longer holds the whole sweep (#218).
   A first index of a source with thousands of files took minutes, and
   meanwhile every other source's index, and the alerts that ride on it,

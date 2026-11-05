@@ -1,6 +1,7 @@
 import base64
 from unittest.mock import MagicMock
 
+import pytest
 from app.collectors import agent as agent_module
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 
@@ -128,3 +129,39 @@ def test_windows_agent_rules_ignore_case(monkeypatch):
     for other in (_source(agent_os="linux"), _source(agent_os=None)):
         assert rules_case_insensitive(other) is False
         assert [e.name for e in agent_module.list_directory(other, rules)] == ["SECRET"]
+
+
+def test_fetch_file_asks_for_chunks_and_writes_the_stream(monkeypatch, tmp_path):
+    """#205: the agent streams the file into the destination as it comes."""
+    fake_registry = _mock_registry(monkeypatch, send_command_sync_result=None)
+
+    def stream(source_id, command_type, *, sink, limit, **fields):
+        sink.write(b"chunk one, ")
+        sink.write(b"chunk two")
+        return {"type": "fetch_result", "streamed": True, "chunks": 2, "size": 20}
+
+    fake_registry.send_command_sync.side_effect = stream
+    destination = tmp_path / "fetched"
+    agent_module.fetch_file(_source(), "app.log", destination)
+
+    assert destination.read_bytes() == b"chunk one, chunk two"
+    fields = fake_registry.send_command_sync.call_args.kwargs
+    assert fields["chunk_size"] == agent_module.FETCH_CHUNK_BYTES
+    assert fields["max_bytes"] == fields["limit"]
+
+
+def test_fetch_file_maps_too_large_to_413_and_leaves_nothing_behind(monkeypatch, tmp_path):
+    from app.agent_registry import AgentCommandError
+    from app.collectors.base import FetchTooLargeError
+
+    fake_registry = _mock_registry(monkeypatch, send_command_sync_result=None)
+
+    def refuse(source_id, command_type, *, sink, limit, **fields):
+        sink.write(b"partial")
+        raise AgentCommandError("too big", code="too_large", size=limit + 10)
+
+    fake_registry.send_command_sync.side_effect = refuse
+    destination = tmp_path / "fetched"
+    with pytest.raises(FetchTooLargeError):
+        agent_module.fetch_file(_source(), "big.log", destination)
+    assert not destination.exists()

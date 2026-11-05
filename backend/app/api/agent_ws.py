@@ -80,7 +80,12 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
     try:
         while True:
             message = await websocket.receive_json()
-            registry.resolve_response(source.id, message, websocket)
+            if message.get("type") == "fetch_chunk":
+                # Awaited before reading on, so the file is written as it
+                # arrives and a slow disk slows the agent down (#205).
+                await registry.receive_chunk(source.id, message, websocket)
+            else:
+                registry.resolve_response(source.id, message, websocket)
     except WebSocketDisconnect:
         pass
     finally:
