@@ -187,7 +187,7 @@ jobs:
 
       # Only the exact version here; X.Y and latest move when a full
       # release is published (see `promote`).
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: labels
         with:
           images: ${{ steps.image.outputs.name }}
