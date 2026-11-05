@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import { detailPairs, targetHref, targetTypeLabel } from '../lib/audit-format'
   import { currentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import type {
@@ -164,8 +165,6 @@
   }
 
   const formatTimestamp = (iso: string) => new Date(iso).toLocaleString()
-  const formatMetadata = (metadata: Record<string, unknown> | null) =>
-    metadata ? JSON.stringify(metadata) : ''
 
   onMount(async () => {
     await Promise.all([loadFilterOptions(), loadIntegrityStatus(), load()])
@@ -302,20 +301,49 @@
             <th>Time</th>
             <th>User</th>
             <th>Action</th>
-            <th>Type</th>
             <th>Target</th>
             <th>Details</th>
           </tr>
         </thead>
         <tbody>
           {#each items as entry (entry.id)}
+            {@const href = targetHref(entry)}
             <tr>
               <td class="nowrap">{formatTimestamp(entry.timestamp)}</td>
               <td>{entry.username ?? '—'}</td>
               <td><code>{entry.action}</code></td>
-              <td>{entry.target_type ?? '—'}</td>
-              <td>{entry.target_id ?? '—'}</td>
-              <td class="metadata">{formatMetadata(entry.metadata)}</td>
+              <td
+                class="target"
+                title={entry.target_type
+                  ? `${entry.target_type}${entry.target_id !== null ? ` #${entry.target_id}` : ''}`
+                  : ''}
+              >
+                {#if entry.target_type}
+                  <span class="target-type">{targetTypeLabel(entry.target_type)}</span>
+                  {#if entry.target_name}
+                    {#if href}<a {href}>{entry.target_name}</a>{:else}<span>{entry.target_name}</span>{/if}
+                    {#if entry.target_context}
+                      <span class="target-context">{entry.target_context}</span>
+                    {/if}
+                    {#if entry.target_name_is_current}
+                      <span
+                        class="target-note"
+                        title="This entry predates 0.5.3 and recorded only an id; this is the object's name now."
+                        >current name</span
+                      >
+                    {/if}
+                  {:else if entry.target_id !== null}
+                    <span class="target-context">#{entry.target_id}, no longer exists</span>
+                  {/if}
+                {:else}
+                  —
+                {/if}
+              </td>
+              <td class="details">
+                {#each detailPairs(entry.metadata) as [key, value] (key)}
+                  <span class="detail"><span class="detail-key">{key}</span> {value}</span>
+                {/each}
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -464,14 +492,40 @@
   .nowrap {
     white-space: nowrap;
   }
-  .metadata {
-    font-family: var(--font-mono);
+  .target {
+    max-width: 320px;
+  }
+  .target-type {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .target-context {
+    display: block;
     font-size: 0.75rem;
     color: var(--text-muted);
-    max-width: 320px;
+  }
+  .target-note {
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    font-style: italic;
+  }
+  .details {
+    max-width: 360px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+  .detail {
+    display: block;
+    font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .detail-key {
+    color: var(--text-faint);
   }
   .pagination {
     display: flex;

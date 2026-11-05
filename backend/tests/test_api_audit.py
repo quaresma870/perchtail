@@ -362,3 +362,50 @@ def test_recording_known_breaks_with_none_to_record_is_a_conflict(session, clien
 
     response = client_for(admin).post("/audit/integrity/known-breaks")
     assert response.status_code == 409
+
+
+def _audited_source(session, name="app01"):
+    from app.models import Protocol, Source
+
+    source = Source(name=name, protocol=Protocol.ssh, host=name, base_path="/var/log")
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+    return source
+
+
+def test_entries_show_the_recorded_target_name(session, client_for):
+    """#239: the name recorded with the entry, not the one the object has now."""
+    viewer = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    source = _audited_source(session)
+    record_audit_event(
+        session, user_id=viewer.id, action="source.open", target_type="source", target_id=source.id
+    )
+    source.name = "renamed"
+    session.add(source)
+    session.commit()
+
+    item = client_for(viewer).get("/audit").json()["items"][0]
+    assert (item["target_name"], item["target_name_is_current"]) == ("app01", False)
+    assert item["target_exists"] is True
+
+
+def test_older_entries_fall_back_to_the_current_name(session, client_for, monkeypatch):
+    """Entries written before 0.5.3 have no recorded name and can't get one
+    (the hash chain covers them), so the page shows the current name."""
+    viewer = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    source = _audited_source(session)
+    monkeypatch.setattr("app.audit.audit_labels", lambda *args: {})
+    record_audit_event(
+        session, user_id=viewer.id, action="source.open", target_type="source", target_id=source.id
+    )
+    session.commit()
+    client = client_for(viewer)
+
+    item = client.get("/audit").json()["items"][0]
+    assert (item["target_name"], item["target_name_is_current"]) == ("app01", True)
+
+    session.delete(source)
+    session.commit()
+    item = client.get("/audit").json()["items"][0]
+    assert (item["target_name"], item["target_exists"]) == (None, False)

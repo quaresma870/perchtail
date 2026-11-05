@@ -131,3 +131,16 @@ def test_plain_user_cannot_manage_folders(session, client_for):
     user = _make_user(session)
     client = client_for(user)
     assert client.get("/folders").status_code == 403
+
+
+def test_deleting_a_folder_leaves_an_audit_entry_that_names_it(session, admin_client):
+    """#239."""
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    customer = _make_customer(session)
+    folder = admin_client.post("/folders", json={"name": "leaf", "customer_id": customer.id}).json()
+    assert admin_client.delete(f"/folders/{folder['id']}").status_code == 204
+
+    entry = session.exec(select(AuditLog).where(AuditLog.action == "folder.delete")).one()
+    assert entry.event_metadata == {"target_name": "leaf", "target_context": customer.name}
