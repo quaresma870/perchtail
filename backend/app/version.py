@@ -3,4 +3,4 @@ FastAPI app's own `version=`) and app.api.monitoring (the detailed health
 endpoint's `version` field) — kept in its own module so neither has to
 import the other to get at it."""
 
-APP_VERSION = "0.5.2-rc.2"
+APP_VERSION = "0.5.2"

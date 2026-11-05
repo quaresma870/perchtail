@@ -8,7 +8,58 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
-### Fixed
+## [0.5.2] - 2026-11-05
+
+The release after 0.5.0. There is no 0.5.1: its tag was used by mistake
+for a pre-release of older code, and releases here are immutable. This
+release carries everything from the pre-releases 0.5.1-rc.1 and
+0.5.2-rc.2 (0.5.2-rc.1 was tagged but never released). Their sections in
+[CHANGELOG.md](https://github.com/quaresma870/perchtail/blob/v0.5.2/CHANGELOG.md)
+list every change. Both were retested in the lab on Linux and Windows
+sources.
+
+### Upgrading from 0.5.0
+- **Back up `DATA_DIR` first**, with PerchTail stopped: copy the whole
+  directory.
+- A migration adds `source.agent_os`; it runs on start.
+- The database switches to SQLite's WAL mode: `perchtail.db-wal` and
+  `perchtail.db-shm` appear next to it. Keep `DATA_DIR` on a local disk,
+  not a network share.
+- **Upgrade the push agents** too: Windows agents need this version for
+  their rules to ignore case, and all agents get the SIGTERM and link
+  fixes.
+- Installed from source? `/opt/perchtail` was owned by your build
+  account; run `sudo chown -R root:root /opt/perchtail` once (see
+  `docs/install-from-source.md`).
+
+### Highlights
+- **Security:** SMB and WinRM no longer follow junctions or symlinks out
+  of the base path; SMB sessions are no longer shared between sources;
+  changing a source's host or port requires its credential again; rules
+  for Windows agents ignore case; `DATA_DIR` is readable by PerchTail's
+  user only.
+- **Search indexing** no longer locks the database, and skips a file it
+  can't read instead of failing the whole source.
+- **Audit log:** two requests writing at the same moment can no longer
+  break the hash chain.
+- **Push agent:** stops at once on SIGTERM, and leaves out links that
+  lead outside its folder.
+- **Releases** are built as a draft with the agent binaries,
+  `SHA256SUMS` and an SBOM attached, then published.
+
+### Known issue: audit chain breaks from before this release
+Before 0.5.2, two requests writing audit entries at the same moment could
+both chain from the same previous entry (fixed by #213). An install where
+that happened keeps showing "Tampering detected" in Settings → Audit log
+→ "Verify now", at the first such row. A break of this kind has a
+recognisable signature in the database (`auditlog` table): the reported
+row and the row before it have the **same `prev_hash`**, timestamps
+**within the same second**, and are dated **before your upgrade to
+0.5.2**. Treat any other break, or one dated after the upgrade, as
+tampering. 0.5.3 will let a super admin record these breaks as known
+(#217).
+
+### Fixed (since 0.5.2-rc.2)
 - Installing from source left `/opt/perchtail` owned by the account that
   built it, not root, so that account could change the code the service
   runs. Both `rsync` commands in `docs/install-from-source.md` now pass
