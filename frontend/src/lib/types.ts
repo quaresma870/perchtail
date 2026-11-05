@@ -140,6 +140,8 @@ export interface AppUser {
   role_id: number
   active: boolean
   must_change_password: boolean
+  auth_provider: 'local' | 'oidc' | 'saml'
+  last_login_at: string | null
 }
 
 export interface BrowseEntry {

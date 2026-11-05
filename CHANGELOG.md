@@ -46,6 +46,13 @@ release ships (0.x releases may include breaking changes between minors).
   (#218).
 
 ### Changed
+- Settings → Sources and Settings → Users can be sorted by any column,
+  both ways, and filtered (#238): by text (name, host, customer or folder;
+  username or role) and by protocol and status, or role, status and
+  sign-in method. "N of M" shows while a filter is on. The sort and
+  filters are kept while you open a row and come back. The Sources list
+  gains a Customer column and shows each source's host; the Users list
+  shows the sign-in method and the last login.
 - Dependencies: docker/setup-qemu-action and setup-buildx-action 4,
   docker/metadata-action 6, docker/build-push-action 7, docker/login-action
   4, actions/upload-artifact 7 and download-artifact 8 (all actions in the
