@@ -81,6 +81,7 @@ def test_local_copy_yields_the_real_path_without_copying(tmp_path):
 def test_read_range_reads_from_the_offset(tmp_path):
     (tmp_path / "app.log").write_bytes(b"line one\nline two\n")
     source = _source(tmp_path)
-    assert local_module.read_range(source, "app.log", 9, 1000) == (18, b"line two\n")
-    assert local_module.read_range(source, "app.log", 18, 1000) == (18, b"")
-    assert local_module.read_range(source, "app.log", 0, 4) == (18, b"line")
+    assert local_module.read_range(source, "app.log", 9, 1000) == (18, b"", b"line two\n")
+    assert local_module.read_range(source, "app.log", 9, 1000, 4) == (18, b"line", b"line two\n")
+    assert local_module.read_range(source, "app.log", 18, 1000) == (18, b"", b"")
+    assert local_module.read_range(source, "app.log", 0, 4) == (18, b"", b"line")

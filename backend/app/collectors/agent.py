@@ -87,11 +87,14 @@ def local_copy(source: Source, relative_path: str):
         yield path
 
 
-def read_range(source: Source, relative_path: str, offset: int, length: int) -> tuple[int, bytes]:
-    """Incremental follow (#254): the agent reads up to `length` bytes from
-    `offset` off its own disk and answers with the file's size. An agent
-    older than 0.6 doesn't know the command: RangeNotSupportedError, and
-    the viewer reloads the whole file instead."""
+def read_range(
+    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+) -> collector_base.RangeRead:
+    """Incremental follow (#254): the agent reads the file's first `head`
+    bytes and up to `length` bytes from `offset` off its own disk, and
+    answers with the file's size. An agent older than 0.6 doesn't know the
+    command: RangeNotSupportedError, and the viewer reloads the whole file
+    instead."""
     try:
         result = get_agent_registry().send_command_sync(
             source.id,
@@ -99,12 +102,17 @@ def read_range(source: Source, relative_path: str, offset: int, length: int) -> 
             path=relative_path,
             offset=max(int(offset), 0),
             length=max(min(int(length), collector_base.RANGE_MAX_BYTES), 0),
+            head_length=max(min(int(head), collector_base.RANGE_MAX_HEAD_BYTES), 0),
         )
     except AgentCommandError as exc:
         if "unknown command type" in str(exc).lower():
             raise collector_base.RangeNotSupportedError(str(exc)) from exc
         raise
+    head_bytes = base64.b64decode(result.get("head_b64") or "")
     data = base64.b64decode(result.get("data_b64") or "")
-    if len(data) > collector_base.RANGE_MAX_BYTES:
+    if (
+        len(data) > collector_base.RANGE_MAX_BYTES
+        or len(head_bytes) > collector_base.RANGE_MAX_HEAD_BYTES
+    ):
         raise collector_base.SourceError("the agent sent more than it was asked for")
-    return int(result.get("size", 0)), data
+    return collector_base.RangeRead(int(result.get("size", 0)), head_bytes, data)

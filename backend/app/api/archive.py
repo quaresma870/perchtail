@@ -429,26 +429,26 @@ def follow_file(
 
     connector = _connector(source)
     try:
-        size, first = connector.read_range(source, path, 0, FOLLOW_HEAD_BYTES)
-        changed = head is not None and offset > 0 and head != _head_hash(first, offset)
-        if offset > size or changed:
-            return Response(
-                content=b"",
-                media_type="application/octet-stream",
-                headers={"X-Follow-Reset": "1", "X-File-Size": str(size)},
-            )
-        data = b""
-        if offset < size:
-            size, data = connector.read_range(source, path, offset, RANGE_MAX_BYTES)
-        next_offset = offset + len(data)
-        if len(first) < min(FOLLOW_HEAD_BYTES, next_offset):
-            # The file was shorter than the head when first read and has
-            # grown since: identify it by what the viewer will now hold.
-            _, first = connector.read_range(source, path, 0, FOLLOW_HEAD_BYTES)
+        # One round trip: the size, the start of the file and the new bytes.
+        size, first, data = connector.read_range(
+            source, path, offset, RANGE_MAX_BYTES, FOLLOW_HEAD_BYTES
+        )
     except RangeNotSupportedError as exc:
         raise _follow_unsupported(
             "This source's agent is older than 0.6 and can't send only the new lines"
         ) from exc
+
+    changed = head is not None and offset > 0 and head != _head_hash(first, offset)
+    if offset > size or changed:
+        return Response(
+            content=b"",
+            media_type="application/octet-stream",
+            headers={"X-Follow-Reset": "1", "X-File-Size": str(size)},
+        )
+    next_offset = offset + len(data)
+    # What the viewer holds from the start once it appends `data`: the head
+    # as read, extended by the new bytes while the file is still short.
+    start_bytes = first[:offset] + data if offset < FOLLOW_HEAD_BYTES else first
 
     if start:
         record_audit_event(
@@ -463,7 +463,7 @@ def follow_file(
     headers = {
         "X-File-Size": str(size),
         "X-Follow-Offset": str(next_offset),
-        "X-Follow-Head": _head_hash(first, next_offset),
+        "X-Follow-Head": _head_hash(start_bytes, next_offset),
     }
     if next_offset < size:
         headers["X-Follow-More"] = "1"

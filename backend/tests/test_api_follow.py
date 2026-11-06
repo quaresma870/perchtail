@@ -167,3 +167,25 @@ def test_rules_and_paths_still_apply(follow):
     assert escape.status_code in (400, 404)
     negative = client.get(f"/sources/{source.id}/follow", params={"path": "app.log", "offset": -1})
     assert negative.status_code == 422
+
+
+def test_each_poll_is_one_read_of_the_source(follow, monkeypatch):
+    # One round trip per poll (one SSH connection, one PowerShell call, one
+    # agent command): the size, the head and the new bytes together.
+    from app.collectors import local
+
+    client, source, log = follow
+    log.write_bytes(b"tiny\n")
+    calls = []
+    real = local.read_range
+
+    def counting(*args, **kwargs):
+        calls.append(args[2:])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(local, "read_range", counting)
+    head = _poll(client, source, 0).headers["x-follow-head"]
+    with log.open("ab") as f:
+        f.write(b"y" * 200)
+    _poll(client, source, 5, head)
+    assert len(calls) == 2

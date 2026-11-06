@@ -21,19 +21,19 @@ func writeLog(t *testing.T, content []byte) string {
 
 func TestHandleReadRangeReadsFromTheOffset(t *testing.T) {
 	base := writeLog(t, []byte("line one\nline two\n"))
-	size, data, err := HandleReadRange(base, "app.log", 9, 100)
+	size, head, data, err := HandleReadRange(base, "app.log", 9, 100, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if size != 18 || string(data) != "line two\n" {
-		t.Fatalf("got size %d, data %q", size, data)
+	if size != 18 || string(head) != "line" || string(data) != "line two\n" {
+		t.Fatalf("got size %d, head %q, data %q", size, head, data)
 	}
 }
 
 func TestHandleReadRangeAtOrPastTheEndIsEmpty(t *testing.T) {
 	base := writeLog(t, []byte("abc"))
 	for _, offset := range []int64{3, 10} {
-		size, data, err := HandleReadRange(base, "app.log", offset, 100)
+		size, _, data, err := HandleReadRange(base, "app.log", offset, 100, 0)
 		if err != nil || size != 3 || len(data) != 0 {
 			t.Fatalf("offset %d: size %d, data %q, err %v", offset, size, data, err)
 		}
@@ -42,27 +42,28 @@ func TestHandleReadRangeAtOrPastTheEndIsEmpty(t *testing.T) {
 
 func TestHandleReadRangeCapsTheLength(t *testing.T) {
 	base := writeLog(t, bytes.Repeat([]byte("x"), maxRangeLength+10))
-	size, data, err := HandleReadRange(base, "app.log", 0, 1<<40)
+	size, head, data, err := HandleReadRange(base, "app.log", 0, 1<<40, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if size != maxRangeLength+10 || len(data) != maxRangeLength {
-		t.Fatalf("size %d, read %d", size, len(data))
+	if size != maxRangeLength+10 || len(data) != maxRangeLength || len(head) != maxHeadLength {
+		t.Fatalf("size %d, read %d, head %d", size, len(data), len(head))
 	}
 }
 
 func TestHandleReadRangeRefusesBadInput(t *testing.T) {
 	base := writeLog(t, []byte("abc"))
 	for _, tc := range []struct {
-		path           string
-		offset, length int64
+		path                 string
+		offset, length, head int64
 	}{
-		{"../app.log", 0, 1},
-		{"app.log", -1, 1},
-		{"app.log", 0, -1},
-		{".", 0, 1},
+		{"../app.log", 0, 1, 0},
+		{"app.log", -1, 1, 0},
+		{"app.log", 0, -1, 0},
+		{"app.log", 0, 1, -1},
+		{".", 0, 1, 0},
 	} {
-		if _, _, err := HandleReadRange(base, tc.path, tc.offset, tc.length); err == nil {
+		if _, _, _, err := HandleReadRange(base, tc.path, tc.offset, tc.length, tc.head); err == nil {
 			t.Errorf("%+v: expected an error", tc)
 		}
 	}
@@ -81,7 +82,7 @@ func TestHandleReadRangeDoesNotFollowALinkOutOfTheBase(t *testing.T) {
 	if err := os.Symlink(secret, filepath.Join(base, "link.log")); err != nil {
 		t.Skip("symlinks not available:", err)
 	}
-	if _, data, err := HandleReadRange(base, "link.log", 0, 100); err == nil {
+	if _, _, data, err := HandleReadRange(base, "link.log", 0, 100, 10); err == nil {
 		t.Fatalf("read %q through a link leaving the base", data)
 	}
 }
@@ -89,14 +90,15 @@ func TestHandleReadRangeDoesNotFollowALinkOutOfTheBase(t *testing.T) {
 func TestHandleCommandAnswersReadRange(t *testing.T) {
 	base := writeLog(t, []byte("hello world"))
 	reply := handleCommand(Config{BasePath: base}, Command{
-		Type: "read_range", ID: "r1", Path: "app.log", Offset: 6, Length: 5,
+		Type: "read_range", ID: "r1", Path: "app.log", Offset: 6, Length: 5, HeadLength: 5,
 	})
 	result, ok := reply.(ReadRangeResult)
 	if !ok {
 		t.Fatalf("reply = %#v", reply)
 	}
 	data, _ := base64.StdEncoding.DecodeString(result.DataB64)
-	if result.Type != "read_range_result" || result.ID != "r1" || result.Size != 11 || string(data) != "world" {
+	head, _ := base64.StdEncoding.DecodeString(result.HeadB64)
+	if result.Type != "read_range_result" || result.ID != "r1" || result.Size != 11 || string(data) != "world" || string(head) != "hello" {
 		t.Fatalf("result = %+v (%q)", result, data)
 	}
 

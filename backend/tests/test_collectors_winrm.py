@@ -296,13 +296,18 @@ def test_read_range_seeks_and_reads_in_one_round_trip(fake_session):
 
     def handler(script):
         offset = int(re.search(r"if \((\d+) -lt \$len\)", script).group(1))
-        length = int(re.search(r"New-Object byte\[\] (\d+)", script).group(1))
+        head, length = map(int, re.findall(r"New-Object byte\[\] (\d+)", script))
         data = content[offset : offset + length] if offset < len(content) else b""
-        return FakeResult(std_out=f"{len(content)}|".encode() + base64.b64encode(data))
+        out = f"{len(content)}|{base64.b64encode(content[:head]).decode()}|"
+        return FakeResult(std_out=out.encode() + base64.b64encode(data))
 
     fake_session.handler = handler
-    assert winrm_module.read_range(_source(), "app.log", 9, 1000) == (18, b"line two\n")
-    assert winrm_module.read_range(_source(), "app.log", 40, 1000) == (18, b"")
+    assert winrm_module.read_range(_source(), "app.log", 9, 1000, 4) == (
+        18,
+        b"line",
+        b"line two\n",
+    )
+    assert winrm_module.read_range(_source(), "app.log", 40, 1000) == (18, b"", b"")
     assert len(fake_session.scripts_run) == 2
     # Opened like fetch_file, tolerating the writer, and the length is capped.
     assert "'Read', 'ReadWrite'" in fake_session.scripts_run[0]

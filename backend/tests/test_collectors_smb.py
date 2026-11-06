@@ -289,6 +289,6 @@ def test_read_range_reads_from_the_offset_with_full_share_access(fake_smbclient)
     path = smb_module._unc_path(_source(), "app.log")
     fake_smbclient.files[path] = b"line one\nline two\n"
 
-    assert smb_module.read_range(_source(), "app.log", 9, 1000) == (18, b"line two\n")
-    assert smb_module.read_range(_source(), "app.log", 30, 1000) == (18, b"")
+    assert smb_module.read_range(_source(), "app.log", 9, 1000, 4) == (18, b"line", b"line two\n")
+    assert smb_module.read_range(_source(), "app.log", 30, 1000) == (18, b"", b"")
     assert fake_smbclient.open_file_kwargs[0]["share_access"] == "rwd"

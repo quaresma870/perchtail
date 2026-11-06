@@ -488,9 +488,11 @@ def test_read_range_reads_only_from_the_offset(monkeypatch):
     sftp = _RangeSFTPClient({"/var/log/appname/app.log": b"line one\nline two\n"})
     monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
 
-    assert ssh_module.read_range(_source(), "app.log", 9, 1000) == (18, b"line two\n")
-    assert sftp.reads == [(9, 9)]
-    assert ssh_module.read_range(_source(), "app.log", 18, 1000) == (18, b"")
+    assert ssh_module.read_range(_source(), "app.log", 9, 1000, 4) == (18, b"line", b"line two\n")
+    # The head, then the range: nothing in between is read.
+    assert sftp.reads == [(0, 4), (9, 9)]
+    sftp.reads.clear()
+    assert ssh_module.read_range(_source(), "app.log", 18, 1000) == (18, b"", b"")
     assert sftp.closed
 
 

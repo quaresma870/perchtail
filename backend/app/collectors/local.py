@@ -100,9 +100,11 @@ def local_copy(source: Source, relative_path: str):
     yield resolve_path(source, relative_path)
 
 
-def read_range(source: Source, relative_path: str, offset: int, length: int) -> tuple[int, bytes]:
-    """Incremental follow (#254): the file's size, and up to `length` bytes
-    from `offset`."""
+def read_range(
+    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+) -> collector_base.RangeRead:
+    """Incremental follow (#254): the file's size, its first `head` bytes and
+    up to `length` bytes from `offset`."""
     with open(resolve_path(source, relative_path), "rb") as f:
         size = os.fstat(f.fileno()).st_size
-        return size, collector_base.read_range_from(f, size, offset, length)
+        return collector_base.read_range_from(f, size, offset, length, head)

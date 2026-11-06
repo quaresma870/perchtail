@@ -247,26 +247,34 @@ def local_copy(source: Source, relative_path: str):
         yield path
 
 
-def read_range(source: Source, relative_path: str, offset: int, length: int) -> tuple[int, bytes]:
-    """Incremental follow (#254): the file's size, and up to `length` bytes
-    from `offset`, in one PowerShell round trip that seeks before reading,
-    so nothing before the offset is transferred."""
+def read_range(
+    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+) -> collector_base.RangeRead:
+    """Incremental follow (#254): the file's size, its first `head` bytes and
+    up to `length` bytes from `offset`, in one PowerShell round trip that
+    seeks before reading, so nothing else is transferred."""
     path = _ps_quote(_remote_path(source, relative_path))
     guard = _containment_guard(source, relative_path)
     offset = max(int(offset), 0)
     length = max(min(int(length), collector_base.RANGE_MAX_BYTES), 0)
+    head = max(min(int(head), collector_base.RANGE_MAX_HEAD_BYTES), 0)
     script = guard + (
         f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
-        "try { $len = $f.Length; $n = 0; "
-        f"$b = New-Object byte[] {length}; "
+        "try { $len = $f.Length; "
+        f"$h = New-Object byte[] {head}; $hn = 0; "
+        "if ($h.Length -gt 0) { $hn = $f.Read($h, 0, $h.Length) }; "
+        f"$b = New-Object byte[] {length}; $n = 0; "
         f"if ({offset} -lt $len) {{ $f.Seek({offset}, 'Begin') | Out-Null; "
         "$n = $f.Read($b, 0, $b.Length) }; "
-        '"$len|" + [Convert]::ToBase64String($b, 0, $n) } finally { $f.Close() }'
+        '"$len|" + [Convert]::ToBase64String($h, 0, $hn) + "|" + '
+        "[Convert]::ToBase64String($b, 0, $n) } finally { $f.Close() }"
     )
     try:
         output = _run_ps(source, script).strip()
     except PathOutsideBaseError:
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
-    size_text, _, data = output.partition("|")
-    return int(size_text), base64.b64decode(data)
+    size_text, head_b64, data_b64 = output.split("|", 2)
+    return collector_base.RangeRead(
+        int(size_text), base64.b64decode(head_b64), base64.b64decode(data_b64)
+    )
