@@ -33,9 +33,14 @@ function Get-PerchTailAllowedRoots {
 # and it is a junction or symbolic link; otherwise a terminating error that
 # PerchTail reads as "outside the base path".
 function Resolve-PerchTailPath([string] $Path) {
+    # Every refusal here must stop the call, whatever -ErrorAction the caller
+    # passed to the public function (a common parameter JEA doesn't filter).
+    $ErrorActionPreference = 'Stop'
     if ([string]::IsNullOrWhiteSpace($Path)) { throw 'PERCHTAIL_OUTSIDE_BASE' }
     # A colon past the drive letter would be an alternate data stream.
-    if ($Path.IndexOf(':', 2) -ge 0 -or $Path.StartsWith('\\?\')) { throw 'PERCHTAIL_OUTSIDE_BASE' }
+    if (($Path.Length -gt 2 -and $Path.IndexOf(':', 2) -ge 0) -or $Path.StartsWith('\\?\')) {
+        throw 'PERCHTAIL_OUTSIDE_BASE'
+    }
     try { $full = [IO.Path]::GetFullPath($Path).TrimEnd('\') } catch { throw 'PERCHTAIL_OUTSIDE_BASE' }
     if ($full.Length -eq 2 -and $full[1] -eq ':') { $full += '\' }
 
@@ -44,15 +49,24 @@ function Resolve-PerchTailPath([string] $Path) {
         $inside = [string]::Equals($full, $rootKey, [StringComparison]::OrdinalIgnoreCase) -or
             $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
         if (-not $inside) { continue }
-        # Each component below the root: its own attributes, not its target's.
+        # Each component below the root: its own attributes, not its target's
+        # (GetAttributes doesn't follow links, so a broken one is caught too).
+        # Only the last component may not exist -- that's "not found" later.
+        $parts = $full.Substring($root.Length).Split('\', [StringSplitOptions]::RemoveEmptyEntries)
         $current = $root
-        foreach ($part in $full.Substring($root.Length).Split('\', [StringSplitOptions]::RemoveEmptyEntries)) {
-            $current = "$current\$part"
-            if (Test-Path -LiteralPath $current) {
-                if ([IO.File]::GetAttributes($current) -band [IO.FileAttributes]::ReparsePoint) {
-                    throw 'PERCHTAIL_OUTSIDE_BASE'
-                }
+        for ($i = 0; $i -lt $parts.Length; $i++) {
+            $current = "$current\$($parts[$i])"
+            try {
+                $attributes = [IO.File]::GetAttributes($current)
             }
+            catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+                if ($i -lt $parts.Length - 1) { throw 'PERCHTAIL_OUTSIDE_BASE' }
+                break
+            }
+            catch {
+                throw 'PERCHTAIL_OUTSIDE_BASE'
+            }
+            if ($attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'PERCHTAIL_OUTSIDE_BASE' }
         }
         return $full
     }
@@ -84,6 +98,7 @@ function Read-PerchTailBytes($Stream, [long] $Offset, [int] $Count) {
 The folders PerchTail may read, as base64 UTF-8 JSON.
 #>
 function Get-PerchTailRoots {
+    $ErrorActionPreference = 'Stop'
     $json = ConvertTo-Json -Compress -InputObject @(Get-PerchTailAllowedRoots)
     [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 }
@@ -95,7 +110,9 @@ out junctions and links, as base64 UTF-8 JSON.
 #>
 function Get-PerchTailListing {
     param([Parameter(Mandatory)] [string] $Path)
+    $ErrorActionPreference = 'Stop'
     $full = Resolve-PerchTailPath $Path
+    if (-not $full) { throw 'PERCHTAIL_OUTSIDE_BASE' }
     if (-not [IO.Directory]::Exists($full)) { throw 'PERCHTAIL_NOT_A_DIRECTORY' }
     $entries = foreach ($item in [IO.DirectoryInfo]::new($full).EnumerateFileSystemInfos()) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
@@ -117,7 +134,9 @@ A file's size in bytes.
 #>
 function Get-PerchTailSize {
     param([Parameter(Mandatory)] [string] $Path)
+    $ErrorActionPreference = 'Stop'
     $full = Resolve-PerchTailPath $Path
+    if (-not $full) { throw 'PERCHTAIL_OUTSIDE_BASE' }
     if (-not [IO.File]::Exists($full)) { throw 'PERCHTAIL_NOT_FOUND' }
     [string] [IO.FileInfo]::new($full).Length
 }
@@ -132,7 +151,9 @@ function Read-PerchTailBlock {
         [Parameter(Mandatory)] [ValidateRange(0, [long]::MaxValue)] [long] $Offset,
         [Parameter(Mandatory)] [ValidateRange(0, [int]::MaxValue)] [int] $Length
     )
+    $ErrorActionPreference = 'Stop'
     $full = Resolve-PerchTailPath $Path
+    if (-not $full) { throw 'PERCHTAIL_OUTSIDE_BASE' }
     $stream = Open-PerchTailFile $full
     try { Read-PerchTailBytes $stream $Offset ([Math]::Min($Length, $script:MaxBlock)) }
     finally { $stream.Dispose() }
@@ -151,7 +172,9 @@ function Read-PerchTailRange {
         [Parameter(Mandatory)] [ValidateRange(0, [int]::MaxValue)] [int] $Length,
         [ValidateRange(0, [int]::MaxValue)] [int] $HeadLength = 0
     )
+    $ErrorActionPreference = 'Stop'
     $full = Resolve-PerchTailPath $Path
+    if (-not $full) { throw 'PERCHTAIL_OUTSIDE_BASE' }
     $stream = Open-PerchTailFile $full
     try {
         $size = $stream.Length

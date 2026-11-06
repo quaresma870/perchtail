@@ -40,10 +40,12 @@ Copy-Item -Path (Join-Path $here 'PerchTail.Jea') -Destination $modules -Recurse
 
 $dataDir = Join-Path $env:ProgramData 'PerchTail'
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
-$rootsFile = Join-Path $dataDir 'jea-roots.txt'
-$Roots | ForEach-Object { [IO.Path]::GetFullPath($_) } | Set-Content -LiteralPath $rootsFile -Encoding UTF8
-# Only administrators can change which folders PerchTail may read.
+# Only administrators can change which folders PerchTail may read: the
+# folder is owned by Administrators (a user who created it first would keep
+# the owner's right to change its permissions) and locked down before the
+# roots file is written into it.
 $acl = New-Object Security.AccessControl.DirectorySecurity
+$acl.SetOwner([Security.Principal.NTAccount] 'BUILTIN\Administrators')
 $acl.SetAccessRuleProtection($true, $false)
 foreach ($rule in @(
     @('BUILTIN\Administrators', 'FullControl'),
@@ -54,6 +56,11 @@ foreach ($rule in @(
         $rule[0], $rule[1], 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
 }
 Set-Acl -LiteralPath $dataDir -AclObject $acl
+$rootsFile = Join-Path $dataDir 'jea-roots.txt'
+# Written afresh, so it takes the folder's permissions rather than keeping
+# whoever owned an existing one.
+Remove-Item -LiteralPath $rootsFile -Force -ErrorAction SilentlyContinue
+$Roots | ForEach-Object { [IO.Path]::GetFullPath($_) } | Set-Content -LiteralPath $rootsFile -Encoding UTF8
 
 $pssc = Join-Path $env:TEMP "PerchTail-$([guid]::NewGuid()).pssc"
 (Get-Content -LiteralPath (Join-Path $here 'PerchTail.pssc') -Raw).Replace(
