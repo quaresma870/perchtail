@@ -32,6 +32,7 @@ function makeSource(overrides: Partial<Source>): Source {
     my_capabilities: ['view', 'download'],
     roots: [],
     winrm_scheme: null,
+    winrm_configuration: null,
     winrm_effective_scheme: null,
     tls_ca_pem: null,
     ...overrides,

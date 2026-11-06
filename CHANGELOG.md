@@ -74,6 +74,16 @@ release ships (0.x releases may include breaking changes between minors).
   one file doesn't count. "Check now" on the source re-checks it, and the
   Sources list shows the same status. When PerchTail itself stops
   answering, a banner says so and retries until it's back.
+- **WinRM without a remote shell: a read-only JEA endpoint** (#169). A
+  WinRM source can name a PowerShell endpoint in **JEA endpoint**;
+  PerchTail then speaks PSRP to it and only calls the functions of
+  PerchTail's reference role (`docs/examples/jea`), by name and with
+  typed parameters. The role runs in `NoLanguage` mode, lists and reads
+  only under the folders its administrator allows, refuses junctions and
+  links, and runs as the connecting account, so that account needs no
+  administrator rights, no Remote Management Users membership and no
+  `RootSDDL` change. `Register-PerchTailJea.ps1` installs it. Sources
+  without an endpoint keep the WinRS shell as before.
 
 ### Changed
 - **Follow fetches only the new lines** (#254). Instead of re-fetching

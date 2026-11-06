@@ -11,6 +11,8 @@ paramiko>=5.0.0
 apscheduler>=3.11.3
 smbprotocol>=1.17.0
 pywinrm>=0.5.0
+# PSRP, for WinRM sources behind a JEA endpoint (#169).
+pypsrp>=0.9.1
 joserfc>=1.7.5
 httpx>=0.27
 pyotp>=2.9

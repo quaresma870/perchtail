@@ -159,3 +159,39 @@ def test_existing_sources_keep_inferring_until_edited(session, client):
     body = client.get(f"/sources/{source.id}").json()
     assert body["winrm_scheme"] is None
     assert body["winrm_effective_scheme"] == "http"
+
+
+# --- JEA endpoint (#169) ------------------------------------------------------
+
+
+def test_a_winrm_source_can_name_a_jea_endpoint(session, client):
+    created = _create(client, winrm_configuration=" PerchTail ").json()
+    assert created["winrm_configuration"] == "PerchTail"
+    assert _create(client).json()["winrm_configuration"] is None
+
+    for bad in ("Perch Tail", "x;y", "a/b", "'quoted'"):
+        response = _create(client, winrm_configuration=bad)
+        assert response.status_code == 400, bad
+
+    # Back to the WinRS shell with an empty name; the change is audited.
+    patched = client.patch(f"/sources/{created['id']}", json={"winrm_configuration": ""}).json()
+    assert patched["winrm_configuration"] is None
+    event = session.exec(select(AuditLog).where(AuditLog.action == "source.update")).one()
+    assert event.event_metadata["changes"]["winrm_configuration"] == {
+        "from": "PerchTail",
+        "to": None,
+    }
+
+
+def test_a_jea_endpoint_is_winrm_only(client):
+    response = client.post(
+        "/sources",
+        json={
+            "name": "s",
+            "protocol": "ssh",
+            "host": "h",
+            "base_path": "/",
+            "winrm_configuration": "PerchTail",
+        },
+    )
+    assert response.status_code == 400

@@ -70,6 +70,8 @@ export interface Source {
   // WinRM (#169): the stored scheme (null = still inferred from the port)
   // and the one in effect; a CA certificate trusted for its HTTPS listener.
   winrm_scheme: 'https' | 'http' | null
+  // JEA endpoint (#169), or null for the WinRS shell.
+  winrm_configuration: string | null
   winrm_effective_scheme: 'https' | 'http' | null
   tls_ca_pem: string | null
   enabled: boolean

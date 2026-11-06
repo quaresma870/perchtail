@@ -9,6 +9,7 @@ from pathlib import Path
 import winrm
 
 from app.collectors import base as collector_base
+from app.collectors import winrm_jea
 from app.collectors.base import DirEntry, PathOutsideBaseError
 from app.config import get_settings
 from app.crypto import decrypt_credential
@@ -133,6 +134,8 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     accented file name (`ação.log`) used to make the whole listing fail to
     decode (#168). Base64 sidesteps the code page entirely, the same way
     fetch_file already returns content."""
+    if source.winrm_configuration:
+        return winrm_jea.list_directory(source, rules, relative_path)
     path = _remote_path(source, relative_path)
     # Junctions and symlinks are left out of the listing (never followed),
     # and listing a file is "not found" rather than the file itself.
@@ -153,9 +156,14 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     except PathOutsideBaseError:
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
+    return parse_listing(output, relative_path, rules)
+
+
+def parse_listing(output: str, relative_path: str, rules: list[Rule]) -> list[DirEntry]:
+    """A listing's base64 UTF-8 JSON (from the script above, or from the JEA
+    role's Get-PerchTailListing) as rule-filtered entries."""
     if not output:
         return []
-
     raw = json.loads(base64.b64decode(output).decode("utf-8"))
     if isinstance(raw, dict):
         raw = [raw]
@@ -176,7 +184,9 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
 
 def list_drives(source: Source) -> list[str]:
     """The host's file-system drive roots (`C:\\`, `D:\\`), for the Base path
-    picker (#159)."""
+    picker (#159). Behind a JEA endpoint (#169): the folders its role allows."""
+    if source.winrm_configuration:
+        return winrm_jea.list_drives(source)
     script = (
         "$j = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root | "
         "ConvertTo-Json -Compress; "
@@ -200,6 +210,8 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     The file is opened with FileShare.ReadWrite so a log another process is
     still writing can be read. Refuses anything over MAX_FETCH_MB before
     transferring a single block."""
+    if source.winrm_configuration:
+        return winrm_jea.fetch_file(source, relative_path, destination)
     path = _ps_quote(_remote_path(source, relative_path))
     guard = _containment_guard(source, relative_path)
     limit = collector_base.max_fetch_bytes()
@@ -258,6 +270,8 @@ def read_range(
     """Incremental follow (#254): the file's size, its first `head` bytes and
     up to `length` bytes from `offset`, in one PowerShell round trip that
     seeks before reading, so nothing else is transferred."""
+    if source.winrm_configuration:
+        return winrm_jea.read_range(source, relative_path, offset, length, head)
     path = _ps_quote(_remote_path(source, relative_path))
     guard = _containment_guard(source, relative_path)
     offset = max(int(offset), 0)
@@ -282,6 +296,12 @@ def read_range(
     except PathOutsideBaseError:
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
+    return parse_range(output)
+
+
+def parse_range(output: str) -> collector_base.RangeRead:
+    """ "size|head|data" (base64 parts), from the script above or the JEA
+    role's Read-PerchTailRange."""
     try:
         size_text, head_b64, data_b64 = output.splitlines()[-1].split("|", 2)
         return collector_base.RangeRead(

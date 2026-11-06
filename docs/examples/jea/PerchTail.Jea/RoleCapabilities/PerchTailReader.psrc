@@ -1,0 +1,12 @@
+@{
+    # PerchTail's read-only role (#169): only the module's own functions,
+    # nothing else -- no cmdlets, no providers, no external commands.
+    GUID              = 'c3e9a7d2-6b41-4f0e-8a25-91d7b4e6f2a8'
+    Description       = 'PerchTail: list folders and read log files under the allowed roots.'
+    ModulesToImport   = 'PerchTail.Jea'
+    VisibleFunctions  = 'Get-PerchTailRoots', 'Get-PerchTailListing', 'Get-PerchTailSize',
+                        'Read-PerchTailBlock', 'Read-PerchTailRange'
+    VisibleCmdlets    = @()
+    VisibleExternalCommands = @()
+    VisibleProviders  = @()
+}
