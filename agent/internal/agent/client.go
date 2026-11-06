@@ -50,6 +50,7 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 	// The backend matches rules case-insensitively for Windows agents, as
 	// NTFS does (#189); it can only know which OS this is if told.
 	header.Set(OSHeader, runtime.GOOS)
+	header.Set(VersionHeader, Version)
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.ServerURL, header)
 	if err != nil {

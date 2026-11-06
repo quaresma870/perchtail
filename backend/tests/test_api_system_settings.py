@@ -44,6 +44,7 @@ _DEFAULTS = {
     "source_max_roots": 20,
     "connections_view_switchable": True,
     "connections_view_default": "list",
+    "update_check_enabled": True,
 }
 
 

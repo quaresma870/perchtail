@@ -196,6 +196,17 @@
             not reported yet (agent older than 0.5.1, or never connected) — rules are case-sensitive
           {/if}
         </dd>
+        <dt>Agent version</dt>
+        <dd>
+          {#if source.agent_version}
+            {source.agent_version}
+            {#if source.agent_outdated}
+              <span class="agent-outdated">— older than this server; upgrade the agent</span>
+            {/if}
+          {:else}
+            not reported yet (agent older than 0.6, or never connected)
+          {/if}
+        </dd>
       {/if}
     </dl>
 
@@ -235,6 +246,9 @@
 </div>
 
 <style>
+  .agent-outdated {
+    color: var(--warning);
+  }
   .http-warning {
     margin: 0.3rem 0 0;
     font-family: var(--font-sans, inherit);

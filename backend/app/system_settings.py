@@ -11,6 +11,8 @@ BOOL_DEFAULTS: dict[str, str] = {
     # Whether users may switch the viewer's connections between list and
     # tree; when false, everyone sees connections_view_default only (#156).
     "connections_view_switchable": "true",
+    # The daily release check (#215); UPDATE_CHECK=false overrides it.
+    "update_check_enabled": "true",
 }
 
 # Enumerated string settings: key -> (default, allowed values). A value

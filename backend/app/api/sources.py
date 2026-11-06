@@ -46,6 +46,8 @@ from app.models import (
     Source,
 )
 from app.search_index import delete_source_index
+from app.version import APP_VERSION
+from app.versions import is_newer
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 logger = get_logger(__name__)
@@ -96,6 +98,11 @@ class SourcePublic(BaseModel):
     agent_connected: bool
     agent_last_seen_at: datetime | None
     agent_os: str | None
+    # The version the agent reported (#215), and whether it's older than this
+    # server: the agent should then be upgraded (0.5.3+ agents stream large
+    # files, for example).
+    agent_version: str | None
+    agent_outdated: bool
     search_indexing_enabled: bool
     # What the requesting user may do on this source (view, download,
     # manage_rules, run_now), so the UI can hide actions it would refuse --
@@ -209,6 +216,8 @@ def _to_public(
         ),
         agent_last_seen_at=source.agent_last_seen_at,
         agent_os=source.agent_os,
+        agent_version=source.agent_version,
+        agent_outdated=is_newer(APP_VERSION, source.agent_version),
         search_indexing_enabled=source.search_indexing_enabled,
         my_capabilities=(
             [c for c in Capability if resolve_capability(session, user, source, c)]

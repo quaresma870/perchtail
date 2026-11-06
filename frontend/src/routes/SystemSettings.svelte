@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import { currentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import UpdatesCard from '../lib/components/UpdatesCard.svelte'
   import { systemSettings } from '../lib/settings'
   import type { MonitoringTokenResult, MonitoringTokenStatus, SystemSettings } from '../lib/types'
 
@@ -357,6 +359,10 @@
         {/if}
       </div>
     </div>
+
+    {#if $currentUser?.is_super_admin}
+      <UpdatesCard />
+    {/if}
   {/if}
 </div>
 

@@ -13,6 +13,7 @@ export const systemSettings = writable<SystemSettings>({
   source_max_roots: 20,
   connections_view_switchable: true,
   connections_view_default: 'list',
+  update_check_enabled: true,
 })
 
 let loadedAt = 0

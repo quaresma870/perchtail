@@ -195,3 +195,28 @@ def test_a_streamed_fetch_through_the_endpoint_lands_in_the_destination(session,
 
     assert errors == []
     assert destination.read_bytes() == content
+
+
+def test_connect_records_the_version_the_agent_reports(session):
+    """#215: shown on the source page, with a warning when it's older than
+    the server."""
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    headers = {"authorization": "Bearer s3cret", "x-perchtail-agent-version": "0.6.0"}
+    with client.websocket_connect("/agent/connect", headers=headers):
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        session.refresh(source)
+        assert source.agent_version == "0.6.0"
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+
+    # An agent older than 0.6 (no header), or a malformed value, clears it:
+    # the source mustn't keep showing the version of the agent it replaced.
+    for extra in ({}, {"x-perchtail-agent-version": "0.6.0; <script>"}):
+        with client.websocket_connect(
+            "/agent/connect", headers={"authorization": "Bearer s3cret", **extra}
+        ):
+            assert _wait_until(lambda: registry.is_connected(source.id))
+            session.refresh(source)
+            assert source.agent_version is None
+        assert _wait_until(lambda: not registry.is_connected(source.id))

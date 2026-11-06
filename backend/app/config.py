@@ -112,6 +112,16 @@ class Settings(BaseSettings):
     # carries on where it left off on the next sweep. 0 = no limit.
     search_index_source_budget_seconds: int = 120
 
+    # Release check (#215): at most once a day, ask GitHub for the latest
+    # release and show it to super admins under Settings -> System. On by
+    # default; false means no outbound request is ever made (air-gapped
+    # installs), whatever the switch under System says.
+    update_check: bool = True
+    # How this instance was installed, for the upgrade steps it shows. The
+    # Docker image sets PERCHTAIL_INSTALL=docker; anything else counts as an
+    # install from source.
+    perchtail_install: str = ""
+
     # Full audit log viewer (app/audit_purge.py) -- how often the purge
     # sweep runs. *What* it purges (retention in days, 0 = keep forever) is
     # admin-configurable from Settings -> System (SystemSetting), not an env

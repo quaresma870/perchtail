@@ -30,6 +30,17 @@ def _reported_os(websocket: WebSocket) -> str | None:
     return value if _AGENT_OS_RE.match(value) else None
 
 
+AGENT_VERSION_HEADER = "x-perchtail-agent-version"
+_AGENT_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$")
+
+
+def _reported_version(websocket: WebSocket) -> str | None:
+    """The agent's version from its connect header (#215), or None when
+    absent (an agent older than 0.6) or not a plain version string."""
+    value = websocket.headers.get(AGENT_VERSION_HEADER, "").strip()
+    return value if _AGENT_VERSION_RE.match(value) else None
+
+
 @router.websocket("/agent/connect")
 async def agent_connect(websocket: WebSocket, session: Session = Depends(get_session)):
     """The push-agent's persistent connection (Protocol.agent — see
@@ -74,6 +85,17 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
             "agent.os_reported", source_id=source.id, agent_os=agent_os, previous=source.agent_os
         )
         source.agent_os = agent_os
+    # Unlike the OS, a missing version is recorded too: an agent replaced by
+    # one older than 0.6 mustn't keep showing the newer version.
+    agent_version = _reported_version(websocket)
+    if agent_version != source.agent_version:
+        logger.info(
+            "agent.version_reported",
+            source_id=source.id,
+            agent_version=agent_version,
+            previous=source.agent_version,
+        )
+        source.agent_version = agent_version
     session.add(source)
     session.commit()
 
