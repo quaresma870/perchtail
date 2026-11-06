@@ -74,6 +74,16 @@ release ships (0.x releases may include breaking changes between minors).
   one file doesn't count. "Check now" on the source re-checks it, and the
   Sources list shows the same status. When PerchTail itself stops
   answering, a banner says so and retries until it's back.
+- **Advanced filter in the explorer** (#274). An "Advanced filter" button
+  next to the search box: tick sources and folders, on any servers, and
+  the box then filters their files by name (shown with "Show the files"
+  or as soon as you type), as text or as a glob
+  (`app-2026-11*`, `*.log`). Each ticked one shows its matching files,
+  in your sort order and with their times, and opens them on a click;
+  chips list the selection, with "Clear all". It filters what's listed
+  in those folders; "Search subfolders too" lists the folders below on
+  request (up to 3 levels and 50 folders per selection). The selection
+  lasts while the app is open, like the tabs.
 
 ### Changed
 - **Follow fetches only the new lines** (#254). Instead of re-fetching

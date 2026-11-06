@@ -6,6 +6,7 @@
   import { tabKey, memberPath } from '../tab-key'
   import { downloadHref } from '../download-href'
   import { registerFolder } from '../explorer-refresh'
+  import { advancedFilter, coveringScope, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
   import { formatEntryTime, sortEntries } from '../explorer-sort'
   import { explorerSort } from '../preferences'
   import type { BrowseEntry } from '../types'
@@ -90,6 +91,12 @@
     refreshError = (await refresh()) ? '' : "Couldn't refresh this folder"
   }
 
+  // Advanced filter (#274): a folder (not one inside an archive) as a scope;
+  // one already covered by a selected parent shows ticked and fixed.
+  $: ownScope = { sourceId, path: entry.path }
+  $: inScope = $scopes.some((s) => scopeKey(s) === scopeKey(ownScope))
+  $: coveredBy = coveringScope($scopes, ownScope)
+
   let unregister: (() => void) | null = null
   $: if (canRefresh && expanded && loaded && !unregister) {
     unregister = registerFolder({ sourceId, path: entry.path, refresh })
@@ -144,6 +151,17 @@
     class:new={isNew}
   >
     <!-- aria-label: the file name only, not the time shown next to it. -->
+    {#if $advancedFilter && canRefresh}
+      <input
+        type="checkbox"
+        class="scope-check"
+        checked={inScope || Boolean(coveredBy)}
+        disabled={Boolean(coveredBy)}
+        aria-label="Filter files in {entry.name}"
+        title={coveredBy ? 'Already included through a folder above' : 'Filter files in this folder'}
+        on:change={() => toggleScopeIn(ownScope)}
+      />
+    {/if}
     <button
       class="label"
       style="padding-left: {depth * 14}px"
@@ -245,6 +263,10 @@
   }
   .row.active .label {
     color: var(--text);
+  }
+  .scope-check {
+    flex: 0 0 auto;
+    accent-color: var(--accent);
   }
   .row.new {
     background: var(--success-soft);
