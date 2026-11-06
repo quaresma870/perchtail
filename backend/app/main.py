@@ -33,6 +33,7 @@ from app.api.severity_patterns import source_router as severity_patterns_source_
 from app.api.sources import router as sources_router
 from app.api.sso import router as sso_router
 from app.api.system_settings import router as system_settings_router
+from app.api.updates import router as updates_router
 from app.api.users import router as users_router
 from app.audit_hash_chain import backfill_chain_if_needed
 from app.audit_integrity import run_audit_integrity_check
@@ -57,6 +58,7 @@ from app.logging_config import configure_logging, get_logger
 from app.scheduler import scheduler
 from app.scratch import get_scratch_store
 from app.search_index import run_indexing_sweep
+from app.update_check import run_update_check
 from app.version import APP_VERSION
 
 configure_logging()
@@ -269,6 +271,7 @@ async def lifespan(app: FastAPI):
         seconds=settings.audit_purge_interval_seconds,
     )
     scheduler.add_job(run_session_purge_sweep, "interval", hours=1)
+    scheduler.add_job(run_update_check, "interval", hours=1)
     scheduler.add_job(
         run_audit_integrity_check,
         "interval",
@@ -299,6 +302,7 @@ app.include_router(sso_router)
 app.include_router(agent_ws_router)
 app.include_router(search_router)
 app.include_router(system_settings_router)
+app.include_router(updates_router)
 app.include_router(severity_patterns_global_router)
 app.include_router(severity_patterns_source_router)
 app.include_router(monitoring_router)

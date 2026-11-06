@@ -4,6 +4,15 @@ package agent
 // backend/app/api/agent_ws.py.
 const OSHeader = "X-PerchTail-Agent-OS"
 
+// VersionHeader carries Version on the handshake (#215), so the server can
+// show which agent version a source runs and warn when it's out of date.
+const VersionHeader = "X-PerchTail-Agent-Version"
+
+// Version is set at build time by the Release workflow
+// (-ldflags "-X github.com/quaresma870/perchtail/agent/internal/agent.Version=X.Y.Z").
+// A local or CI build reports "dev", which the server doesn't compare.
+var Version = "dev"
+
 // Command is a single instruction relayed from the backend down the
 // persistent WebSocket connection — the wire format's other end is
 // backend/app/agent_registry.py's send_command_sync and

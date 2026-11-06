@@ -161,7 +161,10 @@ jobs:
             os="${target%/*}"; arch="${target#*/}"
             ext=""; [ "$os" = windows ] && ext=".exe"
             out="../dist/perchtail-agent-${VERSION}-${os}-${arch}${ext}"
-            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$out" .
+            # The version goes into the binary (#215): the agent reports it on connect.
+            GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X github.com/quaresma870/perchtail/agent/internal/agent.Version=${VERSION}" \
+              -o "$out" .
           done
           cd ../dist
           sha256sum perchtail-agent-* > SHA256SUMS

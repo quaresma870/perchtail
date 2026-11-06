@@ -164,3 +164,27 @@ func TestRunStopsPromptlyWhileConnected(t *testing.T) {
 		t.Fatal("Run didn't return after the context was cancelled")
 	}
 }
+
+func TestConnectSendsTheAgentVersion(t *testing.T) {
+	// #215: the server shows which version a source's agent runs.
+	got := make(chan string, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Get(VersionHeader)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err == nil {
+			conn.Close()
+		}
+	}))
+	defer server.Close()
+
+	previous := Version
+	Version = "0.6.0"
+	defer func() { Version = previous }()
+	cfg := Config{ServerURL: "ws" + strings.TrimPrefix(server.URL, "http"), Token: "t"}
+	_ = connectAndServe(context.Background(), cfg)
+
+	if reported := <-got; reported != "0.6.0" {
+		t.Fatalf("version header = %q, want 0.6.0", reported)
+	}
+}

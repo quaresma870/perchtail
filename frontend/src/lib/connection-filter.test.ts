@@ -23,6 +23,8 @@ function makeSource(overrides: Partial<Source>): Source {
     agent_connected: false,
     agent_last_seen_at: null,
     agent_os: null,
+    agent_version: null,
+    agent_outdated: false,
     search_indexing_enabled: false,
     my_capabilities: ['view', 'download'],
     roots: [],

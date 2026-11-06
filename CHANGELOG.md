@@ -8,6 +8,20 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Added
+- **Update check** (#215). Once a day PerchTail asks the GitHub releases
+  API for the latest release, and super admins see under
+  **Settings → System → Updates** the running version, the latest one,
+  a link to its release notes and the upgrade steps for a Docker or a
+  from-source install. A "Check now" button checks on demand. On by
+  default: turn it off with the switch, or with `UPDATE_CHECK=false`,
+  which wins over the switch and means no outbound request at all. Only
+  full releases are offered, never release candidates, and nothing about
+  the installation is sent.
+- **Push agent version.** Agents from this release report their version
+  when they connect, and the source overview shows it, flagging an agent
+  older than the server. Older agents show as "not reported yet".
+
 ## [0.5.3] - 2026-11-06
 
 The release after 0.5.2. It carries everything from the pre-release

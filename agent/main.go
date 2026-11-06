@@ -20,6 +20,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("agent: %v", err)
 	}
+	log.Printf("perchtail-agent %s", agent.Version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

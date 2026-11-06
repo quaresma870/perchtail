@@ -26,6 +26,7 @@ class SystemSettingsPublic(BaseModel):
     source_max_roots: int
     connections_view_switchable: bool
     connections_view_default: Literal["list", "tree"]
+    update_check_enabled: bool
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -38,6 +39,7 @@ class SystemSettingsUpdate(BaseModel):
     source_max_roots: int | None = Field(default=None, ge=1, le=HARD_MAX_ROOTS)
     connections_view_switchable: bool | None = None
     connections_view_default: Literal["list", "tree"] | None = None
+    update_check_enabled: bool | None = None
 
 
 def _read_all(session: Session) -> SystemSettingsPublic:

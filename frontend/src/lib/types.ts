@@ -73,6 +73,9 @@ export interface Source {
   agent_connected: boolean
   agent_last_seen_at: string | null
   agent_os: string | null
+  // The version the agent reported (#215), and whether it's older than the server.
+  agent_version: string | null
+  agent_outdated: boolean
   search_indexing_enabled: boolean
   // What the current user may do on this source (#174); the backend still
   // enforces every action on its own.
@@ -203,6 +206,24 @@ export interface SystemSettings {
   source_max_roots: number
   connections_view_switchable: boolean
   connections_view_default: 'list' | 'tree'
+  // The daily release check (#215); UPDATE_CHECK=false overrides it.
+  update_check_enabled: boolean
+}
+
+// Settings -> System -> Updates (#215), super admins only.
+export interface UpdateStatus {
+  enabled: boolean
+  disabled_by_env: boolean
+  running_version: string
+  install_method: 'docker' | 'source'
+  latest_version: string | null
+  latest_name: string | null
+  latest_url: string | null
+  latest_published_at: string | null
+  update_available: boolean
+  last_checked_at: string | null
+  last_success_at: string | null
+  last_error: string | null
 }
 
 export interface AuditLogEntry {
