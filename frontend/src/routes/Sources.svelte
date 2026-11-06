@@ -13,6 +13,7 @@
     sortRows,
     type SortState,
   } from '../lib/table-view'
+  import { sourceStatusView } from '../lib/source-status'
   import type { Customer, Protocol, Source } from '../lib/types'
 
   let sources: Source[] = []
@@ -222,6 +223,17 @@
                       >✕ failed</span
                     >
                   {/if}
+                {:else if source.status === 'ok' || source.status === 'failing'}
+                  <!-- The shared, last known status (#276); click to check again. -->
+                  <button
+                    class="status link"
+                    class:status-ok={source.status === 'ok'}
+                    class:status-fail={source.status === 'failing'}
+                    title={sourceStatusView(source, null, true).tooltip + ' — click to check now'}
+                    on:click={() => checkConnection(source)}
+                  >
+                    {source.status === 'ok' ? '✓ reachable' : '✕ failing'}
+                  </button>
                 {:else}
                   <button class="status status-pending link" on:click={() => checkConnection(source)}>
                     ⏱ check

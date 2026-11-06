@@ -4,6 +4,8 @@
   import { registerFolder } from '../explorer-refresh'
   import { sortEntries } from '../explorer-sort'
   import { explorerSort } from '../preferences'
+  import { serverReachable } from '../server-status'
+  import { sourceStatusView } from '../source-status'
   import type { BrowseEntry, Source } from '../types'
   import FolderTree from './FolderTree.svelte'
   import { explorerExpanded, setExpanded } from '../viewer-tabs'
@@ -74,6 +76,27 @@
     }
   }
 
+  // Reachability (#276): the shared status, or what "Check now" just found.
+  let checking = false
+  let checked: { ok: boolean; detail: string; at: string } | null = null
+  $: view = sourceStatusView(source, checked, $serverReachable)
+
+  async function checkNow() {
+    checking = true
+    try {
+      const result = await api.post<{ ok: boolean; detail: string }>(`/sources/${source.id}/check`)
+      checked = { ...result, at: new Date().toISOString() }
+    } catch (err) {
+      checked = {
+        ok: false,
+        detail: err instanceof ApiError ? err.detail : 'The check failed',
+        at: new Date().toISOString(),
+      }
+    } finally {
+      checking = false
+    }
+  }
+
   let refreshError = ''
   async function refreshNow() {
     refreshError = (await refresh()) ? '' : "Couldn't refresh this source"
@@ -122,6 +145,7 @@
     on:click={toggle}
   >
     <span class="chevron">{expanded ? '▾' : '▸'}</span>
+    <span class="status-dot status-{view.state}" title={view.tooltip} aria-label={view.tooltip}></span>
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
       <rect x="2" y="3" width="20" height="8" rx="2" />
       <rect x="2" y="13" width="20" height="8" rx="2" />
@@ -132,6 +156,13 @@
       <span class="badge badge-accent">system</span>
     {/if}
   </button>
+  <button
+    class="refresh check"
+    title="Check the connection now"
+    aria-label="Check {source.name} now"
+    disabled={checking}
+    on:click={checkNow}>{checking ? '…' : '✓?'}</button
+  >
   {#if expanded && loaded}
     <button class="refresh" title="Refresh this source" aria-label="Refresh {source.name}" on:click={refreshNow}>⟳</button>
   {/if}
@@ -172,6 +203,29 @@
 </div>
 
 <style>
+  .status-dot {
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-faint);
+  }
+  .status-ok {
+    background: var(--success);
+  }
+  .status-failing {
+    background: var(--danger);
+  }
+  .status-disconnected {
+    background: var(--warning);
+  }
+  .status-unknown {
+    background: var(--text-faint);
+    opacity: 0.6;
+  }
+  .check {
+    font-size: 0.72rem;
+  }
   .source-row {
     display: flex;
     align-items: center;

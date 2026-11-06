@@ -1,3 +1,5 @@
+import { trackedFetch } from './server-status'
+
 export class ApiError extends Error {
   status: number
   detail: string
@@ -15,7 +17,8 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  // trackedFetch: tells the connection banner whether PerchTail answers (#276).
+  const response = await trackedFetch(path, {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
     ...init,

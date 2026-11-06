@@ -11,6 +11,7 @@
   import { buildConnectionTree } from '../lib/connection-tree'
   import { filterConnections } from '../lib/connection-filter'
   import { readFetchFailure, type FetchProblem } from '../lib/fetch-errors'
+  import { trackedFetch } from '../lib/server-status'
   import { parentPath, refreshFolder, startAutoRefresh, stopAutoRefresh } from '../lib/explorer-refresh'
   import { EXPLORER_SORTS } from '../lib/explorer-sort'
   import {
@@ -106,6 +107,26 @@
   // Open folders re-list themselves (#272); the interval is a System setting.
   $: startAutoRefresh($systemSettings.explorer_refresh_seconds)
 
+  // Source statuses (#276) are re-read with the same rhythm (every minute
+  // when auto-refresh is off), quietly: no "Loading…", and nothing while
+  // the browser tab is hidden.
+  let statusTimer: ReturnType<typeof setInterval> | null = null
+  let statusSeconds = 0
+  $: restartStatusTimer($systemSettings.explorer_refresh_seconds || 60)
+  function restartStatusTimer(seconds: number) {
+    if (statusTimer && seconds === statusSeconds) return
+    if (statusTimer) clearInterval(statusTimer)
+    statusSeconds = seconds
+    statusTimer = setInterval(async () => {
+      if (document.hidden) return
+      try {
+        allSources = await api.get<Source[]>('/sources')
+      } catch {
+        // the banner (server-status) says when PerchTail doesn't answer
+      }
+    }, seconds * 1000)
+  }
+
   $: expandedTreeIds = new Set(
     [...$explorerExpanded].filter((k) => k.startsWith('tree:')).map((k) => k.slice(5)),
   )
@@ -176,7 +197,7 @@
       return true
     }
     try {
-      const response = await fetch(openUrl(sourceId, path, member), { credentials: 'include' })
+      const response = await trackedFetch(openUrl(sourceId, path, member), { credentials: 'include' })
       if (!response.ok) {
         const problem = await readFetchFailure(response, name)
         // Gone from the source (#272): its folder is listed again, so it
@@ -247,7 +268,7 @@
   // the same log on two servers can be diffed (#162).
   async function pickCompareTarget(sourceId: number, path: string, member: string | null, name: string) {
     try {
-      const response = await fetch(openUrl(sourceId, path, member), { credentials: 'include' })
+      const response = await trackedFetch(openUrl(sourceId, path, member), { credentials: 'include' })
       if (!response.ok) {
         notice = await readFetchFailure(response, name)
         compareArmed = false
@@ -382,7 +403,7 @@
 
   async function reloadTab(tab: Tab) {
     try {
-      const response = await fetch(openUrl(tab.sourceId, tab.path, tab.member), {
+      const response = await trackedFetch(openUrl(tab.sourceId, tab.path, tab.member), {
         credentials: 'include',
       })
       if (!response.ok) {
@@ -454,7 +475,7 @@
     let appended = ''
     for (let round = 0; round < FOLLOW_ROUNDS_PER_TICK; round++) {
       const start = !followStarted.has(tab.key)
-      const response = await fetch(followUrl(tab.sourceId, tab.path, byteSize, followHead, start), {
+      const response = await trackedFetch(followUrl(tab.sourceId, tab.path, byteSize, followHead, start), {
         credentials: 'include',
       })
       if (response.status === 409) {
@@ -604,6 +625,7 @@
     if (copyStatusTimer) clearTimeout(copyStatusTimer)
     stopFollowTimer()
     stopAutoRefresh()
+    if (statusTimer) clearInterval(statusTimer)
   })
 </script>
 

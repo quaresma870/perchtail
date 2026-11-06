@@ -71,6 +71,8 @@
       explorerSortDefault = settings.explorer_sort_default
       refreshSaved = settings.explorer_refresh_seconds
       refreshInput = String(refreshSaved)
+      checkSaved = settings.source_check_minutes
+      checkInput = String(checkSaved)
       savedPolicy = pickPolicy(settings)
       policyDraft = { ...savedPolicy }
     } catch (err) {
@@ -106,6 +108,26 @@
   let refreshInput = '30'
   let refreshSaved = 30
   let refreshError = ''
+  let checkInput = '10'
+  let checkSaved = 10
+  let checkError = ''
+
+  async function saveCheckInterval() {
+    saving = true
+    checkError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        source_check_minutes: Number(checkInput),
+      })
+      checkSaved = settings.source_check_minutes
+      checkInput = String(checkSaved)
+      systemSettings.set(settings)
+    } catch (err) {
+      checkError = err instanceof ApiError ? err.detail : 'Failed to update the check interval'
+    } finally {
+      saving = false
+    }
+  }
 
   async function patchExplorer(patch: Partial<SystemSettings>) {
     saving = true
@@ -387,6 +409,40 @@
             class="btn btn-ghost"
             on:click={() => patchExplorer({ explorer_refresh_seconds: Number(refreshInput) })}
             disabled={saving || Number(refreshInput) === refreshSaved}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Check sources in the background</div>
+          <p class="hint">
+            How often PerchTail checks that each source answers (one connection per source), so
+            the explorer shows which ones are down before anyone opens them. Push-agent sources
+            show their live connection instead. 0 turns it off.
+          </p>
+        </div>
+        {#if checkError}
+          <p class="error">{checkError}</p>
+        {/if}
+        <div class="retention-row">
+          <input
+            class="input retention-input"
+            type="number"
+            min="0"
+            max="1440"
+            step="1"
+            aria-label="Background check interval in minutes"
+            bind:value={checkInput}
+          />
+          <span class="hint">minutes</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={saveCheckInterval}
+            disabled={saving || Number(checkInput) === checkSaved}
           >
             Save
           </button>

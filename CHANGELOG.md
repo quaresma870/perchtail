@@ -64,6 +64,16 @@ release ships (0.x releases may include breaking changes between minors).
   (a choice this browser remembered moves there on first use). Push
   agents older than this release don't report times: their files show
   none and sort last by time.
+- **Source status** (#276). A dot before each source in the explorer
+  says whether it answers: green reachable, red failing (with the reason
+  and how long ago), amber for a disconnected push agent, grey not
+  checked yet. The status is kept on the server and shared by everyone:
+  a background check runs every 10 minutes (Settings → System, 0 = off,
+  one connection per source, not audited), and every real operation
+  (browse, open, Follow, search indexing) updates it too; an error about
+  one file doesn't count. "Check now" on the source re-checks it, and the
+  Sources list shows the same status. When PerchTail itself stops
+  answering, a banner says so and retries until it's back.
 
 ### Changed
 - **Follow fetches only the new lines** (#254). Instead of re-fetching
