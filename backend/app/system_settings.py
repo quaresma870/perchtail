@@ -13,9 +13,10 @@ BOOL_DEFAULTS: dict[str, str] = {
     "connections_view_switchable": "true",
     # The daily release check (#215); UPDATE_CHECK=false overrides it.
     "update_check_enabled": "true",
-    # Password policy (#245, app/password_policy.py).
-    "password_reject_simple": "true",
-    "password_reject_personal": "true",
+    # Password policy (#245, app/password_policy.py). Bandit's B105 takes a
+    # "password" key for a hardcoded password; these are setting names.
+    "password_reject_simple": "true",  # nosec B105
+    "password_reject_personal": "true",  # nosec B105
 }
 
 # Enumerated string settings: key -> (default, allowed values). A value
@@ -41,11 +42,12 @@ INT_DEFAULTS: dict[str, str] = {
     "source_max_roots": "20",
     # Password policy (#245, app/password_policy.py): NIST SP 800-63B
     # defaults, so history, character classes and expiry start off (0).
-    "password_min_length": "12",
-    "password_max_length": "128",
-    "password_history": "0",
-    "password_required_classes": "0",
-    "password_max_age_days": "0",
+    # Setting names, not passwords (Bandit B105, as above).
+    "password_min_length": "12",  # nosec B105
+    "password_max_length": "128",  # nosec B105
+    "password_history": "0",  # nosec B105
+    "password_required_classes": "0",  # nosec B105
+    "password_max_age_days": "0",  # nosec B105
 }
 
 
