@@ -45,6 +45,13 @@ _DEFAULTS = {
     "connections_view_switchable": True,
     "connections_view_default": "list",
     "update_check_enabled": True,
+    "password_min_length": 12,
+    "password_max_length": 128,
+    "password_reject_simple": True,
+    "password_reject_personal": True,
+    "password_history": 0,
+    "password_required_classes": 0,
+    "password_max_age_days": 0,
 }
 
 

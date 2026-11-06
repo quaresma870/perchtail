@@ -21,6 +21,19 @@ release ships (0.x releases may include breaking changes between minors).
 - **Push agent version.** Agents from this release report their version
   when they connect, and the source overview shows it, flagging an agent
   older than the server. Older agents show as "not reported yet".
+- **Password policy** (#245), under **Settings → System**, for local
+  accounts. Checked whenever a password is set: a user's own change, the
+  change at first login, temporary passwords an admin picks, and resets
+  (whose random password now meets the policy too). The rules show next
+  to the password fields, and an error names the rule that failed. The
+  defaults follow NIST SP 800-63B: 12 to 128 characters, no passwords
+  that are too simple (repeats, sequences, keyboard runs, the username
+  with small changes) and none containing the username or name.
+  Optional, off by default: character classes, not reusing the last N
+  passwords (only previous argon2id hashes are kept, and only while the
+  rule is on) and expiry after N days, which makes the user change it at
+  the next sign-in. Existing passwords are checked at their next change;
+  with expiry on, they count from the upgrade.
 
 ## [0.5.3] - 2026-11-06
 

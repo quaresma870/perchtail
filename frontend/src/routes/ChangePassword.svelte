@@ -2,12 +2,14 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser } from '../lib/auth'
-  import type { CurrentUser } from '../lib/types'
+  import PasswordRules from '../lib/components/PasswordRules.svelte'
+  import type { CurrentUser, PasswordPolicy } from '../lib/types'
 
   let currentPassword = ''
   let newPassword = ''
   let error = ''
   let submitting = false
+  let policy: PasswordPolicy | null = null
 
   async function handleSubmit() {
     error = ''
@@ -30,15 +32,27 @@
 <div class="page">
   <form class="card" on:submit|preventDefault={handleSubmit}>
     <h1>Set a new password</h1>
-    <p class="hint">Your account was created by an admin — pick your own password to continue.</p>
+    <p class="hint">
+      Pick your own password to continue: your account was created or reset by an admin, or your
+      password expired.
+    </p>
     <label>
       Current (temporary) password
       <input class="input" type="password" bind:value={currentPassword} required />
     </label>
     <label>
       New password
-      <input class="input" type="password" bind:value={newPassword} minlength="8" required />
+      <input
+        class="input"
+        type="password"
+        autocomplete="new-password"
+        bind:value={newPassword}
+        minlength={policy?.min_length ?? 8}
+        maxlength={policy?.max_length ?? 1024}
+        required
+      />
     </label>
+    <PasswordRules bind:policy />
     {#if error}
       <p class="error">{error}</p>
     {/if}

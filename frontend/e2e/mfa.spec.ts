@@ -2,8 +2,9 @@ import { expect, test } from '@playwright/test'
 import { totp } from './totp'
 
 const username = `e2e-mfa-user-${Date.now()}`
-const tempPassword = 'e2e-mfa-temp-password-123!'
-const newPassword = 'e2e-mfa-new-password-456!'
+// Within the default password policy (#245): nothing from the username.
+const tempPassword = 'Lantern-Orbit-temp-58!'
+const newPassword = 'Tagus-River-new-73!'
 
 test('mfa: enroll, login with a TOTP code, login with a backup code, disable', async ({
   page,

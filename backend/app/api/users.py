@@ -1,14 +1,14 @@
-import secrets
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
-from app.api.auth import get_current_active_user
+from app import password_policy
+from app.api.auth import get_current_active_user, password_policy_error
 from app.audit import record_audit_event
 from app.auth.models import AuthProviderType, GlobalCapability, Role, User
-from app.auth.providers.local import create_local_user, hash_password
+from app.auth.providers.local import create_local_user, set_password
 from app.auth.rbac import require_global_capability, require_role_within_authority
 from app.auth.sessions import revoke_all_sessions
 from app.db import get_session
@@ -92,6 +92,15 @@ def create_user(
     require_role_within_authority(user, role)
     if session.exec(select(User).where(User.username == payload.username)).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already in use")
+    # The temporary password the admin picks follows the policy too (#245).
+    try:
+        password_policy.check_password(
+            payload.password,
+            password_policy.get_policy(session),
+            user_identifiers=[payload.username],
+        )
+    except password_policy.PasswordPolicyError as exc:
+        raise password_policy_error(exc) from exc
 
     return create_local_user(
         session,
@@ -149,8 +158,12 @@ def reset_password(
     Security-notes rule as admin-created accounts."""
     target = _get_manageable_user(session, user, user_id)
 
-    temporary_password = secrets.token_urlsafe(12)
-    target.password_hash = hash_password(temporary_password)
+    # Random, but within the policy (#245): long enough, every character class.
+    policy = password_policy.get_policy(session)
+    temporary_password = password_policy.generate_password(
+        policy, user_identifiers=password_policy.user_identifiers(target)
+    )
+    set_password(session, target, temporary_password, policy)
     target.must_change_password = True
     session.add(target)
     revoke_all_sessions(session, target.id)
