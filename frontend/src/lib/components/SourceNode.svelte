@@ -2,6 +2,7 @@
   import { createEventDispatcher, onDestroy, onMount } from 'svelte'
   import { api, ApiError } from '../api'
   import { registerFolder } from '../explorer-refresh'
+  import { advancedFilter, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
   import { sortEntries } from '../explorer-sort'
   import { explorerSort } from '../preferences'
   import { serverReachable } from '../server-status'
@@ -108,6 +109,10 @@
     refreshError = (await refresh()) ? '' : "Couldn't refresh this source"
   }
 
+  // Advanced filter (#274): this source as a scope.
+  $: ownScope = { sourceId: source.id, path: '' }
+  $: inScope = $scopes.some((s) => scopeKey(s) === scopeKey(ownScope))
+
   let unregister: (() => void) | null = null
   $: if (expanded && loaded && !unregister) {
     unregister = registerFolder({ sourceId: source.id, path: '', refresh })
@@ -143,6 +148,16 @@
 
 <div class="source-node" bind:this={element}>
   <div class="source-row">
+  {#if $advancedFilter}
+    <input
+      type="checkbox"
+      class="scope-check"
+      checked={inScope}
+      aria-label="Filter files in {source.name}"
+      title="Filter files in this source"
+      on:change={() => toggleScopeIn(ownScope)}
+    />
+  {/if}
   <button
     class="row source"
     class:expanded
@@ -231,6 +246,11 @@
   }
   .check {
     font-size: 0.72rem;
+  }
+  .scope-check {
+    flex: 0 0 auto;
+    margin: 0 0 0 0.35rem;
+    accent-color: var(--accent);
   }
   .source-row {
     display: flex;

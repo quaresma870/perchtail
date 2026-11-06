@@ -5,6 +5,14 @@
   import ConnectionCard from '../lib/components/ConnectionCard.svelte'
   import ConnectionsTree from '../lib/components/ConnectionsTree.svelte'
   import SourceNode from '../lib/components/SourceNode.svelte'
+  import ScopeResults from '../lib/components/ScopeResults.svelte'
+  import {
+    advancedFilter,
+    clearScopes,
+    removeScope,
+    scopeKey,
+    scopes,
+  } from '../lib/explorer-scope'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
   import DiffPane from '../lib/components/DiffPane.svelte'
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
@@ -92,7 +100,19 @@
     : ''
   $: sourceNames = new Set(tabs.map((t) => t.sourceId)).size > 1
 
-  $: filteredAllSources = filterConnections(allSources, connectionsQuery)
+  // Advanced filter (#274): the box filters files in the ticked sources and
+  // folders instead of connections; the explorer lists every source for
+  // picking, and shows the matching files once something is ticked.
+  let fileQuery = ''
+  // While ticking, the tree stays; the files show on "Show the files" or as
+  // soon as something is typed in the filter.
+  let pickingScopes = true
+  $: showScoped = $advancedFilter && $scopes.length > 0 && !pickingScopes
+  $: if ($scopes.length === 0) pickingScopes = true
+  const scopeLabel = (sourceId: number, path: string) =>
+    `${sourceLabel(sourceId)}${path ? ` › ${path}` : ''}`
+
+  $: filteredAllSources = filterConnections(allSources, $advancedFilter ? '' : connectionsQuery)
 
   // List or tree: the admin's default (Settings -> System), and -- when
   // switching is allowed -- each user's own choice, kept on the server so
@@ -632,12 +652,32 @@
 <div class="viewer">
   <aside class="explorer">
     <div class="explorer-header">
-      <input
-        class="input search-box"
-        type="search"
-        placeholder="Search by folder, customer, or host…"
-        bind:value={connectionsQuery}
-      />
+      {#if $advancedFilter}
+        <input
+          class="input search-box"
+          type="search"
+          aria-label="Filter files"
+          placeholder="Filter files in the ticked sources and folders (text, or a glob like app-*.log)"
+          bind:value={fileQuery}
+          on:input={() => { if (fileQuery.trim() && $scopes.length > 0) pickingScopes = false }}
+        />
+      {:else}
+        <input
+          class="input search-box"
+          type="search"
+          placeholder="Search by folder, customer, or host…"
+          bind:value={connectionsQuery}
+        />
+      {/if}
+      <button
+        class="view-toggle-btn advanced-toggle"
+        class:active={$advancedFilter}
+        aria-pressed={$advancedFilter}
+        title="Advanced filter: tick sources and folders, then filter their files by name"
+        on:click={() => advancedFilter.update((on) => !on)}
+      >
+        Advanced filter
+      </button>
       {#if switchable}
         <div class="view-toggle" role="group" aria-label="View">
           <button
@@ -668,11 +708,44 @@
         {/each}
       </select>
     </div>
+    {#if $advancedFilter}
+      <div class="scope-bar">
+        {#if $scopes.length === 0}
+          <span class="hint">Tick the sources and folders to filter files in.</span>
+        {:else}
+          {#each $scopes as scope (scopeKey(scope))}
+            <span class="scope-chip">
+              {scopeLabel(scope.sourceId, scope.path)}
+              <button
+                class="link"
+                aria-label="Remove {scopeLabel(scope.sourceId, scope.path)} from the filter"
+                on:click={() => removeScope(scope)}>✕</button
+              >
+            </span>
+          {/each}
+          <button class="link" on:click={clearScopes}>Clear all</button>
+          <button class="link" on:click={() => (pickingScopes = !pickingScopes)}>
+            {pickingScopes ? `Show the files (${$scopes.length})` : 'Add or change'}
+          </button>
+        {/if}
+      </div>
+    {/if}
     <div class="explorer-body">
       {#if loading}
         <p class="hint">Loading…</p>
       {:else if loadError}
         <p class="error">{loadError}</p>
+      {:else if showScoped}
+        <div class="scoped-results">
+          {#each $scopes as scope (scopeKey(scope))}
+            <ScopeResults
+              {scope}
+              sourceName={sourceLabel(scope.sourceId)}
+              query={fileQuery}
+              on:open={handleOpen}
+            />
+          {/each}
+        </div>
       {:else if filteredAllSources.length === 0}
         <p class="hint">
           {connectionsQuery.trim() ? 'No connections match that search.' : 'No sources visible to your account.'}
@@ -1017,6 +1090,33 @@
     gap: 0.5rem;
     padding: 0.75rem;
     border-bottom: 1px solid var(--border-soft);
+  }
+  .advanced-toggle {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+  .scope-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.5rem;
+    padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 0.78rem;
+  }
+  .scope-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--text);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .search-box {
     width: 100%;
