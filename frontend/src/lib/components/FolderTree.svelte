@@ -1,10 +1,13 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte'
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { explorerExpanded, setExpanded } from '../viewer-tabs'
   import { api, ApiError } from '../api'
   import { tabKey, memberPath } from '../tab-key'
   import { downloadHref } from '../download-href'
+  import { registerFolder } from '../explorer-refresh'
+  import { formatEntryTime, sortEntries } from '../explorer-sort'
+  import { explorerSort } from '../preferences'
   import type { BrowseEntry } from '../types'
 
   export let sourceId: number
@@ -22,6 +25,8 @@
   // per-entry download icon isn't shown (the endpoint would refuse anyway,
   // #174).
   export let canDownload = true
+  // Just appeared in an auto-refresh (#272): highlighted for a moment.
+  export let isNew = false
 
   const dispatch = createEventDispatcher<{
     open: { path: string; member: string | null; name: string }
@@ -44,21 +49,67 @@
 
   $: ownDownloadHref = canDownload ? downloadHref(sourceId, entry, archiveRoot) : null
 
+  const browseUrl = () => `/sources/${sourceId}/browse?path=${encodeURIComponent(entry.path)}`
+
+  // Folders re-list themselves while open (#272); archives don't, since
+  // listing one fetches the whole archive.
+  const canRefresh = entry.is_dir && archiveRoot === null
+  let newPaths = new Set<string>()
+  let newTimer: ReturnType<typeof setTimeout> | null = null
+  let refreshing = false
+
+  /** Re-lists this folder in place: open subfolders and the scroll stay,
+   * new files are highlighted for a few seconds. */
+  async function refresh(): Promise<boolean> {
+    if (refreshing) return true
+    refreshing = true
+    try {
+      const fresh = await api.get<BrowseEntry[]>(browseUrl())
+      const known = new Set(children.map((c) => c.path))
+      const added = fresh.filter((c) => !known.has(c.path)).map((c) => c.path)
+      children = fresh
+      error = ''
+      if (added.length > 0) {
+        newPaths = new Set(added)
+        if (newTimer) clearTimeout(newTimer)
+        newTimer = setTimeout(() => (newPaths = new Set()), 5000)
+      }
+      return true
+    } catch {
+      return false
+    } finally {
+      refreshing = false
+    }
+  }
+
+  let unregister: (() => void) | null = null
+  $: if (canRefresh && expanded && loaded && !unregister) {
+    unregister = registerFolder({ sourceId, path: entry.path, refresh })
+  } else if (unregister && !(expanded && loaded)) {
+    unregister()
+    unregister = null
+  }
+  onDestroy(() => {
+    unregister?.()
+    if (newTimer) clearTimeout(newTimer)
+  })
+
   async function toggle() {
     if (canExpand) {
       if (!loaded) {
         loading = true
         error = ''
         try {
-          children = await api.get<BrowseEntry[]>(
-            `/sources/${sourceId}/browse?path=${encodeURIComponent(entry.path)}`,
-          )
+          children = await api.get<BrowseEntry[]>(browseUrl())
           loaded = true
         } catch (err) {
           error = err instanceof ApiError ? err.detail : 'Failed to load'
         } finally {
           loading = false
         }
+      } else if (!expanded && canRefresh) {
+        // Re-opened: show what was there and list it again behind it.
+        refresh()
       }
       expanded = !expanded
       setExpanded(expandKey, expanded)
@@ -78,7 +129,12 @@
 </script>
 
 <div class="node">
-  <div class="row" class:inert={entry.is_dir && archiveRoot !== null} class:active={isActive}>
+  <div
+    class="row"
+    class:inert={entry.is_dir && archiveRoot !== null}
+    class:active={isActive}
+    class:new={isNew}
+  >
     <button class="label" style="padding-left: {depth * 14}px" on:click={toggle}>
       {#if canExpand}
         <span class="chevron">{expanded ? '▾' : '▸'}</span>
@@ -112,7 +168,15 @@
         {/if}
       </span>
       <span class="name">{entry.name}</span>
+      {#if !entry.is_dir && entry.mtime}
+        <span class="time" title={new Date(entry.mtime * 1000).toLocaleString()}
+          >{formatEntryTime(entry.mtime)}</span
+        >
+      {/if}
     </button>
+    {#if canRefresh && expanded}
+      <button class="refresh" title="Refresh this folder" aria-label="Refresh {entry.name}" on:click={refresh}>⟳</button>
+    {/if}
     {#if ownDownloadHref}
       <a class="download" href={ownDownloadHref} target="_blank" rel="noreferrer" title="Download">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -130,10 +194,11 @@
     {:else if error}
       <div class="error" style="padding-left: {(depth + 1) * 14}px">{error}</div>
     {:else}
-      {#each children as child (child.path)}
+      {#each sortEntries(children, $explorerSort) as child (child.path)}
         <svelte:self
           {sourceId}
           entry={child}
+          isNew={newPaths.has(child.path)}
           depth={depth + 1}
           archiveRoot={entry.is_archive ? entry.path : archiveRoot}
           {activeKey}
@@ -163,6 +228,34 @@
   }
   .row.active .label {
     color: var(--text);
+  }
+  .row.new {
+    background: var(--success-soft);
+    transition: background 1s;
+  }
+  .time {
+    margin-left: auto;
+    padding-left: 0.5rem;
+    font-size: 0.72rem;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+    flex: 0 0 auto;
+  }
+  .refresh {
+    flex: 0 0 auto;
+    border: none;
+    background: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 0 0.4rem;
+    visibility: hidden;
+  }
+  .row:hover .refresh {
+    visibility: visible;
+  }
+  .refresh:hover {
+    color: var(--accent-hover);
   }
   .row.inert {
     color: var(--text-faint);

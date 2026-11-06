@@ -26,6 +26,8 @@ class SourceError(Exception):
 
     status_code = 502
     public_message = "The source returned an error"
+    # Optional, machine-readable, sent next to `detail`.
+    error_code: str | None = None
 
     def __init__(self, detail: str = "", public_message: str | None = None):
         super().__init__(detail or public_message or self.public_message)
@@ -42,6 +44,10 @@ class SourcePermissionError(SourceError):
 class SourceNotFoundError(SourceError):
     status_code = 404
     public_message = "Not found on the source"
+    # Lets the viewer say "no longer exists" and drop it from the tree
+    # (#272). Only reached once the rules allow the path: a hidden one
+    # answers a plain "not found".
+    error_code = "not_found_on_source"
 
 
 class SourceLockedError(SourceError):

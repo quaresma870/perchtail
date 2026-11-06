@@ -83,6 +83,13 @@ test('connections-home tree: nests sources by customer/folder and search auto-ex
   await expect(page.locator('.connections-tree-body').getByText(nestedSourceName, { exact: true })).toBeVisible()
   await expect(page.locator('.connections-tree-body').getByText(rootSourceName, { exact: true })).toHaveCount(0)
 
+  // The list/tree choice is kept on the server now (#273): back to List,
+  // the default, for the specs that run after this one.
+  await page.getByPlaceholder('Search by folder, customer, or host…').fill('')
+  const listSaved = page.waitForResponse((r) => r.url().includes('/auth/preferences') && r.ok())
+  await page.getByRole('button', { name: 'List', exact: true }).click()
+  await listSaved
+
   // Cleanup: both sources via the Sources admin UI first (folders.py
   // refuses to delete a non-empty folder), then the now-childless
   // folders, then the customer via a direct API call (no admin UI exposes

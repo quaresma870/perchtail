@@ -5,7 +5,13 @@
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import UpdatesCard from '../lib/components/UpdatesCard.svelte'
   import { systemSettings } from '../lib/settings'
-  import type { MonitoringTokenResult, MonitoringTokenStatus, SystemSettings } from '../lib/types'
+  import { EXPLORER_SORTS } from '../lib/explorer-sort'
+  import type {
+    ExplorerSort,
+    MonitoringTokenResult,
+    MonitoringTokenStatus,
+    SystemSettings,
+  } from '../lib/types'
 
   let loading = true
   let saving = false
@@ -62,6 +68,9 @@
       maxRootsInput = String(settings.source_max_roots)
       connectionsViewDefault = settings.connections_view_default
       connectionsViewSwitchable = settings.connections_view_switchable
+      explorerSortDefault = settings.explorer_sort_default
+      refreshSaved = settings.explorer_refresh_seconds
+      refreshInput = String(refreshSaved)
       savedPolicy = pickPolicy(settings)
       policyDraft = { ...savedPolicy }
     } catch (err) {
@@ -89,6 +98,31 @@
       monitoringTokenError = err instanceof ApiError ? err.detail : 'Failed to generate token'
     } finally {
       generatingMonitoringToken = false
+    }
+  }
+
+  // Explorer (#272, #273).
+  let explorerSortDefault: ExplorerSort = 'name_asc'
+  let refreshInput = '30'
+  let refreshSaved = 30
+  let refreshError = ''
+
+  async function patchExplorer(patch: Partial<SystemSettings>) {
+    saving = true
+    error = ''
+    refreshError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', patch)
+      explorerSortDefault = settings.explorer_sort_default
+      refreshSaved = settings.explorer_refresh_seconds
+      refreshInput = String(refreshSaved)
+      systemSettings.set(settings)
+    } catch (err) {
+      const message = err instanceof ApiError ? err.detail : 'Failed to update system settings'
+      if ('explorer_refresh_seconds' in patch) refreshError = message
+      else error = message
+    } finally {
+      saving = false
     }
   }
 
@@ -287,8 +321,8 @@
         <div>
           <div class="setting-name">Let users switch between list and tree</div>
           <p class="hint">
-            When on, each user can switch and their browser remembers the choice. When off, the
-            switch is hidden and everyone sees the default view above.
+            When on, each user can switch and the choice follows them (kept on the server). When
+            off, the switch is hidden and everyone sees the default view above.
           </p>
         </div>
         <label class="switch">
@@ -303,9 +337,65 @@
         </label>
       </div>
 
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">File order</div>
+          <p class="hint">
+            How the explorer orders the files in a folder, for users who haven't picked their own
+            order (each user can, from the explorer, and keeps it). Folders always come first.
+          </p>
+        </div>
+        <select
+          class="input view-select"
+          aria-label="Default file order"
+          value={explorerSortDefault}
+          disabled={saving}
+          on:change={(e) =>
+            patchExplorer({ explorer_sort_default: e.currentTarget.value as ExplorerSort })}
+        >
+          {#each EXPLORER_SORTS as option}
+            <option value={option.value}>{option.label}</option>
+          {/each}
+        </select>
+      </div>
+
       <div class="setting-row column">
         <div>
-          <div class="setting-name">Audit log retention</div>
+          <div class="setting-name">Refresh open folders</div>
+          <p class="hint">
+            How often the explorer lists the folders people have open again, so files that
+            rotate in and out show up -- only the list of files, never their content, and not
+            while the browser tab is hidden. 0 turns it off; otherwise at least 5 seconds.
+          </p>
+        </div>
+        {#if refreshError}
+          <p class="error">{refreshError}</p>
+        {/if}
+        <div class="retention-row">
+          <input
+            class="input retention-input"
+            type="number"
+            min="0"
+            max="3600"
+            step="1"
+            aria-label="Refresh interval in seconds"
+            bind:value={refreshInput}
+          />
+          <span class="hint">seconds</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={() => patchExplorer({ explorer_refresh_seconds: Number(refreshInput) })}
+            disabled={saving || Number(refreshInput) === refreshSaved}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Audit log retention</div>)
           <p class="hint">
             Entries older than this are purged automatically on a daily sweep. 0 keeps every entry
             forever.

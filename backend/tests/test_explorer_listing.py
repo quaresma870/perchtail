@@ -169,3 +169,32 @@ def test_explorer_settings_are_bounded(session, client_as, payload, status):
     if status == 200:
         key, value = next(iter(payload.items()))
         assert response.json()[key] == value
+
+
+# --- a file that left the source (#272) ----------------------------------------
+
+
+def test_a_file_gone_from_the_source_says_so():
+    from app.api import errors
+    from app.collectors.base import PathOutsideBaseError, SourceNotFoundError
+
+    app = FastAPI()
+    errors.install(app)
+
+    @app.get("/gone")
+    def gone():
+        raise SourceNotFoundError("No such file: /var/log/app/x.log")
+
+    @app.get("/outside")
+    def outside():
+        raise PathOutsideBaseError("x")
+
+    client = TestClient(app)
+    response = client.get("/gone")
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "Not found on the source",
+        "error_code": "not_found_on_source",
+    }
+    # A path outside the base still looks like a hidden one.
+    assert client.get("/outside").json() == {"detail": "not found"}

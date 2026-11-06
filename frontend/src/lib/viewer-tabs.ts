@@ -24,6 +24,9 @@ export interface Tab {
   format: FormatMode
   // "Follow" (tail -f) -- polled only while this tab is active.
   following: boolean
+  // The file is no longer on the source (#272): the tab keeps what it
+  // had, marked, and Follow stops.
+  missing?: boolean
   // Incremental follow (#254): how many bytes of the file `content` holds,
   // the server's identity of its start (from the last follow answer), and
   // whether only what was appended can be fetched ('reload': .gz files,
