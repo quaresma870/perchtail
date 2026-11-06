@@ -104,9 +104,11 @@
   // folders instead of connections; the explorer lists every source for
   // picking, and shows the matching files once something is ticked.
   let fileQuery = ''
-  let pickingScopes = false
+  // While ticking, the tree stays; the files show on "Show the files" or as
+  // soon as something is typed in the filter.
+  let pickingScopes = true
   $: showScoped = $advancedFilter && $scopes.length > 0 && !pickingScopes
-  $: if ($scopes.length === 0) pickingScopes = false
+  $: if ($scopes.length === 0) pickingScopes = true
   const scopeLabel = (sourceId: number, path: string) =>
     `${sourceLabel(sourceId)}${path ? ` › ${path}` : ''}`
 
@@ -657,6 +659,7 @@
           aria-label="Filter files"
           placeholder="Filter files in the ticked sources and folders (text, or a glob like app-*.log)"
           bind:value={fileQuery}
+          on:input={() => { if (fileQuery.trim() && $scopes.length > 0) pickingScopes = false }}
         />
       {:else}
         <input
@@ -722,7 +725,7 @@
           {/each}
           <button class="link" on:click={clearScopes}>Clear all</button>
           <button class="link" on:click={() => (pickingScopes = !pickingScopes)}>
-            {pickingScopes ? 'Show the files' : 'Add or change'}
+            {pickingScopes ? `Show the files (${$scopes.length})` : 'Add or change'}
           </button>
         {/if}
       </div>

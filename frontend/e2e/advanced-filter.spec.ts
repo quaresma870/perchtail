@@ -8,7 +8,11 @@ test('advanced filter: files of a ticked source, filtered by name or glob', asyn
   await page.getByRole('button', { name: 'Advanced filter' }).click()
   await expect(page.getByText('Tick the sources and folders to filter files in.')).toBeVisible()
 
+  // Ticking keeps the tree, so several can be ticked; "Show the files"
+  // (or typing a filter) shows the matches.
   await page.getByLabel(`Filter files in ${SYSTEM_SOURCE_NAME}`).check()
+  await expect(page.getByLabel(`Filter files in ${SYSTEM_SOURCE_NAME}`)).toBeChecked()
+  await page.getByRole('button', { name: 'Show the files (1)' }).click()
   const results = page.locator('.scoped-results')
   await expect(results.getByRole('button', { name: 'perchtail.log', exact: true })).toBeVisible()
 
