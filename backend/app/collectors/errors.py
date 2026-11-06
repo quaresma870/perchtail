@@ -173,9 +173,32 @@ def _from_powershell_text(text: str) -> SourceError | None:
 
 def translate_winrm(exc: BaseException) -> SourceError | None:
     import requests
+    from pypsrp import exceptions as psrp_exc
     from winrm import exceptions as winrm_exc
 
     text = str(exc)
+    # PSRP, for a source behind a JEA endpoint (#169).
+    if isinstance(exc, psrp_exc.AuthenticationError):
+        return SourceAuthError(text)
+    if isinstance(exc, psrp_exc.WinRMTransportError) and exc.code == 401:
+        return SourceAuthError(text)
+    if isinstance(exc, psrp_exc.WSManFaultError | psrp_exc.WinRMTransportError):
+        lowered = text.lower()
+        if "access is denied" in lowered or getattr(exc, "code", None) == 403:
+            return SourcePermissionError(
+                text,
+                public_message="The WinRM account isn't allowed to use the JEA endpoint "
+                "(see docs/examples/jea)",
+            )
+        # Windows names a missing endpoint by its resource URI (fault 2150858811),
+        # not as a missing "configuration".
+        if "ws-management catalog" in lowered or (
+            "configuration" in lowered and ("not found" in lowered or "cannot be found" in lowered)
+        ):
+            return SourceError(text, public_message="The JEA endpoint wasn't found on the server")
+        return SourceUnreachableError(text)
+    if isinstance(exc, psrp_exc.WinRMError):
+        return SourceUnreachableError(text)
     if isinstance(exc, winrm_exc.InvalidCredentialsError | winrm_exc.AuthenticationError):
         return SourceAuthError(text)
     if isinstance(exc, requests.exceptions.SSLError):

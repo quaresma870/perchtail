@@ -101,6 +101,11 @@ class Source(SQLModel, table=True):
     # WinRM only (#169): "https" or "http". Null keeps the pre-0.5.0 rule of
     # inferring it from the port (HTTPS on 5986 or no port, HTTP otherwise).
     winrm_scheme: str | None = None
+    # WinRM only (#169): the PowerShell session configuration (JEA endpoint)
+    # to connect to. Set, the connector speaks PSRP and calls only the
+    # reference read-only role's functions (docs/examples/jea); null keeps
+    # the WinRS shell, which needs remote-shell rights.
+    winrm_configuration: str | None = None
     # PEM CA certificate(s) trusted for this source's TLS listener (WinRM
     # over HTTPS) -- internal PKI or a self-signed certificate, without a
     # server-wide REQUESTS_CA_BUNDLE. Public data, not a secret.

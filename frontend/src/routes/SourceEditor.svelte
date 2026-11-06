@@ -58,6 +58,9 @@
   $: rootsLimit = $systemSettings.source_max_roots
   let winrmScheme: 'https' | 'http' = 'https'
   let tlsCaPem = ''
+  // JEA endpoint (#169): the PowerShell session configuration name; empty =
+  // the WinRS shell.
+  let winrmConfiguration = ''
   let enabled = true
   let searchIndexingEnabled = false
   let username = ''
@@ -193,6 +196,7 @@
           hadRootsCount = source.roots.length
           winrmScheme = source.winrm_effective_scheme ?? 'https'
           tlsCaPem = source.tls_ca_pem ?? ''
+          winrmConfiguration = source.winrm_configuration ?? ''
           originalPaths = JSON.stringify(roots.map((r) => r.path))
           originalHostPort = `${source.host}:${source.port ?? ''}`
           enabled = source.enabled
@@ -248,7 +252,11 @@
 
   function winrmPayload(): Record<string, string> {
     if (protocol !== 'winrm') return {}
-    return { winrm_scheme: winrmScheme, tls_ca_pem: winrmScheme === 'https' ? tlsCaPem : '' }
+    return {
+      winrm_scheme: winrmScheme,
+      tls_ca_pem: winrmScheme === 'https' ? tlsCaPem : '',
+      winrm_configuration: winrmConfiguration.trim(),
+    }
   }
 
   function locationPayload() {
@@ -511,6 +519,24 @@
           Plain HTTP: NTLM still encrypts the WinRM messages, but the server isn't authenticated.
           Prefer HTTPS.
         </p>
+      {/if}
+      {#if protocol === 'winrm'}
+        <label>
+          JEA endpoint (optional)
+          <input
+            class="input"
+            bind:value={winrmConfiguration}
+            placeholder="PerchTail"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <span class="hint small">
+            The PowerShell endpoint registered with PerchTail's read-only JEA role
+            (docs/examples/jea): the account then needs no administrator rights or remote
+            shell, and can only list and read under the role's folders. Empty: a WinRS shell,
+            which needs an account with remote-shell rights.
+          </span>
+        </label>
       {/if}
 
       <div class="roots">

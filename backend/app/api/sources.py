@@ -89,6 +89,8 @@ class SourcePublic(BaseModel):
     # what is actually used.
     winrm_scheme: Literal["https", "http"] | None = None
     winrm_effective_scheme: Literal["https", "http"] | None = None
+    # The JEA endpoint (#169), or null for the WinRS shell.
+    winrm_configuration: str | None = None
     tls_ca_pem: str | None = None
     enabled: bool
     is_system: bool
@@ -129,6 +131,7 @@ class SourceCreate(BaseModel):
     # When given, base_path is ignored and the first root's path is used.
     roots: list[SourceRootModel] | None = None
     winrm_scheme: Literal["https", "http"] | None = None
+    winrm_configuration: str | None = None
     tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
     enabled: bool = True
     # Per-protocol JSON blob (SSH: username + private_key|password; SMB/WinRM:
@@ -147,6 +150,8 @@ class SourceUpdate(BaseModel):
     # [] or a single entry turns a multi-root source back into a plain one.
     roots: list[SourceRootModel] | None = None
     winrm_scheme: Literal["https", "http"] | None = None
+    # "" goes back to the WinRS shell.
+    winrm_configuration: str | None = None
     # "" removes the CA certificate.
     tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
     enabled: bool | None = None
@@ -223,6 +228,7 @@ def _to_public(
         base_path=source.base_path,
         roots=[SourceRootModel(**r) for r in source_roots.roots_of(source)],
         winrm_scheme=source.winrm_scheme,
+        winrm_configuration=source.winrm_configuration,
         winrm_effective_scheme=(
             winrm_collector.endpoint(source)[0] if source.protocol == Protocol.winrm else None
         ),
@@ -369,6 +375,23 @@ def _validate_ca_pem(protocol: Protocol, pem: str | None) -> str | None:
     return pem.strip() + "\n"
 
 
+_CONFIGURATION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _validate_winrm_configuration(protocol: Protocol, name: str | None) -> str | None:
+    """A PowerShell session configuration name (#169), or None for the WinRS
+    shell. Only letters, digits, dot, dash and underscore: it goes into the
+    WSMan resource URI."""
+    name = (name or "").strip() or None
+    if name is None:
+        return None
+    if protocol != Protocol.winrm:
+        raise _bad_request("winrm_configuration only applies to WinRM sources")
+    if not _CONFIGURATION_NAME.match(name):
+        raise _bad_request("The JEA endpoint name can only have letters, digits, '.', '-' and '_'")
+    return name
+
+
 def _validate_winrm_scheme(protocol: Protocol, scheme: str | None) -> str | None:
     if scheme is not None and protocol != Protocol.winrm:
         raise _bad_request("winrm_scheme only applies to WinRM sources")
@@ -505,6 +528,9 @@ def create_source(
         port=payload.port,
         base_path=base_path,
         roots=roots,
+        winrm_configuration=_validate_winrm_configuration(
+            payload.protocol, payload.winrm_configuration
+        ),
         winrm_scheme=_validate_winrm_scheme(payload.protocol, payload.winrm_scheme)
         # New WinRM sources always store a scheme: the one asked for, or the
         # one the port implied before 0.5.0.
@@ -558,6 +584,7 @@ def update_source(
         "name": source.name,
         "enabled": source.enabled,
         "winrm_scheme": source.winrm_scheme,
+        "winrm_configuration": source.winrm_configuration,
         **_location(source),
     }
     new_customer_id = payload.customer_id if "customer_id" in fields_set else source.customer_id
@@ -601,6 +628,13 @@ def update_source(
             )
     if "winrm_scheme" in fields_set:
         source.winrm_scheme = _validate_winrm_scheme(source.protocol, payload.winrm_scheme)
+    configuration_changed = False
+    if "winrm_configuration" in fields_set:
+        new_configuration = _validate_winrm_configuration(
+            source.protocol, payload.winrm_configuration
+        )
+        configuration_changed = new_configuration != source.winrm_configuration
+        source.winrm_configuration = new_configuration
     tls_ca_changed = False
     if "tls_ca_pem" in fields_set:
         new_ca = _validate_ca_pem(source.protocol, payload.tls_ca_pem)
@@ -616,6 +650,7 @@ def update_source(
         "name": source.name,
         "enabled": source.enabled,
         "winrm_scheme": source.winrm_scheme,
+        "winrm_configuration": source.winrm_configuration,
         **_location(source),
     }
     location_changed = any(before[k] != after[k] for k in _location(source))
@@ -631,7 +666,12 @@ def update_source(
         changes["credential"] = "replaced"
     if tls_ca_changed:
         changes["tls_ca_pem"] = "replaced" if source.tls_ca_pem else "removed"
-    if location_changed or payload.credential is not None or tls_ca_changed:
+    if (
+        location_changed
+        or payload.credential is not None
+        or tls_ca_changed
+        or configuration_changed
+    ):
         # How the source is reached changed: the old status says nothing
         # about the new settings (#276).
         source.status = source.status_checked_at = source.status_message = None
@@ -792,6 +832,7 @@ class FolderPickRequest(BaseModel):
     port: int | None = None
     credential: dict | None = None
     winrm_scheme: Literal["https", "http"] | None = None
+    winrm_configuration: str | None = None
     tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
     path: str = ""
 
@@ -842,6 +883,11 @@ def _picker_source(session: Session, payload: FolderPickRequest) -> Source:
         if "winrm_scheme" in payload.model_fields_set
         else (saved.winrm_scheme if saved else None)
     )
+    configuration = (
+        _validate_winrm_configuration(protocol, payload.winrm_configuration)
+        if "winrm_configuration" in payload.model_fields_set
+        else (saved.winrm_configuration if saved else None)
+    )
     ca_pem = (
         _validate_ca_pem(protocol, payload.tls_ca_pem)
         if "tls_ca_pem" in payload.model_fields_set
@@ -858,6 +904,7 @@ def _picker_source(session: Session, payload: FolderPickRequest) -> Source:
         credential_ref=credential_ref,
         base_path="",
         winrm_scheme=scheme if protocol == Protocol.winrm else None,
+        winrm_configuration=configuration if protocol == Protocol.winrm else None,
         tls_ca_pem=ca_pem if protocol == Protocol.winrm else None,
     )
 

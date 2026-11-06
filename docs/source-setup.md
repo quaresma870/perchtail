@@ -16,7 +16,7 @@ See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
 |---|---|---|---|---|
 | SSH/SFTP | Linux | 22 | dedicated OS user, key-based | SFTP-only chroot jail |
 | SMB | Windows shares | 445 | dedicated local/domain user | share + NTFS ACL scoped to one folder |
-| WinRM | Windows (fallback when SMB isn't open) | 5986 (HTTPS) / 5985 | dedicated account with remote-shell rights (admin or `RootSDDL`) | NTFS read ACLs; prefer SMB or the agent (see below) |
+| WinRM | Windows (fallback when SMB isn't open) | 5986 (HTTPS) / 5985 | dedicated account behind the read-only JEA endpoint (or, without it, remote-shell rights) | NTFS read ACLs; the JEA role's allowed folders |
 | Agent | Any host not reachable inbound | outbound only, no listener | enrollment token, not a login account | `PERCHTAIL_BASE_PATH` scopes what it can read |
 | Local disk | Directories on the PerchTail host (e.g. a read-only bind mount) | n/a | none | off unless the operator sets `LOCAL_SOURCE_ROOTS` |
 
@@ -272,19 +272,25 @@ Allow TCP 445 inbound from the PerchTail connector's IP only.
 
 ## WinRM (Windows, fallback when SMB isn't open)
 
-> **Read this before choosing WinRM.** The current WinRM connector runs
-> PowerShell through a WinRS remote shell (pywinrm). Windows only lets an
-> account open that shell if it is a local **Administrator**, or if the
-> WinRM service's `RootSDDL` is widened to grant it (`GXGR`). Either way the
-> credential PerchTail stores has a **full remote shell** on the host: if it
-> leaks, it can do far more than read logs. A Just Enough Administration
-> (JEA) endpoint can't restrict it today, because pywinrm never reaches a
-> PowerShell session configuration (#169, moving to PSRP).
+> **Read this before choosing WinRM.** There are two ways to connect, and
+> they differ a lot in what the stored credential can do:
 >
-> Prefer an [SMB share](#smb-windows-shares) of the log folder, or the
-> [push agent](#agent-push-agent-for-hosts-not-reachable-inbound), whenever
-> either is possible. Use WinRM only where neither is, and treat its
-> credential like an administrator's.
+> - **Through PerchTail's read-only JEA endpoint (recommended, 0.6+).** The
+>   source names the endpoint in **JEA endpoint**, and PerchTail speaks PSRP
+>   to it. The endpoint runs in `NoLanguage` mode and only exposes
+>   PerchTail's own functions, which list and read files under the folders
+>   you allow and refuse junctions and links. The account needs no
+>   administrator rights and no remote shell: if the credential leaks, it can
+>   read those logs and nothing else. See step 2, option A.
+> - **Through a WinRS remote shell** (JEA endpoint left empty). Windows only
+>   lets an account open that shell if it is a local **Administrator**, or if
+>   the WinRM service's `RootSDDL` is widened to grant it (`GXGR`). Either way
+>   the credential has a **full remote shell** on the host. See step 2,
+>   option B.
+>
+> An [SMB share](#smb-windows-shares) of the log folder, or the
+> [push agent](#agent-push-agent-for-hosts-not-reachable-inbound), are still
+> simpler where either is possible.
 
 ### 1. Enable WinRM over HTTPS
 
@@ -310,7 +316,26 @@ Saving the source in the editor stores the scheme explicitly.
 ### 2. Create a dedicated account
 
 A dedicated local or domain account, e.g. `svc-perchtail`, used for nothing
-else and for no other host. For the reasons above it needs one of:
+else and for no other host, with NTFS read access to the log folders only.
+
+**Option A -- the read-only JEA endpoint (recommended).** Put the account in
+a group of its own (e.g. `PerchTail Readers`), copy
+[`docs/examples/jea`](examples/jea) to the host, and run, as an administrator:
+
+```powershell
+.Register-PerchTailJea.ps1 -Group 'CONTOSOPerchTail Readers' -Roots 'D:ogs', 'c:inetpubogs'
+```
+
+it installs the role, records the folders it may read
+(`%programdata%perchtailjea-roots.txt`, changeable by administrators only)
+and registers the endpoint `perchtail`. in the source editor, set **jea
+endpoint** to `perchtail`; the **base path** must be one of those folders or
+inside one. the account needs nothing else: not administrators, not
+**remote management users**, not `rootsddl`. details in
+[`docs/examples/jea/readme.md`](examples/jea/readme.md).
+
+**option b -- a winrs shell.** leave **jea endpoint** empty. for the reasons
+above the account then needs one of:
 
 - membership of the local **Administrators** group; or
 - an entry in the WinRM `RootSDDL` granting it execute and read (`GXGR`):
@@ -323,9 +348,8 @@ else and for no other host. For the reasons above it needs one of:
   gives it a remote shell, but keeps it out of Administrators, so it can
   only read what its NTFS permissions allow.
 
-Grant NTFS read access to the log folders only, as for SMB. Adding the
-account to **Remote Management Users** alone is not enough for this
-connector: it fails with `Access is denied`.
+Adding the account to **Remote Management Users** alone is not enough for
+option B: it fails with `Access is denied`.
 
 ### 3. Firewall
 
