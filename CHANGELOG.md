@@ -8,6 +8,43 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-06
+
+The release after 0.5.2. It carries everything from the pre-release
+0.5.3-rc.1, whose section in
+[CHANGELOG.md](https://github.com/quaresma870/perchtail/blob/v0.5.3/CHANGELOG.md)
+lists every change; PerchTail itself hasn't changed since. It was
+retested in the lab on Linux and Windows sources, including an audit log
+with old race breaks.
+
+### Upgrading from 0.5.2
+- **Back up `DATA_DIR` first**, with PerchTail stopped.
+- One migration runs on start (`audit known breaks`). It records the
+  newest audit row at the time of the upgrade, which is how 0.5.3 tells
+  the old race breaks apart (see below).
+- **Upgrade the push agents.** Agents older than 0.5.3 keep working with
+  this version, but send each file in one message, which fails above
+  about 12 MiB.
+- Optional new setting: `SEARCH_INDEX_SOURCE_BUDGET_SECONDS` (default
+  120).
+
+### Highlights
+- **Audit log:** if "Verify now" reported "Tampering detected" because of
+  the race fixed in 0.5.2, it now shows those breaks apart, and a super
+  admin can mark them as known (Settings → Audit log). Any other break is
+  still tampering. Entries now name the source, user or object they're
+  about, and keep that name after a rename or a delete.
+- **Push agent:** files come in 1 MiB chunks, written as they arrive, so
+  large logs open without the agent holding them in memory. A file over
+  `MAX_FETCH_MB` is refused before it's read. The agent answers commands
+  in parallel, so a long download doesn't hold up browsing, and stops
+  reading when PerchTail gives up on a file.
+- **Search indexing:** each source gets a time budget per sweep, so one
+  large source can't hold up the others; files that can't be indexed are
+  retried only when their size changes.
+- **Settings:** the Sources and Users lists sort by any column and filter.
+- **Viewer:** "⌕ Find" is a button that opens the search panel.
+
 ## [0.5.3-rc.1] - 2026-11-05
 
 First release candidate for 0.5.3. Upgrade notes:
