@@ -97,6 +97,13 @@ jobs:
             sha="$(git rev-parse --verify "origin/$INPUT_TARGET^{commit}" 2>/dev/null || git rev-parse --verify "$INPUT_TARGET^{commit}")"
           fi
 
+          # Releases are built only from code on dev or main, which went
+          # through a PR and CI; a manual run can't release any other commit.
+          if ! git merge-base --is-ancestor "$sha" origin/dev && ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::${sha:0:7} is on neither dev nor main; a release is built only from code merged there"
+            exit 1
+          fi
+
           # The code being released must carry this version, so a tag can't
           # point at an older release's code by mistake (v0.5.1 did, #201).
           app_version="$(git show "$sha:backend/app/version.py" | sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p')"
