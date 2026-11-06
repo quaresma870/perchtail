@@ -176,6 +176,14 @@ jobs:
       - name: Test
         run: go test ./... -v
 
+      # Path containment (internal/agent/fuzz_test.go): `go test` above only
+      # runs the seed corpus; this explores new inputs for a short while.
+      - name: Fuzz the path checks
+        run: |
+          for target in FuzzIsSafeRelativePath FuzzFetchStaysInBase; do
+            go test ./internal/agent -run '^$' -fuzz "^${target}\$" -fuzztime 30s
+          done
+
       - name: Cross-compile
         run: |
           GOOS=linux GOARCH=amd64 go build -o dist/perchtail-agent-linux-amd64 .
