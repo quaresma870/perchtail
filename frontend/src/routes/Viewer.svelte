@@ -181,7 +181,7 @@
         const problem = await readFetchFailure(response, name)
         // Gone from the source (#272): its folder is listed again, so it
         // leaves the tree.
-        if (problem.missing && member === null) refreshFolder(sourceId, parentPath(path))
+        if (problem.missing) refreshFolder(sourceId, parentPath(path))
         notice = {
           ...problem,
           retry: problem.retryable
@@ -437,7 +437,7 @@
   function markMissing(tab: Tab) {
     updateTab(tab.key, { following: false, missing: true })
     followStarted.delete(tab.key)
-    if (tab.member === null) refreshFolder(tab.sourceId, parentPath(tab.path))
+    refreshFolder(tab.sourceId, parentPath(tab.path))
     notice = {
       message: `${tab.name} no longer exists on the source. The tab keeps what it had; Follow stopped.`,
       retryable: false,

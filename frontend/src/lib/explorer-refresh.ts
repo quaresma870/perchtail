@@ -51,6 +51,8 @@ export async function refreshAll(intervalMs: number, now = Date.now()): Promise<
       const state = backoff.get(sourceId)
       if (state && state.until > now) return
       for (const target of list) {
+        // A folder a previous refresh removed from the tree is skipped.
+        if (targets.get(targetKey(target.sourceId, target.path)) !== target) continue
         const ok = await target.refresh().catch(() => false)
         if (!ok) {
           const failures = (state?.failures ?? 0) + 1

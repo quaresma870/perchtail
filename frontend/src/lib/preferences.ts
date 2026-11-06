@@ -34,7 +34,12 @@ export async function savePreference(key: PreferenceKey, value: string | null): 
   try {
     currentUser.set(await api.patch<CurrentUser>('/auth/preferences', { [key]: value }))
   } catch {
-    currentUser.set(before)
+    // Back to what the server has (another save may have landed since).
+    try {
+      currentUser.set(await api.get<CurrentUser>('/auth/me'))
+    } catch {
+      currentUser.set(before)
+    }
   }
 }
 
@@ -44,6 +49,8 @@ const LEGACY_VIEW_KEY = 'perchtail.connectionsView'
 /** Moves a list/tree choice this browser remembered to the server, once,
  * unless the user already has one there. */
 export async function migrateLegacyViewChoice(): Promise<void> {
+  const user = get(currentUser)
+  if (!user) return // not signed in yet: try again next time
   let stored: string | null = null
   try {
     stored = localStorage.getItem(LEGACY_VIEW_KEY)
@@ -51,8 +58,7 @@ export async function migrateLegacyViewChoice(): Promise<void> {
   } catch {
     return
   }
-  const user = get(currentUser)
-  if ((stored === 'list' || stored === 'tree') && user && !user.preferences?.connections_view) {
+  if ((stored === 'list' || stored === 'tree') && !user.preferences?.connections_view) {
     await savePreference('connections_view', stored)
   }
 }

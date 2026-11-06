@@ -217,3 +217,14 @@ def test_open_gives_the_head_the_first_poll_checks(follow):
     log.write_bytes(b"2026-11-07 new file, line one\n" * 3)
     response = _poll(client, source, len(opened.content), head)
     assert response.headers["x-follow-reset"] == "1"
+
+
+def test_a_refresh_of_a_source_isnt_audited_as_opening_it(session, follow):
+    # #272: the explorer re-lists open sources every few seconds.
+    client, source, log = follow
+    log.write_bytes(b"line\n")
+    client.get(f"/sources/{source.id}/browse", params={"path": ""})
+    client.get(f"/sources/{source.id}/browse", params={"path": "", "refresh": "true"})
+    client.get(f"/sources/{source.id}/browse", params={"path": "", "refresh": "true"})
+    events = session.exec(select(AuditLog).where(AuditLog.action == "source.open")).all()
+    assert len(events) == 1

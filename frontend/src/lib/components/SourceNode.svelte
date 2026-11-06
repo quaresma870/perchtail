@@ -53,7 +53,9 @@
     if (refreshing) return true
     refreshing = true
     try {
-      const fresh = await api.get<BrowseEntry[]>(`/sources/${source.id}/browse?path=`)
+      // refresh=true: re-listing isn't "opening the source" again, so it
+      // isn't audited as source.open.
+      const fresh = await api.get<BrowseEntry[]>(`/sources/${source.id}/browse?path=&refresh=true`)
       const known = new Set(entries.map((e) => e.path))
       const added = fresh.filter((e) => !known.has(e.path)).map((e) => e.path)
       entries = fresh
@@ -63,12 +65,18 @@
         if (newTimer) clearTimeout(newTimer)
         newTimer = setTimeout(() => (newPaths = new Set()), 5000)
       }
+      refreshError = ''
       return true
     } catch {
       return false
     } finally {
       refreshing = false
     }
+  }
+
+  let refreshError = ''
+  async function refreshNow() {
+    refreshError = (await refresh()) ? '' : "Couldn't refresh this source"
   }
 
   let unregister: (() => void) | null = null
@@ -125,12 +133,15 @@
     {/if}
   </button>
   {#if expanded && loaded}
-    <button class="refresh" title="Refresh this source" aria-label="Refresh {source.name}" on:click={refresh}>⟳</button>
+    <button class="refresh" title="Refresh this source" aria-label="Refresh {source.name}" on:click={refreshNow}>⟳</button>
   {/if}
   </div>
 
   {#if expanded}
     <div class="tree-body">
+      {#if refreshError}
+        <div class="error" style="padding-left: {(depth + 1) * 14}px">{refreshError}</div>
+      {/if}
       {#if loading}
         <div class="hint" style="padding-left: {(depth + 1) * 14}px">Loading…</div>
       {:else if error}

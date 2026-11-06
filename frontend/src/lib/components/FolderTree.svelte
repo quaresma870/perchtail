@@ -64,7 +64,7 @@
     if (refreshing) return true
     refreshing = true
     try {
-      const fresh = await api.get<BrowseEntry[]>(browseUrl())
+      const fresh = await api.get<BrowseEntry[]>(`${browseUrl()}&refresh=true`)
       const known = new Set(children.map((c) => c.path))
       const added = fresh.filter((c) => !known.has(c.path)).map((c) => c.path)
       children = fresh
@@ -74,12 +74,20 @@
         if (newTimer) clearTimeout(newTimer)
         newTimer = setTimeout(() => (newPaths = new Set()), 5000)
       }
+      refreshError = ''
       return true
-    } catch {
-      return false
+    } catch (err) {
+      // Gone (or hidden by a rule change): its parent's next listing drops
+      // it -- not a reason to hold back the rest of the source.
+      return err instanceof ApiError && err.status === 404
     } finally {
       refreshing = false
     }
+  }
+
+  let refreshError = ''
+  async function refreshNow() {
+    refreshError = (await refresh()) ? '' : "Couldn't refresh this folder"
   }
 
   let unregister: (() => void) | null = null
@@ -175,7 +183,7 @@
       {/if}
     </button>
     {#if canRefresh && expanded}
-      <button class="refresh" title="Refresh this folder" aria-label="Refresh {entry.name}" on:click={refresh}>⟳</button>
+      <button class="refresh" title="Refresh this folder" aria-label="Refresh {entry.name}" on:click={refreshNow}>⟳</button>
     {/if}
     {#if ownDownloadHref}
       <a class="download" href={ownDownloadHref} target="_blank" rel="noreferrer" title="Download">
@@ -188,6 +196,9 @@
     {/if}
   </div>
 
+  {#if refreshError}
+    <div class="error" style="padding-left: {(depth + 1) * 14}px">{refreshError}</div>
+  {/if}
   {#if expanded}
     {#if loading}
       <div class="hint" style="padding-left: {(depth + 1) * 14}px">Loading…</div>
