@@ -271,8 +271,8 @@ class AgentRegistry:
                 # than 0.5.3 answers with an unknown_error nobody awaits.
                 try:
                     await connection.websocket.send_json({"type": "cancel", "id": request_id})
-                except Exception:  # noqa: BLE001 - the connection may be gone
-                    pass
+                except Exception as exc:  # noqa: BLE001 - the connection may be gone
+                    logger.debug("agent.cancel_not_sent", source_id=source_id, error=str(exc))
 
     def send_command_sync(
         self,

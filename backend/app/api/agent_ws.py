@@ -65,8 +65,8 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
                 code=status.WS_1000_NORMAL_CLOSURE,
                 reason="replaced by a newer connection for this source",
             )
-        except Exception:  # noqa: BLE001 - it may already be gone
-            pass
+        except Exception as exc:  # noqa: BLE001 - it may already be gone
+            logger.debug("agent.replaced_close_failed", source_id=source.id, error=str(exc))
     source.agent_last_seen_at = utcnow()
     agent_os = _reported_os(websocket)
     if agent_os is not None and agent_os != source.agent_os:

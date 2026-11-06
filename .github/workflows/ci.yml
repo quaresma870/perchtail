@@ -46,6 +46,11 @@ jobs:
           pip-audit -r backend/requirements.txt
           pip-audit -r backend/requirements-dev.txt
 
+      - name: Static security analysis (Bandit)
+        run: |
+          pip install bandit==1.9.4
+          bandit -q -r backend/app
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -181,6 +186,17 @@ jobs:
           GOOS=linux GOARCH=amd64 go build -o dist/perchtail-agent-linux-amd64 .
           GOOS=linux GOARCH=arm64 go build -o dist/perchtail-agent-linux-arm64 .
           GOOS=windows GOARCH=amd64 go build -o dist/perchtail-agent-windows-amd64.exe .
+
+      # gosec 2.30 needs Go >= 1.26. setup-go sets GOTOOLCHAIN=local, so this
+      # step sets it back to auto: `go install` then fetches that toolchain.
+      # The agent itself is still built with the Go set up above.
+      - name: Static security analysis (gosec)
+        working-directory: agent
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          "$(go env GOPATH)/bin/gosec" -quiet ./...
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

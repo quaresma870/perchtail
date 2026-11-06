@@ -28,7 +28,8 @@ from app.auth.providers.local import hash_password
 from app.auth.rbac import create_role
 
 DEFAULT_USERNAME = "e2e-admin"
-DEFAULT_PASSWORD = "e2e-test-password-123!"  # noqa: S105 -- test-only, isolated DB
+# For the e2e tests only, against their own throwaway database.
+DEFAULT_PASSWORD = "e2e-test-password-123!"  # noqa: S105  # nosec B105
 
 
 def seed(username: str, password: str) -> int:
