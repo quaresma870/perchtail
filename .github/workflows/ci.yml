@@ -84,6 +84,10 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    # A normal run takes 3-5 minutes. A slow apt mirror once stretched the
+    # Playwright and test-server installs to 16; past 30, something is
+    # stuck, and without this the job would hold the PR for 6 hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
