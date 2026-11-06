@@ -9,7 +9,7 @@ test('users: create, reset password, change role, deactivate/reactivate', async 
 
   await page.getByPlaceholder('username', { exact: true }).fill(username)
   await page.getByPlaceholder('temporary password').fill(password)
-  await page.getByPlaceholder('display name (optional)').fill('Throwaway User')
+  await page.getByPlaceholder('display name (optional)').fill('Test Person')
   await page.getByPlaceholder('email (optional)').fill(`${username}@example.com`)
   // The seeded builtin "No Access" role (app/bootstrap.py's
   // seed_no_access_role) always exists and grants nothing -- a safe default
@@ -20,7 +20,7 @@ test('users: create, reset password, change role, deactivate/reactivate', async 
   const row = page.getByRole('row', { name: new RegExp(username) })
   await expect(row).toBeVisible()
   await expect(row.getByText('active', { exact: true })).toBeVisible()
-  await expect(row.getByText(`Throwaway User · ${username}@example.com`)).toBeVisible()
+  await expect(row.getByText(`Test Person · ${username}@example.com`)).toBeVisible()
 
   // Role change persists through the real API, not just local state.
   await row.locator('select').selectOption({ label: 'Super Admin' })

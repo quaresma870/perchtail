@@ -24,7 +24,8 @@ test('profile: set name and email, see sessions, old links land here', async ({ 
   await page.reload()
   await expect(page.getByLabel('Display name')).toHaveValue(name)
 
-  await page.getByLabel('Email').fill('not an email')
+  // Passes the browser's own check (type=email), not the server's.
+  await page.getByLabel('Email').fill('e2e-admin@example')
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page.getByText('Enter a valid email address.')).toBeVisible()
 
