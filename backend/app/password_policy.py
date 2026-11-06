@@ -176,9 +176,13 @@ def _personal_parts(user_identifiers: Sequence[str]) -> list[str]:
             value = value.split("@", 1)[0]
         if not value:
             continue
-        parts.add(value)
-        parts.update(value.replace(".", " ").replace("_", " ").replace("-", " ").split())
-    return [part for part in parts if len(part) >= _MIN_PERSONAL_PART]
+        if len(value) >= _MIN_PERSONAL_PART:
+            parts.add(value)
+        # Single words need one more letter, so a name like "Bob The Admin"
+        # doesn't bar every password containing "the".
+        words = value.replace(".", " ").replace("_", " ").replace("-", " ").split()
+        parts.update(word for word in words if len(word) > _MIN_PERSONAL_PART)
+    return sorted(parts)
 
 
 def _strip_decoration(password: str) -> str:
@@ -233,8 +237,9 @@ def check_password(
 
 
 def user_identifiers(user: User) -> list[str]:
-    """What check_password compares against for this account."""
-    return [user.username]
+    """What check_password compares against for this account: the
+    username, email and display name (#243)."""
+    return [value for value in (user.username, user.email, user.display_name) if value]
 
 
 def check_history(session: Session, user: User, password: str, policy: PasswordPolicy) -> None:

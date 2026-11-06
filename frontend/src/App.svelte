@@ -22,13 +22,13 @@
   import SsoSettings from './routes/SsoSettings.svelte'
   import SystemSettings from './routes/SystemSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
-  import SessionsSettings from './routes/SessionsSettings.svelte'
-  import SecuritySettings from './routes/SecuritySettings.svelte'
+  import Profile from './routes/Profile.svelte'
   import AuditLogSettings from './routes/AuditLogSettings.svelte'
 
   const routes = {
     '/login': Login,
     '/change-password': ChangePassword,
+    '/profile': Profile,
     '/viewer': Viewer,
     '/viewer/:sourceId': Viewer,
     '/search': Search,
@@ -46,8 +46,6 @@
     '/settings/sso': SsoSettings,
     '/settings/system': SystemSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
-    '/settings/sessions': SessionsSettings,
-    '/settings/security': SecuritySettings,
     '/settings/audit-log': AuditLogSettings,
     '/settings/import-export': ImportExportSettings,
   }
@@ -75,6 +73,11 @@
     $currentHash !== '/change-password'
   ) {
     push('/change-password')
+  }
+  // Settings -> Security and Sessions moved to My profile (#243); old links
+  // still land there for a release.
+  $: if ($currentHash === '/settings/security' || $currentHash === '/settings/sessions') {
+    push('/profile')
   }
   // The Search view can be turned off deployment-wide (Settings -> System);
   // guard the route itself, not just the nav link, so it's actually off for
@@ -126,7 +129,12 @@
       {/if}
       <a href="#/settings" class:active={isActive('/settings')}>Settings</a>
       <span class="spacer"></span>
-      <span class="username">{$currentUser.username}</span>
+      <a
+        href="#/profile"
+        class="username"
+        class:active={isActive('/profile')}
+        title="My profile">{$currentUser.display_name ?? $currentUser.username}</a
+      >
       <button class="btn btn-ghost" on:click={handleLogout}>Log out</button>
     </nav>
   {/if}

@@ -43,6 +43,11 @@ you're creating one with:
   token's `sub` claim (always present) and uses `email` (falling back to
   `preferred_username`) as the displayed username — if neither claim is
   entirely absent, login fails.
+  On every sign-in, the `name` claim (or `given_name` and `family_name`)
+  and the `email` claim also set the account's name and email under
+  **My profile**, where SSO users see them read-only. An email the IdP
+  marks as unverified (`email_verified: false`), or one another account
+  already has, is left out.
 
 ## 2. Group-claim to role auto-mapping (optional)
 

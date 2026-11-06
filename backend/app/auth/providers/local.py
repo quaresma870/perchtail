@@ -42,7 +42,14 @@ def _burn_a_verify(password: str) -> None:
 
 
 def create_local_user(
-    session: Session, *, actor_user_id: int | None, username: str, password: str, role_id: int
+    session: Session,
+    *,
+    actor_user_id: int | None,
+    username: str,
+    password: str,
+    role_id: int,
+    display_name: str | None = None,
+    email: str | None = None,
 ) -> User:
     """Admin-created local account. Starts with must_change_password=True per
     CLAUDE.md's Security notes ("Force password change on first login for
@@ -51,6 +58,8 @@ def create_local_user(
     user = User(
         username=username,
         password_hash=hash_password(password),
+        display_name=display_name,
+        email=email,
         role_id=role_id,
         auth_provider=AuthProviderType.local,
         must_change_password=True,
@@ -65,7 +74,7 @@ def create_local_user(
         action="user.create",
         target_type="user",
         target_id=user.id,
-        metadata={"username": username},
+        metadata={"username": username, "display_name": display_name, "email": email},
     )
     session.commit()
     session.refresh(user)

@@ -7,10 +7,17 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
-from app import auth_events, password_policy
+from app import auth_events, password_policy, profile
 from app.audit import record_audit_event
 from app.auth import mfa
-from app.auth.models import AuthSession, GlobalCapability, Role, SSOProviderConfig, User
+from app.auth.models import (
+    AuthProviderType,
+    AuthSession,
+    GlobalCapability,
+    Role,
+    SSOProviderConfig,
+    User,
+)
 from app.auth.providers.local import (
     LocalPasswordProvider,
     change_password,
@@ -83,6 +90,20 @@ def password_policy_error(exc: password_policy.PasswordPolicyError) -> HTTPExcep
     )
 
 
+class ProfileUpdate(BaseModel):
+    """PATCH /auth/me: an omitted field is left as it is; an empty string
+    clears it."""
+
+    display_name: str | None = None
+    email: str | None = None
+
+
+def profile_error(exc: profile.ProfileError) -> HTTPException:
+    """409 for an email another account has, 422 for anything malformed."""
+    code = 409 if isinstance(exc, profile.EmailTakenError) else 422
+    return HTTPException(status_code=code, detail=str(exc))
+
+
 class PasswordPolicyPublic(BaseModel):
     min_length: int
     max_length: int
@@ -98,6 +119,11 @@ class UserPublic(BaseModel):
 
     id: int
     username: str
+    # My profile (#243). For an SSO account (auth_provider other than
+    # local) they come from the IdP and are read-only.
+    display_name: str | None
+    email: str | None
+    auth_provider: AuthProviderType
     role_id: int
     active: bool
     must_change_password: bool
@@ -113,6 +139,9 @@ class UserPublic(BaseModel):
         return cls(
             id=user.id,
             username=user.username,
+            display_name=user.display_name,
+            email=user.email,
+            auth_provider=user.auth_provider,
             role_id=user.role_id,
             active=user.active,
             must_change_password=user.must_change_password,
@@ -285,6 +314,32 @@ def change_password_endpoint(
     # outlive it. This session (the one that just proved the password) stays.
     # One commit, so the new password never lands without the revocation.
     revoke_all_sessions(session, user.id, except_token=session_token)
+    session.commit()
+    session.refresh(user)
+    return UserPublic.from_user(user)
+
+
+@router.patch("/me", response_model=UserPublic)
+def update_my_profile(
+    payload: ProfileUpdate,
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    """My profile (#243): the user's own display name and email. An SSO
+    account's come from the IdP on every sign-in, so they can't be edited
+    here."""
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        return UserPublic.from_user(user)
+    if user.auth_provider != AuthProviderType.local:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Your name and email come from your identity provider",
+        )
+    try:
+        profile.apply_profile(session, user, actor_id=user.id, changes=changes)
+    except profile.ProfileError as exc:
+        raise profile_error(exc) from exc
     session.commit()
     session.refresh(user)
     return UserPublic.from_user(user)
