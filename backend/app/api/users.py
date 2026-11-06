@@ -1,14 +1,14 @@
-import secrets
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
-from app.api.auth import get_current_active_user
+from app import password_policy, profile
+from app.api.auth import get_current_active_user, password_policy_error, profile_error
 from app.audit import record_audit_event
 from app.auth.models import AuthProviderType, GlobalCapability, Role, User
-from app.auth.providers.local import create_local_user, hash_password
+from app.auth.providers.local import create_local_user, set_password
 from app.auth.rbac import require_global_capability, require_role_within_authority
 from app.auth.sessions import revoke_all_sessions
 from app.db import get_session
@@ -23,6 +23,10 @@ class UserPublic(BaseModel):
 
     id: int
     username: str
+    # #243: shown in the Users list; set by an admin or the user (local
+    # accounts), or from the IdP (SSO accounts).
+    display_name: str | None
+    email: str | None
     role_id: int
     active: bool
     must_change_password: bool
@@ -35,11 +39,17 @@ class UserCreate(BaseModel):
     username: str
     password: str
     role_id: int
+    display_name: str | None = None
+    email: str | None = None
 
 
 class UserUpdate(BaseModel):
     role_id: int | None = None
     active: bool | None = None
+    # Local accounts only: an SSO account's come from the IdP. An empty
+    # string clears the field.
+    display_name: str | None = None
+    email: str | None = None
 
 
 class ResetPasswordResponse(BaseModel):
@@ -92,6 +102,21 @@ def create_user(
     require_role_within_authority(user, role)
     if session.exec(select(User).where(User.username == payload.username)).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already in use")
+    try:
+        display_name = profile.normalize_display_name(payload.display_name)
+        email = profile.normalize_email(payload.email)
+        profile.check_email_available(session, email, user_id=None)
+    except profile.ProfileError as exc:
+        raise profile_error(exc) from exc
+    # The temporary password the admin picks follows the policy too (#245).
+    try:
+        password_policy.check_password(
+            payload.password,
+            password_policy.get_policy(session),
+            user_identifiers=[value for value in (payload.username, email, display_name) if value],
+        )
+    except password_policy.PasswordPolicyError as exc:
+        raise password_policy_error(exc) from exc
 
     return create_local_user(
         session,
@@ -99,6 +124,8 @@ def create_user(
         username=payload.username,
         password=payload.password,
         role_id=payload.role_id,
+        display_name=display_name,
+        email=email,
     )
 
 
@@ -123,16 +150,30 @@ def update_user(
         _require_not_last_super_admin(session, target)
     if payload.active is not None:
         target.active = payload.active
+    profile_changes = payload.model_dump(exclude_unset=True, include={"display_name", "email"})
+    if profile_changes:
+        if target.auth_provider != AuthProviderType.local:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An SSO account's name and email come from the identity provider",
+            )
+        try:
+            profile.apply_profile(session, target, actor_id=user.id, changes=profile_changes)
+        except profile.ProfileError as exc:
+            raise profile_error(exc) from exc
 
     session.add(target)
-    record_audit_event(
-        session,
-        user_id=user.id,
-        action="user.update",
-        target_type="user",
-        target_id=target.id,
-        metadata={"role_id": target.role_id, "active": target.active},
-    )
+    # Name and email changes have their own events (user.profile_update,
+    # user.email_change); this one is for the role and active flag.
+    if payload.role_id is not None or payload.active is not None:
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="user.update",
+            target_type="user",
+            target_id=target.id,
+            metadata={"role_id": target.role_id, "active": target.active},
+        )
     session.commit()
     session.refresh(target)
     return target
@@ -149,8 +190,12 @@ def reset_password(
     Security-notes rule as admin-created accounts."""
     target = _get_manageable_user(session, user, user_id)
 
-    temporary_password = secrets.token_urlsafe(12)
-    target.password_hash = hash_password(temporary_password)
+    # Random, but within the policy (#245): long enough, every character class.
+    policy = password_policy.get_policy(session)
+    temporary_password = password_policy.generate_password(
+        policy, user_identifiers=password_policy.user_identifiers(target)
+    )
+    set_password(session, target, temporary_password, policy)
     target.must_change_password = True
     session.add(target)
     revoke_all_sessions(session, target.id)

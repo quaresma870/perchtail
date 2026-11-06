@@ -1,10 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
-  import { api, ApiError } from '../lib/api'
-  import { logout } from '../lib/auth'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
-  import type { AuthSessionInfo } from '../lib/types'
+  import { api, ApiError } from '../api'
+  import { logout } from '../auth'
+  import type { AuthSessionInfo } from '../types'
 
   let sessions: AuthSessionInfo[] = []
   let loading = true
@@ -50,11 +49,9 @@
   onMount(load)
 </script>
 
-<SettingsNav />
-
-<div class="page">
+<section class="panel">
   <div class="header">
-    <h1>Sessions</h1>
+    <h2 class="panel-title">Sessions</h2>
     <p class="hint">
       Every device or browser currently signed in as you. If you don't recognize one, revoke it.
     </p>
@@ -90,18 +87,16 @@
       {/each}
     </ul>
   {/if}
-</div>
+</section>
 
 <style>
-  .page {
-    padding: 1.75rem 2rem;
-    max-width: 820px;
+  .panel {
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
   }
-  h1 {
-    font-size: 1.4rem;
+  .panel-title {
+    font-size: 1.1rem;
     margin: 0;
     color: var(--text);
   }

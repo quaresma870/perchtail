@@ -1,13 +1,16 @@
 import { expect, test } from '@playwright/test'
 
 const username = `e2e-user-${Date.now()}`
-const password = 'e2e-throwaway-password-123!'
+// Within the default password policy (#245): nothing from the username.
+const password = 'Lantern-Orbit-throwaway-58!'
 
 test('users: create, reset password, change role, deactivate/reactivate', async ({ page }) => {
   await page.goto('/#/settings/users')
 
-  await page.getByPlaceholder('username or email').fill(username)
+  await page.getByPlaceholder('username', { exact: true }).fill(username)
   await page.getByPlaceholder('temporary password').fill(password)
+  await page.getByPlaceholder('display name (optional)').fill('Test Person')
+  await page.getByPlaceholder('email (optional)').fill(`${username}@example.com`)
   // The seeded builtin "No Access" role (app/bootstrap.py's
   // seed_no_access_role) always exists and grants nothing -- a safe default
   // for a throwaway test account.
@@ -17,6 +20,7 @@ test('users: create, reset password, change role, deactivate/reactivate', async 
   const row = page.getByRole('row', { name: new RegExp(username) })
   await expect(row).toBeVisible()
   await expect(row.getByText('active', { exact: true })).toBeVisible()
+  await expect(row.getByText(`Test Person · ${username}@example.com`)).toBeVisible()
 
   // Role change persists through the real API, not just local state.
   await row.locator('select').selectOption({ label: 'Super Admin' })

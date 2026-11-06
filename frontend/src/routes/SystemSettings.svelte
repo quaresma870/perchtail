@@ -24,6 +24,28 @@
   let maxRootsSaving = false
   let maxRootsError = ''
 
+  // Password policy (#245), saved together with one button.
+  const POLICY_KEYS = [
+    'password_min_length',
+    'password_max_length',
+    'password_reject_simple',
+    'password_reject_personal',
+    'password_history',
+    'password_required_classes',
+    'password_max_age_days',
+  ] as const
+  type PolicyFields = Pick<SystemSettings, (typeof POLICY_KEYS)[number]>
+  let savedPolicy: PolicyFields | null = null
+  let policyDraft: PolicyFields | null = null
+  let policySaving = false
+  let policyError = ''
+  const pickPolicy = (settings: SystemSettings): PolicyFields =>
+    Object.fromEntries(POLICY_KEYS.map((key) => [key, settings[key]])) as PolicyFields
+  $: policyDirty =
+    savedPolicy !== null &&
+    policyDraft !== null &&
+    POLICY_KEYS.some((key) => savedPolicy?.[key] !== policyDraft?.[key])
+
   let monitoringConfigured = false
   let monitoringToken = ''
   let monitoringTokenError = ''
@@ -40,6 +62,8 @@
       maxRootsInput = String(settings.source_max_roots)
       connectionsViewDefault = settings.connections_view_default
       connectionsViewSwitchable = settings.connections_view_switchable
+      savedPolicy = pickPolicy(settings)
+      policyDraft = { ...savedPolicy }
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load system settings'
     } finally {
@@ -136,6 +160,22 @@
       maxRootsError = err instanceof ApiError ? err.detail : 'Failed to update the folder limit'
     } finally {
       maxRootsSaving = false
+    }
+  }
+
+  async function savePolicy() {
+    if (!policyDraft) return
+    policyError = ''
+    policySaving = true
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', policyDraft)
+      savedPolicy = pickPolicy(settings)
+      policyDraft = { ...savedPolicy }
+      systemSettings.set(settings)
+    } catch (err) {
+      policyError = err instanceof ApiError ? err.detail : 'Failed to update the password policy'
+    } finally {
+      policySaving = false
     }
   }
 
@@ -328,6 +368,91 @@
       </div>
     </div>
 
+    {#if policyDraft}
+      <div class="card">
+        <div class="setting-row column">
+          <div>
+            <div class="setting-name">Password policy</div>
+            <p class="hint">
+              For local accounts, checked whenever a password is set: a user's own change, the
+              change at first login, and temporary passwords an admin sets. Existing passwords are
+              checked at their next change. The defaults follow NIST SP 800-63B: length first,
+              no composition rules or expiry.
+            </p>
+          </div>
+          <div class="policy-grid">
+            <label for="policy-min">Minimum length</label>
+            <input
+              id="policy-min"
+              class="input policy-input"
+              type="number"
+              min="8"
+              max="1024"
+              bind:value={policyDraft.password_min_length}
+            />
+            <label for="policy-max">Maximum length</label>
+            <input
+              id="policy-max"
+              class="input policy-input"
+              type="number"
+              min="64"
+              max="1024"
+              bind:value={policyDraft.password_max_length}
+            />
+            <label for="policy-classes">Character classes required</label>
+            <select
+              id="policy-classes"
+              class="input policy-input"
+              bind:value={policyDraft.password_required_classes}
+            >
+              <option value={0}>off</option>
+              <option value={1}>1 of 4</option>
+              <option value={2}>2 of 4</option>
+              <option value={3}>3 of 4</option>
+              <option value={4}>all 4</option>
+            </select>
+            <label for="policy-history">Don't reuse the last N passwords (0 = off)</label>
+            <input
+              id="policy-history"
+              class="input policy-input"
+              type="number"
+              min="0"
+              max="24"
+              bind:value={policyDraft.password_history}
+            />
+            <label for="policy-age">Expire after N days (0 = never)</label>
+            <input
+              id="policy-age"
+              class="input policy-input"
+              type="number"
+              min="0"
+              max="3650"
+              bind:value={policyDraft.password_max_age_days}
+            />
+          </div>
+          <label class="check">
+            <input type="checkbox" bind:checked={policyDraft.password_reject_simple} />
+            Reject passwords that are too simple (repeats, sequences, keyboard runs, the username)
+          </label>
+          <label class="check">
+            <input type="checkbox" bind:checked={policyDraft.password_reject_personal} />
+            Reject passwords containing the username, email or name
+          </label>
+          {#if policyError}
+            <p class="error">{policyError}</p>
+          {/if}
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={savePolicy}
+            disabled={policySaving || !policyDirty}
+          >
+            {policySaving ? 'Saving…' : 'Save policy'}
+          </button>
+        </div>
+      </div>
+    {/if}
+
     <div class="card">
       <div class="setting-row column">
         <div>
@@ -443,6 +568,25 @@
   .error {
     color: var(--danger);
     margin: 0;
+  }
+  .policy-grid {
+    display: grid;
+    grid-template-columns: 1fr 7rem;
+    gap: 0.5rem 1rem;
+    align-items: center;
+    font-size: 0.86rem;
+    color: var(--text);
+    width: 100%;
+  }
+  .policy-input {
+    width: 7rem;
+  }
+  .check {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+    font-size: 0.86rem;
+    color: var(--text);
   }
   .view-select {
     width: auto;

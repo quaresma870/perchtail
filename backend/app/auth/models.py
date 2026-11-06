@@ -92,6 +92,11 @@ class User(SQLModel, table=True):
     # IdP's claim.
     username: str = Field(unique=True, index=True)
     password_hash: str | None = None
+    # My profile (#243). Optional; set by the user (or an admin) for local
+    # accounts, and from the IdP's claims on each sign-in for SSO accounts.
+    # The email is stored lowercased and is unique (app/profile.py).
+    display_name: str | None = None
+    email: str | None = Field(default=None, unique=True, index=True)
     role_id: int = Field(foreign_key="role.id")
     active: bool = True
     auth_provider: AuthProviderType = AuthProviderType.local
@@ -105,6 +110,9 @@ class User(SQLModel, table=True):
     # Set on admin-created local accounts (see CLAUDE.md's Security notes);
     # cleared once the user picks their own password.
     must_change_password: bool = False
+    # When the local password was last set (#245), for the optional expiry
+    # under Settings -> System. Null for SSO accounts.
+    password_changed_at: datetime | None = None
     # Optional TOTP second factor for local accounts (ROADMAP.md's Security
     # hardening section) -- SSO accounts delegate MFA to the IdP instead, so
     # this is only ever meaningful for auth_provider=local. mfa_enabled is
@@ -149,6 +157,20 @@ class MfaBackupCode(SQLModel, table=True):
     # Consumed codes are kept (not deleted) as a record of use rather than
     # silently vanishing -- null means still usable.
     used_at: datetime | None = None
+
+
+class PasswordHistory(SQLModel, table=True):
+    """A local account's previous password hashes (#245), kept only while
+    the "don't reuse the last N passwords" rule is on, and only as many as
+    it needs (app/password_policy.py). argon2id hashes, never the
+    passwords."""
+
+    __tablename__ = "password_history"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    password_hash: str
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class SSOProviderConfig(SQLModel, table=True):

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import PasswordRules from '../lib/components/PasswordRules.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import SortableHeader from '../lib/components/SortableHeader.svelte'
   import {
@@ -20,6 +21,8 @@
 
   let newUsername = ''
   let newPassword = ''
+  let newDisplayName = ''
+  let newEmail = ''
   let newRoleId: number | null = null
   let creating = false
 
@@ -47,9 +50,17 @@
     creating = true
     error = ''
     try {
-      await api.post('/users', { username: newUsername, password: newPassword, role_id: newRoleId })
+      await api.post('/users', {
+        username: newUsername,
+        password: newPassword,
+        role_id: newRoleId,
+        display_name: newDisplayName,
+        email: newEmail,
+      })
       newUsername = ''
       newPassword = ''
+      newDisplayName = ''
+      newEmail = ''
       await load()
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to create user'
@@ -116,7 +127,7 @@
 
   $: filtered = users.filter(
     (u) =>
-      matchesText([u.username, roleName(u.role_id)], view.text) &&
+      matchesText([u.username, u.display_name ?? '', u.email ?? '', roleName(u.role_id)], view.text) &&
       (!view.roleId || u.role_id === Number(view.roleId)) &&
       (!view.status || (view.status === 'active') === u.active) &&
       (!view.provider || (view.provider === 'local') === (u.auth_provider === 'local')),
@@ -146,7 +157,7 @@
       <input
         class="input filter-text"
         type="search"
-        placeholder="Filter by username or role"
+        placeholder="Filter by username, name, email or role"
         aria-label="Filter users"
         bind:value={view.text}
       />
@@ -187,7 +198,14 @@
         <tbody>
           {#each visible as user (user.id)}
             <tr>
-              <td class="username">{user.username}</td>
+              <td class="username">
+                {user.username}
+                {#if user.display_name || user.email}
+                  <div class="user-sub">
+                    {[user.display_name, user.email].filter(Boolean).join(' · ')}
+                  </div>
+                {/if}
+              </td>
               <td>
                 <select
                   class="input"
@@ -238,14 +256,23 @@
 
     <form class="add-user card" on:submit|preventDefault={createUser}>
       <h2>New user</h2>
-      <input class="input" placeholder="username or email" bind:value={newUsername} required />
+      <input class="input" placeholder="username" bind:value={newUsername} required />
+      <input class="input" placeholder="display name (optional)" bind:value={newDisplayName} />
+      <input
+        class="input"
+        type="email"
+        placeholder="email (optional)"
+        bind:value={newEmail}
+      />
       <input
         class="input"
         type="password"
         placeholder="temporary password"
+        autocomplete="new-password"
         bind:value={newPassword}
         required
       />
+      <PasswordRules />
       <select class="input" bind:value={newRoleId}>
         {#each roles as role (role.id)}
           <option value={role.id}>{role.name}</option>
@@ -320,6 +347,11 @@
   }
   tbody tr:last-child {
     border-bottom: none;
+  }
+  .user-sub {
+    font-size: 0.78rem;
+    color: var(--text-faint);
+    margin-top: 0.15rem;
   }
   .username {
     font-weight: 600;

@@ -93,7 +93,9 @@ def test_seed_initial_super_admin_creates_user_on_empty_db(session):
 def test_seed_initial_super_admin_password_is_usable(session):
     from unittest.mock import patch
 
-    with patch("app.bootstrap.secrets.token_urlsafe", return_value="fixed-temp-password"):
+    with patch(
+        "app.bootstrap.password_policy.generate_password", return_value="fixed-temp-password"
+    ):
         user = seed_initial_super_admin(session)
 
     assert verify_password(user, "fixed-temp-password") is True

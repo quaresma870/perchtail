@@ -1,10 +1,10 @@
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
-from app import system_settings
+from app import password_policy, system_settings
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import GlobalCapability, User
@@ -27,6 +27,14 @@ class SystemSettingsPublic(BaseModel):
     connections_view_switchable: bool
     connections_view_default: Literal["list", "tree"]
     update_check_enabled: bool
+    # Password policy (#245, app/password_policy.py).
+    password_min_length: int
+    password_max_length: int
+    password_reject_simple: bool
+    password_reject_personal: bool
+    password_history: int
+    password_required_classes: int
+    password_max_age_days: int
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -40,6 +48,31 @@ class SystemSettingsUpdate(BaseModel):
     connections_view_switchable: bool | None = None
     connections_view_default: Literal["list", "tree"] | None = None
     update_check_enabled: bool | None = None
+    password_min_length: int | None = Field(
+        default=None, ge=password_policy.MIN_LENGTH_FLOOR, le=password_policy.MAX_LENGTH_CEILING
+    )
+    password_max_length: int | None = Field(
+        default=None, ge=password_policy.MAX_LENGTH_FLOOR, le=password_policy.MAX_LENGTH_CEILING
+    )
+    password_reject_simple: bool | None = None
+    password_reject_personal: bool | None = None
+    # 0 = off; otherwise the current password and the N-1 before it.
+    password_history: int | None = Field(default=None, ge=0, le=password_policy.MAX_HISTORY)
+    # How many of lowercase, uppercase, digit, symbol; 0 = off.
+    password_required_classes: int | None = Field(default=None, ge=0, le=4)
+    # 0 = passwords don't expire.
+    password_max_age_days: int | None = Field(
+        default=None, ge=0, le=password_policy.MAX_AGE_DAYS_CEILING
+    )
+
+
+_PASSWORD_INTS = (
+    "password_min_length",
+    "password_max_length",
+    "password_history",
+    "password_required_classes",
+    "password_max_age_days",
+)
 
 
 def _read_all(session: Session) -> SystemSettingsPublic:
@@ -48,6 +81,7 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         audit_retention_days=system_settings.get_int(session, "audit_retention_days"),
         source_max_roots=max_roots(session),
         connections_view_default=system_settings.get_choice(session, "connections_view_default"),
+        **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
     )
 
 
@@ -73,6 +107,17 @@ def update_system_settings(
     # set_int/set_bool, which would stringify it into a value the getters
     # can't parse back (int("None") raises) on every read after this.
     changed = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    min_length = changed.get(
+        "password_min_length", system_settings.get_int(session, "password_min_length")
+    )
+    max_length = changed.get(
+        "password_max_length", system_settings.get_int(session, "password_max_length")
+    )
+    if min_length > max_length:
+        raise HTTPException(
+            status_code=422,
+            detail="The minimum password length can't be above the maximum",
+        )
     for key in system_settings.INT_DEFAULTS:
         if key in changed:
             system_settings.set_int(session, key, changed[key])
@@ -86,6 +131,10 @@ def update_system_settings(
     for key in system_settings.CHOICE_DEFAULTS:
         if key in changed:
             system_settings.set_choice(session, key, changed[key])
+    # Lowering or turning off "don't reuse" drops the hashes it no longer
+    # needs right away, not at each account's next change (#245).
+    if "password_history" in changed:
+        password_policy.trim_all_history(session, changed["password_history"])
     record_audit_event(
         session,
         user_id=user.id,
