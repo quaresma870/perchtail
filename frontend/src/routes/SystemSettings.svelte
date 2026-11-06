@@ -427,9 +427,9 @@
         {#if checkError}
           <p class="error">{checkError}</p>
         {/if}
-        <div class="retention-row">
+        <div class="interval-row">
           <input
-            class="input retention-input"
+            class="input interval-input"
             type="number"
             min="0"
             max="1440"
