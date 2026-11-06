@@ -180,3 +180,51 @@ func rootName(relPath string) string {
 	}
 	return path.Clean(relPath)
 }
+
+// maxRangeLength caps one read_range (#254), whatever the backend asks:
+// the same 1 MiB as a fetch chunk (RANGE_MAX_BYTES on the backend).
+const maxRangeLength = maxChunkSize
+
+// HandleReadRange reads up to length bytes of relPath from offset, for the
+// viewer's incremental follow (#254): only what was appended since the
+// viewer's last read crosses the connection. It returns the file's size
+// too, so the backend can tell a file that shrank (rotated or truncated).
+// Reading at or past the end returns no bytes.
+func HandleReadRange(basePath, relPath string, offset, length int64) (int64, []byte, error) {
+	if !IsSafeRelativePath(relPath) {
+		return 0, nil, fmt.Errorf("unsafe path: %q", relPath)
+	}
+	if offset < 0 || length < 0 {
+		return 0, nil, fmt.Errorf("invalid range: offset %d, length %d", offset, length)
+	}
+	root, err := os.OpenRoot(basePath)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer root.Close()
+	f, err := root.Open(rootName(relPath))
+	if err != nil {
+		return 0, nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return 0, nil, err
+	}
+	if st.IsDir() {
+		return 0, nil, fmt.Errorf("%s: is a directory", relPath)
+	}
+	size := st.Size()
+	if offset >= size || length == 0 {
+		return size, []byte{}, nil
+	}
+	// A fixed-size allocation, as in StreamFetch: length only picks how
+	// much of the buffer this read uses.
+	want := min(length, maxRangeLength, size-offset)
+	buf := make([]byte, maxRangeLength)[:want]
+	n, err := f.ReadAt(buf, offset)
+	if err != nil && err != io.EOF {
+		return size, nil, err
+	}
+	return size, buf[:n], nil
+}

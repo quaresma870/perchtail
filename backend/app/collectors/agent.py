@@ -9,7 +9,7 @@ from app.collectors.base import DirEntry
 from app.models import Rule, Source
 from app.rules import is_entry_visible, rules_case_insensitive
 
-__all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
+__all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy", "read_range"]
 
 # Size of each fetch_chunk the agent sends (#205): about 1.4 MB once
 # base64-encoded, well under uvicorn's 16 MiB WebSocket message limit.
@@ -85,3 +85,26 @@ def local_copy(source: Source, relative_path: str):
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path
+
+
+def read_range(source: Source, relative_path: str, offset: int, length: int) -> tuple[int, bytes]:
+    """Incremental follow (#254): the agent reads up to `length` bytes from
+    `offset` off its own disk and answers with the file's size. An agent
+    older than 0.6 doesn't know the command: RangeNotSupportedError, and
+    the viewer reloads the whole file instead."""
+    try:
+        result = get_agent_registry().send_command_sync(
+            source.id,
+            "read_range",
+            path=relative_path,
+            offset=max(int(offset), 0),
+            length=max(min(int(length), collector_base.RANGE_MAX_BYTES), 0),
+        )
+    except AgentCommandError as exc:
+        if "unknown command type" in str(exc).lower():
+            raise collector_base.RangeNotSupportedError(str(exc)) from exc
+        raise
+    data = base64.b64decode(result.get("data_b64") or "")
+    if len(data) > collector_base.RANGE_MAX_BYTES:
+        raise collector_base.SourceError("the agent sent more than it was asked for")
+    return int(result.get("size", 0)), data

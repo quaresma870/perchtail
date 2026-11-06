@@ -22,6 +22,21 @@ release ships (0.x releases may include breaking changes between minors).
   when they connect, and the source overview shows it, flagging an agent
   older than the server. Older agents show as "not reported yet".
 
+### Changed
+- **Follow fetches only the new lines** (#254). Instead of re-fetching
+  the whole file every 2 seconds, Follow asks the source for what was
+  appended after the bytes the viewer holds (SFTP and SMB seek, WinRM
+  reads a range, the push agent has a new `read_range` command), and
+  appends it to the editor, which keeps your place and selection. While
+  you're at the end it scrolls with the new lines; scrolled up, a
+  "N new lines — jump to end" button appears instead. A rotated or
+  truncated file is detected (it shrank, or starts differently) and
+  reloaded from the start, with a note. The interval can be set from
+  1 to 30 seconds, and Follow pauses while the browser tab is hidden.
+  Every poll still reads fresh from the source; following is audited
+  once (`file.follow`), not on every poll. `.gz` files, archive members
+  and push agents older than this release still reload the whole file.
+
 ## [0.5.3] - 2026-11-06
 
 The release after 0.5.2. It carries everything from the pre-release

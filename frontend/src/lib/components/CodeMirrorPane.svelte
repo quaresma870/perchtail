@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte'
+  import { createEventDispatcher, onMount, onDestroy } from 'svelte'
   import { EditorView, basicSetup } from 'codemirror'
   import { EditorState } from '@codemirror/state'
   import { search, openSearchPanel } from '@codemirror/search'
@@ -28,6 +28,9 @@
 
   let host: HTMLDivElement
   let view: EditorView | null = null
+  // `bottom`: the reader scrolled back to the end (the viewer clears its
+  // "N new lines" count, #254).
+  const dispatch = createEventDispatcher<{ bottom: void }>()
 
   function extensions() {
     return [
@@ -81,6 +84,23 @@
   // bottom if the view was already there (the common "watching it grow"
   // case), otherwise the same absolute scroll offset, so an ordinary
   // toggle (Wrap, a mark, etc.) no longer disturbs a reader's place either.
+  // True when the only change is text appended to the content already shown
+  // (and Show whitespace, which scans the content, is off).
+  function appendOnly(): boolean {
+    return (
+      appliedContent !== null &&
+      content.length > appliedContent.length &&
+      severityPatterns === appliedPatterns &&
+      filename === appliedFilename &&
+      wrapEnabled === appliedWrap &&
+      !showWhitespace &&
+      showWhitespace === appliedShowWhitespace &&
+      bookmarks === appliedBookmarks &&
+      markPatterns === appliedMarkPatterns &&
+      content.startsWith(appliedContent)
+    )
+  }
+
   function syncView() {
     if (!view) return
     if (
@@ -95,6 +115,17 @@
       return
     }
     const wasAtBottom = isNearBottom(view)
+    if (appendOnly()) {
+      // Incremental follow (#254): only text was added at the end, so it
+      // goes in as one transaction -- no rebuild, the reader's place and
+      // selection stay where they are.
+      view.dispatch({
+        changes: { from: view.state.doc.length, insert: content.slice((appliedContent ?? '').length) },
+      })
+      if (wasAtBottom) view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight
+      appliedContent = content
+      return
+    }
     const previousScrollTop = view.scrollDOM.scrollTop
     view.setState(EditorState.create({ doc: content, extensions: extensions() }))
     view.scrollDOM.scrollTop = wasAtBottom ? view.scrollDOM.scrollHeight : previousScrollTop
@@ -111,6 +142,12 @@
     view = new EditorView({
       state: EditorState.create({ doc: content, extensions: extensions() }),
       parent: host,
+    })
+    let wasAtBottom = true
+    view.scrollDOM.addEventListener('scroll', () => {
+      const atBottom = view !== null && isNearBottom(view)
+      if (atBottom && !wasAtBottom) dispatch('bottom')
+      wasAtBottom = atBottom
     })
     appliedContent = content
     appliedPatterns = severityPatterns
@@ -152,6 +189,15 @@
   // never reaches the editor at all and falls through to the browser's own
   // find bar instead. Calling this directly sidesteps that regardless of
   // where focus currently is.
+  export function isAtBottom(): boolean {
+    return view === null || isNearBottom(view)
+  }
+
+  export function scrollToEnd() {
+    if (!view) return
+    view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight
+  }
+
   export function openSearch() {
     if (!view) return
     openSearchPanel(view)

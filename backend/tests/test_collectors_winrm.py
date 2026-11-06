@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 
 import app.collectors.winrm as winrm_module
 import pytest
@@ -285,3 +286,25 @@ def test_a_junction_swapped_in_mid_read_is_refused_and_logged(fake_session, tmp_
     assert events == [
         ("winrm.path_outside_base", {"source_id": None, "path": "nested/app.log", "offset": 4})
     ]
+
+
+# --- incremental follow (#254) ----------------------------------------------
+
+
+def test_read_range_seeks_and_reads_in_one_round_trip(fake_session):
+    content = b"line one\nline two\n"
+
+    def handler(script):
+        offset = int(re.search(r"if \((\d+) -lt \$len\)", script).group(1))
+        length = int(re.search(r"New-Object byte\[\] (\d+)", script).group(1))
+        data = content[offset : offset + length] if offset < len(content) else b""
+        return FakeResult(std_out=f"{len(content)}|".encode() + base64.b64encode(data))
+
+    fake_session.handler = handler
+    assert winrm_module.read_range(_source(), "app.log", 9, 1000) == (18, b"line two\n")
+    assert winrm_module.read_range(_source(), "app.log", 40, 1000) == (18, b"")
+    assert len(fake_session.scripts_run) == 2
+    # Opened like fetch_file, tolerating the writer, and the length is capped.
+    assert "'Read', 'ReadWrite'" in fake_session.scripts_run[0]
+    winrm_module.read_range(_source(), "app.log", 0, 10**12)
+    assert f"byte[] {1 << 20}" in fake_session.scripts_run[-1]

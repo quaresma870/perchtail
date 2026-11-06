@@ -127,3 +127,24 @@ def copy_with_limit(src: BinaryIO, destination: Path, limit: int) -> int:
         destination.unlink(missing_ok=True)
         raise
     return written
+
+
+# Incremental follow (#254): each connector's read_range(source, path,
+# offset, length) returns (the file's current size, up to `length` bytes
+# from `offset`), without fetching the rest of the file. A poll reads at
+# most this much; the agent's own cap is the same (agent/internal/agent).
+RANGE_MAX_BYTES = 1 << 20
+
+
+class RangeNotSupportedError(Exception):
+    """The source can't read a byte range: an agent older than 0.6 doesn't
+    know the read_range command. The viewer falls back to reloading the
+    whole file."""
+
+
+def read_range_from(f: BinaryIO, size: int, offset: int, length: int) -> bytes:
+    """The shared tail of read_range for file objects that can seek."""
+    if offset >= size or length <= 0:
+        return b""
+    f.seek(offset)
+    return f.read(min(length, size - offset, RANGE_MAX_BYTES))

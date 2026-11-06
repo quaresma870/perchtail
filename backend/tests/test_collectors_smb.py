@@ -280,3 +280,15 @@ def test_paths_through_a_reparse_point_are_refused(fake_smbclient, tmp_path, pat
         smb_module.fetch_file(_source(), path, tmp_path / "out")
     assert fake_smbclient.open_file_kwargs == []
     assert len(fake_smbclient.reset_caches) == 2
+
+
+# --- incremental follow (#254) ----------------------------------------------
+
+
+def test_read_range_reads_from_the_offset_with_full_share_access(fake_smbclient):
+    path = smb_module._unc_path(_source(), "app.log")
+    fake_smbclient.files[path] = b"line one\nline two\n"
+
+    assert smb_module.read_range(_source(), "app.log", 9, 1000) == (18, b"line two\n")
+    assert smb_module.read_range(_source(), "app.log", 30, 1000) == (18, b"")
+    assert fake_smbclient.open_file_kwargs[0]["share_access"] == "rwd"
