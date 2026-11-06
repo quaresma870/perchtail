@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import Session, select
 
-from app import source_roots
+from app import source_roots, source_status
 from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
@@ -103,6 +103,12 @@ class SourcePublic(BaseModel):
     # files, for example).
     agent_version: str | None
     agent_outdated: bool
+    # Reachability (#276): "ok", "failing" or "unknown"; for an agent source,
+    # its live connection ("ok" connected, "failing" not). When it was last
+    # known, and the public reason when failing.
+    status: str
+    status_checked_at: datetime | None
+    status_message: str | None
     search_indexing_enabled: bool
     # What the requesting user may do on this source (view, download,
     # manage_rules, run_now), so the UI can hide actions it would refuse --
@@ -180,6 +186,21 @@ def _folder_path(
     return [FolderPathEntry(id=f.id, name=f.name) for f in chain]
 
 
+def _status_fields(source: Source) -> dict:
+    if source.protocol == Protocol.agent:
+        connected = get_agent_registry().is_connected(source.id)
+        return {
+            "status": "ok" if connected else "failing",
+            "status_checked_at": source.agent_last_seen_at,
+            "status_message": None if connected else "The agent isn't connected",
+        }
+    return {
+        "status": source.status or "unknown",
+        "status_checked_at": source.status_checked_at,
+        "status_message": source.status_message,
+    }
+
+
 def _to_public(
     session: Session,
     source: Source,
@@ -218,6 +239,7 @@ def _to_public(
         agent_os=source.agent_os,
         agent_version=source.agent_version,
         agent_outdated=is_newer(APP_VERSION, source.agent_version),
+        **_status_fields(source),
         search_indexing_enabled=source.search_indexing_enabled,
         my_capabilities=(
             [c for c in Capability if resolve_capability(session, user, source, c)]
@@ -672,21 +694,18 @@ def check_connection(
         return ConnectionCheckResult(ok=False, detail=f"protocol {source.protocol} not supported")
 
     # Each root of a multi-root source is checked on its own (#161), so the
-    # answer names the folder that fails rather than just "failed".
+    # answer names the folder that fails rather than just "failed". The
+    # result is also the source's status for everyone (#276).
     roots = source_roots.roots_of(source) or [{"label": None, "path": source.base_path}]
-    failures = []
-    for root in roots:
-        target = source_roots.with_base_path(source, root["path"])
-        try:
-            connector.list_directory(target, [], "")
-        except Exception as exc:  # noqa: BLE001 - surfaced to the caller, not swallowed
-            logger.warning(
-                "source.check.failed", source_id=source.id, root=root["label"], error=str(exc)
-            )
-            failures.append(_check_failure_message(source, root, exc, user))
-
-    if failures:
+    failed = source_status.check(source, connector)
+    if failed:
+        _root, first = next(
+            ((r, e) for r, e in failed if source_status.is_connectivity_error(e)), failed[0]
+        )
+        source_status.record(source.id, False, source_status.failure_message(first))
+        failures = [_check_failure_message(source, root, exc, user) for root, exc in failed]
         return ConnectionCheckResult(ok=False, detail="; ".join(failures))
+    source_status.record(source.id, True)
     if len(roots) > 1:
         return ConnectionCheckResult(ok=True, detail=f"Connected ({len(roots)} folders)")
     return ConnectionCheckResult(ok=True, detail="Connected")

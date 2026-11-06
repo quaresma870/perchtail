@@ -58,6 +58,7 @@ from app.logging_config import configure_logging, get_logger
 from app.scheduler import scheduler
 from app.scratch import get_scratch_store
 from app.search_index import run_indexing_sweep
+from app.source_status import run_source_checks
 from app.update_check import run_update_check
 from app.version import APP_VERSION
 
@@ -272,6 +273,8 @@ async def lifespan(app: FastAPI):
     )
     scheduler.add_job(run_session_purge_sweep, "interval", hours=1)
     scheduler.add_job(run_update_check, "interval", hours=1)
+    # Background source check (#276): every minute it checks whatever is due.
+    scheduler.add_job(run_source_checks, "interval", minutes=1, max_instances=1)
     scheduler.add_job(
         run_audit_integrity_check,
         "interval",
