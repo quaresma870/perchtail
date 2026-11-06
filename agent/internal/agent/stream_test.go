@@ -270,3 +270,22 @@ func TestACancelledFetchStopsStreaming(t *testing.T) {
 		}
 	})
 }
+
+func TestStreamFetchCapsTheChunkSizeTheBackendAsksFor(t *testing.T) {
+	// The chunk size comes from the backend's message: a huge value must
+	// not make the agent allocate or send more than maxChunkSize at once.
+	base := t.TempDir()
+	writeFile(t, base, "app.log", make([]byte, 2*maxChunkSize+10))
+
+	var sizes []int
+	_, _, err := StreamFetch(base, "app.log", 1<<40, 0, func(data []byte) error {
+		sizes = append(sizes, len(data))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sizes) != 3 || sizes[0] != maxChunkSize || sizes[2] != 10 {
+		t.Errorf("chunk sizes = %v, want [%d %d 10]", sizes, maxChunkSize, maxChunkSize)
+	}
+}

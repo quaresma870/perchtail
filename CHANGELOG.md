@@ -13,9 +13,10 @@ release ships (0.x releases may include breaking changes between minors).
 The release after 0.5.2. It carries everything from the pre-release
 0.5.3-rc.1, whose section in
 [CHANGELOG.md](https://github.com/quaresma870/perchtail/blob/v0.5.3/CHANGELOG.md)
-lists every change; PerchTail itself hasn't changed since. It was
-retested in the lab on Linux and Windows sources, including an audit log
-with old race breaks.
+lists every change. Since the rc, only the push agent changed: its read
+buffer is now a fixed 1 MiB, so the chunk size PerchTail asks for can't
+make it allocate more. The rc was retested in the lab on Linux and
+Windows sources, including an audit log with old race breaks.
 
 ### Upgrading from 0.5.2
 - **Back up `DATA_DIR` first**, with PerchTail stopped.

@@ -94,10 +94,11 @@ func HandleFetch(basePath, relPath string) ([]byte, error) {
 
 // Chunk sizes the agent accepts from the backend: small enough to keep
 // every message well under the backend's WebSocket message limit (16 MiB
-// in uvicorn by default), large enough not to waste time on overhead.
+// in uvicorn by default), large enough not to waste time on overhead. The
+// maximum is what the backend asks for (FETCH_CHUNK_BYTES).
 const (
 	minChunkSize = 4 << 10
-	maxChunkSize = 4 << 20
+	maxChunkSize = 1 << 20
 )
 
 // TooLargeError refuses a streamed fetch over the backend's limit.
@@ -144,7 +145,10 @@ func StreamFetch(
 		return 0, 0, &TooLargeError{Size: st.Size(), Limit: maxBytes}
 	}
 
-	buf := make([]byte, chunkSize)
+	// A fixed-size allocation: chunkSize comes from the backend's message
+	// and only picks how much of the buffer each read uses, so no value it
+	// sends can make the agent allocate more.
+	buf := make([]byte, maxChunkSize)[:chunkSize]
 	for {
 		n, readErr := io.ReadFull(f, buf)
 		if n > 0 {
