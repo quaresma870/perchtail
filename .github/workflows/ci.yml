@@ -187,11 +187,13 @@ jobs:
           GOOS=linux GOARCH=arm64 go build -o dist/perchtail-agent-linux-arm64 .
           GOOS=windows GOARCH=amd64 go build -o dist/perchtail-agent-windows-amd64.exe .
 
-      # gosec 2.30 needs Go >= 1.26; `go install` fetches that toolchain on
-      # its own (GOTOOLCHAIN=auto). The agent itself is still built with the
-      # Go set up above.
+      # gosec 2.30 needs Go >= 1.26. setup-go sets GOTOOLCHAIN=local, so this
+      # step sets it back to auto: `go install` then fetches that toolchain.
+      # The agent itself is still built with the Go set up above.
       - name: Static security analysis (gosec)
         working-directory: agent
+        env:
+          GOTOOLCHAIN: auto
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
           "$(go env GOPATH)/bin/gosec" -quiet ./...
