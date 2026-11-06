@@ -127,6 +127,7 @@ def test_change_password_clears_must_change_flag_and_audits(session):
     assert user.must_change_password is True
 
     change_password(session, user, "new-password!")
+    session.commit()
     session.refresh(user)
 
     assert user.must_change_password is False

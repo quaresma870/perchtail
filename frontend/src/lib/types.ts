@@ -208,6 +208,25 @@ export interface SystemSettings {
   connections_view_default: 'list' | 'tree'
   // The daily release check (#215); UPDATE_CHECK=false overrides it.
   update_check_enabled: boolean
+  // Password policy (#245).
+  password_min_length: number
+  password_max_length: number
+  password_reject_simple: boolean
+  password_reject_personal: boolean
+  password_history: number
+  password_required_classes: number
+  password_max_age_days: number
+}
+
+// GET /auth/password-policy (#245): the rules a new password must follow.
+export interface PasswordPolicy {
+  min_length: number
+  max_length: number
+  reject_simple: boolean
+  reject_personal: boolean
+  history: number
+  required_classes: number
+  max_age_days: number
 }
 
 // Settings -> System -> Updates (#215), super admins only.

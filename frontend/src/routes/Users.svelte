@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import PasswordRules from '../lib/components/PasswordRules.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import SortableHeader from '../lib/components/SortableHeader.svelte'
   import {
@@ -243,9 +244,11 @@
         class="input"
         type="password"
         placeholder="temporary password"
+        autocomplete="new-password"
         bind:value={newPassword}
         required
       />
+      <PasswordRules />
       <select class="input" bind:value={newRoleId}>
         {#each roles as role (role.id)}
           <option value={role.id}>{role.name}</option>

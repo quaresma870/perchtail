@@ -13,6 +13,9 @@ BOOL_DEFAULTS: dict[str, str] = {
     "connections_view_switchable": "true",
     # The daily release check (#215); UPDATE_CHECK=false overrides it.
     "update_check_enabled": "true",
+    # Password policy (#245, app/password_policy.py).
+    "password_reject_simple": "true",
+    "password_reject_personal": "true",
 }
 
 # Enumerated string settings: key -> (default, allowed values). A value
@@ -36,6 +39,13 @@ INT_DEFAULTS: dict[str, str] = {
     # How many folders one source may read (#161): 1 turns the feature off.
     # Never above source_roots.HARD_MAX_ROOTS, whatever is stored.
     "source_max_roots": "20",
+    # Password policy (#245, app/password_policy.py): NIST SP 800-63B
+    # defaults, so history, character classes and expiry start off (0).
+    "password_min_length": "12",
+    "password_max_length": "128",
+    "password_history": "0",
+    "password_required_classes": "0",
+    "password_max_age_days": "0",
 }
 
 

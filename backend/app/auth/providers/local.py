@@ -1,7 +1,8 @@
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from sqlmodel import Session, select
 
+from app import password_policy
 from app.audit import record_audit_event
 from app.auth.models import AuthProviderType, User
 from app.logging_config import get_logger
@@ -19,14 +20,18 @@ def hash_password(password: str) -> str:
     return _hasher.hash(password)
 
 
+def verify_hash(stored_hash: str, password: str) -> bool:
+    try:
+        _hasher.verify(stored_hash, password)
+    except (VerifyMismatchError, InvalidHashError):
+        return False
+    return True
+
+
 def verify_password(user: User, password: str) -> bool:
     if user.password_hash is None:
         return False
-    try:
-        _hasher.verify(user.password_hash, password)
-    except VerifyMismatchError:
-        return False
-    return True
+    return verify_hash(user.password_hash, password)
 
 
 def _burn_a_verify(password: str) -> None:
@@ -41,13 +46,15 @@ def create_local_user(
 ) -> User:
     """Admin-created local account. Starts with must_change_password=True per
     CLAUDE.md's Security notes ("Force password change on first login for
-    admin-created local accounts")."""
+    admin-created local accounts"). The caller checks the password against
+    the policy (the users API does; the first-run seed generates one)."""
     user = User(
         username=username,
         password_hash=hash_password(password),
         role_id=role_id,
         auth_provider=AuthProviderType.local,
         must_change_password=True,
+        password_changed_at=utcnow(),
     )
     session.add(user)
     session.flush()
@@ -65,8 +72,38 @@ def create_local_user(
     return user
 
 
-def change_password(session: Session, user: User, new_password: str) -> None:
+def set_password(
+    session: Session,
+    user: User,
+    new_password: str,
+    policy: password_policy.PasswordPolicy | None = None,
+) -> None:
+    """Replaces the account's password hash, keeping the outgoing one in the
+    history when the policy needs it. Doesn't check the policy or commit."""
+    policy = policy or password_policy.get_policy(session)
+    password_policy.remember_previous(session, user, policy)
     user.password_hash = hash_password(new_password)
+    user.password_changed_at = utcnow()
+    session.add(user)
+
+
+def change_password(session: Session, user: User, new_password: str) -> None:
+    """The user's own change (also the forced one at first login or after
+    expiry). Raises PasswordPolicyError, before changing anything, when the
+    password breaks the policy (#245). Doesn't commit: the caller commits
+    it together with revoking the other sessions."""
+    policy = password_policy.get_policy(session)
+    password_policy.check_password(
+        new_password, policy, user_identifiers=password_policy.user_identifiers(user)
+    )
+    # Whatever the history rule says, a forced change (first login, reset,
+    # expiry) mustn't be satisfied by entering the same password again.
+    if user.password_hash and verify_hash(user.password_hash, new_password):
+        raise password_policy.PasswordPolicyError(
+            "same_as_current", "Choose a password different from the current one."
+        )
+    password_policy.check_history(session, user, new_password, policy)
+    set_password(session, user, new_password, policy)
     user.must_change_password = False
     session.add(user)
 
@@ -77,7 +114,6 @@ def change_password(session: Session, user: User, new_password: str) -> None:
         target_type="user",
         target_id=user.id,
     )
-    session.commit()
 
 
 class LocalPasswordProvider:

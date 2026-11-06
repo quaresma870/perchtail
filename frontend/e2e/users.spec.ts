@@ -1,7 +1,8 @@
 import { expect, test } from '@playwright/test'
 
 const username = `e2e-user-${Date.now()}`
-const password = 'e2e-throwaway-password-123!'
+// Within the default password policy (#245): nothing from the username.
+const password = 'Lantern-Orbit-throwaway-58!'
 
 test('users: create, reset password, change role, deactivate/reactivate', async ({ page }) => {
   await page.goto('/#/settings/users')

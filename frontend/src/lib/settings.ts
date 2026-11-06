@@ -14,6 +14,13 @@ export const systemSettings = writable<SystemSettings>({
   connections_view_switchable: true,
   connections_view_default: 'list',
   update_check_enabled: true,
+  password_min_length: 12,
+  password_max_length: 128,
+  password_reject_simple: true,
+  password_reject_personal: true,
+  password_history: 0,
+  password_required_classes: 0,
+  password_max_age_days: 0,
 })
 
 let loadedAt = 0

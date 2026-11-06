@@ -1,9 +1,9 @@
 import json
-import secrets
 from pathlib import Path
 
 from sqlmodel import Session, select
 
+from app import password_policy
 from app.auth.models import AuditLog, AuthProviderType, Role, SSOProtocol, SSOProviderConfig, User
 from app.auth.providers.local import create_local_user
 from app.auth.rbac import create_role
@@ -127,7 +127,9 @@ def seed_initial_super_admin(session: Session) -> User | None:
         is_builtin=True,
         is_super_admin=True,
     )
-    temporary_password = secrets.token_urlsafe(16)
+    temporary_password = password_policy.generate_password(
+        password_policy.get_policy(session), user_identifiers=[settings.initial_admin_username]
+    )
     user = create_local_user(
         session,
         actor_user_id=None,

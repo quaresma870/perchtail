@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
-from app import auth_events
+from app import auth_events, password_policy
 from app.audit import record_audit_event
 from app.auth import mfa
 from app.auth.models import AuthSession, GlobalCapability, Role, SSOProviderConfig, User
@@ -72,6 +72,25 @@ class LoginRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
+
+
+def password_policy_error(exc: password_policy.PasswordPolicyError) -> HTTPException:
+    """The 422 for a password the policy refuses (#245): the rule's message,
+    never the password."""
+    return HTTPException(
+        status_code=422,
+        detail={"message": str(exc), "error_code": f"password_{exc.rule}"},
+    )
+
+
+class PasswordPolicyPublic(BaseModel):
+    min_length: int
+    max_length: int
+    reject_simple: bool
+    reject_personal: bool
+    history: int
+    required_classes: int
+    max_age_days: int
 
 
 class UserPublic(BaseModel):
@@ -220,6 +239,10 @@ def login(
             )
 
     record_success(payload.username)
+    # Expired password (#245): signed in, but only to change it.
+    if password_policy.password_expired(user, password_policy.get_policy(session)):
+        user.must_change_password = True
+        logger.info("user.password_expired", user_id=user.id)
     complete_login(session, user)
     _, token = create_session(session, user, user_agent=request.headers.get("user-agent"))
     _set_session_cookie(response, token)
@@ -253,12 +276,28 @@ def change_password_endpoint(
     # brute-force the account password at argon2 speed.
     _require_password_reconfirmation(user, payload.current_password)
 
+    try:
+        change_password(session, user, payload.new_password)
+    except password_policy.PasswordPolicyError as exc:
+        session.rollback()
+        raise password_policy_error(exc) from exc
     # Every other session was opened with the old password; it shouldn't
     # outlive it. This session (the one that just proved the password) stays.
+    # One commit, so the new password never lands without the revocation.
     revoke_all_sessions(session, user.id, except_token=session_token)
-    change_password(session, user, payload.new_password)
+    session.commit()
     session.refresh(user)
     return UserPublic.from_user(user)
+
+
+@router.get("/password-policy", response_model=PasswordPolicyPublic)
+def get_password_policy(
+    user: User = Depends(get_current_user), session: Session = Depends(get_session)
+):
+    """The rules a new password must follow, shown next to password fields.
+    Open to any signed-in user, including one who must change their
+    password first."""
+    return PasswordPolicyPublic(**password_policy.get_policy(session).as_dict())
 
 
 class MfaEnrollResponse(BaseModel):
