@@ -7,3 +7,6 @@ data/
 *.log
 .ruff_cache/
 .pytest_cache/
+
+# Local Claude Code settings and session files
+.claude/

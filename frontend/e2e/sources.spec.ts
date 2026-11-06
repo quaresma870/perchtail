@@ -40,3 +40,35 @@ test('source overview follows the id in the URL (#192)', async ({ page }) => {
     await page.request.delete(`/sources/${other.id}`)
   }
 })
+
+test('sources list sorts and filters, and keeps both after opening a source (#238)', async ({
+  page,
+}) => {
+  await page.goto('/#/settings/sources')
+
+  const nameHeader = page.getByRole('columnheader', { name: /Source/ })
+  await nameHeader.getByRole('button').click()
+  await expect(nameHeader).toHaveAttribute('aria-sort', 'ascending')
+  await nameHeader.getByRole('button').click()
+  await expect(nameHeader).toHaveAttribute('aria-sort', 'descending')
+
+  await page.getByLabel('Filter sources').fill('no-such-source-zzz')
+  await expect(page.getByText('No sources match.')).toBeVisible()
+
+  await page.getByLabel('Filter sources').fill('application logs')
+  await page.getByLabel('Protocol').selectOption({ label: 'Local' })
+  const row = page.getByRole('row', { name: new RegExp(SYSTEM_SOURCE_NAME) })
+  await expect(row).toBeVisible()
+  await expect(page.locator('.filter-count')).toContainText('1 of')
+
+  await row.getByRole('link', { name: SYSTEM_SOURCE_NAME }).click()
+  await page.goBack()
+  await expect(page.getByLabel('Filter sources')).toHaveValue('application logs')
+  await expect(page.getByRole('columnheader', { name: /Source/ })).toHaveAttribute(
+    'aria-sort',
+    'descending',
+  )
+
+  await page.getByRole('button', { name: 'Clear filters' }).click()
+  await expect(page.getByLabel('Filter sources')).toHaveValue('')
+})

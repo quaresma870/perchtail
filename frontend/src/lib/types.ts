@@ -140,6 +140,8 @@ export interface AppUser {
   role_id: number
   active: boolean
   must_change_password: boolean
+  auth_provider: 'local' | 'oidc' | 'saml'
+  last_login_at: string | null
 }
 
 export interface BrowseEntry {
@@ -212,6 +214,12 @@ export interface AuditLogEntry {
   target_id: number | null
   timestamp: string
   metadata: Record<string, unknown> | null
+  // #239: the target by name, as recorded, or its current name for entries
+  // older than 0.5.3 (target_name_is_current).
+  target_name: string | null
+  target_context: string | null
+  target_name_is_current: boolean
+  target_exists: boolean
 }
 
 export interface AuditLogPage {
@@ -225,9 +233,14 @@ export interface AuditLogFilterOptions {
 }
 
 export interface AuditIntegrityStatus {
-  status: 'unknown' | 'ok' | 'broken'
+  // 'race_breaks': the only breaks match the #213 race and a super admin can
+  // record them as known (#217).
+  status: 'unknown' | 'ok' | 'broken' | 'race_breaks'
   last_checked_at: string | null
   broken_row_id: number | null
+  race_break_count: number
+  known_break_count: number
+  known_breaks_recorded_at: string | null
 }
 
 export interface AuthSessionInfo {

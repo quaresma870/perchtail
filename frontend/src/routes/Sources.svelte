@@ -4,6 +4,15 @@
   import { api, ApiError } from '../lib/api'
   import { currentUser, hasCapability } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SortableHeader from '../lib/components/SortableHeader.svelte'
+  import {
+    loadViewState,
+    matchesText,
+    nextSort,
+    saveViewState,
+    sortRows,
+    type SortState,
+  } from '../lib/table-view'
   import type { Customer, Protocol, Source } from '../lib/types'
 
   let sources: Source[] = []
@@ -74,6 +83,48 @@
     }
   }
 
+  // Sort and filters (#238), kept for the browser session.
+  const VIEW_KEY = 'perchtail.view.sources'
+  let view = loadViewState(VIEW_KEY, {
+    sort: null as SortState | null,
+    text: '',
+    protocol: '',
+    status: '',
+  })
+  $: saveViewState(VIEW_KEY, view)
+
+  // Agents first by connection, then enabled, then disabled.
+  const statusRank = (s: Source) =>
+    !s.enabled ? 3 : s.protocol === 'agent' ? (s.agent_connected ? 0 : 2) : 1
+  const placeOf = (s: Source) =>
+    [s.customer_name ?? customerName(s.customer_id), s.folder_name].filter(Boolean).join(' / ')
+  const accessors: Record<string, (s: Source) => unknown> = {
+    name: (s) => s.name,
+    customer: (s) => placeOf(s),
+    protocol: (s) => PROTOCOL_LABEL[s.protocol],
+    status: statusRank,
+    rules: (s) => s.rule_count,
+  }
+
+  $: filtered = sources.filter(
+    (s) =>
+      matchesText([s.name, s.host, placeOf(s)], view.text) &&
+      (!view.protocol || s.protocol === view.protocol) &&
+      (!view.status || (view.status === 'enabled') === s.enabled),
+  )
+  $: visible = sortRows(filtered, view.sort, accessors)
+  $: filtering = Boolean(view.text || view.protocol || view.status)
+  $: presentProtocols = [...new Set(sources.map((s) => s.protocol))]
+  // A protocol filter kept from earlier in the session can name a protocol
+  // no source uses any more: the select would show "All protocols" while
+  // the filter still hid every row. Drop it once the list has loaded.
+  $: if (!loading && view.protocol && !presentProtocols.includes(view.protocol as Protocol)) {
+    view = { ...view, protocol: '' }
+  }
+
+  const sortBy = (key: string) => (view = { ...view, sort: nextSort(view.sort, key) })
+  const clearFilters = () => (view = { ...view, text: '', protocol: '', status: '' })
+
   onMount(load)
 </script>
 
@@ -94,19 +145,45 @@
   {:else if error}
     <p class="error">{error}</p>
   {:else}
+    <div class="filters">
+      <input
+        class="input filter-text"
+        type="search"
+        placeholder="Filter by name, host, customer or folder"
+        aria-label="Filter sources"
+        bind:value={view.text}
+      />
+      <select class="input" aria-label="Protocol" bind:value={view.protocol}>
+        <option value="">All protocols</option>
+        {#each presentProtocols as protocol (protocol)}
+          <option value={protocol}>{PROTOCOL_LABEL[protocol]}</option>
+        {/each}
+      </select>
+      <select class="input" aria-label="Status" bind:value={view.status}>
+        <option value="">Enabled and disabled</option>
+        <option value="enabled">Enabled</option>
+        <option value="disabled">Disabled</option>
+      </select>
+      {#if filtering}
+        <span class="filter-count">{visible.length} of {sources.length}</span>
+        <button class="link" on:click={clearFilters}>Clear filters</button>
+      {/if}
+    </div>
+
     <div class="card">
       <table>
         <thead>
           <tr>
-            <th>Source</th>
-            <th>Protocol</th>
-            <th>Status</th>
-            <th>Rules</th>
+            <SortableHeader label="Source" key="name" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Customer" key="customer" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Protocol" key="protocol" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Status" key="status" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Rules" key="rules" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
             <th></th>
           </tr>
         </thead>
         <tbody>
-          {#each sources as source (source.id)}
+          {#each visible as source (source.id)}
             <tr>
               <td>
                 <div class="source-name">
@@ -118,10 +195,9 @@
                     <span class="badge badge-muted">disabled</span>
                   {/if}
                 </div>
-                {#if customerName(source.customer_id)}
-                  <div class="source-sub">{customerName(source.customer_id)}</div>
-                {/if}
+                <div class="source-sub">{source.host}</div>
               </td>
+              <td class="place">{placeOf(source) || '—'}</td>
               <td>
                 <span class="badge protocol-{source.protocol}">{PROTOCOL_LABEL[source.protocol]}</span>
               </td>
@@ -172,7 +248,13 @@
           {/each}
           {#if sources.length === 0}
             <tr>
-              <td colspan="5" class="empty">No sources visible to your account.</td>
+              <td colspan="6" class="empty">No sources visible to your account.</td>
+            </tr>
+          {:else if visible.length === 0}
+            <tr>
+              <td colspan="6" class="empty">
+                No sources match. <button class="link" on:click={clearFilters}>Clear filters</button>
+              </td>
             </tr>
           {/if}
         </tbody>
@@ -200,13 +282,13 @@
     width: 100%;
     border-collapse: collapse;
   }
-  th,
+  table :global(th),
   td {
     text-align: left;
     padding: 0.75rem 1rem;
     font-size: 0.88rem;
   }
-  th {
+  table :global(th) {
     color: var(--text-faint);
     font-weight: 600;
     font-size: 0.72rem;
@@ -222,6 +304,24 @@
   }
   tbody tr:hover {
     background: var(--bg-hover);
+  }
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.9rem;
+  }
+  .filter-text {
+    flex: 1 1 260px;
+    max-width: 420px;
+  }
+  .filter-count {
+    color: var(--text-muted);
+    font-size: 0.82rem;
+  }
+  .place {
+    color: var(--text-muted);
   }
   .source-name {
     font-weight: 600;

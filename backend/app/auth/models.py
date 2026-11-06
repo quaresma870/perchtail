@@ -257,3 +257,14 @@ class AuditChainState(SQLModel, table=True):
     # up to a year after upgrade with nothing to show on the banner.
     status: str = "unknown"
     broken_row_id: int | None = None
+    # Known breaks from the #213 race (#217, see app.audit_integrity). The
+    # cutoff is the newest row written before upgrading to 0.5.3, set by
+    # its migration: only rows up to it can be marked as known. The race
+    # was fixed in 0.5.2, so a fork after it is never offered. Null on an
+    # install that started on 0.5.3 or later, which can't have race breaks.
+    known_break_cutoff_row_id: int | None = None
+    # From the last verify_chain() pass: breaks that match the race
+    # signature but aren't recorded yet, and recorded ones it accepted.
+    race_break_count: int = 0
+    known_break_count: int = 0
+    known_breaks_recorded_at: datetime | None = None

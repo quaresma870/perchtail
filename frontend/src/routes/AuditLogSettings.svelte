@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import { detailPairs, targetHref, targetTypeLabel } from '../lib/audit-format'
+  import { currentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import type {
     AuditIntegrityStatus,
@@ -28,8 +30,19 @@
   let since = ''
   let until = ''
 
-  let integrity: AuditIntegrityStatus = { status: 'unknown', last_checked_at: null, broken_row_id: null }
+  let integrity: AuditIntegrityStatus = {
+    status: 'unknown',
+    last_checked_at: null,
+    broken_row_id: null,
+    race_break_count: 0,
+    known_break_count: 0,
+    known_breaks_recorded_at: null,
+  }
   let verifying = false
+  let recordingKnownBreaks = false
+
+  $: isSuperAdmin = $currentUser?.is_super_admin ?? false
+  $: raceBreakText = `${integrity.race_break_count} ${integrity.race_break_count === 1 ? 'break matches' : 'breaks match'}`
 
   function buildQuery(): string {
     const params = new URLSearchParams()
@@ -85,6 +98,25 @@
     }
   }
 
+  async function recordKnownBreaks() {
+    const confirmed = confirm(
+      `Record the ${integrity.race_break_count} ${integrity.race_break_count === 1 ? 'break' : 'breaks'} ` +
+        'from the #213 race as known? Verification will then accept ' +
+        'exactly these rows. Any other break is still reported as tampering. This is ' +
+        'itself written to the audit log.',
+    )
+    if (!confirmed) return
+    recordingKnownBreaks = true
+    try {
+      integrity = await api.post<AuditIntegrityStatus>('/audit/integrity/known-breaks')
+      await load()
+    } catch (err) {
+      error = err instanceof ApiError ? err.detail : 'Failed to record the known breaks'
+    } finally {
+      recordingKnownBreaks = false
+    }
+  }
+
   function toggleSetMember(set: Set<string>, value: string): Set<string> {
     const next = new Set(set)
     if (next.has(value)) next.delete(value)
@@ -133,8 +165,6 @@
   }
 
   const formatTimestamp = (iso: string) => new Date(iso).toLocaleString()
-  const formatMetadata = (metadata: Record<string, unknown> | null) =>
-    metadata ? JSON.stringify(metadata) : ''
 
   onMount(async () => {
     await Promise.all([loadFilterOptions(), loadIntegrityStatus(), load()])
@@ -153,17 +183,34 @@
   <div
     class="integrity-banner"
     class:broken={integrity.status === 'broken'}
+    class:race={integrity.status === 'race_breaks'}
     class:unknown={integrity.status === 'unknown'}
   >
     {#if integrity.status === 'broken'}
       <span class="integrity-text">
         ⚠ Tampering detected: the audit log's hash chain breaks at row {integrity.broken_row_id}.
         Everything from that row onward can no longer be trusted as an unaltered record.
+        {#if integrity.race_break_count > 0}
+          Separately, {raceBreakText} the #213 race (concurrent writes before 0.5.2).
+        {/if}
+      </span>
+    {:else if integrity.status === 'race_breaks'}
+      <span class="integrity-text">
+        ⚠ {raceBreakText} the #213 race, starting at row {integrity.broken_row_id}: concurrent
+        audit writes before 0.5.2 forked the chain. These rows were written by PerchTail itself, so
+        this isn't tampering, but verification can't accept them until a super admin records them
+        as known.
       </span>
     {:else if integrity.status === 'ok'}
       <span class="integrity-text">
         ✓ Audit log integrity verified -- chain intact as of
         {integrity.last_checked_at ? formatTimestamp(integrity.last_checked_at) : 'unknown'}.
+        {#if integrity.known_break_count > 0}
+          {integrity.known_break_count} known
+          {integrity.known_break_count === 1 ? 'break' : 'breaks'} from the #213 race recorded{integrity.known_breaks_recorded_at
+            ? ` on ${formatTimestamp(integrity.known_breaks_recorded_at)}`
+            : ''}.
+        {/if}
       </span>
     {:else}
       <span class="integrity-text">
@@ -171,9 +218,21 @@
         schedule (Settings → System), or verify it now.
       </span>
     {/if}
-    <button type="button" class="btn btn-ghost" on:click={verifyIntegrityNow} disabled={verifying}>
-      {verifying ? 'Verifying…' : 'Verify now'}
-    </button>
+    <div class="integrity-actions">
+      {#if isSuperAdmin && integrity.race_break_count > 0}
+        <button
+          type="button"
+          class="btn btn-ghost"
+          on:click={recordKnownBreaks}
+          disabled={recordingKnownBreaks || verifying}
+        >
+          {recordingKnownBreaks ? 'Recording…' : 'Mark as known'}
+        </button>
+      {/if}
+      <button type="button" class="btn btn-ghost" on:click={verifyIntegrityNow} disabled={verifying}>
+        {verifying ? 'Verifying…' : 'Verify now'}
+      </button>
+    </div>
   </div>
 
   <div class="filters card">
@@ -242,20 +301,49 @@
             <th>Time</th>
             <th>User</th>
             <th>Action</th>
-            <th>Type</th>
             <th>Target</th>
             <th>Details</th>
           </tr>
         </thead>
         <tbody>
           {#each items as entry (entry.id)}
+            {@const href = targetHref(entry)}
             <tr>
               <td class="nowrap">{formatTimestamp(entry.timestamp)}</td>
               <td>{entry.username ?? '—'}</td>
               <td><code>{entry.action}</code></td>
-              <td>{entry.target_type ?? '—'}</td>
-              <td>{entry.target_id ?? '—'}</td>
-              <td class="metadata">{formatMetadata(entry.metadata)}</td>
+              <td
+                class="target"
+                title={entry.target_type
+                  ? `${entry.target_type}${entry.target_id !== null ? ` #${entry.target_id}` : ''}`
+                  : ''}
+              >
+                {#if entry.target_type}
+                  <span class="target-type">{targetTypeLabel(entry.target_type)}</span>
+                  {#if entry.target_name}
+                    {#if href}<a {href}>{entry.target_name}</a>{:else}<span>{entry.target_name}</span>{/if}
+                    {#if entry.target_context}
+                      <span class="target-context">{entry.target_context}</span>
+                    {/if}
+                    {#if entry.target_name_is_current}
+                      <span
+                        class="target-note"
+                        title="This entry predates 0.5.3 and recorded only an id; this is the object's name now."
+                        >current name</span
+                      >
+                    {/if}
+                  {:else if entry.target_id !== null}
+                    <span class="target-context">#{entry.target_id}, no longer exists</span>
+                  {/if}
+                {:else}
+                  —
+                {/if}
+              </td>
+              <td class="details">
+                {#each detailPairs(entry.metadata) as [key, value] (key)}
+                  <span class="detail"><span class="detail-key">{key}</span> {value}</span>
+                {/each}
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -308,8 +396,16 @@
   .integrity-banner.broken {
     background: var(--danger-soft);
   }
+  .integrity-banner.race {
+    background: var(--warning-soft);
+  }
   .integrity-banner.unknown {
     background: var(--border-soft);
+  }
+  .integrity-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
   }
   .integrity-text {
     color: var(--text);
@@ -396,14 +492,40 @@
   .nowrap {
     white-space: nowrap;
   }
-  .metadata {
-    font-family: var(--font-mono);
+  .target {
+    max-width: 320px;
+  }
+  .target-type {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .target-context {
+    display: block;
     font-size: 0.75rem;
     color: var(--text-muted);
-    max-width: 320px;
+  }
+  .target-note {
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    font-style: italic;
+  }
+  .details {
+    max-width: 360px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+  .detail {
+    display: block;
+    font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .detail-key {
+    color: var(--text-faint);
   }
   .pagination {
     display: flex;

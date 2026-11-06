@@ -867,3 +867,25 @@ def test_opting_out_or_disabling_a_source_deletes_its_search_snippets(session, a
 
     assert search(session, "secret", None) == []
     assert session.exec(select(SearchIndexState)).all() == []
+
+
+def test_deleting_a_source_leaves_an_audit_entry_that_names_it(session, admin_client):
+    """#239: the entry must still say which source it was once it's gone."""
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    customer = _make_customer(session)
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "app01",
+            "customer_id": customer.id,
+            "protocol": "ssh",
+            "host": "app01",
+            "base_path": "/var/log",
+        },
+    ).json()
+    assert admin_client.delete(f"/sources/{created['id']}").status_code == 204
+
+    entry = session.exec(select(AuditLog).where(AuditLog.action == "source.delete")).one()
+    assert entry.event_metadata == {"target_name": "app01", "target_context": customer.name}

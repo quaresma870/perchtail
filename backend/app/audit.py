@@ -1,6 +1,7 @@
 from sqlmodel import Session
 
 from app.audit_hash_chain import chain_new_entry
+from app.audit_labels import audit_labels
 from app.auth.models import AuditLog
 from app.crypto import audit_chain_key
 from app.logging_config import get_logger
@@ -22,7 +23,17 @@ def record_audit_event(
     logging section). Does not commit — callers include this in their own
     transaction alongside whatever triggered it. Also chained into the
     tamper-evidence hash chain (app/audit_hash_chain.py) before being
-    added, same as every other AuditLog row."""
+    added, same as every other AuditLog row.
+
+    The target's name, and the names next to related ids, are added to the
+    metadata as the event is written (#239, see app/audit_labels.py), so
+    the entry still says what it was about after a rename or a delete.
+    Keys the caller sets win."""
+    # Before chain_new_entry: the name lookups must run before it takes
+    # SQLite's write lock, so they never lengthen the time it's held.
+    labels = audit_labels(session, target_type, target_id, metadata)
+    if labels:
+        metadata = {**labels, **(metadata or {})}
     entry = AuditLog(
         user_id=user_id,
         action=action,

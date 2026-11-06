@@ -58,8 +58,9 @@ jobs:
       prerelease: ${{ steps.meta.outputs.prerelease }}
       sha: ${{ steps.meta.outputs.sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - id: meta
@@ -96,6 +97,13 @@ jobs:
             sha="$(git rev-parse --verify "origin/$INPUT_TARGET^{commit}" 2>/dev/null || git rev-parse --verify "$INPUT_TARGET^{commit}")"
           fi
 
+          # Releases are built only from code on dev or main, which went
+          # through a PR and CI; a manual run can't release any other commit.
+          if ! git merge-base --is-ancestor "$sha" origin/dev && ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::${sha:0:7} is on neither dev nor main; a release is built only from code merged there"
+            exit 1
+          fi
+
           # The code being released must carry this version, so a tag can't
           # point at an older release's code by mistake (v0.5.1 did, #201).
           app_version="$(git show "$sha:backend/app/version.py" | sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p')"
@@ -110,8 +118,9 @@ jobs:
           fi
 
           if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            git tag "$tag" "$sha"
-            git push origin "refs/tags/$tag"
+            # Through the API with this step's token, so the checkout
+            # doesn't need to keep credentials (persist-credentials: false).
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$sha" >/dev/null
             echo "Created tag $tag at $sha"
           fi
           {
@@ -128,14 +137,17 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.meta.outputs.sha }}
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.24"
-          cache-dependency-path: agent/go.sum
+          # No cache in a release build: a cache a PR wrote could end up in
+          # the published binaries (zizmor cache-poisoning).
+          cache: false
 
       - name: Build agent binaries
         working-directory: agent
@@ -155,7 +167,7 @@ jobs:
           sha256sum perchtail-agent-* > SHA256SUMS
           cat SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agent
           path: dist/
@@ -168,18 +180,19 @@ jobs:
       contents: read
       packages: write # push to ghcr.io
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.meta.outputs.sha }}
 
       - id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -187,7 +200,7 @@ jobs:
 
       # Only the exact version here; X.Y and latest move when a full
       # release is published (see `promote`).
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         id: labels
         with:
           images: ${{ steps.image.outputs.name }}
@@ -197,7 +210,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
             org.opencontainers.image.revision=${{ needs.meta.outputs.sha }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           # No build-record artifact: the draft job only wants agent + sbom.
           DOCKER_BUILD_RECORD_UPLOAD: "false"
@@ -216,7 +229,7 @@ jobs:
       # The package may be private on ghcr.io, so Trivy pulls with the
       # same token.
       - name: Generate SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ github.token }}
@@ -225,7 +238,7 @@ jobs:
           format: cyclonedx
           output: sbom/perchtail-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom
           path: sbom/
@@ -237,18 +250,19 @@ jobs:
     permissions:
       contents: write # create or update the draft release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.meta.outputs.sha }}
 
       # By name: the run also holds other artifacts (build records), and
       # downloading everything failed on one of those.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agent
           path: assets
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sbom
           path: assets
@@ -289,7 +303,7 @@ jobs:
           case "$state" in
             none)
               gh release create "$TAG" assets/* --repo "$GITHUB_REPOSITORY" \
-                --draft --verify-tag --target "$SHA" --title "PerchTail $TAG" --notes-file notes.md \
+                --draft --verify-tag --target "$SHA" --title "$TAG" --notes-file notes.md \
                 --prerelease="$PRERELEASE"
               ;;
             true)
@@ -310,9 +324,9 @@ jobs:
     permissions:
       packages: write
     steps:
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

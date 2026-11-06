@@ -45,3 +45,20 @@ test('users: create, reset password, change role, deactivate/reactivate', async 
   // default way to remove access").
   await rowAfterReactivate.getByRole('button', { name: 'deactivate' }).click()
 })
+
+test('users list sorts and filters (#238)', async ({ page }) => {
+  await page.goto('/#/settings/users')
+
+  const header = page.getByRole('columnheader', { name: /Last login/ })
+  await header.getByRole('button').click()
+  await expect(header).toHaveAttribute('aria-sort', 'ascending')
+
+  await page.getByLabel('Filter users').fill('no-such-user-zzz')
+  await expect(page.getByText('No users match.')).toBeVisible()
+  await expect(page.locator('.filter-count')).toContainText('0 of')
+
+  await page.getByRole('button', { name: 'Clear filters' }).first().click()
+  await page.getByLabel('Status').selectOption('active')
+  await expect(page.locator('tbody tr').first()).toBeVisible()
+  await expect(page.locator('tbody').getByText('inactive', { exact: true })).toHaveCount(0)
+})

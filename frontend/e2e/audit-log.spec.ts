@@ -33,9 +33,10 @@ test('audit log: retention control writes a system_settings.update entry, filter
   // retention save above just wrote one.
   await page.locator('.chip', { hasText: 'system_settings' }).click()
 
-  const row = page.locator('tbody tr', { hasText: `"audit_retention_days":${marker}` })
+  const row = page.locator('tbody tr', { hasText: String(marker) })
   await expect(row).toBeVisible()
   await expect(row.locator('td').nth(2)).toContainText('system_settings.update')
+  await expect(row.locator('td.details')).toContainText('audit_retention_days')
 
   // Restore the setting so other specs (and a re-run of this one) see the
   // documented default rather than this test's leftover value.
@@ -81,4 +82,15 @@ test('audit log: integrity banner verifies the hash chain on demand', async ({ p
   await page.getByRole('button', { name: 'Verify now' }).click()
   await expect(page.locator('.integrity-banner')).toContainText('chain intact')
   await expect(page.locator('.integrity-banner')).not.toHaveClass(/broken/)
+})
+
+test('audit log: opening a source names it in the Target column (#239)', async ({ page }) => {
+  await page.goto('/#/viewer')
+  await page.locator('.explorer').getByRole('button', { name: 'PerchTail application logs' }).click()
+
+  await page.goto('/#/settings/audit-log')
+  await page.locator('.action-select').selectOption('source.open')
+  const target = page.locator('tbody tr td.target').first()
+  await expect(target).toContainText('PerchTail application logs')
+  await expect(target).toContainText('system')
 })

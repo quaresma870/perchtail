@@ -505,3 +505,153 @@ def test_an_unreadable_file_is_skipped_not_fatal_to_the_source(tmp_path, monkeyp
     assert stats.indexed == 2
     assert stats.unreadable == 1 and stats.skipped == 1
     assert files == {"a.log", "c.log"}
+
+
+# --- #218: a per-source time budget, so one large source can't hold the sweep
+
+
+def _fetch_recorder(monkeypatch):
+    import app.search_index as search_index_module
+
+    fetched: list[str] = []
+    monkeypatch.setattr(
+        search_index_module, "_CONNECTORS", {Protocol.local: _HookedLocalConnector(fetched.append)}
+    )
+    return fetched
+
+
+def test_a_source_past_its_deadline_reads_one_file_and_defers_the_rest(
+    session, tmp_path, monkeypatch
+):
+    fetched = _fetch_recorder(monkeypatch)
+    for name in ("a.log", "b.log", "c.log"):
+        (tmp_path / name).write_text(f"line in {name}\n")
+    source = _source(session, tmp_path)
+    _rule(session, source.id, "*.log")
+
+    first = index_source(session, source, deadline=0.0)  # already past
+    assert (first.indexed, first.deferred) == (1, 2)
+
+    second = index_source(session, source)
+    assert (second.indexed, second.deferred) == (2, 0)
+    # The file indexed in the first call isn't read again.
+    assert len(fetched) == 3 and len(set(fetched)) == 3
+
+
+def test_new_files_come_first_then_the_least_recently_indexed(session, tmp_path, monkeypatch):
+    """Live logs change size every sweep: without this order, a source that
+    keeps running out of time would re-read the same first files forever."""
+    from datetime import timedelta
+
+    from app.models import SearchIndexState
+    from app.timeutils import utcnow
+    from sqlmodel import select
+
+    fetched = _fetch_recorder(monkeypatch)
+    for name in ("a.log", "b.log", "c.log"):
+        (tmp_path / name).write_text(f"line in {name}\n")
+    source = _source(session, tmp_path)
+    _rule(session, source.id, "*.log")
+    index_source(session, source)
+
+    ages = {"a.log": 1, "b.log": 3, "c.log": 2}  # minutes since indexed
+    for state in session.exec(select(SearchIndexState)).all():
+        state.indexed_at = utcnow() - timedelta(minutes=ages[state.file_path])
+        session.add(state)
+    session.commit()
+    for name in ("a.log", "b.log", "c.log"):
+        with open(tmp_path / name, "a") as handle:
+            handle.write("another line\n")
+    (tmp_path / "new.log").write_text("brand new\n")
+    fetched.clear()
+
+    order = []
+    for _ in range(4):
+        index_source(session, source, deadline=0.0)
+        order.append(fetched[-1])
+
+    assert order == ["new.log", "b.log", "c.log", "a.log"]
+
+
+def test_files_that_are_gone_are_removed_even_when_time_runs_out(session, tmp_path, monkeypatch):
+    _fetch_recorder(monkeypatch)
+    (tmp_path / "old.log").write_text("going away\n")
+    source = _source(session, tmp_path)
+    _rule(session, source.id, "*.log")
+    index_source(session, source)
+
+    (tmp_path / "old.log").unlink()
+    for name in ("a.log", "b.log"):
+        (tmp_path / name).write_text(f"line in {name}\n")
+    stats = index_source(session, source, deadline=0.0)
+
+    assert (stats.indexed, stats.deferred, stats.removed) == (1, 1, 1)
+    assert "old.log" not in {row.file_path for row in _fts_rows(session, source.id)}
+
+
+def test_one_large_source_does_not_hold_the_sweep_for_the_others(tmp_path, monkeypatch):
+    import app.search_index as search_index_module
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    SQLModel.metadata.create_all(engine)
+    ensure_search_schema(engine)
+    monkeypatch.setattr("app.db.engine", engine)
+
+    class TinyBudget:
+        search_index_max_file_size_mb = 20.0
+        search_index_source_budget_seconds = 1
+
+    monkeypatch.setattr(search_index_module, "get_settings", lambda: TinyBudget())
+
+    class SlowClock:  # every reading is 5 s after the last
+        now = 0
+
+        @classmethod
+        def monotonic(cls):
+            cls.now += 5
+            return cls.now
+
+    monkeypatch.setattr(search_index_module, "time", SlowClock)
+
+    with Session(engine) as session:
+        big_dir, small_dir = tmp_path / "big", tmp_path / "small"
+        big_dir.mkdir()
+        small_dir.mkdir()
+        for index in range(5):
+            (big_dir / f"{index}.log").write_text(f"big {index}\n")
+        (small_dir / "app.log").write_text("small\n")
+        big = _source(session, big_dir, name="big")
+        small = _source(session, small_dir, name="small")
+        _rule(session, big.id, "*.log")
+        _rule(session, small.id, "*.log")
+        big_id, small_id = big.id, small.id
+
+    run_indexing_sweep()
+
+    with Session(engine) as session:
+        assert len(_fts_rows(session, big_id)) == 1
+        assert len(_fts_rows(session, small_id)) == 1
+
+
+def test_a_skipped_file_is_retried_only_when_its_size_changes(session, tmp_path, monkeypatch):
+    """Review of #218: binary and unreadable files were never recorded, so
+    every sweep treated them as new, put them first and fetched them again."""
+    fetched = _fetch_recorder(monkeypatch)
+    (tmp_path / "blob.log").write_bytes(b"\x00\x01binary")
+    (tmp_path / "app.log").write_text("text\n")
+    source = _source(session, tmp_path)
+    _rule(session, source.id, "*.log")
+
+    index_source(session, source)
+    assert sorted(fetched) == ["app.log", "blob.log"]
+
+    fetched.clear()
+    index_source(session, source)
+    assert fetched == []  # nothing changed, nothing fetched
+
+    with open(tmp_path / "blob.log", "ab") as handle:
+        handle.write(b"\x00more")
+    index_source(session, source)
+    assert fetched == ["blob.log"]

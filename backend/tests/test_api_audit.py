@@ -225,7 +225,14 @@ def test_integrity_status_unknown_before_any_check_has_run(session, client_for):
     response = client.get("/audit/integrity")
     assert response.status_code == 200
     body = response.json()
-    assert body == {"status": "unknown", "last_checked_at": None, "broken_row_id": None}
+    assert body == {
+        "status": "unknown",
+        "last_checked_at": None,
+        "broken_row_id": None,
+        "race_break_count": 0,
+        "known_break_count": 0,
+        "known_breaks_recorded_at": None,
+    }
 
 
 def test_plain_user_cannot_read_integrity_status(session, client_for):
@@ -296,3 +303,160 @@ def test_manual_verify_is_cooldown_throttled(session, client_for):
 
     second = client.post("/audit/integrity/verify")
     assert second.json()["status"] == "ok"
+
+
+def _race_forks(session, user_id):
+    """Two rows chained from the same tip, as the #213 race wrote them."""
+    from app.audit_hash_chain import compute_row_hash
+    from app.auth.models import AuditChainState, AuditLog
+    from app.crypto import audit_chain_key
+
+    tip, _ = _seed(session, user_id, count=2)
+    fork = AuditLog(user_id=None, action="source.open")
+    fork.prev_hash = tip.row_hash
+    fork.row_hash = compute_row_hash(
+        audit_chain_key(),
+        tip.row_hash,
+        user_id=None,
+        action="source.open",
+        target_type=None,
+        target_id=None,
+        timestamp=fork.timestamp,
+        metadata=None,
+    )
+    session.add(fork)
+    session.commit()
+    session.add(AuditChainState(known_break_cutoff_row_id=fork.id))
+    session.commit()
+    return fork
+
+
+def test_super_admin_records_race_breaks_as_known(session, client_for):
+    admin = _make_user(session, is_super_admin=True)
+    fork = _race_forks(session, admin.id)
+    client = client_for(admin)
+
+    verified = client.post("/audit/integrity/verify").json()
+    assert (verified["status"], verified["race_break_count"]) == ("race_breaks", 1)
+    assert verified["broken_row_id"] == fork.id
+
+    response = client.post("/audit/integrity/known-breaks")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["known_break_count"] == 1
+    assert body["known_breaks_recorded_at"] is not None
+
+
+def test_recording_known_breaks_is_for_super_admins_only(session, client_for):
+    viewer = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    _race_forks(session, viewer.id)
+
+    response = client_for(viewer).post("/audit/integrity/known-breaks")
+    assert response.status_code == 403
+
+
+def test_recording_known_breaks_with_none_to_record_is_a_conflict(session, client_for):
+    admin = _make_user(session, is_super_admin=True)
+    _seed(session, admin.id, count=2)
+
+    response = client_for(admin).post("/audit/integrity/known-breaks")
+    assert response.status_code == 409
+
+
+def _audited_source(session, name="app01"):
+    from app.models import Protocol, Source
+
+    source = Source(name=name, protocol=Protocol.ssh, host=name, base_path="/var/log")
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+    return source
+
+
+def test_entries_show_the_recorded_target_name(session, client_for):
+    """#239: the name recorded with the entry, not the one the object has now."""
+    viewer = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    source = _audited_source(session)
+    record_audit_event(
+        session, user_id=viewer.id, action="source.open", target_type="source", target_id=source.id
+    )
+    source.name = "renamed"
+    session.add(source)
+    session.commit()
+
+    item = client_for(viewer).get("/audit").json()["items"][0]
+    assert (item["target_name"], item["target_name_is_current"]) == ("app01", False)
+    assert item["target_exists"] is True
+
+
+def test_older_entries_fall_back_to_the_current_name(session, client_for, monkeypatch):
+    """Entries written before 0.5.3 have no recorded name and can't get one
+    (the hash chain covers them), so the page shows the current name."""
+    viewer = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    source = _audited_source(session)
+    monkeypatch.setattr("app.audit.audit_labels", lambda *args: {})
+    record_audit_event(
+        session, user_id=viewer.id, action="source.open", target_type="source", target_id=source.id
+    )
+    session.commit()
+    client = client_for(viewer)
+
+    item = client.get("/audit").json()["items"][0]
+    assert (item["target_name"], item["target_name_is_current"]) == ("app01", True)
+
+    session.delete(source)
+    session.commit()
+    item = client.get("/audit").json()["items"][0]
+    assert (item["target_name"], item["target_exists"]) == (None, False)
+
+
+def test_a_page_of_entries_is_named_in_a_few_queries(session, client_for):
+    """Review of #239: naming took several queries per entry (the target,
+    its customer, each folder up the tree)."""
+    from app.models import Customer, Folder, Protocol, Source
+    from sqlalchemy import event
+
+    viewer = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
+    customer = Customer(name="Vodacom")
+    session.add(customer)
+    session.commit()
+    parent = None
+    for depth in range(3):
+        folder = Folder(name=f"level{depth}", customer_id=customer.id, parent_folder_id=parent)
+        session.add(folder)
+        session.commit()
+        parent = folder.id
+    for index in range(30):
+        source = Source(
+            name=f"app{index}",
+            protocol=Protocol.ssh,
+            host=f"app{index}",
+            base_path="/var/log",
+            customer_id=customer.id,
+            folder_id=parent,
+        )
+        session.add(source)
+        session.commit()
+        record_audit_event(
+            session,
+            user_id=viewer.id,
+            action="source.open",
+            target_type="source",
+            target_id=source.id,
+            metadata={},
+        )
+    session.commit()
+    session.expire_all()  # as in a fresh request: nothing loaded yet
+
+    statements = []
+    engine = session.get_bind()
+    listener = lambda *args: statements.append(args[2])  # noqa: E731
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        items = client_for(viewer).get("/audit").json()["items"]
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+
+    assert {item["target_context"] for item in items} == {"Vodacom / level0 / level1 / level2"}
+    assert len(statements) < 15, statements

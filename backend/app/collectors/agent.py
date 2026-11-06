@@ -3,13 +3,17 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from app.agent_registry import get_agent_registry
+from app.agent_registry import AgentCommandError, get_agent_registry
 from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.models import Rule, Source
 from app.rules import is_entry_visible, rules_case_insensitive
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
+
+# Size of each fetch_chunk the agent sends (#205): about 1.4 MB once
+# base64-encoded, well under uvicorn's 16 MiB WebSocket message limit.
+FETCH_CHUNK_BYTES = 1024 * 1024
 
 
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:
@@ -35,14 +39,39 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
 
 def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     """Fetch-on-open into `destination` — the agent reads the file off its
-    own local disk and sends the bytes back over the same connection,
+    own local disk and sends it back over the same connection,
     base64-encoded (same trade-off as collectors/winrm.py: correctness and
-    a single, simple wire format over squeezing the last bit of transfer
-    efficiency out of what's still just a log-file viewer)."""
-    result = get_agent_registry().send_command_sync(source.id, "fetch", path=relative_path)
-    content = base64.b64decode(result["content_b64"])
+    a simple wire format over squeezing the last bit of transfer
+    efficiency out of what's still just a log-file viewer).
+
+    The file comes in chunks of FETCH_CHUNK_BYTES, each written to
+    `destination` as it arrives (#205), so neither side holds the whole
+    file in memory, and a large file stays under the WebSocket message
+    limit. An agent older than 0.5.3 ignores `chunk_size` and sends the
+    whole file in one message, handled as before."""
     limit = collector_base.max_fetch_bytes()
+    try:
+        with destination.open("wb") as sink:
+            result = get_agent_registry().send_command_sync(
+                source.id,
+                "fetch",
+                path=relative_path,
+                chunk_size=FETCH_CHUNK_BYTES,
+                max_bytes=limit,
+                sink=sink,
+                limit=limit,
+            )
+    except BaseException as exc:
+        destination.unlink(missing_ok=True)  # no partial file left behind
+        if isinstance(exc, AgentCommandError) and exc.code == "too_large":
+            raise collector_base.too_large(exc.size or limit + 1, limit) from exc
+        raise
+    if result.get("streamed"):
+        return
+
+    content = base64.b64decode(result["content_b64"])
     if len(content) > limit:
+        destination.unlink(missing_ok=True)
         raise collector_base.too_large(len(content), limit)
     destination.write_bytes(content)
 

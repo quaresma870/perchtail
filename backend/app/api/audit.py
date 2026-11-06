@@ -1,13 +1,14 @@
 import threading
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlmodel import Session, func, select
 
-from app.api.auth import get_current_active_user
-from app.audit_integrity import verify_chain
+from app.api.auth import get_current_active_user, require_super_admin
+from app.audit_integrity import NoRaceBreaksError, record_known_breaks, verify_chain
+from app.audit_labels import describe_target, prefetch_targets
 from app.auth.models import AuditChainState, AuditLog, GlobalCapability, User
 from app.auth.rbac import require_global_capability
 from app.crypto import audit_chain_key
@@ -33,6 +34,14 @@ class AuditLogEntryPublic(BaseModel):
     target_id: int | None
     timestamp: datetime
     metadata: dict | None
+    # What the entry is about, by name (#239): as recorded when it was
+    # written, or, for entries older than 0.5.3, the object's current name
+    # (target_name_is_current), since those can't be backfilled.
+    target_name: str | None = None
+    target_context: str | None = None
+    target_name_is_current: bool = False
+    # Whether the object still exists, so the page can link to it.
+    target_exists: bool = False
 
 
 class AuditLogPage(BaseModel):
@@ -105,20 +114,39 @@ def list_audit_log(
             u.id: u.username for u in session.exec(select(User).where(User.id.in_(user_ids))).all()
         }
 
-    items = [
-        AuditLogEntryPublic(
-            id=row.id,
-            user_id=row.user_id,
-            username=usernames.get(row.user_id) if row.user_id is not None else None,
-            action=row.action,
-            target_type=row.target_type,
-            target_id=row.target_id,
-            timestamp=row.timestamp,
-            metadata=row.event_metadata,
+    # Rows for every target on the page, in a few queries (see prefetch_targets).
+    _loaded = prefetch_targets(session, [(row.target_type, row.target_id) for row in rows])
+    current: dict[tuple, dict] = {}
+    items = []
+    for row in rows:
+        key = (row.target_type, row.target_id)
+        if row.target_id is not None and key not in current:
+            current[key] = describe_target(session, row.target_type, row.target_id)
+        now = current.get(key, {})
+        recorded = row.event_metadata if isinstance(row.event_metadata, dict) else {}
+        use_current = "target_name" not in recorded and "target_name" in now
+        names = now if use_current else recorded
+        items.append(
+            AuditLogEntryPublic(
+                id=row.id,
+                user_id=row.user_id,
+                username=usernames.get(row.user_id) if row.user_id is not None else None,
+                action=row.action,
+                target_type=row.target_type,
+                target_id=row.target_id,
+                timestamp=row.timestamp,
+                metadata=row.event_metadata,
+                target_name=_as_text(names.get("target_name")),
+                target_context=_as_text(names.get("target_context")),
+                target_name_is_current=use_current,
+                target_exists="target_name" in now,
+            )
         )
-        for row in rows
-    ]
     return AuditLogPage(items=items, total=total)
+
+
+def _as_text(value) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 @router.get("/filters", response_model=AuditLogFilterOptions)
@@ -139,9 +167,14 @@ def get_audit_log_filters(
 class AuditIntegrityStatus(BaseModel):
     # "unknown" until the first check ever runs -- see AuditChainState's
     # docstring in app/auth/models.py.
+    # "race_breaks": the only breaks match the #213 race and can be
+    # recorded as known (#217, see app/audit_integrity.py).
     status: str
     last_checked_at: datetime | None
     broken_row_id: int | None
+    race_break_count: int = 0
+    known_break_count: int = 0
+    known_breaks_recorded_at: datetime | None = None
 
 
 def _read_integrity_status(session: Session) -> AuditIntegrityStatus:
@@ -152,6 +185,9 @@ def _read_integrity_status(session: Session) -> AuditIntegrityStatus:
         status=state.status,
         last_checked_at=state.last_checked_at,
         broken_row_id=state.broken_row_id,
+        race_break_count=state.race_break_count,
+        known_break_count=state.known_break_count,
+        known_breaks_recorded_at=state.known_breaks_recorded_at,
     )
 
 
@@ -205,5 +241,27 @@ def run_audit_integrity_verification(
                 return _read_integrity_status(session)
 
         verify_chain(audit_chain_key(), session)
+        session.commit()
+        return _read_integrity_status(session)
+
+
+@router.post("/integrity/known-breaks", response_model=AuditIntegrityStatus)
+def record_audit_known_breaks(
+    user: User = Depends(require_super_admin),
+    session: Session = Depends(get_session),
+):
+    """Records the breaks that match the #213 race as known (#217), so
+    verification accepts exactly those rows from then on. Super admins
+    only: unlike "Verify now", this changes what verification accepts.
+    Only breaks that match the race signature can be recorded; anything
+    else stays reported as tampering."""
+    with _manual_verify_lock:
+        try:
+            record_known_breaks(audit_chain_key(), session, user.id)
+        except NoRaceBreaksError:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="No breaks match the #213 race, so there is nothing to record.",
+            ) from None
         session.commit()
         return _read_integrity_status(session)

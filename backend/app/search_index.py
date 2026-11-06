@@ -13,7 +13,9 @@ files."""
 
 import html
 import tempfile
+import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import text
@@ -60,6 +62,9 @@ class IndexStats:
     # Files that couldn't be read this sweep (no permission, gone since the
     # listing, grown past the limit); also counted in `skipped` (#204).
     unreadable: int = 0
+    # Changed files left for the next sweep because the source ran out of
+    # its time budget (#218).
+    deferred: int = 0
 
 
 @dataclass
@@ -177,7 +182,7 @@ def delete_source_index(session: Session, source_id: int) -> None:
 _UNREADABLE = (SourcePermissionError, SourceNotFoundError, PathOutsideBaseError, FetchTooLargeError)
 
 
-def index_source(session: Session, source: Source) -> IndexStats:
+def index_source(session: Session, source: Source, deadline: float | None = None) -> IndexStats:
     """Indexes (or re-indexes) every rule-visible file in `source`. Safe to
     call repeatedly — unchanged files (by size, see SearchIndexState's
     docstring on why size alone) are skipped, and files no longer present or
@@ -191,7 +196,12 @@ def index_source(session: Session, source: Source) -> IndexStats:
 
     Stops early, leaving what's indexed so far, if the source is disabled,
     opted out or deleted while it runs (rows of a source that's no longer
-    indexed are purged by purge_inactive_source_indexes on the next sweep)."""
+    indexed are purged by purge_inactive_source_indexes on the next sweep).
+
+    `deadline`, a time.monotonic() value, bounds how long this call spends
+    reading files (#218): past it, the remaining changed files are left for
+    the next sweep (counted in IndexStats.deferred), so one large source
+    can't hold the sweep for every other source."""
     connector = _CONNECTORS.get(source.protocol)
     if connector is None:
         return IndexStats()
@@ -202,27 +212,47 @@ def index_source(session: Session, source: Source) -> IndexStats:
     rules = list(session.exec(select(Rule).where(Rule.source_id == source_id)).all())
 
     stats = IndexStats()
-    seen_paths: set[str] = set()
-    # (id, size) rather than the rows themselves: every commit below expires
-    # loaded objects, and reloading each one to compare sizes would cost a
-    # query per unchanged file.
+    # (id, size, indexed_at) rather than the rows themselves: every commit
+    # below expires loaded objects, and reloading each one to compare sizes
+    # would cost a query per unchanged file.
     known = {
-        state.file_path: (state.id, state.size)
+        state.file_path: (state.id, state.size, state.indexed_at)
         for state in session.exec(
             select(SearchIndexState).where(SearchIndexState.source_id == source_id)
         ).all()
     }
     session.commit()  # end the read transaction before the slow part
 
-    for entry in _iter_files(connector, source, rules):
-        seen_paths.add(entry.path)
+    entries = list(_iter_files(connector, source, rules))
+    seen_paths = {entry.path for entry in entries}
+    pending = [
+        entry for entry in entries if entry.path not in known or known[entry.path][1] != entry.size
+    ]
+    # New files first, then changed ones least recently indexed first: a
+    # source that keeps running out of time (live logs change size every
+    # sweep) still works through all of its files over successive sweeps,
+    # instead of re-reading the same first few each time (#218).
+    pending.sort(
+        key=lambda entry: ((1, known[entry.path][2]) if entry.path in known else (0, datetime.min))
+    )
+
+    attempted = 0
+    for position, entry in enumerate(pending):
+        # At least one file per call, so a single slow file still progresses.
+        if deadline is not None and attempted and time.monotonic() >= deadline:
+            stats.deferred = len(pending) - position
+            logger.info(
+                "search_index.source_budget_reached",
+                source_id=source_id,
+                deferred=stats.deferred,
+            )
+            break
         previous = known.get(entry.path)
-        if previous is not None and previous[1] == entry.size:
-            continue
         if not _still_indexed(session, source):
             logger.info("search_index.source_stopped", source_id=source_id)
             return stats
 
+        attempted += 1
         try:
             content = _read_text(connector, source, entry, max_bytes)
         except _UNREADABLE as exc:
@@ -237,23 +267,21 @@ def index_source(session: Session, source: Source) -> IndexStats:
             )
             stats.skipped += 1
             stats.unreadable += 1
+            _record_attempt(session, source_id, entry, previous)
             continue
         if content is None:
             stats.skipped += 1
+            _record_attempt(session, source_id, entry, previous)
             continue
 
         _delete_fts_rows(session, source_id, entry.path)
         _insert_fts_rows(session, source_id, entry.path, content)
-        state = session.get(SearchIndexState, previous[0]) if previous else None
-        if state is None:
-            state = SearchIndexState(source_id=source_id, file_path=entry.path)
-        state.size = entry.size
-        state.indexed_at = utcnow()
-        session.add(state)
-        session.commit()
+        _record_attempt(session, source_id, entry, previous)
         stats.indexed += 1
 
-    for path, (state_id, _) in known.items():
+    # The listing above is complete even when time ran out, so files that
+    # are gone (or no longer rule-visible) are removed either way.
+    for path, (state_id, _, _) in known.items():
         if path not in seen_paths:
             _delete_fts_rows(session, source_id, path)
             _delete_alert_file_states(session, source_id, path)
@@ -270,8 +298,25 @@ def index_source(session: Session, source: Source) -> IndexStats:
         skipped=stats.skipped,
         unreadable=stats.unreadable,
         removed=stats.removed,
+        deferred=stats.deferred,
     )
     return stats
+
+
+def _record_attempt(session: Session, source_id: int, entry: DirEntry, previous) -> None:
+    """Records that `entry` was handled at its current size, whether it was
+    indexed, skipped (binary, a .gz that won't decompress) or unreadable.
+    A skipped or unreadable file is then retried only when its size
+    changes, instead of counting as new on every sweep, going first in the
+    queue and using up the source's time budget (#218). Its earlier index
+    rows, if any, are kept. Commits."""
+    state = session.get(SearchIndexState, previous[0]) if previous else None
+    if state is None:
+        state = SearchIndexState(source_id=source_id, file_path=entry.path)
+    state.size = entry.size
+    state.indexed_at = utcnow()
+    session.add(state)
+    session.commit()
 
 
 def _still_indexed(session: Session, source: Source) -> bool:
@@ -311,19 +356,22 @@ def purge_inactive_source_indexes(session: Session) -> int:
 
 def run_indexing_sweep() -> None:
     """The APScheduler job (see app/main.py's lifespan) — indexes every
-    enabled, opted-in source in turn. One source's failure (a dead
+    enabled, opted-in source in turn, each within its time budget
+    (search_index_source_budget_seconds). One source's failure (a dead
     connection, a permissions error) is logged and skipped rather than
     aborting the sweep for every other source."""
     from app.db import engine  # deferred: app.db imports this module for schema setup
 
+    budget = get_settings().search_index_source_budget_seconds
     with Session(engine) as session:
         purge_inactive_source_indexes(session)
         sources = session.exec(
             select(Source).where(Source.search_indexing_enabled.is_(True), Source.enabled.is_(True))
         ).all()
         for source in sources:
+            deadline = time.monotonic() + budget if budget > 0 else None
             try:
-                index_source(session, source)
+                index_source(session, source, deadline)
             except Exception:
                 logger.exception("search_index.sweep_failed", source_id=source.id)
 

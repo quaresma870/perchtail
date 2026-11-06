@@ -532,7 +532,8 @@ def test_download_logs_file_download_audit_event(app_client, session, fake_sftp,
     assert len(events) == 1
     assert events[0].user_id == user.id
     assert events[0].target_id == source.id
-    assert events[0].event_metadata == {"path": "app.log"}
+    assert events[0].event_metadata["path"] == "app.log"
+    assert events[0].event_metadata["target_name"] == source.name  # #239
 
 
 def test_open_logs_a_file_open_audit_event(app_client, session, fake_sftp, scratch_store):
@@ -548,7 +549,8 @@ def test_open_logs_a_file_open_audit_event(app_client, session, fake_sftp, scrat
     assert len(events) == 1
     assert events[0].user_id == user.id
     assert events[0].target_id == source.id
-    assert events[0].event_metadata == {"path": "app.log"}
+    assert events[0].event_metadata["path"] == "app.log"
+    assert events[0].event_metadata["target_name"] == source.name  # #239
 
 
 def test_download_zip_logs_a_folder_download_audit_event(app_client, session, tmp_path):
@@ -564,7 +566,8 @@ def test_download_zip_logs_a_folder_download_audit_event(app_client, session, tm
     events = session.exec(select(AuditLog).where(AuditLog.action == "folder.download")).all()
     assert len(events) == 1
     assert events[0].user_id == user.id
-    assert events[0].event_metadata == {"path": "", "file_count": 2}
+    assert events[0].event_metadata["file_count"] == 2
+    assert events[0].event_metadata["target_name"] == source.name  # #239
 
 
 def test_open_over_max_fetch_mb_is_a_413(
@@ -813,3 +816,20 @@ def test_413_reports_file_size_and_limit(
     assert detail["error_code"] == "fetch_too_large"
     assert detail["size_bytes"] == 100
     assert detail["limit_bytes"] == 8
+
+
+def test_source_open_names_the_source_and_its_customer(app_client, session, fake_sftp):
+    """#239: opening a source recorded only `source` and an id."""
+    app, client = app_client
+    customer = Customer(name="Acme")
+    session.add(customer)
+    session.commit()
+    session.refresh(customer)
+    source = _make_source(session, customer=customer)
+    _make_user(session, app, is_super_admin=True)
+    fake_sftp.listing = [FakeAttr("app.log", is_dir=False, size=1)]
+
+    assert client.get(f"/sources/{source.id}/browse").status_code == 200
+
+    event = session.exec(select(AuditLog).where(AuditLog.action == "source.open")).one()
+    assert event.event_metadata == {"target_name": source.name, "target_context": "Acme"}

@@ -8,6 +8,126 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-06
+
+The release after 0.5.2. It carries everything from the pre-release
+0.5.3-rc.1, whose section in
+[CHANGELOG.md](https://github.com/quaresma870/perchtail/blob/v0.5.3/CHANGELOG.md)
+lists every change. Since the rc, only the push agent changed: its read
+buffer is now a fixed 1 MiB, so the chunk size PerchTail asks for can't
+make it allocate more. The rc was retested in the lab on Linux and
+Windows sources, including an audit log with old race breaks.
+
+### Upgrading from 0.5.2
+- **Back up `DATA_DIR` first**, with PerchTail stopped.
+- One migration runs on start (`audit known breaks`). It records the
+  newest audit row at the time of the upgrade, which is how 0.5.3 tells
+  the old race breaks apart (see below).
+- **Upgrade the push agents.** Agents older than 0.5.3 keep working with
+  this version, but send each file in one message, which fails above
+  about 12 MiB.
+- Optional new setting: `SEARCH_INDEX_SOURCE_BUDGET_SECONDS` (default
+  120).
+
+### Highlights
+- **Audit log:** if "Verify now" reported "Tampering detected" because of
+  the race fixed in 0.5.2, it now shows those breaks apart, and a super
+  admin can mark them as known (Settings → Audit log). Any other break is
+  still tampering. Entries now name the source, user or object they're
+  about, and keep that name after a rename or a delete.
+- **Push agent:** files come in 1 MiB chunks, written as they arrive, so
+  large logs open without the agent holding them in memory. A file over
+  `MAX_FETCH_MB` is refused before it's read. The agent answers commands
+  in parallel, so a long download doesn't hold up browsing, and stops
+  reading when PerchTail gives up on a file.
+- **Search indexing:** each source gets a time budget per sweep, so one
+  large source can't hold up the others; files that can't be indexed are
+  retried only when their size changes.
+- **Settings:** the Sources and Users lists sort by any column and filter.
+- **Viewer:** "⌕ Find" is a button that opens the search panel.
+
+## [0.5.3-rc.1] - 2026-11-05
+
+First release candidate for 0.5.3. Upgrade notes:
+- **Back up `DATA_DIR` first**, as for every release. One migration
+  runs on start (`audit known breaks`): it adds columns to the audit
+  chain state and records the newest audit row at the time of the
+  upgrade, which is how 0.5.3 tells old race breaks apart (see below).
+- **Upgrade the push agents** to get chunked fetches, parallel commands
+  and cancel. Agents older than 0.5.3 keep working with this backend, but
+  send whole files in one message, which fails above about 12 MiB.
+- Optional new setting: `SEARCH_INDEX_SOURCE_BUDGET_SECONDS` (default 120).
+- If "Verify now" reports "Tampering detected" because of the race fixed
+  in 0.5.2, it now shows those breaks apart, and a super admin can mark
+  them as known (see the 0.5.2 known issue).
+
+### Added
+- Audit log: entries name what they're about (#239). Each event now
+  records the target's name and where it sits (a source's "customer /
+  folder", a rule's source, a grant's role), and the names next to ids it
+  already held (`source_name`, `role_name`, `customer_name`,
+  `scope_name`), so an entry still makes sense after the object is
+  renamed or deleted. The table shows a readable Target column, linked
+  when the object still exists, and the details as key/value pairs.
+  Entries from before this release can't be changed (the hash chain
+  covers them), so they show the object's current name, marked as such.
+- Audit log: breaks in the hash chain left by the #213 race (concurrent
+  writes before 0.5.2) are no longer reported as tampering forever (#217).
+  "Verify now" reports them apart, as "N breaks match the #213 race", when
+  each row is valid under the chain's key, chains from an existing earlier
+  row, and was written before the upgrade to 0.5.3. A super admin can
+  "Mark as known": this writes a chained `audit.chain.known_breaks_recorded`
+  entry listing those rows and the fork's other rows, and verification
+  then reports the chain as intact, with N known breaks. Any other break is
+  still tampering, and so is a recorded row that later goes missing or
+  changes.
+
+### Fixed
+- Push agent: files are fetched in 1 MiB chunks, written to the scratch
+  file as they arrive (#205). Before, the agent read the whole file and
+  sent it base64-encoded in one WebSocket message: a ~100 MB log took
+  hundreds of MB of agent memory, and anything over about 12 MiB was
+  larger than the backend's 16 MiB message limit, so the open failed and
+  the agent's connection dropped. A file over `MAX_FETCH_MB` is now
+  refused by the agent before it reads anything (HTTP 413, as for the
+  other connectors). The fetch only times out when no chunk arrives for
+  30 seconds, not after 30 seconds in all. **Upgrade the agents** to get
+  this: an agent older than 0.5.3 still works with this backend, but
+  sends whole files as before, and a 0.5.3 agent works with an older
+  backend the old way. The agent also answers commands in parallel, so a
+  long download no longer holds up browsing on the same agent, and stops
+  reading a file when the backend gives up on it.
+- Search indexing: one large source no longer holds the whole sweep (#218).
+  A first index of a source with thousands of files took minutes, and
+  meanwhile every other source's index, and the alerts that ride on it,
+  went stale. Each source now gets at most
+  `SEARCH_INDEX_SOURCE_BUDGET_SECONDS` (default 120) of reading per sweep
+  and carries on where it left off in the next one. New files are read
+  first, then the least recently indexed, so a source with many growing
+  logs still works through all of them. Files that can't be indexed
+  (binary, unreadable) are retried only when their size changes.
+- Viewer: "⌕ Find" in the toolbar is now a button that opens the search
+  panel. It looked clickable before but was only a hint for Ctrl/Cmd+F
+  (#218).
+
+### Changed
+- Settings → Sources and Settings → Users can be sorted by any column,
+  both ways, and filtered (#238): by text (name, host, customer or folder;
+  username or role) and by protocol and status, or role, status and
+  sign-in method. "N of M" shows while a filter is on. The sort and
+  filters are kept while you open a row and come back. The Sources list
+  gains a Customer column and shows each source's host; the Users list
+  shows the sign-in method and the last login.
+- Dependencies: docker/setup-qemu-action and setup-buildx-action 4,
+  docker/metadata-action 6, docker/build-push-action 7, docker/login-action
+  4, actions/upload-artifact 7 and download-artifact 8 (all actions in the
+  CI and Release workflows now run on Node 24), @codemirror/commands
+  6.11.1, @codemirror/autocomplete 6.20.4, @sveltejs/vite-plugin-svelte
+  7.3.1, @playwright/test 1.64.1 and black 26.10.1.
+- Dependabot no longer proposes sqlmodel 0.0.45 or later: those versions
+  reject the naive datetimes PerchTail stores, so `requirements.in` keeps
+  it below 0.0.45.
+
 ## [0.5.2] - 2026-11-05
 
 The release after 0.5.0. There is no 0.5.1: its tag was used by mistake

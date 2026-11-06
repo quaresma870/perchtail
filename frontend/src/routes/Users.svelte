@@ -2,6 +2,15 @@
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SortableHeader from '../lib/components/SortableHeader.svelte'
+  import {
+    loadViewState,
+    matchesText,
+    nextSort,
+    saveViewState,
+    sortRows,
+    type SortState,
+  } from '../lib/table-view'
   import type { AppUser, Role } from '../lib/types'
 
   let users: AppUser[] = []
@@ -83,6 +92,41 @@
     }
   }
 
+  // Sort and filters (#238), kept for the browser session.
+  const VIEW_KEY = 'perchtail.view.users'
+  let view = loadViewState(VIEW_KEY, {
+    sort: null as SortState | null,
+    text: '',
+    roleId: '',
+    status: '',
+    provider: '',
+  })
+  $: saveViewState(VIEW_KEY, view)
+
+  const roleName = (id: number) => roles.find((r) => r.id === id)?.name ?? `#${id}`
+  const signInLabel = (u: AppUser) => (u.auth_provider === 'local' ? 'Local' : 'SSO')
+  const formatLogin = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : 'never')
+  const accessors: Record<string, (u: AppUser) => unknown> = {
+    username: (u) => u.username,
+    role: (u) => roleName(u.role_id),
+    status: (u) => (u.active ? 0 : 1),
+    provider: signInLabel,
+    lastLogin: (u) => (u.last_login_at ? Date.parse(u.last_login_at) : null),
+  }
+
+  $: filtered = users.filter(
+    (u) =>
+      matchesText([u.username, roleName(u.role_id)], view.text) &&
+      (!view.roleId || u.role_id === Number(view.roleId)) &&
+      (!view.status || (view.status === 'active') === u.active) &&
+      (!view.provider || (view.provider === 'local') === (u.auth_provider === 'local')),
+  )
+  $: visible = sortRows(filtered, view.sort, accessors)
+  $: filtering = Boolean(view.text || view.roleId || view.status || view.provider)
+
+  const sortBy = (key: string) => (view = { ...view, sort: nextSort(view.sort, key) })
+  const clearFilters = () => (view = { ...view, text: '', roleId: '', status: '', provider: '' })
+
   onMount(load)
 </script>
 
@@ -98,18 +142,50 @@
       <p class="error">{error}</p>
     {/if}
 
+    <div class="filters">
+      <input
+        class="input filter-text"
+        type="search"
+        placeholder="Filter by username or role"
+        aria-label="Filter users"
+        bind:value={view.text}
+      />
+      <select class="input" aria-label="Role" bind:value={view.roleId}>
+        <option value="">All roles</option>
+        {#each roles as role (role.id)}
+          <option value={String(role.id)}>{role.name}</option>
+        {/each}
+      </select>
+      <select class="input" aria-label="Status" bind:value={view.status}>
+        <option value="">Active and inactive</option>
+        <option value="active">Active</option>
+        <option value="inactive">Inactive</option>
+      </select>
+      <select class="input" aria-label="Sign-in" bind:value={view.provider}>
+        <option value="">Local and SSO</option>
+        <option value="local">Local</option>
+        <option value="sso">SSO</option>
+      </select>
+      {#if filtering}
+        <span class="filter-count">{visible.length} of {users.length}</span>
+        <button class="link" on:click={clearFilters}>Clear filters</button>
+      {/if}
+    </div>
+
     <div class="card">
       <table>
         <thead>
           <tr>
-            <th>Username</th>
-            <th>Role</th>
-            <th>Status</th>
+            <SortableHeader label="Username" key="username" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Role" key="role" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Status" key="status" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Sign-in" key="provider" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Last login" key="lastLogin" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
             <th></th>
           </tr>
         </thead>
         <tbody>
-          {#each users as user (user.id)}
+          {#each visible as user (user.id)}
             <tr>
               <td class="username">{user.username}</td>
               <td>
@@ -132,6 +208,8 @@
                   <span class="badge badge-warn">must change password</span>
                 {/if}
               </td>
+              <td>{signInLabel(user)}</td>
+              <td class="last-login">{formatLogin(user.last_login_at)}</td>
               <td class="actions">
                 <button class="link" on:click={() => resetPassword(user)}>reset password</button>
                 <button class="link" on:click={() => toggleActive(user)}>
@@ -141,12 +219,19 @@
             </tr>
             {#if tempPasswordFor === user.id}
               <tr>
-                <td colspan="4" class="temp-password">
+                <td colspan="6" class="temp-password">
                   Temporary password (shown once): <code>{tempPassword}</code>
                 </td>
               </tr>
             {/if}
           {/each}
+          {#if users.length > 0 && visible.length === 0}
+            <tr>
+              <td colspan="6" class="empty">
+                No users match. <button class="link" on:click={clearFilters}>Clear filters</button>
+              </td>
+            </tr>
+          {/if}
         </tbody>
       </table>
     </div>
@@ -185,6 +270,28 @@
     margin: 0;
     color: var(--text);
   }
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .filter-text {
+    flex: 1 1 260px;
+    max-width: 420px;
+  }
+  .filter-count {
+    color: var(--text-muted);
+    font-size: 0.82rem;
+  }
+  .last-login {
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .empty {
+    color: var(--text-muted);
+    text-align: center;
+  }
   h2 {
     font-size: 1rem;
     margin: 0;
@@ -194,13 +301,13 @@
     width: 100%;
     border-collapse: collapse;
   }
-  th,
+  table :global(th),
   td {
     text-align: left;
     padding: 0.65rem 1rem;
     font-size: 0.88rem;
   }
-  th {
+  table :global(th) {
     color: var(--text-faint);
     font-weight: 600;
     font-size: 0.72rem;
