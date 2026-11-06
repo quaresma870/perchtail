@@ -23,7 +23,9 @@ test('explorer: the file order persists, and an open source refreshes in place',
 
   // Refreshing lists it again without collapsing it.
   const listed = page.waitForResponse((r) => r.url().includes('/browse?path=') && r.status() === 200)
-  await page.getByRole('button', { name: `Refresh ${SYSTEM_SOURCE_NAME}` }).click({ force: true })
+  // The row's buttons show on hover.
+  await page.locator('.explorer .source-row', { hasText: SYSTEM_SOURCE_NAME }).hover()
+  await page.getByRole('button', { name: `Refresh ${SYSTEM_SOURCE_NAME}` }).click()
   await listed
   await expect(logFile).toBeVisible()
 
