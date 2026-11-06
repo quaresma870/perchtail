@@ -263,3 +263,23 @@ def local_copy(source: Source, relative_path: str):
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path
+
+
+def read_range(
+    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+) -> collector_base.RangeRead:
+    """Incremental follow (#254): the file's size, its first `head` bytes and
+    up to `length` bytes from `offset`, read with an SFTP seek -- nothing before the offset is
+    transferred."""
+    client = _connect(source)
+    try:
+        sftp = client.open_sftp()
+        try:
+            remote_path = _resolve_contained(sftp, source, relative_path)
+            with sftp.open(remote_path, "rb") as f:
+                size = f.stat().st_size or 0
+                return collector_base.read_range_from(f, size, offset, length, head)
+        finally:
+            sftp.close()
+    finally:
+        client.close()

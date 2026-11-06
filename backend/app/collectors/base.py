@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 from app.config import get_settings
 
@@ -127,3 +127,44 @@ def copy_with_limit(src: BinaryIO, destination: Path, limit: int) -> int:
         destination.unlink(missing_ok=True)
         raise
     return written
+
+
+# Incremental follow (#254): each connector's read_range(source, path,
+# offset, length, head) returns a RangeRead -- the file's current size, its
+# first `head` bytes and up to `length` bytes from `offset` -- in one round
+# trip, without fetching the rest of the file. A poll reads at
+# most this much; the agent's own cap is the same (agent/internal/agent).
+RANGE_MAX_BYTES = 1 << 20
+
+
+class RangeNotSupportedError(Exception):
+    """The source can't read a byte range: an agent older than 0.6 doesn't
+    know the read_range command. The viewer falls back to reloading the
+    whole file."""
+
+
+class RangeRead(NamedTuple):
+    """What read_range returns: the file's size now, its first `head` bytes
+    (to tell a rotated file from the one the viewer has), and up to
+    `length` bytes from `offset`."""
+
+    size: int
+    head: bytes
+    data: bytes
+
+
+# The start of the file read along with the range, to identify it.
+RANGE_MAX_HEAD_BYTES = 4096
+
+
+def read_range_from(f: BinaryIO, size: int, offset: int, length: int, head: int) -> RangeRead:
+    """The shared tail of read_range for file objects that can seek."""
+    head_bytes = b""
+    if head > 0 and size > 0:
+        f.seek(0)
+        head_bytes = f.read(min(head, size, RANGE_MAX_HEAD_BYTES))
+    data = b""
+    if offset < size and length > 0:
+        f.seek(offset)
+        data = f.read(min(length, size - offset, RANGE_MAX_BYTES))
+    return RangeRead(size, head_bytes, data)

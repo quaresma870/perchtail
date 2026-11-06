@@ -24,6 +24,15 @@ export interface Tab {
   format: FormatMode
   // "Follow" (tail -f) -- polled only while this tab is active.
   following: boolean
+  // Incremental follow (#254): how many bytes of the file `content` holds,
+  // the server's identity of its start (from the last follow answer), and
+  // whether only what was appended can be fetched ('reload': .gz files,
+  // archive members and agents older than 0.6 reload the whole file).
+  byteSize: number
+  followHead: string | null
+  followMode: 'incremental' | 'reload'
+  // Lines appended while the reader was scrolled up, for "jump to end".
+  newLines: number
 }
 
 export interface ViewerState {

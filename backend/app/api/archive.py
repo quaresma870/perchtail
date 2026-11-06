@@ -5,7 +5,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -28,7 +28,13 @@ from app.audit import record_audit_event
 from app.auth.models import Capability, User
 from app.auth.rbac import require_capability
 from app.collectors import local as local_collector
-from app.collectors.base import DirEntry, FetchTooLargeError, max_fetch_bytes
+from app.collectors.base import (
+    RANGE_MAX_BYTES,
+    DirEntry,
+    FetchTooLargeError,
+    RangeNotSupportedError,
+    max_fetch_bytes,
+)
 from app.collectors.registry import CONNECTORS
 from app.config import get_settings
 from app.db import get_session
@@ -356,6 +362,12 @@ def open_file(
     )
     session.commit()
     headers = {"X-Scratch-Key": key} if key else {}
+    if member is None and not is_transparent_gzip(path.rsplit("/", 1)[-1]):
+        # What the first Follow poll compares against (#254), so a file
+        # rotated between this open and that poll is caught too.
+        size = served_path.stat().st_size
+        with served_path.open("rb") as served:
+            headers["X-Follow-Head"] = _head_hash(served.read(FOLLOW_HEAD_BYTES), size)
     # Inline, not an attachment: this is what the viewer reads to display a
     # file, not a download endpoint (downloads go through /download, gated
     # by the `download` capability -- #174). nosniff (set app-wide) keeps
@@ -367,6 +379,104 @@ def open_file(
         media_type="text/plain; charset=utf-8",
         content_disposition_type="inline",
     )
+
+
+# Incremental follow (#254). The start of the file identifies it: a rotated
+# or truncated log almost always starts differently, even when it has grown
+# back past the viewer's offset by the next poll.
+FOLLOW_HEAD_BYTES = 64
+
+
+def _follow_unsupported(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"message": message, "error_code": "follow_unsupported"},
+    )
+
+
+def _head_hash(start: bytes, offset: int) -> str:
+    """Identifies the file by the bytes the viewer already has from its
+    start: the first min(FOLLOW_HEAD_BYTES, offset)."""
+    return hashlib.sha256(start[: min(FOLLOW_HEAD_BYTES, offset)]).hexdigest()[:32]
+
+
+@router.get("/follow")
+def follow_file(
+    path: str,
+    # Below 2**62: an agent reads it as an int64.
+    offset: int = Query(ge=0, lt=2**62),
+    head: str | None = None,
+    start: bool = False,
+    source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+) -> Response:
+    """Incremental follow (#254): what was appended to `path` after `offset`
+    bytes, at most RANGE_MAX_BYTES at a time, read fresh from the source
+    without transferring the rest of the file.
+
+    `head` is the X-Follow-Head of the previous answer. Headers:
+    X-File-Size (bytes now), X-Follow-Offset (the offset to ask from
+    next), X-Follow-Head, X-Follow-More: 1 when more is waiting already,
+    X-Follow-Reset: 1 (no body) when the file shrank or starts differently
+    -- rotated or truncated -- so the viewer reloads it from the start.
+
+    409 follow_unsupported for .gz files and archive members, and for an
+    agent older than 0.6: the viewer reloads the whole file instead.
+    Audited when following starts (`start`) and whenever a read begins at
+    the start of the file, so a whole file can't be read through here
+    without a record; not on every poll."""
+    _require_safe_path(source, path)
+    if not path:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
+    rules = _rules_for(session, source.id)
+    if not _visible(source, path, rules):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    filename = path.rsplit("/", 1)[-1]
+    if is_transparent_gzip(filename) or is_archive(filename):
+        raise _follow_unsupported("Compressed files and archives can only be reloaded whole")
+
+    connector = _connector(source)
+    try:
+        # One round trip: the size, the start of the file and the new bytes.
+        size, first, data = connector.read_range(
+            source, path, offset, RANGE_MAX_BYTES, FOLLOW_HEAD_BYTES
+        )
+    except RangeNotSupportedError as exc:
+        raise _follow_unsupported(
+            "This source's agent is older than 0.6 and can't send only the new lines"
+        ) from exc
+
+    changed = head is not None and offset > 0 and head != _head_hash(first, offset)
+    if offset > size or changed:
+        return Response(
+            content=b"",
+            media_type="application/octet-stream",
+            headers={"X-Follow-Reset": "1", "X-File-Size": str(size)},
+        )
+    next_offset = offset + len(data)
+    # What the viewer holds from the start once it appends `data`: the head
+    # as read, extended by the new bytes while the file is still short.
+    start_bytes = first[:offset] + data if offset < FOLLOW_HEAD_BYTES else first
+
+    if start or offset == 0:
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="file.follow",
+            target_type="source",
+            target_id=source.id,
+            metadata={"path": path},
+        )
+        session.commit()
+    headers = {
+        "X-File-Size": str(size),
+        "X-Follow-Offset": str(next_offset),
+        "X-Follow-Head": _head_hash(start_bytes, next_offset),
+    }
+    if next_offset < size:
+        headers["X-Follow-More"] = "1"
+    return Response(content=data, media_type="application/octet-stream", headers=headers)
 
 
 class CloseRequest(BaseModel):

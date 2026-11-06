@@ -227,6 +227,18 @@ func handleCommand(cfg Config, cmd Command) any {
 			ID:         cmd.ID,
 			ContentB64: base64.StdEncoding.EncodeToString(content),
 		}
+	case "read_range":
+		size, head, data, err := HandleReadRange(cfg.BasePath, cmd.Path, cmd.Offset, cmd.Length, cmd.HeadLength)
+		if err != nil {
+			return ErrorResult{Type: "read_range_error", ID: cmd.ID, Error: err.Error()}
+		}
+		return ReadRangeResult{
+			Type:    "read_range_result",
+			ID:      cmd.ID,
+			Size:    size,
+			HeadB64: base64.StdEncoding.EncodeToString(head),
+			DataB64: base64.StdEncoding.EncodeToString(data),
+		}
 	default:
 		return ErrorResult{
 			Type:  "unknown_error",

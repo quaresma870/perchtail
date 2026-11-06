@@ -3,6 +3,7 @@ import shutil
 from contextlib import contextmanager
 from pathlib import Path
 
+from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.config import get_settings
 from app.models import Rule, Source
@@ -97,3 +98,13 @@ def local_copy(source: Source, relative_path: str):
     """No fetch needed — the file is already local, so this yields the real
     path directly rather than copying it anywhere first."""
     yield resolve_path(source, relative_path)
+
+
+def read_range(
+    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+) -> collector_base.RangeRead:
+    """Incremental follow (#254): the file's size, its first `head` bytes and
+    up to `length` bytes from `offset`."""
+    with open(resolve_path(source, relative_path), "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        return collector_base.read_range_from(f, size, offset, length, head)

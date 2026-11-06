@@ -157,3 +157,17 @@ def local_copy(source: Source, relative_path: str):
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path
+
+
+def read_range(
+    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+) -> collector_base.RangeRead:
+    """Incremental follow (#254): the file's size, its first `head` bytes and
+    up to `length` bytes from `offset` -- SMB reads at an offset, so nothing before it is
+    transferred. Opened like fetch_file, tolerating the writer (#166)."""
+    with _connection(source) as kwargs:
+        _require_no_reparse_points(source, relative_path, kwargs)
+        remote_path = _unc_path(source, relative_path)
+        with smbclient.open_file(remote_path, mode="rb", share_access="rwd", **kwargs) as f:
+            size = smbclient.stat(remote_path, **kwargs).st_size
+            return collector_base.read_range_from(f, size, offset, length, head)

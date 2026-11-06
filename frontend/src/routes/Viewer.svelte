@@ -11,6 +11,15 @@
   import { buildConnectionTree } from '../lib/connection-tree'
   import { filterConnections } from '../lib/connection-filter'
   import { readFetchFailure, type FetchProblem } from '../lib/fetch-errors'
+  import {
+    countLines,
+    FOLLOW_INTERVALS_MS,
+    followUrl,
+    formatInterval,
+    loadFollowInterval,
+    readFollowHeaders,
+    saveFollowInterval,
+  } from '../lib/follow'
   import { canFormat, formatContent } from '../lib/format-content'
   import { languageForFilename } from '../lib/file-language'
   import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
@@ -29,7 +38,8 @@
    * Search). */
   export let params: { sourceId?: string } = {}
 
-  const FOLLOW_INTERVAL_MS = 2000
+  // How often Follow polls (#254): 1 s to 30 s, remembered per browser.
+  let followIntervalMs = loadFollowInterval()
   const VIEW_PREF_KEY = 'perchtail.connectionsView'
 
   const focusSourceId = params.sourceId ? Number(params.sourceId) : null
@@ -174,7 +184,12 @@
         }
         return false
       }
-      const content = await response.text()
+      const bytes = await response.arrayBuffer()
+      // Streaming, so a character the file's end splits is completed by
+      // the first Follow answer (#254) instead of turning into two U+FFFD.
+      const decoder = new TextDecoder()
+      const content = decoder.decode(bytes, { stream: true })
+      followDecoders.set(key, decoder)
       const tab: Tab = {
         key,
         sourceId,
@@ -190,6 +205,12 @@
         markPatterns: [],
         format: 'none',
         following: false,
+        byteSize: bytes.byteLength,
+        followHead: response.headers.get('x-follow-head'),
+        // A .gz file or an archive member is decompressed on the server: only
+        // the whole of it can be reloaded.
+        followMode: member || name.toLowerCase().endsWith('.gz') ? 'reload' : 'incremental',
+        newLines: 0,
       }
       notice = null
       ensureSeverityPatterns(sourceId)
@@ -265,6 +286,8 @@
   }
 
   function closeTab(tab: Tab) {
+    followDecoders.delete(tab.key)
+    followStarted.delete(tab.key)
     const remaining = tabs.filter((t) => t.key !== tab.key)
     setState({
       tabs: remaining,
@@ -344,11 +367,14 @@
     updateActiveTab({ format: mode, bookmarks: [] })
   }
 
-  // Re-fetch the active tab in place (Reload, and every Follow tick); the
-  // previous scratch reference is released once the new one lands.
+  // Re-fetch a tab in place (Reload; Follow when only the whole file can be
+  // fetched, or after a rotation); the previous scratch reference is
+  // released once the new one lands.
   async function reloadActiveTab() {
-    if (!activeTab) return
-    const tab = activeTab
+    if (activeTab) await reloadTab(activeTab)
+  }
+
+  async function reloadTab(tab: Tab) {
     try {
       const response = await fetch(openUrl(tab.sourceId, tab.path, tab.member), {
         credentials: 'include',
@@ -358,9 +384,19 @@
         notice = { ...problem, retry: problem.retryable ? reloadActiveTab : undefined }
         return
       }
-      const content = await response.text()
+      const bytes = await response.arrayBuffer()
+      const decoder = new TextDecoder()
+      const content = decoder.decode(bytes, { stream: true })
       const scratchKey = response.headers.get('x-scratch-key')
-      setState({ tabs: tabs.map((t) => (t.key === tab.key ? { ...t, content, scratchKey } : t)) })
+      const followHead = response.headers.get('x-follow-head')
+      followDecoders.set(tab.key, decoder)
+      setState({
+        tabs: tabs.map((t) =>
+          t.key === tab.key
+            ? { ...t, content, scratchKey, byteSize: bytes.byteLength, followHead, newLines: 0 }
+            : t,
+        ),
+      })
       if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
     } catch {
       notice = { message: `${tab.name}: the server could not be reached.`, retryable: true, retry: reloadActiveTab }
@@ -368,7 +404,78 @@
   }
 
   function toggleFollow() {
-    if (activeTab) updateActiveTab({ following: !activeTab.following })
+    if (!activeTab) return
+    if (activeTab.following) followStarted.delete(activeTab.key)
+    updateActiveTab({ following: !activeTab.following, newLines: 0 })
+  }
+
+  function setFollowInterval(ms: number) {
+    followIntervalMs = ms
+    saveFollowInterval(ms)
+  }
+
+  // Incremental follow (#254). Per-tab streaming decoders, so a character
+  // split across two answers decodes whole, and the tabs whose follow was
+  // already announced (audited once, on the first poll). Not reactive.
+  const followDecoders = new Map<string, TextDecoder>()
+  const followStarted = new Set<string>()
+  // A burst bigger than one answer is read in a few more right away.
+  const FOLLOW_ROUNDS_PER_TICK = 8
+
+  function updateTab(key: string, patch: Partial<Tab>) {
+    setState({ tabs: tabs.map((t) => (t.key === key ? { ...t, ...patch } : t)) })
+  }
+
+  async function followIncrementally(tab: Tab) {
+    let byteSize = tab.byteSize
+    let followHead = tab.followHead
+    let appended = ''
+    for (let round = 0; round < FOLLOW_ROUNDS_PER_TICK; round++) {
+      const start = !followStarted.has(tab.key)
+      const response = await fetch(followUrl(tab.sourceId, tab.path, byteSize, followHead, start), {
+        credentials: 'include',
+      })
+      if (response.status === 409) {
+        // A .gz file, an archive member or an agent older than 0.6: this
+        // tab reloads the whole file from now on.
+        followStarted.add(tab.key)
+        updateTab(tab.key, { followMode: 'reload' })
+        await reloadTab(tab)
+        return
+      }
+      if (!response.ok) {
+        const problem = await readFetchFailure(response, tab.name)
+        notice = problem
+        return
+      }
+      followStarted.add(tab.key)
+      const answer = readFollowHeaders(response.headers, byteSize)
+      if (answer.reset) {
+        await reloadTab(tab)
+        notice = { message: `${tab.name} was rotated or truncated: reloaded from the start.`, retryable: false }
+        return
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      let decoder = followDecoders.get(tab.key)
+      if (!decoder) {
+        decoder = new TextDecoder()
+        followDecoders.set(tab.key, decoder)
+      }
+      appended += decoder.decode(bytes, { stream: true })
+      byteSize = answer.offset
+      followHead = answer.head
+      if (!answer.more) break
+    }
+    // A Reload while this was in flight replaced the content: drop the answer.
+    const current = tabs.find((t) => t.key === tab.key)
+    if (!current || current.byteSize !== tab.byteSize) return
+    const readingAbove = appended !== '' && tab.key === activeKey && !(paneRef?.isAtBottom() ?? true)
+    updateTab(tab.key, {
+      content: current.content + appended,
+      byteSize,
+      followHead,
+      newLines: readingAbove ? current.newLines + countLines(appended) : current.newLines,
+    })
   }
 
   let followTimer: ReturnType<typeof setInterval> | null = null
@@ -382,20 +489,39 @@
   }
 
   async function followTick() {
-    if (followPolling) return
+    // A hidden browser tab doesn't poll, to spare the sources (#254).
+    if (followPolling || document.hidden || !activeTab?.following) return
     followPolling = true
+    const tab = activeTab
     try {
-      await reloadActiveTab()
+      if (tab.followMode === 'incremental') await followIncrementally(tab)
+      else await reloadTab(tab)
+    } catch {
+      notice = { message: `${tab.name}: the server could not be reached.`, retryable: true }
     } finally {
       followPolling = false
     }
   }
 
-  $: {
+  // Restarted only when the followed tab or the interval changes, not on
+  // every append.
+  $: followedKey = activeTab?.following ? activeTab.key : null
+  $: restartFollow(followedKey, followIntervalMs)
+
+  function restartFollow(key: string | null, intervalMs: number) {
     stopFollowTimer()
-    if (activeTab?.following) {
-      followTimer = setInterval(followTick, FOLLOW_INTERVAL_MS)
-    }
+    if (key === null) return
+    followTimer = setInterval(followTick, intervalMs)
+    followTick()
+  }
+
+  function jumpToEnd() {
+    paneRef?.scrollToEnd()
+    if (activeTab) updateActiveTab({ newLines: 0 })
+  }
+
+  function onReachedBottom() {
+    if (activeTab && activeTab.newLines > 0) updateActiveTab({ newLines: 0 })
   }
 
   async function doCopySelectedLines() {
@@ -612,11 +738,24 @@
             <button
               class="btn-toggle"
               class:active={activeTab.following}
-              title="Follow new content like tail -f -- polls and re-fetches the whole file every few seconds"
+              title={activeTab.followMode === 'incremental'
+                ? 'Follow new content like tail -f: fetches only what was appended'
+                : 'Follow new content: reloads the whole file (compressed files, archive members, agents older than 0.6)'}
               on:click={toggleFollow}
             >
               Follow
             </button>
+            <select
+              class="follow-interval"
+              aria-label="Follow interval"
+              title="How often Follow checks for new content"
+              value={followIntervalMs}
+              on:change={(e) => setFollowInterval(Number(e.currentTarget.value))}
+            >
+              {#each FOLLOW_INTERVALS_MS as ms}
+                <option value={ms}>{formatInterval(ms)}</option>
+              {/each}
+            </select>
             <button
               class="btn-toggle"
               class:active={activeTab.wrapEnabled}
@@ -773,7 +912,13 @@
           showWhitespace={activeTab.showWhitespace}
           bookmarks={activeTab.bookmarks}
           markPatterns={activeTab.markPatterns}
+          on:bottom={onReachedBottom}
         />
+        {#if activeTab.newLines > 0}
+          <button class="jump-to-end" on:click={jumpToEnd}>
+            {activeTab.newLines} new {activeTab.newLines === 1 ? 'line' : 'lines'} — jump to end ↓
+          </button>
+        {/if}
         {#if findAllOpen}
           <FindInDocumentPanel
             content={displayContent}
@@ -924,6 +1069,29 @@
     min-width: 0;
     min-height: 0;
     background: var(--bg);
+    position: relative;
+  }
+  .jump-to-end {
+    position: absolute;
+    right: 1.5rem;
+    bottom: 1.25rem;
+    z-index: 5;
+    padding: 0.4rem 0.8rem;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    color: var(--text);
+    font-size: 0.8rem;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  }
+  .follow-interval {
+    background: var(--bg-elevated-2);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 0.75rem;
+    padding: 0.15rem 0.25rem;
   }
   .tabs {
     display: flex;

@@ -180,3 +180,70 @@ func rootName(relPath string) string {
 	}
 	return path.Clean(relPath)
 }
+
+// maxRangeLength caps one read_range (#254), whatever the backend asks:
+// the same 1 MiB as a fetch chunk (RANGE_MAX_BYTES on the backend), and
+// maxHeadLength the start of the file read along with it.
+const (
+	maxRangeLength = maxChunkSize
+	maxHeadLength  = 4 << 10
+)
+
+// HandleReadRange reads up to length bytes of relPath from offset, and its
+// first headLength bytes, for the viewer's incremental follow (#254): only
+// what was appended since the viewer's last read crosses the connection,
+// plus the start of the file and its size, which tell the backend a file
+// that was rotated or truncated. Reading at or past the end returns no
+// bytes.
+func HandleReadRange(basePath, relPath string, offset, length, headLength int64) (int64, []byte, []byte, error) {
+	if !IsSafeRelativePath(relPath) {
+		return 0, nil, nil, fmt.Errorf("unsafe path: %q", relPath)
+	}
+	if offset < 0 || length < 0 || headLength < 0 {
+		return 0, nil, nil, fmt.Errorf("invalid range: offset %d, length %d, head %d", offset, length, headLength)
+	}
+	root, err := os.OpenRoot(basePath)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer root.Close()
+	f, err := root.Open(rootName(relPath))
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if st.IsDir() {
+		return 0, nil, nil, fmt.Errorf("%s: is a directory", relPath)
+	}
+	size := st.Size()
+	// Fixed-size allocations, as in StreamFetch: the backend's numbers only
+	// pick how much of each buffer is used.
+	head, err := readAt(f, 0, make([]byte, maxHeadLength)[:min(headLength, size, maxHeadLength)])
+	if err != nil {
+		return size, nil, nil, err
+	}
+	data := []byte{}
+	if offset < size {
+		data, err = readAt(f, offset, make([]byte, maxRangeLength)[:min(length, size-offset, maxRangeLength)])
+		if err != nil {
+			return size, nil, nil, err
+		}
+	}
+	return size, head, data, nil
+}
+
+// readAt fills as much of buf as the file has from offset.
+func readAt(f *os.File, offset int64, buf []byte) ([]byte, error) {
+	if len(buf) == 0 {
+		return []byte{}, nil
+	}
+	n, err := f.ReadAt(buf, offset)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return buf[:n], nil
+}

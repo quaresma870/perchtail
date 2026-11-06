@@ -245,3 +245,45 @@ def local_copy(source: Source, relative_path: str):
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path
+
+
+def read_range(
+    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+) -> collector_base.RangeRead:
+    """Incremental follow (#254): the file's size, its first `head` bytes and
+    up to `length` bytes from `offset`, in one PowerShell round trip that
+    seeks before reading, so nothing else is transferred."""
+    path = _ps_quote(_remote_path(source, relative_path))
+    guard = _containment_guard(source, relative_path)
+    offset = max(int(offset), 0)
+    length = max(min(int(length), collector_base.RANGE_MAX_BYTES), 0)
+    head = max(min(int(head), collector_base.RANGE_MAX_HEAD_BYTES), 0)
+    script = guard + (
+        f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
+        "try { $len = $f.Length; "
+        f"$h = New-Object byte[] {head}; $hn = 0; "
+        # Read() may return less than asked: loop until the head is full or
+        # the file ends, or a short head would look like a rotated file.
+        "while ($hn -lt $h.Length) { $r = $f.Read($h, $hn, $h.Length - $hn); "
+        "if ($r -le 0) { break }; $hn += $r }; "
+        f"$b = New-Object byte[] {length}; $n = 0; "
+        f"if ({offset} -lt $len) {{ $f.Seek({offset}, 'Begin') | Out-Null; "
+        "$n = $f.Read($b, 0, $b.Length) }; "
+        '"$len|" + [Convert]::ToBase64String($h, 0, $hn) + "|" + '
+        "[Convert]::ToBase64String($b, 0, $n) } finally { $f.Close() }"
+    )
+    try:
+        output = _run_ps(source, script).strip()
+    except PathOutsideBaseError:
+        logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
+        raise
+    try:
+        size_text, head_b64, data_b64 = output.splitlines()[-1].split("|", 2)
+        return collector_base.RangeRead(
+            int(size_text), base64.b64decode(head_b64), base64.b64decode(data_b64)
+        )
+    except (ValueError, IndexError) as exc:
+        raise collector_base.SourceError(
+            "unexpected answer from PowerShell",
+            public_message="The source sent an unexpected answer",
+        ) from exc

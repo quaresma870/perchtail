@@ -1,3 +1,4 @@
+import io
 import posixpath
 import stat as stat_module
 from pathlib import Path
@@ -452,3 +453,52 @@ def test_sibling_directory_with_a_shared_prefix_is_outside(monkeypatch, tmp_path
 
     with pytest.raises(ssh_module.PathOutsideBaseError):
         ssh_module.fetch_file(_source(), "x/secret.log", tmp_path / "out")
+
+
+# --- incremental follow (#254) ----------------------------------------------
+
+
+class _SeekableRemoteFile(io.BytesIO):
+    """What paramiko's SFTPFile offers read_range: stat, seek and read,
+    recording the offset so a test can tell nothing before it was read."""
+
+    def __init__(self, content: bytes, reads: list):
+        super().__init__(content)
+        self._reads = reads
+
+    def stat(self):
+        return FakeAttr("app.log", False, len(self.getvalue()))
+
+    def read(self, size=-1):
+        self._reads.append((self.tell(), size))
+        return super().read(size)
+
+
+class _RangeSFTPClient(FakeSFTPClient):
+    def __init__(self, files):
+        super().__init__(files=files)
+        self.reads: list = []
+
+    def open(self, path, mode="r"):
+        assert mode == "rb"
+        return _SeekableRemoteFile(self._files[path], self.reads)
+
+
+def test_read_range_reads_only_from_the_offset(monkeypatch):
+    sftp = _RangeSFTPClient({"/var/log/appname/app.log": b"line one\nline two\n"})
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    assert ssh_module.read_range(_source(), "app.log", 9, 1000, 4) == (18, b"line", b"line two\n")
+    # The head, then the range: nothing in between is read.
+    assert sftp.reads == [(0, 4), (9, 9)]
+    sftp.reads.clear()
+    assert ssh_module.read_range(_source(), "app.log", 18, 1000) == (18, b"", b"")
+    assert sftp.closed
+
+
+def test_read_range_refuses_a_link_out_of_the_base(monkeypatch):
+    sftp = _RangeSFTPClient({"/etc/shadow": b"secret"})
+    sftp._symlinks = {"/var/log/appname/app.log": "/etc/shadow"}
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+    with pytest.raises(ssh_module.PathOutsideBaseError):
+        ssh_module.read_range(_source(), "app.log", 0, 10)

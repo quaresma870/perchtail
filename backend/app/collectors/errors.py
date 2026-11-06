@@ -15,6 +15,7 @@ from app import source_roots
 from app.collectors.base import (
     FetchTooLargeError,
     PathOutsideBaseError,
+    RangeNotSupportedError,
     SourceAuthError,
     SourceError,
     SourceHostKeyError,
@@ -230,7 +231,7 @@ def translate_local(exc: BaseException) -> SourceError | None:
     return _common(exc)
 
 
-_PASS_THROUGH = (SourceError, FetchTooLargeError, PathOutsideBaseError)
+_PASS_THROUGH = (SourceError, FetchTooLargeError, PathOutsideBaseError, RangeNotSupportedError)
 
 
 @contextmanager
@@ -272,6 +273,13 @@ class TranslatingConnector:
             if source_roots.is_multi_root(source):
                 source, relative_path = source_roots.split(source, relative_path)
             return self._module.fetch_file(source, relative_path, destination)
+
+    def read_range(self, source, relative_path: str, offset: int, length: int, head: int = 0):
+        """Incremental follow (#254): a RangeRead (collectors/base.py)."""
+        with translated(self._translate):
+            if source_roots.is_multi_root(source):
+                source, relative_path = source_roots.split(source, relative_path)
+            return self._module.read_range(source, relative_path, offset, length, head)
 
     @contextmanager
     def local_copy(self, source, relative_path: str):
