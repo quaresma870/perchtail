@@ -97,6 +97,9 @@ class User(SQLModel, table=True):
     # The email is stored lowercased and is unique (app/profile.py).
     display_name: str | None = None
     email: str | None = Field(default=None, unique=True, index=True)
+    # Display preferences that follow the user (#273, app/preferences.py):
+    # explorer sort order, connections list/tree view. Null = defaults.
+    preferences: dict | None = Field(default=None, sa_column=Column(JSON))
     role_id: int = Field(foreign_key="role.id")
     active: bool = True
     auth_provider: AuthProviderType = AuthProviderType.local

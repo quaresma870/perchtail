@@ -62,6 +62,9 @@ class BrowseEntry(BaseModel):
     is_dir: bool
     size: int
     is_archive: bool
+    # Last modification, seconds since the epoch (#273); null when the
+    # source doesn't say.
+    mtime: float | None = None
 
 
 def _connector(source: Source):
@@ -264,6 +267,7 @@ def browse(
                 is_dir=child.is_dir,
                 size=child.size,
                 is_archive=False,
+                mtime=child.mtime,
             )
             for child in children
             # Same filter as regular listings: files through the rule chain,
@@ -286,6 +290,7 @@ def browse(
             is_dir=entry.is_dir,
             size=entry.size,
             is_archive=(not entry.is_dir) and is_archive(entry.name),
+            mtime=entry.mtime,
         )
         for entry in entries
     ]

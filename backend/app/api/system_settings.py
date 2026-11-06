@@ -19,6 +19,9 @@ require_manage = require_global_capability(
 )
 
 
+ExplorerSort = Literal["name_asc", "name_desc", "mtime_desc", "mtime_asc", "size_desc"]
+
+
 class SystemSettingsPublic(BaseModel):
     search_view_enabled: bool
     audit_view_enabled: bool
@@ -35,6 +38,9 @@ class SystemSettingsPublic(BaseModel):
     password_history: int
     password_required_classes: int
     password_max_age_days: int
+    # Explorer (#272, #273).
+    explorer_sort_default: ExplorerSort
+    explorer_refresh_seconds: int
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -64,6 +70,9 @@ class SystemSettingsUpdate(BaseModel):
     password_max_age_days: int | None = Field(
         default=None, ge=0, le=password_policy.MAX_AGE_DAYS_CEILING
     )
+    explorer_sort_default: ExplorerSort | None = None
+    # 0 = off; otherwise at least 5 s, so open folders can't hammer sources.
+    explorer_refresh_seconds: int | None = Field(default=None, ge=0, le=3600)
 
 
 _PASSWORD_INTS = (
@@ -81,6 +90,8 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         audit_retention_days=system_settings.get_int(session, "audit_retention_days"),
         source_max_roots=max_roots(session),
         connections_view_default=system_settings.get_choice(session, "connections_view_default"),
+        explorer_sort_default=system_settings.get_choice(session, "explorer_sort_default"),
+        explorer_refresh_seconds=system_settings.get_int(session, "explorer_refresh_seconds"),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
     )
 
@@ -113,6 +124,10 @@ def update_system_settings(
     max_length = changed.get(
         "password_max_length", system_settings.get_int(session, "password_max_length")
     )
+    if 0 < changed.get("explorer_refresh_seconds", 0) < 5:
+        raise HTTPException(
+            status_code=422, detail="Refresh open folders every 5 seconds at least, or 0 for off"
+        )
     if min_length > max_length:
         raise HTTPException(
             status_code=422,

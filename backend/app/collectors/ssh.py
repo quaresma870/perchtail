@@ -208,6 +208,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                 child_path = f"{relative_path}/{attr.filename}" if relative_path else attr.filename
                 mode = attr.st_mode or 0
                 size = attr.st_size or 0
+                mtime = getattr(attr, "st_mtime", None)
                 if stat_module.S_ISLNK(mode):
                     try:
                         target = sftp.normalize(posixpath.join(remote_path, attr.filename))
@@ -218,11 +219,18 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                         continue  # dangling link: nothing to show
                     mode = target_attr.st_mode or 0
                     size = target_attr.st_size or 0
+                    mtime = getattr(target_attr, "st_mtime", None)
                 is_dir = stat_module.S_ISDIR(mode)
                 if not is_entry_visible(child_path, is_dir, rules, case_insensitive=False):
                     continue
                 entries.append(
-                    DirEntry(name=attr.filename, path=child_path, is_dir=is_dir, size=size)
+                    DirEntry(
+                        name=attr.filename,
+                        path=child_path,
+                        is_dir=is_dir,
+                        size=size,
+                        mtime=float(mtime) if mtime is not None else None,
+                    )
                 )
             return entries
         finally:

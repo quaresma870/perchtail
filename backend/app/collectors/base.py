@@ -13,6 +13,9 @@ class DirEntry:
     path: str
     is_dir: bool
     size: int
+    # Last modification, as seconds since the epoch (#273); None when the
+    # source doesn't say (an agent older than 0.6).
+    mtime: float | None = None
 
 
 class SourceError(Exception):
