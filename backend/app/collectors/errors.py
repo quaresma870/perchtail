@@ -190,7 +190,11 @@ def translate_winrm(exc: BaseException) -> SourceError | None:
                 public_message="The WinRM account isn't allowed to use the JEA endpoint "
                 "(see docs/examples/jea)",
             )
-        if "configuration" in lowered and ("not found" in lowered or "cannot be found" in lowered):
+        # Windows names a missing endpoint by its resource URI (fault 2150858811),
+        # not as a missing "configuration".
+        if "ws-management catalog" in lowered or (
+            "configuration" in lowered and ("not found" in lowered or "cannot be found" in lowered)
+        ):
             return SourceError(text, public_message="The JEA endpoint wasn't found on the server")
         return SourceUnreachableError(text)
     if isinstance(exc, psrp_exc.WinRMError):

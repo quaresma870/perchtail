@@ -10,6 +10,7 @@ from app.collectors.base import (
     PathOutsideBaseError,
     SourceAuthError,
     SourcePermissionError,
+    SourceUnreachableError,
 )
 from app.collectors.errors import translate_winrm
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
@@ -219,3 +220,21 @@ def test_psrp_errors_are_translated():
     mapped = translate_winrm(denied)
     assert isinstance(mapped, SourcePermissionError)
     assert "JEA endpoint" in mapped.public_message
+
+
+def test_a_missing_endpoint_is_named():
+    """What pt-win answers for an endpoint name that isn't registered (lab, #169)."""
+    from pypsrp import exceptions as psrp_exc
+
+    missing = psrp_exc.WSManFaultError(
+        2150858811,
+        "192.168.77.10",
+        "The resource URI (http://schemas.microsoft.com/powershell/NaoExiste) "
+        "was not found in the WS-Management catalog.",
+        None,
+        None,
+        None,
+    )
+    mapped = translate_winrm(missing)
+    assert not isinstance(mapped, SourceUnreachableError)
+    assert mapped.public_message == "The JEA endpoint wasn't found on the server"
