@@ -143,7 +143,13 @@
     class:active={isActive}
     class:new={isNew}
   >
-    <button class="label" style="padding-left: {depth * 14}px" on:click={toggle}>
+    <!-- aria-label: the file name only, not the time shown next to it. -->
+    <button
+      class="label"
+      style="padding-left: {depth * 14}px"
+      aria-label={entry.name}
+      on:click={toggle}
+    >
       {#if canExpand}
         <span class="chevron">{expanded ? '▾' : '▸'}</span>
       {:else}

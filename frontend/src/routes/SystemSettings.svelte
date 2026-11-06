@@ -393,9 +393,9 @@
         {#if refreshError}
           <p class="error">{refreshError}</p>
         {/if}
-        <div class="retention-row">
+        <div class="interval-row">
           <input
-            class="input retention-input"
+            class="input interval-input"
             type="number"
             min="0"
             max="3600"
@@ -690,12 +690,14 @@
     align-self: flex-start;
   }
   .retention-row,
+  .interval-row,
   .limit-row {
     display: flex;
     align-items: center;
     gap: 0.5rem;
   }
   .retention-input,
+  .interval-input,
   .limit-input {
     width: 6rem;
   }
