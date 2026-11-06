@@ -3,6 +3,7 @@
   import { onMount } from 'svelte'
   import { authChecked, currentUser, hasCapability, logout, refreshCurrentUser } from './lib/auth'
   import { currentHash } from './lib/hash'
+  import { serverReachable } from './lib/server-status'
   import { closeAllTabs } from './lib/viewer-tabs'
   import { refreshSystemSettings, refreshSystemSettingsIfStale, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
@@ -139,6 +140,12 @@
     </nav>
   {/if}
 
+  {#if !$serverReachable}
+    <div class="server-banner" role="alert">
+      Can't reach PerchTail — retrying… Source statuses may be out of date until it answers.
+    </div>
+  {/if}
+
   {#if $authChecked}
     <div class="content">
       <Router {routes} />
@@ -195,6 +202,13 @@
   .username {
     font-size: 0.82rem;
     color: var(--text-faint);
+  }
+  .server-banner {
+    padding: 0.45rem 1.5rem;
+    background: var(--warning-soft);
+    color: var(--warning);
+    font-size: 0.85rem;
+    border-bottom: 1px solid var(--border-soft);
   }
   .content {
     flex: 1;

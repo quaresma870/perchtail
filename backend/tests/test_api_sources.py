@@ -918,3 +918,29 @@ def test_an_agent_older_than_the_server_is_flagged(session, admin_client, monkey
     assert flagged("0.6.0") == ("0.6.0", False)
     assert flagged("dev") == ("dev", False)  # a local build isn't compared
     assert flagged(None) == (None, False)
+
+
+def test_sources_carry_their_status(session, admin_client):
+    """#276: the explorer shows each source's reachability."""
+    customer = _make_customer(session)
+    remote = Source(
+        name="web01", customer_id=customer.id, protocol=Protocol.ssh, host="web01", base_path="/x"
+    )
+    agent = Source(
+        name="agent01", customer_id=customer.id, protocol=Protocol.agent, host="a", base_path="/x"
+    )
+    session.add_all([remote, agent])
+    session.commit()
+
+    body = admin_client.get(f"/sources/{remote.id}").json()
+    assert (body["status"], body["status_message"]) == ("unknown", None)
+
+    remote.status, remote.status_message = "failing", "The source isn't reachable"
+    session.add(remote)
+    session.commit()
+    body = admin_client.get(f"/sources/{remote.id}").json()
+    assert (body["status"], body["status_message"]) == ("failing", "The source isn't reachable")
+
+    # An agent source's status is its live connection.
+    body = admin_client.get(f"/sources/{agent.id}").json()
+    assert (body["status"], body["status_message"]) == ("failing", "The agent isn't connected")

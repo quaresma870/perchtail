@@ -127,6 +127,14 @@ class Source(SQLModel, table=True):
     # sends on connect (#215). Null until an agent that reports it (0.6 or
     # later) has connected.
     agent_version: str | None = None
+    # Reachability (#276), shared by everyone: "ok" or "failing", when it was
+    # last known, and the public reason when failing (never the raw error).
+    # Set by the background check and by every real operation on the source
+    # (app/source_status.py). Null until first known; agent sources use the
+    # live connection instead.
+    status: str | None = None
+    status_checked_at: datetime | None = None
+    status_message: str | None = None
     # Phase 3 full-text search (see app/search_index.py and ROADMAP.md):
     # opt-in, off by default — same "explicit opt-in, not on-by-default"
     # conservatism as the rule engine's zero-rules-matches-nothing default,

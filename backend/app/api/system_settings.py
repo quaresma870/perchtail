@@ -41,6 +41,8 @@ class SystemSettingsPublic(BaseModel):
     # Explorer (#272, #273).
     explorer_sort_default: ExplorerSort
     explorer_refresh_seconds: int
+    # Background source check (#276), minutes; 0 = off.
+    source_check_minutes: int
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -73,6 +75,7 @@ class SystemSettingsUpdate(BaseModel):
     explorer_sort_default: ExplorerSort | None = None
     # 0 = off; otherwise at least 5 s, so open folders can't hammer sources.
     explorer_refresh_seconds: int | None = Field(default=None, ge=0, le=3600)
+    source_check_minutes: int | None = Field(default=None, ge=0, le=1440)
 
 
 _PASSWORD_INTS = (
@@ -92,6 +95,7 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         connections_view_default=system_settings.get_choice(session, "connections_view_default"),
         explorer_sort_default=system_settings.get_choice(session, "explorer_sort_default"),
         explorer_refresh_seconds=system_settings.get_int(session, "explorer_refresh_seconds"),
+        source_check_minutes=system_settings.get_int(session, "source_check_minutes"),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
     )
 

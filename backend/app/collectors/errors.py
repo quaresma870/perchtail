@@ -235,6 +235,23 @@ _PASS_THROUGH = (SourceError, FetchTooLargeError, PathOutsideBaseError, RangeNot
 
 
 @contextmanager
+def tracked(source) -> Iterator[None]:
+    """Records the source's reachability from a real operation (#276): ok
+    when it worked, failing for an error about reaching the source; an
+    error about one file changes nothing. Re-raises whatever it sees."""
+    from app import source_status
+
+    source_id = getattr(source, "id", None)
+    try:
+        yield
+    except Exception as exc:
+        if source_status.is_connectivity_error(exc):
+            source_status.record(source_id, False, source_status.failure_message(exc))
+        raise
+    source_status.record(source_id, True)
+
+
+@contextmanager
 def translated(translate: Translator) -> Iterator[None]:
     try:
         yield
@@ -263,20 +280,20 @@ class TranslatingConnector:
     # virtual `label/...` tree.
 
     def list_directory(self, source, rules, relative_path: str = ""):
-        with translated(self._translate):
+        with tracked(source), translated(self._translate):
             if source_roots.is_multi_root(source):
                 return source_roots.list_directory(self._module, source, rules, relative_path)
             return self._module.list_directory(source, rules, relative_path)
 
     def fetch_file(self, source, relative_path: str, destination):
-        with translated(self._translate):
+        with tracked(source), translated(self._translate):
             if source_roots.is_multi_root(source):
                 source, relative_path = source_roots.split(source, relative_path)
             return self._module.fetch_file(source, relative_path, destination)
 
     def read_range(self, source, relative_path: str, offset: int, length: int, head: int = 0):
         """Incremental follow (#254): a RangeRead (collectors/base.py)."""
-        with translated(self._translate):
+        with tracked(source), translated(self._translate):
             if source_roots.is_multi_root(source):
                 source, relative_path = source_roots.split(source, relative_path)
             return self._module.read_range(source, relative_path, offset, length, head)
@@ -286,7 +303,7 @@ class TranslatingConnector:
         # Only the fetch is translated; exceptions from the caller's `with`
         # body propagate unchanged.
         with ExitStack() as stack:
-            with translated(self._translate):
+            with tracked(source), translated(self._translate):
                 if source_roots.is_multi_root(source):
                     source, relative_path = source_roots.split(source, relative_path)
                 local = stack.enter_context(self._module.local_copy(source, relative_path))

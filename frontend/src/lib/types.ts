@@ -83,6 +83,11 @@ export interface Source {
   // The version the agent reported (#215), and whether it's older than the server.
   agent_version: string | null
   agent_outdated: boolean
+  // Reachability (#276): last known, shared by every user; for an agent
+  // source, its live connection.
+  status: 'ok' | 'failing' | 'unknown'
+  status_checked_at: string | null
+  status_message: string | null
   search_indexing_enabled: boolean
   // What the current user may do on this source (#174); the backend still
   // enforces every action on its own.
@@ -231,6 +236,8 @@ export interface SystemSettings {
   // Explorer (#272, #273).
   explorer_sort_default: ExplorerSort
   explorer_refresh_seconds: number
+  // Background source check (#276), minutes; 0 = off.
+  source_check_minutes: number
 }
 
 export type ExplorerSort = 'name_asc' | 'name_desc' | 'mtime_desc' | 'mtime_asc' | 'size_desc'

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import Session, select
 
-from app import source_roots
+from app import source_roots, source_status
 from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
@@ -103,6 +103,12 @@ class SourcePublic(BaseModel):
     # files, for example).
     agent_version: str | None
     agent_outdated: bool
+    # Reachability (#276): "ok", "failing" or "unknown"; for an agent source,
+    # its live connection ("ok" connected, "failing" not). When it was last
+    # known, and the public reason when failing.
+    status: str
+    status_checked_at: datetime | None
+    status_message: str | None
     search_indexing_enabled: bool
     # What the requesting user may do on this source (view, download,
     # manage_rules, run_now), so the UI can hide actions it would refuse --
@@ -180,6 +186,21 @@ def _folder_path(
     return [FolderPathEntry(id=f.id, name=f.name) for f in chain]
 
 
+def _status_fields(source: Source) -> dict:
+    if source.protocol == Protocol.agent:
+        connected = get_agent_registry().is_connected(source.id)
+        return {
+            "status": "ok" if connected else "failing",
+            "status_checked_at": source.agent_last_seen_at,
+            "status_message": None if connected else "The agent isn't connected",
+        }
+    return {
+        "status": source.status or "unknown",
+        "status_checked_at": source.status_checked_at,
+        "status_message": source.status_message,
+    }
+
+
 def _to_public(
     session: Session,
     source: Source,
@@ -218,6 +239,7 @@ def _to_public(
         agent_os=source.agent_os,
         agent_version=source.agent_version,
         agent_outdated=is_newer(APP_VERSION, source.agent_version),
+        **_status_fields(source),
         search_indexing_enabled=source.search_indexing_enabled,
         my_capabilities=(
             [c for c in Capability if resolve_capability(session, user, source, c)]
@@ -609,6 +631,11 @@ def update_source(
         changes["credential"] = "replaced"
     if tls_ca_changed:
         changes["tls_ca_pem"] = "replaced" if source.tls_ca_pem else "removed"
+    if location_changed or payload.credential is not None or tls_ca_changed:
+        # How the source is reached changed: the old status says nothing
+        # about the new settings (#276).
+        source.status = source.status_checked_at = source.status_message = None
+        source_status.forget(source.id)
     session.add(source)
     record_audit_event(
         session,
@@ -672,20 +699,13 @@ def check_connection(
         return ConnectionCheckResult(ok=False, detail=f"protocol {source.protocol} not supported")
 
     # Each root of a multi-root source is checked on its own (#161), so the
-    # answer names the folder that fails rather than just "failed".
+    # answer names the folder that fails rather than just "failed". The
+    # result is also the source's status for everyone (#276).
     roots = source_roots.roots_of(source) or [{"label": None, "path": source.base_path}]
-    failures = []
-    for root in roots:
-        target = source_roots.with_base_path(source, root["path"])
-        try:
-            connector.list_directory(target, [], "")
-        except Exception as exc:  # noqa: BLE001 - surfaced to the caller, not swallowed
-            logger.warning(
-                "source.check.failed", source_id=source.id, root=root["label"], error=str(exc)
-            )
-            failures.append(_check_failure_message(source, root, exc, user))
-
-    if failures:
+    failed = source_status.check(source, connector)
+    source_status.record_check(source.id, failed)
+    if failed:
+        failures = [_check_failure_message(source, root, exc, user) for root, exc in failed]
         return ConnectionCheckResult(ok=False, detail="; ".join(failures))
     if len(roots) > 1:
         return ConnectionCheckResult(ok=True, detail=f"Connected ({len(roots)} folders)")
@@ -828,7 +848,9 @@ def _picker_source(session: Session, payload: FolderPickRequest) -> Source:
         else (saved.tls_ca_pem if saved else None)
     )
     return Source(
-        id=saved.id if saved else None,
+        # No id: this is a draft of the settings, so what it finds mustn't be
+        # recorded as the saved source's status (#276).
+        id=None,
         name=saved.name if saved else "picker",
         protocol=protocol,
         host=host,

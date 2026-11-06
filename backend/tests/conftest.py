@@ -61,6 +61,13 @@ def _reset_login_throttle():
     auth_events.reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _no_source_status_writes(monkeypatch):
+    # app/source_status.py writes through app.db.engine, which tests don't
+    # point at their database; tests/test_source_status.py turns it on.
+    monkeypatch.setattr("app.source_status.ENABLED", False)
+
+
 @pytest.fixture()
 def session():
     # StaticPool: FastAPI's TestClient runs the app in a separate thread, and
