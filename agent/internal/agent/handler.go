@@ -66,7 +66,9 @@ func HandleList(basePath, relPath string) ([]DirEntryWire, error) {
 		if isDir {
 			size = 0
 		}
-		result = append(result, DirEntryWire{Name: entry.Name(), IsDir: isDir, Size: size})
+		result = append(result, DirEntryWire{
+			Name: entry.Name(), IsDir: isDir, Size: size, MTimeMs: info.ModTime().UnixMilli(),
+		})
 	}
 	return result, nil
 }

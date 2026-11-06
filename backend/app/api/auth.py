@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
-from app import auth_events, password_policy, profile
+from app import auth_events, password_policy, preferences, profile
 from app.audit import record_audit_event
 from app.auth import mfa
 from app.auth.models import (
@@ -90,6 +90,14 @@ def password_policy_error(exc: password_policy.PasswordPolicyError) -> HTTPExcep
     )
 
 
+class PreferencesUpdate(BaseModel):
+    """PATCH /auth/preferences: a value sets the choice, null clears it back
+    to the System default, an omitted key is left as it is."""
+
+    explorer_sort: str | None = None
+    connections_view: str | None = None
+
+
 class ProfileUpdate(BaseModel):
     """PATCH /auth/me: an omitted field is left as it is; an empty string
     clears it."""
@@ -124,6 +132,9 @@ class UserPublic(BaseModel):
     display_name: str | None
     email: str | None
     auth_provider: AuthProviderType
+    # The display choices this user made (#273); anything missing follows
+    # the System default (explorer_sort_default, connections_view_default).
+    preferences: dict[str, str]
     role_id: int
     active: bool
     must_change_password: bool
@@ -142,6 +153,7 @@ class UserPublic(BaseModel):
             display_name=user.display_name,
             email=user.email,
             auth_provider=user.auth_provider,
+            preferences=preferences.own_choices(user),
             role_id=user.role_id,
             active=user.active,
             must_change_password=user.must_change_password,
@@ -340,6 +352,24 @@ def update_my_profile(
         profile.apply_profile(session, user, actor_id=user.id, changes=changes)
     except profile.ProfileError as exc:
         raise profile_error(exc) from exc
+    session.commit()
+    session.refresh(user)
+    return UserPublic.from_user(user)
+
+
+@router.patch("/preferences", response_model=UserPublic)
+def update_my_preferences(
+    payload: PreferencesUpdate,
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    """The signed-in user's own display preferences (#273). Not audited:
+    they change nothing but how this user's screens look."""
+    try:
+        preferences.update(user, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    session.add(user)
     session.commit()
     session.refresh(user)
     return UserPublic.from_user(user)

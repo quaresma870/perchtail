@@ -81,8 +81,13 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         is_dir = child.is_dir()
         if not is_entry_visible(child_path, is_dir, rules, case_insensitive=False):
             continue
-        size = 0 if is_dir else child.stat().st_size
-        entries.append(DirEntry(name=child.name, path=child_path, is_dir=is_dir, size=size))
+        info = child.stat()
+        size = 0 if is_dir else info.st_size
+        entries.append(
+            DirEntry(
+                name=child.name, path=child_path, is_dir=is_dir, size=size, mtime=info.st_mtime
+            )
+        )
     return entries
 
 

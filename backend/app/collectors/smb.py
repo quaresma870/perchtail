@@ -102,6 +102,16 @@ def _require_no_reparse_points(source: Source, relative_path: str, kwargs: dict)
             raise PathOutsideBaseError(relative_path)
 
 
+def _mtime(smb_info) -> float | None:
+    """last_write_time off the listing (a UTC datetime in smbprotocol), as
+    seconds since the epoch (#273)."""
+    written = getattr(smb_info, "last_write_time", None)
+    try:
+        return written.timestamp() if written is not None else None
+    except (AttributeError, OSError, OverflowError, ValueError):
+        return None
+
+
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:
     """Live directory listing filtered through the rule engine. Junctions
     and symlinks are left out, without following them: one that can't be
@@ -127,7 +137,15 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
             # straight off the listing, and SMBDirEntry.stat() would open a
             # session of its own without this request's credentials.
             size = 0 if is_dir else info.smb_info.end_of_file
-            entries.append(DirEntry(name=info.name, path=child_path, is_dir=is_dir, size=size))
+            entries.append(
+                DirEntry(
+                    name=info.name,
+                    path=child_path,
+                    is_dir=is_dir,
+                    size=size,
+                    mtime=_mtime(info.smb_info),
+                )
+            )
         return entries
 
 

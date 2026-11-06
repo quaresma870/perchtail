@@ -20,6 +20,9 @@ export interface CurrentUser {
   display_name: string | null
   email: string | null
   auth_provider: 'local' | 'oidc' | 'saml'
+  // The display choices this user made (#273); missing keys follow the
+  // System defaults.
+  preferences: Partial<Record<'explorer_sort' | 'connections_view', string>>
   role_id: number
   active: boolean
   must_change_password: boolean
@@ -159,6 +162,9 @@ export interface BrowseEntry {
   is_dir: boolean
   size: number
   is_archive: boolean
+  // Last modification, seconds since the epoch (#273); null when the
+  // source doesn't say (push agents older than 0.6).
+  mtime?: number | null
 }
 
 export interface ConnectionCheckResult {
@@ -222,7 +228,12 @@ export interface SystemSettings {
   password_history: number
   password_required_classes: number
   password_max_age_days: number
+  // Explorer (#272, #273).
+  explorer_sort_default: ExplorerSort
+  explorer_refresh_seconds: number
 }
+
+export type ExplorerSort = 'name_asc' | 'name_desc' | 'mtime_desc' | 'mtime_asc' | 'size_desc'
 
 // GET /auth/password-policy (#245): the rules a new password must follow.
 export interface PasswordPolicy {

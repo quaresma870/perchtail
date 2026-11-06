@@ -18,6 +18,7 @@ function user(overrides: Partial<CurrentUser> = {}): CurrentUser {
     display_name: null,
     email: null,
     auth_provider: 'local',
+    preferences: {},
     role_id: 2,
     active: true,
     must_change_password: false,

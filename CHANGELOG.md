@@ -44,6 +44,26 @@ release ships (0.x releases may include breaking changes between minors).
   Admins see name and email in the Users list, can set them when
   creating a user and edit them for local accounts. The password policy
   also refuses passwords containing the name or email.
+- **Explorer: open folders refresh themselves** (#272). The folders you
+  have open are listed again every 30 seconds (Settings → System, 0 to
+  turn it off): only the list of files, never their content, one folder
+  at a time per source, not while the browser tab is hidden, and less
+  often for a source that just failed. New files are highlighted for a
+  moment; files that are gone disappear; open subfolders stay open. A ⟳
+  button on each open source and folder lists it right away, and
+  re-opening a folder lists it again.
+- **Files that disappear** (#272). Opening a file that's no longer on the
+  source says so (no longer "wasn't found, or is hidden by the rules")
+  and drops it from its folder. A file you're following that disappears
+  stops Follow; its tab stays open with what it had, marked, with a note.
+- **Explorer: file times and order** (#273). Each file shows when it was
+  last modified, and a sort button orders folders by name (A→Z, Z→A),
+  newest or oldest first, or size; folders come first. The default is
+  set under Settings → System; each user's own choice is kept on the
+  server and follows them, as does the list/tree choice for connections
+  (a choice this browser remembered moves there on first use). Push
+  agents older than this release don't report times: their files show
+  none and sort last by time.
 
 ### Changed
 - **Follow fetches only the new lines** (#254). Instead of re-fetching

@@ -24,6 +24,12 @@ BOOL_DEFAULTS: dict[str, str] = {
 # Literal, set_choice re-checks).
 CHOICE_DEFAULTS: dict[str, tuple[str, tuple[str, ...]]] = {
     "connections_view_default": ("list", ("list", "tree")),
+    # How the explorer orders a folder by default (#273); each user can pick
+    # their own (app/preferences.py).
+    "explorer_sort_default": (
+        "name_asc",
+        ("name_asc", "name_desc", "mtime_desc", "mtime_asc", "size_desc"),
+    ),
 }
 
 # Separate from BOOL_DEFAULTS since get_all_bool()/get_bool() would silently
@@ -48,6 +54,9 @@ INT_DEFAULTS: dict[str, str] = {
     "password_history": "0",  # nosec B105
     "password_required_classes": "0",  # nosec B105
     "password_max_age_days": "0",  # nosec B105
+    # How often the explorer re-lists the folders a user has open (#272), in
+    # seconds; 0 turns it off. Only the listing, never file content.
+    "explorer_refresh_seconds": "30",
 }
 
 

@@ -1,6 +1,9 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte'
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte'
   import { api, ApiError } from '../api'
+  import { registerFolder } from '../explorer-refresh'
+  import { sortEntries } from '../explorer-sort'
+  import { explorerSort } from '../preferences'
   import type { BrowseEntry, Source } from '../types'
   import FolderTree from './FolderTree.svelte'
   import { explorerExpanded, setExpanded } from '../viewer-tabs'
@@ -40,10 +43,59 @@
     }
   }
 
+  // Auto-refresh while open (#272): only the listing. New entries are
+  // highlighted for a few seconds.
+  let newPaths = new Set<string>()
+  let newTimer: ReturnType<typeof setTimeout> | null = null
+  let refreshing = false
+
+  async function refresh(): Promise<boolean> {
+    if (refreshing) return true
+    refreshing = true
+    try {
+      // refresh=true: re-listing isn't "opening the source" again, so it
+      // isn't audited as source.open.
+      const fresh = await api.get<BrowseEntry[]>(`/sources/${source.id}/browse?path=&refresh=true`)
+      const known = new Set(entries.map((e) => e.path))
+      const added = fresh.filter((e) => !known.has(e.path)).map((e) => e.path)
+      entries = fresh
+      error = ''
+      if (added.length > 0) {
+        newPaths = new Set(added)
+        if (newTimer) clearTimeout(newTimer)
+        newTimer = setTimeout(() => (newPaths = new Set()), 5000)
+      }
+      refreshError = ''
+      return true
+    } catch {
+      return false
+    } finally {
+      refreshing = false
+    }
+  }
+
+  let refreshError = ''
+  async function refreshNow() {
+    refreshError = (await refresh()) ? '' : "Couldn't refresh this source"
+  }
+
+  let unregister: (() => void) | null = null
+  $: if (expanded && loaded && !unregister) {
+    unregister = registerFolder({ sourceId: source.id, path: '', refresh })
+  } else if (unregister && !(expanded && loaded)) {
+    unregister()
+    unregister = null
+  }
+  onDestroy(() => {
+    unregister?.()
+    if (newTimer) clearTimeout(newTimer)
+  })
+
   async function toggle() {
     expanded = !expanded
     setExpanded(`source:${source.id}`, expanded)
     if (expanded && !loaded) await load()
+    else if (expanded) refresh()
   }
 
   function retry() {
@@ -61,6 +113,7 @@
 </script>
 
 <div class="source-node" bind:this={element}>
+  <div class="source-row">
   <button
     class="row source"
     class:expanded
@@ -79,9 +132,16 @@
       <span class="badge badge-accent">system</span>
     {/if}
   </button>
+  {#if expanded && loaded}
+    <button class="refresh" title="Refresh this source" aria-label="Refresh {source.name}" on:click={refreshNow}>⟳</button>
+  {/if}
+  </div>
 
   {#if expanded}
     <div class="tree-body">
+      {#if refreshError}
+        <div class="error" style="padding-left: {(depth + 1) * 14}px">{refreshError}</div>
+      {/if}
       {#if loading}
         <div class="hint" style="padding-left: {(depth + 1) * 14}px">Loading…</div>
       {:else if error}
@@ -90,10 +150,11 @@
           <button class="link" on:click={retry}>Try again</button>
         </div>
       {:else}
-        {#each entries as entry (entry.path)}
+        {#each sortEntries(entries, $explorerSort) as entry (entry.path)}
           <FolderTree
             sourceId={source.id}
             {entry}
+            isNew={newPaths.has(entry.path)}
             depth={depth + 1}
             {activeKey}
             {canDownload}
@@ -111,6 +172,30 @@
 </div>
 
 <style>
+  .source-row {
+    display: flex;
+    align-items: center;
+  }
+  .source-row .row {
+    flex: 1;
+    min-width: 0;
+  }
+  .refresh {
+    flex: 0 0 auto;
+    border: none;
+    background: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 0 0.5rem;
+    visibility: hidden;
+  }
+  .source-row:hover .refresh {
+    visibility: visible;
+  }
+  .refresh:hover {
+    color: var(--accent-hover);
+  }
   .row {
     display: flex;
     align-items: center;

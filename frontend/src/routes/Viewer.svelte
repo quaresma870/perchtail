@@ -11,6 +11,14 @@
   import { buildConnectionTree } from '../lib/connection-tree'
   import { filterConnections } from '../lib/connection-filter'
   import { readFetchFailure, type FetchProblem } from '../lib/fetch-errors'
+  import { parentPath, refreshFolder, startAutoRefresh, stopAutoRefresh } from '../lib/explorer-refresh'
+  import { EXPLORER_SORTS } from '../lib/explorer-sort'
+  import {
+    connectionsViewPreference,
+    explorerSort,
+    migrateLegacyViewChoice,
+    savePreference,
+  } from '../lib/preferences'
   import {
     countLines,
     FOLLOW_INTERVALS_MS,
@@ -40,7 +48,6 @@
 
   // How often Follow polls (#254): 1 s to 30 s, remembered per browser.
   let followIntervalMs = loadFollowInterval()
-  const VIEW_PREF_KEY = 'perchtail.connectionsView'
 
   const focusSourceId = params.sourceId ? Number(params.sourceId) : null
 
@@ -87,21 +94,17 @@
   $: filteredAllSources = filterConnections(allSources, connectionsQuery)
 
   // List or tree: the admin's default (Settings -> System), and -- when
-  // switching is allowed -- each browser remembers its own last choice (#156).
-  let connectionsView: 'list' | 'tree' = 'list'
-  let viewChosenLocally = false
+  // switching is allowed -- each user's own choice, kept on the server so
+  // it follows them (#156, #273).
   $: switchable = $systemSettings.connections_view_switchable
-  $: if (!switchable || !viewChosenLocally) connectionsView = $systemSettings.connections_view_default
+  $: connectionsView = switchable ? $connectionsViewPreference : $systemSettings.connections_view_default
 
   function chooseView(view: 'list' | 'tree') {
-    connectionsView = view
-    viewChosenLocally = true
-    try {
-      localStorage.setItem(VIEW_PREF_KEY, view)
-    } catch {
-      // storage unavailable: the choice just isn't remembered
-    }
+    savePreference('connections_view', view)
   }
+
+  // Open folders re-list themselves (#272); the interval is a System setting.
+  $: startAutoRefresh($systemSettings.explorer_refresh_seconds)
 
   $: expandedTreeIds = new Set(
     [...$explorerExpanded].filter((k) => k.startsWith('tree:')).map((k) => k.slice(5)),
@@ -176,6 +179,9 @@
       const response = await fetch(openUrl(sourceId, path, member), { credentials: 'include' })
       if (!response.ok) {
         const problem = await readFetchFailure(response, name)
+        // Gone from the source (#272): its folder is listed again, so it
+        // leaves the tree.
+        if (problem.missing) refreshFolder(sourceId, parentPath(path))
         notice = {
           ...problem,
           retry: problem.retryable
@@ -381,6 +387,10 @@
       })
       if (!response.ok) {
         const problem = await readFetchFailure(response, tab.name)
+        if (problem.missing) {
+          markMissing(tab)
+          return
+        }
         notice = { ...problem, retry: problem.retryable ? reloadActiveTab : undefined }
         return
       }
@@ -393,7 +403,7 @@
       setState({
         tabs: tabs.map((t) =>
           t.key === tab.key
-            ? { ...t, content, scratchKey, byteSize: bytes.byteLength, followHead, newLines: 0 }
+            ? { ...t, content, scratchKey, byteSize: bytes.byteLength, followHead, newLines: 0, missing: false }
             : t,
         ),
       })
@@ -422,6 +432,18 @@
   // A burst bigger than one answer is read in a few more right away.
   const FOLLOW_ROUNDS_PER_TICK = 8
 
+  // The file left the source (#272): Follow stops, the tab keeps what it
+  // had and is marked, its folder is listed again, and a note says so once.
+  function markMissing(tab: Tab) {
+    updateTab(tab.key, { following: false, missing: true })
+    followStarted.delete(tab.key)
+    refreshFolder(tab.sourceId, parentPath(tab.path))
+    notice = {
+      message: `${tab.name} no longer exists on the source. The tab keeps what it had; Follow stopped.`,
+      retryable: false,
+    }
+  }
+
   function updateTab(key: string, patch: Partial<Tab>) {
     setState({ tabs: tabs.map((t) => (t.key === key ? { ...t, ...patch } : t)) })
   }
@@ -445,7 +467,8 @@
       }
       if (!response.ok) {
         const problem = await readFetchFailure(response, tab.name)
-        notice = problem
+        if (problem.missing) markMissing(tab)
+        else notice = problem
         return
       }
       followStarted.add(tab.key)
@@ -559,15 +582,7 @@
   }
 
   onMount(async () => {
-    try {
-      const stored = localStorage.getItem(VIEW_PREF_KEY)
-      if (stored === 'list' || stored === 'tree') {
-        connectionsView = stored
-        viewChosenLocally = true
-      }
-    } catch {
-      // storage unavailable
-    }
+    migrateLegacyViewChoice()
     window.addEventListener('keydown', handleKeydown)
     await loadSources()
     for (const tab of tabs) ensureSeverityPatterns(tab.sourceId)
@@ -588,6 +603,7 @@
     window.removeEventListener('keydown', handleKeydown)
     if (copyStatusTimer) clearTimeout(copyStatusTimer)
     stopFollowTimer()
+    stopAutoRefresh()
   })
 </script>
 
@@ -618,6 +634,17 @@
           </button>
         </div>
       {/if}
+      <select
+        class="sort-select"
+        aria-label="Sort files"
+        title="How folders are ordered (your choice; the default is set under Settings → System)"
+        value={$explorerSort}
+        on:change={(e) => savePreference('explorer_sort', e.currentTarget.value)}
+      >
+        {#each EXPLORER_SORTS as option}
+          <option value={option.value}>{option.label}</option>
+        {/each}
+      </select>
     </div>
     <div class="explorer-body">
       {#if loading}
@@ -662,7 +689,7 @@
       <div class="tabs">
         {#each tabs as tab (tab.key)}
           <div class="tab" class:active={tab.key === activeKey} title={`${tab.sourceName} › ${tab.member ? `${tab.path} › ${tab.member}` : tab.path}`}>
-            <button class="tab-label" on:click={() => handleTabClick(tab)}>
+            <button class="tab-label" class:missing={tab.missing} on:click={() => handleTabClick(tab)}>
               <span class="source-dot" style="background: hsl({sourceHue(tab.sourceId)} 65% 55%)"></span>
               {#if sourceNames}
                 <span class="tab-source">{tab.sourceName} ›</span>
@@ -1085,6 +1112,14 @@
     cursor: pointer;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
   }
+  .sort-select {
+    background: var(--bg-elevated-2);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 0.75rem;
+    padding: 0.2rem 0.25rem;
+  }
   .follow-interval {
     background: var(--bg-elevated-2);
     color: var(--text-muted);
@@ -1119,6 +1154,10 @@
     font-size: 0.8rem;
     cursor: pointer;
     color: var(--text-muted);
+  }
+  .tab-label.missing {
+    text-decoration: line-through;
+    opacity: 0.7;
   }
   .tab.active .tab-label {
     color: var(--text);

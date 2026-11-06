@@ -52,6 +52,8 @@ _DEFAULTS = {
     "password_history": 0,
     "password_required_classes": 0,
     "password_max_age_days": 0,
+    "explorer_sort_default": "name_asc",
+    "explorer_refresh_seconds": 30,
 }
 
 

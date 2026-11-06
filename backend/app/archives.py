@@ -2,6 +2,7 @@ import gzip
 import tarfile
 import zipfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
@@ -35,6 +36,17 @@ class ArchiveMember:
     name: str
     size: int
     is_dir: bool
+    # Seconds since the epoch, as the archive records it (#273).
+    mtime: float | None = None
+
+
+def _zip_mtime(date_time: tuple) -> float | None:
+    """A zip member's DOS timestamp (no time zone: taken as UTC) in
+    seconds since the epoch."""
+    try:
+        return datetime(*date_time, tzinfo=UTC).timestamp()
+    except (TypeError, ValueError):
+        return None
 
 
 def is_archive(filename: str) -> bool:
@@ -78,7 +90,9 @@ def tree_children(members: list[ArchiveMember], member_dir: str) -> list[Archive
         if tail or member.is_dir:
             children.setdefault(child, ArchiveMember(name=child, size=0, is_dir=True))
         else:
-            children[child] = ArchiveMember(name=child, size=member.size, is_dir=False)
+            children[child] = ArchiveMember(
+                name=child, size=member.size, is_dir=False, mtime=member.mtime
+            )
     return sorted(children.values(), key=lambda m: (not m.is_dir, m.name.lower()))
 
 
@@ -98,13 +112,23 @@ def list_members(local_path: Path, filename: str) -> list[ArchiveMember]:
     if filename.endswith(".zip"):
         with zipfile.ZipFile(local_path) as zf:
             return [
-                ArchiveMember(name=info.filename, size=info.file_size, is_dir=info.is_dir())
+                ArchiveMember(
+                    name=info.filename,
+                    size=info.file_size,
+                    is_dir=info.is_dir(),
+                    mtime=_zip_mtime(info.date_time),
+                )
                 for info in zf.infolist()
             ]
     if filename.endswith(_TAR_SUFFIXES):
         with tarfile.open(local_path, mode="r:gz") as tf:
             return [
-                ArchiveMember(name=member.name, size=member.size, is_dir=member.isdir())
+                ArchiveMember(
+                    name=member.name,
+                    size=member.size,
+                    is_dir=member.isdir(),
+                    mtime=float(member.mtime) if member.mtime else None,
+                )
                 for member in tf.getmembers()
             ]
     raise ValueError(f"Not a supported archive: {filename}")

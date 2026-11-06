@@ -42,6 +42,9 @@ type DirEntryWire struct {
 	Name  string `json:"name"`
 	IsDir bool   `json:"is_dir"`
 	Size  int64  `json:"size"`
+	// Last modification in Unix milliseconds (#273, agents from 0.6), for
+	// sorting the explorer by time.
+	MTimeMs int64 `json:"mtime_ms"`
 }
 
 // ListResult answers a "list" command.

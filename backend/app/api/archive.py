@@ -62,6 +62,9 @@ class BrowseEntry(BaseModel):
     is_dir: bool
     size: int
     is_archive: bool
+    # Last modification, seconds since the epoch (#273); null when the
+    # source doesn't say.
+    mtime: float | None = None
 
 
 def _connector(source: Source):
@@ -225,11 +228,14 @@ def _materialize(
 def browse(
     source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
     path: str = "",
+    # Set by the explorer's refresh (#272): re-listing a source the user
+    # already has open isn't opening it again, so it isn't audited.
+    refresh: bool = False,
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> list[BrowseEntry]:
     _require_safe_path(source, path)
-    if path == "":
+    if path == "" and not refresh:
         # Root browse == "opened this source" -- the connections home page's
         # Recent column (GET /sources/recent) reads this back. Deliberately
         # not logged on every sub-directory expand, only the first hop into
@@ -264,6 +270,7 @@ def browse(
                 is_dir=child.is_dir,
                 size=child.size,
                 is_archive=False,
+                mtime=child.mtime,
             )
             for child in children
             # Same filter as regular listings: files through the rule chain,
@@ -286,6 +293,7 @@ def browse(
             is_dir=entry.is_dir,
             size=entry.size,
             is_archive=(not entry.is_dir) and is_archive(entry.name),
+            mtime=entry.mtime,
         )
         for entry in entries
     ]

@@ -142,7 +142,10 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         f"{{ Write-Output '{_NOT_A_DIRECTORY}'; exit 4 }}; "
         f"$j = Get-ChildItem -LiteralPath {_ps_quote(path)} | "
         "Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | "
-        "Select-Object Name, PSIsContainer, Length | ConvertTo-Json -Compress; "
+        # MTime (#273): last write, in Unix milliseconds (UTC).
+        "Select-Object Name, PSIsContainer, Length, "
+        "@{n='MTime';e={[DateTimeOffset]::new($_.LastWriteTimeUtc).ToUnixTimeMilliseconds()}} "
+        "| ConvertTo-Json -Compress; "
         "if ($j) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)) }"
     )
     try:
@@ -165,7 +168,9 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         if not is_entry_visible(child_path, is_dir, rules, case_insensitive=True):
             continue
         size = 0 if is_dir else int(item.get("Length") or 0)
-        entries.append(DirEntry(name=name, path=child_path, is_dir=is_dir, size=size))
+        mtime_ms = item.get("MTime")
+        mtime = mtime_ms / 1000 if isinstance(mtime_ms, int | float) else None
+        entries.append(DirEntry(name=name, path=child_path, is_dir=is_dir, size=size, mtime=mtime))
     return entries
 
 

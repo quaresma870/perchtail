@@ -31,8 +31,16 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
             child_path, raw["is_dir"], rules, case_insensitive=case_insensitive
         ):
             continue
+        # mtime_ms (#273): agents from 0.6 on; None from older ones.
+        mtime_ms = raw.get("mtime_ms")
         entries.append(
-            DirEntry(name=raw["name"], path=child_path, is_dir=raw["is_dir"], size=raw["size"])
+            DirEntry(
+                name=raw["name"],
+                path=child_path,
+                is_dir=raw["is_dir"],
+                size=raw["size"],
+                mtime=mtime_ms / 1000 if isinstance(mtime_ms, int) else None,
+            )
         )
     return entries
 
