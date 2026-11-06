@@ -69,7 +69,7 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 			_ = conn.WriteControl(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent stopping"),
 				time.Now().Add(time.Second))
-			conn.Close()
+			_ = conn.Close()
 		case <-done:
 		}
 	}()
@@ -114,7 +114,7 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 				// The connection is broken: closing it ends the read loop,
 				// and Run reconnects.
 				log.Printf("agent: write failed (%v), dropping the connection", err)
-				conn.Close()
+				_ = conn.Close()
 			}
 		}(cmd)
 	}
