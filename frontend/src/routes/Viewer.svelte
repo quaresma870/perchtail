@@ -185,7 +185,11 @@
         return false
       }
       const bytes = await response.arrayBuffer()
-      const content = new TextDecoder().decode(bytes)
+      // Streaming, so a character the file's end splits is completed by
+      // the first Follow answer (#254) instead of turning into two U+FFFD.
+      const decoder = new TextDecoder()
+      const content = decoder.decode(bytes, { stream: true })
+      followDecoders.set(key, decoder)
       const tab: Tab = {
         key,
         sourceId,
@@ -202,7 +206,7 @@
         format: 'none',
         following: false,
         byteSize: bytes.byteLength,
-        followHead: null,
+        followHead: response.headers.get('x-follow-head'),
         // A .gz file or an archive member is decompressed on the server: only
         // the whole of it can be reloaded.
         followMode: member || name.toLowerCase().endsWith('.gz') ? 'reload' : 'incremental',
@@ -381,13 +385,15 @@
         return
       }
       const bytes = await response.arrayBuffer()
-      const content = new TextDecoder().decode(bytes)
+      const decoder = new TextDecoder()
+      const content = decoder.decode(bytes, { stream: true })
       const scratchKey = response.headers.get('x-scratch-key')
-      followDecoders.delete(tab.key)
+      const followHead = response.headers.get('x-follow-head')
+      followDecoders.set(tab.key, decoder)
       setState({
         tabs: tabs.map((t) =>
           t.key === tab.key
-            ? { ...t, content, scratchKey, byteSize: bytes.byteLength, followHead: null, newLines: 0 }
+            ? { ...t, content, scratchKey, byteSize: bytes.byteLength, followHead, newLines: 0 }
             : t,
         ),
       })

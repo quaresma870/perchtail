@@ -262,7 +262,10 @@ def read_range(
         f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
         "try { $len = $f.Length; "
         f"$h = New-Object byte[] {head}; $hn = 0; "
-        "if ($h.Length -gt 0) { $hn = $f.Read($h, 0, $h.Length) }; "
+        # Read() may return less than asked: loop until the head is full or
+        # the file ends, or a short head would look like a rotated file.
+        "while ($hn -lt $h.Length) { $r = $f.Read($h, $hn, $h.Length - $hn); "
+        "if ($r -le 0) { break }; $hn += $r }; "
         f"$b = New-Object byte[] {length}; $n = 0; "
         f"if ({offset} -lt $len) {{ $f.Seek({offset}, 'Begin') | Out-Null; "
         "$n = $f.Read($b, 0, $b.Length) }; "
@@ -274,7 +277,13 @@ def read_range(
     except PathOutsideBaseError:
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
-    size_text, head_b64, data_b64 = output.split("|", 2)
-    return collector_base.RangeRead(
-        int(size_text), base64.b64decode(head_b64), base64.b64decode(data_b64)
-    )
+    try:
+        size_text, head_b64, data_b64 = output.splitlines()[-1].split("|", 2)
+        return collector_base.RangeRead(
+            int(size_text), base64.b64decode(head_b64), base64.b64decode(data_b64)
+        )
+    except (ValueError, IndexError) as exc:
+        raise collector_base.SourceError(
+            "unexpected answer from PowerShell",
+            public_message="The source sent an unexpected answer",
+        ) from exc

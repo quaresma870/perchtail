@@ -189,3 +189,31 @@ def test_each_poll_is_one_read_of_the_source(follow, monkeypatch):
         f.write(b"y" * 200)
     _poll(client, source, 5, head)
     assert len(calls) == 2
+
+
+def test_a_read_from_the_start_is_always_audited(session, follow):
+    client, source, log = follow
+    log.write_bytes(b"line\n")
+    _poll(client, source, 0)
+    _poll(client, source, 0)
+    events = session.exec(select(AuditLog).where(AuditLog.action == "file.follow")).all()
+    assert len(events) == 2
+
+
+def test_an_offset_an_agent_cant_take_is_refused(follow):
+    client, source, log = follow
+    log.write_bytes(b"line\n")
+    assert _poll(client, source, 2**62).status_code == 422
+
+
+def test_open_gives_the_head_the_first_poll_checks(follow):
+    client, source, log = follow
+    log.write_bytes(b"2026-11-06 old file, line one\n")
+    opened = client.get(f"/sources/{source.id}/open", params={"path": "app.log"})
+    head = opened.headers["x-follow-head"]
+    assert _poll(client, source, len(opened.content), head).headers.get("x-follow-reset") is None
+
+    # Rotated between the open and the first poll, already past the offset.
+    log.write_bytes(b"2026-11-07 new file, line one\n" * 3)
+    response = _poll(client, source, len(opened.content), head)
+    assert response.headers["x-follow-reset"] == "1"

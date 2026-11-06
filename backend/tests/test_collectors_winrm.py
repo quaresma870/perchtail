@@ -313,3 +313,17 @@ def test_read_range_seeks_and_reads_in_one_round_trip(fake_session):
     assert "'Read', 'ReadWrite'" in fake_session.scripts_run[0]
     winrm_module.read_range(_source(), "app.log", 0, 10**12)
     assert f"byte[] {1 << 20}" in fake_session.scripts_run[-1]
+
+
+def test_read_range_loops_for_the_head_and_refuses_garbage(fake_session):
+    script_text = {}
+
+    def handler(script):
+        script_text["last"] = script
+        return FakeResult(std_out=b"not the expected answer")
+
+    fake_session.handler = handler
+    with pytest.raises(winrm_module.collector_base.SourceError):
+        winrm_module.read_range(_source(), "app.log", 0, 10, 4)
+    # A short Read() mustn't leave the head short: it reads until full or EOF.
+    assert "while ($hn -lt $h.Length)" in script_text["last"]

@@ -362,6 +362,12 @@ def open_file(
     )
     session.commit()
     headers = {"X-Scratch-Key": key} if key else {}
+    if member is None and not is_transparent_gzip(path.rsplit("/", 1)[-1]):
+        # What the first Follow poll compares against (#254), so a file
+        # rotated between this open and that poll is caught too.
+        size = served_path.stat().st_size
+        with served_path.open("rb") as served:
+            headers["X-Follow-Head"] = _head_hash(served.read(FOLLOW_HEAD_BYTES), size)
     # Inline, not an attachment: this is what the viewer reads to display a
     # file, not a download endpoint (downloads go through /download, gated
     # by the `download` capability -- #174). nosniff (set app-wide) keeps
@@ -397,7 +403,8 @@ def _head_hash(start: bytes, offset: int) -> str:
 @router.get("/follow")
 def follow_file(
     path: str,
-    offset: int = Query(ge=0),
+    # Below 2**62: an agent reads it as an int64.
+    offset: int = Query(ge=0, lt=2**62),
     head: str | None = None,
     start: bool = False,
     source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
@@ -416,7 +423,9 @@ def follow_file(
 
     409 follow_unsupported for .gz files and archive members, and for an
     agent older than 0.6: the viewer reloads the whole file instead.
-    Audited once, on the first poll (`start`), not on every one."""
+    Audited when following starts (`start`) and whenever a read begins at
+    the start of the file, so a whole file can't be read through here
+    without a record; not on every poll."""
     _require_safe_path(source, path)
     if not path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
@@ -450,7 +459,7 @@ def follow_file(
     # as read, extended by the new bytes while the file is still short.
     start_bytes = first[:offset] + data if offset < FOLLOW_HEAD_BYTES else first
 
-    if start:
+    if start or offset == 0:
         record_audit_event(
             session,
             user_id=user.id,
