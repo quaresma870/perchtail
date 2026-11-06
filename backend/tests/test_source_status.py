@@ -139,3 +139,12 @@ def test_the_background_check_can_be_turned_off(db, monkeypatch):
     monkeypatch.setattr("app.collectors.registry.CONNECTORS", {Protocol.ssh: connector})
     source_status.run_source_checks()
     assert connector.checked == []
+
+
+def test_a_missing_folder_of_a_source_that_answers_keeps_it_ok(db):
+    source_id = _source(db)
+    root = {"label": "app", "path": "/var/log/app"}
+    source_status.record_check(source_id, [(root, SourceNotFoundError("no such folder"))])
+    assert _status(db, source_id)[0] == "ok"
+    source_status.record_check(source_id, [(root, SourceUnreachableError("timed out"))])
+    assert _status(db, source_id)[0] == "failing"

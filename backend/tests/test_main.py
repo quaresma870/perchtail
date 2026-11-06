@@ -25,6 +25,8 @@ def test_responses_carry_security_headers():
 
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["x-content-type-options"] == "nosniff"
+    # #276: the browser tells PerchTail's own 502s from a proxy's.
+    assert response.headers["x-perchtail"] == "1"
     assert response.headers["referrer-policy"] == "same-origin"
     csp = response.headers["content-security-policy"]
     assert "default-src 'self'" in csp

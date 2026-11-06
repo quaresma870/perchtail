@@ -52,3 +52,17 @@ describe('serverReachable', () => {
     expect(get(serverReachable)).toBe(true)
   })
 })
+
+describe('a 502 from PerchTail itself', () => {
+  it('is a failing source, not PerchTail being down', async () => {
+    const fromPerchTail = () =>
+      new Response('{"detail":"The source isn\'t reachable"}', {
+        status: 502,
+        headers: { 'X-PerchTail': '1' },
+      })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => fromPerchTail()))
+    await trackedFetch('/sources/1/browse')
+    await trackedFetch('/sources/1/browse')
+    expect(get(serverReachable)).toBe(true)
+  })
+})

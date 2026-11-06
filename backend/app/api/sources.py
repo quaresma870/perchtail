@@ -631,6 +631,11 @@ def update_source(
         changes["credential"] = "replaced"
     if tls_ca_changed:
         changes["tls_ca_pem"] = "replaced" if source.tls_ca_pem else "removed"
+    if location_changed or payload.credential is not None or tls_ca_changed:
+        # How the source is reached changed: the old status says nothing
+        # about the new settings (#276).
+        source.status = source.status_checked_at = source.status_message = None
+        source_status.forget(source.id)
     session.add(source)
     record_audit_event(
         session,
@@ -698,14 +703,10 @@ def check_connection(
     # result is also the source's status for everyone (#276).
     roots = source_roots.roots_of(source) or [{"label": None, "path": source.base_path}]
     failed = source_status.check(source, connector)
+    source_status.record_check(source.id, failed)
     if failed:
-        _root, first = next(
-            ((r, e) for r, e in failed if source_status.is_connectivity_error(e)), failed[0]
-        )
-        source_status.record(source.id, False, source_status.failure_message(first))
         failures = [_check_failure_message(source, root, exc, user) for root, exc in failed]
         return ConnectionCheckResult(ok=False, detail="; ".join(failures))
-    source_status.record(source.id, True)
     if len(roots) > 1:
         return ConnectionCheckResult(ok=True, detail=f"Connected ({len(roots)} folders)")
     return ConnectionCheckResult(ok=True, detail="Connected")
@@ -847,7 +848,9 @@ def _picker_source(session: Session, payload: FolderPickRequest) -> Source:
         else (saved.tls_ca_pem if saved else None)
     )
     return Source(
-        id=saved.id if saved else None,
+        # No id: this is a draft of the settings, so what it finds mustn't be
+        # recorded as the saved source's status (#276).
+        id=None,
         name=saved.name if saved else "picker",
         protocol=protocol,
         host=host,

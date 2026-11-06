@@ -133,6 +133,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
+        # Tells the browser this answer came from PerchTail itself, so a 502
+        # about a source isn't mistaken for a proxy saying PerchTail is down
+        # (#276, frontend/src/lib/server-status.ts).
+        response.headers["X-PerchTail"] = "1"
         return response
 
 

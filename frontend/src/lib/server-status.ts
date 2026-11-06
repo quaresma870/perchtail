@@ -36,10 +36,11 @@ export function noteUnanswered(): void {
   }
 }
 
-/** Whether a response means "PerchTail didn't answer": what a reverse
- * proxy says when the app behind it is down. */
-export function isGatewayFailure(status: number): boolean {
-  return status === 502 || status === 503 || status === 504
+/** Whether a response means "PerchTail didn't answer": a gateway error that
+ * didn't come from PerchTail itself (it marks its own answers with
+ * X-PerchTail, and answers 502 for a source that fails). */
+export function isGatewayFailure(response: Response): boolean {
+  return [502, 503, 504].includes(response.status) && !response.headers?.has('x-perchtail')
 }
 
 function schedulePing(): void {
@@ -64,7 +65,7 @@ function schedulePing(): void {
 export async function trackedFetch(input: string, init?: RequestInit): Promise<Response> {
   try {
     const response = await fetch(input, init)
-    if (isGatewayFailure(response.status)) noteUnanswered()
+    if (isGatewayFailure(response)) noteUnanswered()
     else noteAnswered()
     return response
   } catch (err) {

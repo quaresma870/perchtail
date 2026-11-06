@@ -79,14 +79,20 @@
   // Reachability (#276): the shared status, or what "Check now" just found.
   let checking = false
   let checked: { ok: boolean; detail: string; at: string } | null = null
+  // A check is also recorded as the shared status, so once the next read of
+  // the sources brings a newer status, that one is shown again.
+  let checkedAgainst: string | null = null
+  $: if (checked && source.status_checked_at !== checkedAgainst) checked = null
   $: view = sourceStatusView(source, checked, $serverReachable)
 
   async function checkNow() {
     checking = true
     try {
       const result = await api.post<{ ok: boolean; detail: string }>(`/sources/${source.id}/check`)
+      checkedAgainst = source.status_checked_at
       checked = { ...result, at: new Date().toISOString() }
     } catch (err) {
+      checkedAgainst = source.status_checked_at
       checked = {
         ok: false,
         detail: err instanceof ApiError ? err.detail : 'The check failed',

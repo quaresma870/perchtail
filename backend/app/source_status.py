@@ -116,6 +116,18 @@ def check(source: Source, connector) -> list[tuple[dict, Exception]]:
     return failures
 
 
+def record_check(source_id: int | None, failures: list[tuple[dict, Exception]]) -> None:
+    """The status a check found: failing only when it couldn't reach the
+    source. A folder of a multi-root source that's missing is a setup problem
+    the check reports, but the source answers, so it stays ok -- otherwise
+    it would flip with every browse of another folder."""
+    reaching = [exc for _root, exc in failures if is_connectivity_error(exc)]
+    if reaching:
+        record(source_id, False, failure_message(reaching[0]))
+    else:
+        record(source_id, True)
+
+
 def check_interval(session: Session) -> timedelta | None:
     minutes = system_settings.get_int(session, "source_check_minutes")
     return timedelta(minutes=minutes) if minutes > 0 else None
@@ -147,13 +159,14 @@ def run_source_checks() -> None:
         connector = CONNECTORS.get(source.protocol)
         if connector is None:
             continue
-        failures = check(source, connector)
-        if failures:
-            # The connectivity failure, if any, is the useful reason.
-            root, exc = next(((r, e) for r, e in failures if is_connectivity_error(e)), failures[0])
-            record(source.id, False, failure_message(exc))
-        else:
-            record(source.id, True)
+        record_check(source.id, check(source, connector))
+
+
+def forget(source_id: int) -> None:
+    """Drops what was last written for a source, so its next result is
+    written at once (after its connection settings change)."""
+    with _lock:
+        _last_written.pop(source_id, None)
 
 
 def forget_cache() -> None:

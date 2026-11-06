@@ -6,6 +6,7 @@ function mockFetchOnce(response: Partial<Response> & { json?: () => Promise<unkn
     ok: response.ok ?? true,
     status: response.status ?? 200,
     statusText: response.statusText ?? '',
+    headers: response.headers ?? new Headers(),
     json: response.json ?? (async () => ({})),
   } as Response
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(fullResponse))
