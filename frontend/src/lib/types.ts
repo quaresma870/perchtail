@@ -16,6 +16,10 @@ export type GlobalCapability =
 export interface CurrentUser {
   id: number
   username: string
+  // My profile (#243); read-only for SSO accounts (auth_provider not 'local').
+  display_name: string | null
+  email: string | null
+  auth_provider: 'local' | 'oidc' | 'saml'
   role_id: number
   active: boolean
   must_change_password: boolean
@@ -140,6 +144,8 @@ export interface RoleGrant {
 export interface AppUser {
   id: number
   username: string
+  display_name: string | null
+  email: string | null
   role_id: number
   active: boolean
   must_change_password: boolean

@@ -34,6 +34,16 @@ release ships (0.x releases may include breaking changes between minors).
   rule is on) and expiry after N days, which makes the user change it at
   the next sign-in. Existing passwords are checked at their next change;
   with expiry on, they count from the upgrade.
+- **My profile** (#243), opened by clicking your name in the top bar: your
+  display name and email, password change, two-factor authentication and
+  sessions on one page. Settings → Security and Settings → Sessions moved
+  there (their old links still lead to it). The email is checked for
+  format and must be unique; changing it is audited
+  (`user.email_change`). SSO accounts get their name and email from the
+  IdP's claims on each sign-in, read-only, and have no password section.
+  Admins see name and email in the Users list, can set them when
+  creating a user and edit them for local accounts. The password policy
+  also refuses passwords containing the name or email.
 
 ## [0.5.3] - 2026-11-06
 

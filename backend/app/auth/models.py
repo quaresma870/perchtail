@@ -92,6 +92,11 @@ class User(SQLModel, table=True):
     # IdP's claim.
     username: str = Field(unique=True, index=True)
     password_hash: str | None = None
+    # My profile (#243). Optional; set by the user (or an admin) for local
+    # accounts, and from the IdP's claims on each sign-in for SSO accounts.
+    # The email is stored lowercased and is unique (app/profile.py).
+    display_name: str | None = None
+    email: str | None = Field(default=None, unique=True, index=True)
     role_id: int = Field(foreign_key="role.id")
     active: bool = True
     auth_provider: AuthProviderType = AuthProviderType.local

@@ -21,6 +21,7 @@ from joserfc import jwt
 from joserfc.jwk import KeySet
 from sqlmodel import Session, select
 
+from app import profile
 from app.audit import record_audit_event
 from app.auth.models import AuthProviderType, SSOGroupRoleMapping, User
 from app.crypto import decrypt_secret, encrypt_secret
@@ -302,6 +303,9 @@ class OIDCProvider:
         )
         if not user.active:
             raise ValueError("account is deactivated")
+
+        # Name and email follow the IdP (#243): read-only in My profile.
+        profile.sync_from_claims(session, user, claims)
 
         # Re-synced on every login, not just first provisioning -- see
         # SSOGroupRoleMapping's docstring for why this can override a
