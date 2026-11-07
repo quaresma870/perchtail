@@ -1,10 +1,17 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 // Incremental follow (#254) on the built-in log source: the first poll is
 // audited, which writes a file.follow line to the very log being followed,
 // so the next poll has something new to append -- fetched alone, not by
 // reloading the whole file.
 const SYSTEM_SOURCE_NAME = 'PerchTail application logs'
+
+// Find all runs from the find bar (#299).
+async function findAll(page: Page, query: string) {
+  await page.getByRole('button', { name: 'Find', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Find', exact: true }).fill(query)
+  await page.getByRole('button', { name: 'Find all', exact: true }).click()
+}
 
 test('follow appends only the new lines of a growing log', async ({ page }) => {
   await page.goto('/#/viewer')
@@ -52,7 +59,7 @@ test('the new-lines notice stays over the log with Find all open', async ({ page
   await page.locator('.cm-content').click({ position: { x: 5, y: 5 } })
   await page.keyboard.press('Control+Home')
 
-  await page.getByRole('button', { name: 'Find all', exact: true }).click()
+  await findAll(page, 'event')
   const panel = page.locator('.find-all-panel')
   await expect(panel).toBeVisible()
   await page.getByRole('button', { name: 'Tail', exact: true }).click()
@@ -71,9 +78,8 @@ test('find all draws only the rows in view, and keeps drawing them while scrolli
   await page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
   await page.locator('.tree-body').getByRole('button', { name: 'perchtail.log' }).click()
   await expect(page.locator('.cm-content')).not.toBeEmpty()
-  await page.getByRole('button', { name: 'Find all', exact: true }).click()
   // Every JSON log line has "event": many more rows than fit in the panel.
-  await page.getByPlaceholder('Find all in this file…').fill('event')
+  await findAll(page, 'event')
   const rows = page.locator('.find-all-results .result-row')
   await expect(rows.first()).toBeVisible()
   const total = Number(await rows.first().getAttribute('aria-setsize'))

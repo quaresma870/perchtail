@@ -22,6 +22,12 @@ release ships (0.x releases may include breaking changes between minors).
 - **The explorer shows each file's size** ("3.5 MB") instead of the
   time it was last modified; hovering a file shows the exact size and
   the time. Also in the advanced filter's results.
+- **One find bar for Find and Find all** (#299), above the editor:
+  text, Match case, Whole word and Regex, previous/next with "3 of 120"
+  (every match counted, in the background), and Find all, which lists
+  the matching lines in the panel below. Enter / Shift+Enter move between
+  matches, Alt+Enter runs Find all, Escape closes the bar, Ctrl/Cmd+F
+  opens it with the selected text. The toolbar keeps one Find button.
 
 ### Fixed
 - The Tail notice ("N new lines — jump to end") stays in the log's
