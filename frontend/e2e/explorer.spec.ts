@@ -1,19 +1,14 @@
 import { expect, test } from '@playwright/test'
 
-// #272, #273: the file order is each user's choice and is kept on the
-// server; an open source can be refreshed in place.
+// #272, #273, #282: files show their time, the order follows the System
+// default (no sort control in the explorer), and an open source can be
+// refreshed in place.
 const SYSTEM_SOURCE_NAME = 'PerchTail application logs'
 
-test('explorer: the file order persists, and an open source refreshes in place', async ({ page }) => {
+test('explorer: files show their time, and an open source refreshes in place', async ({ page }) => {
   await page.goto('/#/viewer')
-  const sort = page.getByLabel('Sort files')
-  await expect(sort).toHaveValue('name_asc')
-
-  const saved = page.waitForResponse((r) => r.url().includes('/auth/preferences') && r.ok())
-  await sort.selectOption('mtime_desc')
-  await saved
-  await page.reload()
-  await expect(page.getByLabel('Sort files')).toHaveValue('mtime_desc')
+  await expect(page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME })).toBeVisible()
+  await expect(page.getByLabel('Sort files')).toHaveCount(0)
 
   // Open the built-in source: its log file shows with a time next to it.
   await page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
@@ -28,10 +23,4 @@ test('explorer: the file order persists, and an open source refreshes in place',
   await page.getByRole('button', { name: `Refresh ${SYSTEM_SOURCE_NAME}` }).click()
   await listed
   await expect(logFile).toBeVisible()
-
-  // Back to the default for the specs that follow.
-  const reset = page.waitForResponse((r) => r.url().includes('/auth/preferences') && r.ok())
-  await page.getByLabel('Sort files').selectOption('name_asc')
-  await reset
-  await expect(page.getByLabel('Sort files')).toHaveValue('name_asc')
 })

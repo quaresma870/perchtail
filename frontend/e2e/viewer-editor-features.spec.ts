@@ -96,12 +96,12 @@ test('compare renders a diff against a second file and exits cleanly', async ({ 
 
 test('follow picks up appended content while enabled, and stops once disabled', async ({ page }) => {
   await treeFile(page, fileA).click()
-  await page.getByRole('button', { name: 'Follow' }).click()
+  await page.getByRole('button', { name: 'Tail', exact: true }).click()
 
   fs.appendFileSync(pathA, 'appended line\n')
   await expect(page.locator('.cm-content')).toContainText('appended line', { timeout: 6000 })
 
-  await page.getByRole('button', { name: 'Follow' }).click() // disable
+  await page.getByRole('button', { name: 'Tail', exact: true }).click() // disable
   await page.waitForTimeout(2500) // longer than one 2s poll interval
   fs.appendFileSync(pathA, 'should not appear once follow is off\n')
   await page.waitForTimeout(2500)
@@ -116,4 +116,19 @@ test('the Find button opens the search panel, same as Ctrl/Cmd+F', async ({ page
   await page.getByRole('button', { name: '⌕ Find', exact: true }).click()
 
   await expect(page.locator('.cm-search input[main-field]')).toBeFocused()
+})
+
+test('find all can be resized by its handle', async ({ page }) => {
+  // #285: the handle on top of the panel resizes it (here by keyboard).
+  await treeFile(page, fileA).click()
+  await page.getByRole('button', { name: 'Find All', exact: true }).click()
+  const panel = page.locator('.find-all-panel')
+  await expect(panel).toBeVisible()
+  const before = (await panel.boundingBox())!.height
+  const handle = page.getByRole('separator', { name: 'Resize find all' })
+  await handle.focus()
+  await handle.press('ArrowUp')
+  await handle.press('ArrowUp')
+  await expect.poll(async () => (await panel.boundingBox())!.height).toBeGreaterThan(before + 30)
+  await page.getByRole('button', { name: 'Find All', exact: true }).click()
 })

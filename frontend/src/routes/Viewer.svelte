@@ -21,13 +21,7 @@
   import { readFetchFailure, type FetchProblem } from '../lib/fetch-errors'
   import { trackedFetch } from '../lib/server-status'
   import { parentPath, refreshFolder, startAutoRefresh, stopAutoRefresh } from '../lib/explorer-refresh'
-  import { EXPLORER_SORTS } from '../lib/explorer-sort'
-  import {
-    connectionsViewPreference,
-    explorerSort,
-    migrateLegacyViewChoice,
-    savePreference,
-  } from '../lib/preferences'
+  import { connectionsViewPreference, migrateLegacyViewChoice, savePreference } from '../lib/preferences'
   import {
     countLines,
     FOLLOW_INTERVALS_MS,
@@ -480,7 +474,7 @@
     followStarted.delete(tab.key)
     refreshFolder(tab.sourceId, parentPath(tab.path))
     notice = {
-      message: `${tab.name} no longer exists on the source. The tab keeps what it had; Follow stopped.`,
+      message: `${tab.name} no longer exists on the source. The tab keeps what it had; Tail stopped.`,
       retryable: false,
     }
   }
@@ -696,17 +690,6 @@
           </button>
         </div>
       {/if}
-      <select
-        class="sort-select"
-        aria-label="Sort files"
-        title="How folders are ordered (your choice; the default is set under Settings → System)"
-        value={$explorerSort}
-        on:change={(e) => savePreference('explorer_sort', e.currentTarget.value)}
-      >
-        {#each EXPLORER_SORTS as option}
-          <option value={option.value}>{option.label}</option>
-        {/each}
-      </select>
     </div>
     {#if $advancedFilter}
       <div class="scope-bar">
@@ -860,24 +843,28 @@
             <button
               class="btn-toggle"
               class:active={activeTab.following}
+              aria-pressed={activeTab.following}
               title={activeTab.followMode === 'incremental'
-                ? 'Follow new content like tail -f: fetches only what was appended'
-                : 'Follow new content: reloads the whole file (compressed files, archive members, agents older than 0.6)'}
+                ? "Show new lines as they're written, like tail -f: fetches only what was appended"
+                : "Show new lines as they're written: reloads the whole file (compressed files, archive members, agents older than 0.6)"}
               on:click={toggleFollow}
             >
-              Follow
+              Tail
             </button>
-            <select
-              class="follow-interval"
-              aria-label="Follow interval"
-              title="How often Follow checks for new content"
-              value={followIntervalMs}
-              on:change={(e) => setFollowInterval(Number(e.currentTarget.value))}
-            >
-              {#each FOLLOW_INTERVALS_MS as ms}
-                <option value={ms}>{formatInterval(ms)}</option>
-              {/each}
-            </select>
+            {#if activeTab.following}
+              <!-- Only while Tail is on (#283). -->
+              <select
+                class="follow-interval"
+                aria-label="Tail interval"
+                title="How often Tail checks for new lines"
+                value={followIntervalMs}
+                on:change={(e) => setFollowInterval(Number(e.currentTarget.value))}
+              >
+                {#each FOLLOW_INTERVALS_MS as ms}
+                  <option value={ms}>{formatInterval(ms)}</option>
+                {/each}
+              </select>
+            {/if}
             <button
               class="btn-toggle"
               class:active={activeTab.wrapEnabled}
@@ -1233,14 +1220,6 @@
     font-size: 0.8rem;
     cursor: pointer;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-  }
-  .sort-select {
-    background: var(--bg-elevated-2);
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    font-size: 0.75rem;
-    padding: 0.2rem 0.25rem;
   }
   .follow-interval {
     background: var(--bg-elevated-2);

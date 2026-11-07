@@ -28,12 +28,13 @@ test('follow appends only the new lines of a growing log', async ({ page }) => {
     { timeout: 20_000 },
   )
 
-  await page.getByLabel('Follow interval').selectOption('1000')
-  await page.getByRole('button', { name: 'Follow', exact: true }).click()
+  await page.getByRole('button', { name: 'Tail', exact: true }).click()
+  // The interval shows only while Tail is on (#283).
+  await page.getByLabel('Tail interval').selectOption('1000')
   await appended
 
   await expect(page.locator('.cm-content')).toContainText('file.follow', { timeout: 10_000 })
   expect(reloads).toEqual([])
 
-  await page.getByRole('button', { name: 'Follow', exact: true }).click()
+  await page.getByRole('button', { name: 'Tail', exact: true }).click()
 })
