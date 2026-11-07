@@ -86,9 +86,6 @@
   }
 
   onMount(async () => {
-    // A new role's form starts as it is now: Escape while the lists below
-    // still load mustn't count as unsaved changes.
-    savedState = formState()
     try {
       await Promise.all([loadRole(), loadScopeOptions()])
     } catch (err) {
