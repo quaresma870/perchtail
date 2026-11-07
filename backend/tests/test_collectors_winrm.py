@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 
 import app.collectors.winrm as winrm_module
 import pytest
@@ -285,3 +286,78 @@ def test_a_junction_swapped_in_mid_read_is_refused_and_logged(fake_session, tmp_
     assert events == [
         ("winrm.path_outside_base", {"source_id": None, "path": "nested/app.log", "offset": 4})
     ]
+
+
+# --- incremental follow (#254) ----------------------------------------------
+
+
+def test_read_range_seeks_and_reads_in_one_round_trip(fake_session):
+    content = b"line one\nline two\n"
+
+    def handler(script):
+        offset = int(re.search(r"if \((\d+) -lt \$len\)", script).group(1))
+        head, length = map(int, re.findall(r"New-Object byte\[\] (\d+)", script))
+        data = content[offset : offset + length] if offset < len(content) else b""
+        out = f"{len(content)}|{base64.b64encode(content[:head]).decode()}|"
+        return FakeResult(std_out=out.encode() + base64.b64encode(data))
+
+    fake_session.handler = handler
+    assert winrm_module.read_range(_source(), "app.log", 9, 1000, 4) == (
+        18,
+        b"line",
+        b"line two\n",
+    )
+    assert winrm_module.read_range(_source(), "app.log", 40, 1000) == (18, b"", b"")
+    assert len(fake_session.scripts_run) == 2
+    # Opened like fetch_file, tolerating the writer, and the length is capped.
+    assert "'Read', 'ReadWrite'" in fake_session.scripts_run[0]
+    winrm_module.read_range(_source(), "app.log", 0, 10**12)
+    assert f"byte[] {1 << 20}" in fake_session.scripts_run[-1]
+
+
+def test_read_range_loops_for_the_head_and_refuses_garbage(fake_session):
+    script_text = {}
+
+    def handler(script):
+        script_text["last"] = script
+        return FakeResult(std_out=b"not the expected answer")
+
+    fake_session.handler = handler
+    with pytest.raises(winrm_module.collector_base.SourceError):
+        winrm_module.read_range(_source(), "app.log", 0, 10, 4)
+    # A short Read() mustn't leave the head short: it reads until full or EOF.
+    assert "while ($hn -lt $h.Length)" in script_text["last"]
+
+
+# --- a file that isn't there (#272, found in the 0.6.0-rc.1 lab) -----------
+
+
+def _missing_file(script):
+    # What Windows does: the existence check stops the script with the marker.
+    if "[IO.File]::Exists(" in script:
+        return FakeResult(status_code=5, std_out=b"PERCHTAIL_NOT_FOUND\r\n")
+    return FakeResult()
+
+
+def test_fetch_file_of_a_missing_file_is_not_found_not_empty(fake_session, tmp_path):
+    from app.collectors.base import SourceNotFoundError
+    from app.collectors.errors import translate_winrm
+
+    fake_session.handler = _missing_file
+    destination = tmp_path / "out"
+    with pytest.raises(FileNotFoundError) as caught:
+        winrm_module.fetch_file(_source(), "app/gone.log", destination)
+    assert not destination.exists()
+    # The check runs before the size is read, after the junction guard.
+    script = fake_session.scripts_run[0]
+    assert script.index("[IO.File]::Exists(") < script.index("Get-Item")
+    assert script.index("ReparsePoint") < script.index("[IO.File]::Exists(")
+    assert isinstance(translate_winrm(caught.value), SourceNotFoundError)
+
+
+def test_read_range_of_a_missing_file_is_not_found(fake_session):
+    fake_session.handler = _missing_file
+    with pytest.raises(FileNotFoundError):
+        winrm_module.read_range(_source(), "app/gone.log", 0, 10, 4)
+    script = fake_session.scripts_run[0]
+    assert script.index("[IO.File]::Exists(") < script.index("[IO.File]::Open(")

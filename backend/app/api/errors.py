@@ -19,7 +19,10 @@ async def source_error_handler(request: Request, exc: SourceError) -> JSONRespon
         detail=exc.detail,
         path=request.url.path,
     )
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.public_message})
+    content = {"detail": exc.public_message}
+    if exc.error_code:
+        content["error_code"] = exc.error_code
+    return JSONResponse(status_code=exc.status_code, content=content)
 
 
 async def path_outside_base(request: Request, exc: PathOutsideBaseError) -> JSONResponse:

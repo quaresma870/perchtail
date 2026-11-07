@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup } from './popups'
 
 // No real WinRM target is available in CI or this dev sandbox (that needs
 // an actual Windows host) -- run_e2e_server.sh wires in
@@ -16,7 +17,8 @@ test('WinRM source: create, add rule, browse over the mocked connector, delete',
 }) => {
   await page.goto('/#/settings/sources/new')
   await page.getByLabel('Name', { exact: true }).fill(sourceName)
-  await page.getByLabel('Protocol').selectOption('winrm')
+  // The editor is a popup over the sources list, which has its own Protocol filter (#302).
+  await page.getByRole('dialog').getByLabel('Protocol').selectOption('winrm')
   await page.getByLabel('Host').fill('e2e-fake-winrm-host')
   await page.getByLabel('Base path').fill(FIXTURE_ROOT)
   await page.getByLabel('Username').fill('svc')
@@ -39,10 +41,10 @@ test('WinRM source: create, add rule, browse over the mocked connector, delete',
   await expect(page.locator('.cm-content')).toContainText('winrm hello world log line 1')
 
   await page.goto('/#/settings/sources')
-  page.once('dialog', (dialog) => dialog.accept())
   await page
     .getByRole('row', { name: new RegExp(sourceName) })
-    .getByRole('button', { name: 'delete' })
+    .getByRole('button', { name: 'Delete' })
     .click()
+  await confirmPopup(page, 'Delete')
   await expect(page.getByRole('row', { name: new RegExp(sourceName) })).toHaveCount(0)
 })

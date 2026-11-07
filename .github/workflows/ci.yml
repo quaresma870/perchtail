@@ -46,6 +46,11 @@ jobs:
           pip-audit -r backend/requirements.txt
           pip-audit -r backend/requirements-dev.txt
 
+      - name: Static security analysis (Bandit)
+        run: |
+          pip install bandit==1.9.4
+          bandit -q -r backend/app
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -79,6 +84,10 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    # A normal run takes 3-5 minutes. A slow apt mirror once stretched the
+    # Playwright and test-server installs to 16; past 30, something is
+    # stuck, and without this the job would hold the PR for 6 hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -176,11 +185,30 @@ jobs:
       - name: Test
         run: go test ./... -v
 
+      # Path containment (internal/agent/fuzz_test.go): `go test` above only
+      # runs the seed corpus; this explores new inputs for a short while.
+      - name: Fuzz the path checks
+        run: |
+          for target in FuzzIsSafeRelativePath FuzzFetchStaysInBase; do
+            go test ./internal/agent -run '^$' -fuzz "^${target}\$" -fuzztime 30s
+          done
+
       - name: Cross-compile
         run: |
           GOOS=linux GOARCH=amd64 go build -o dist/perchtail-agent-linux-amd64 .
           GOOS=linux GOARCH=arm64 go build -o dist/perchtail-agent-linux-arm64 .
           GOOS=windows GOARCH=amd64 go build -o dist/perchtail-agent-windows-amd64.exe .
+
+      # gosec 2.30 needs Go >= 1.26. setup-go sets GOTOOLCHAIN=local, so this
+      # step sets it back to auto: `go install` then fetches that toolchain.
+      # The agent itself is still built with the Go set up above.
+      - name: Static security analysis (gosec)
+        working-directory: agent
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          "$(go env GOPATH)/bin/gosec" -quiet ./...
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

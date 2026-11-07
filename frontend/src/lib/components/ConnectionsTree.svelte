@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte'
   import type { ConnectionTreeNode } from '../connection-tree'
+  import { advancedFilter, coveringScope, scopeContext, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
   import SourceNode from './SourceNode.svelte'
 
   export let node: ConnectionTreeNode
@@ -20,9 +21,27 @@
   }>()
 
   $: expanded = forceExpand || expandedIds.has(node.id)
+
+  // Advanced filter (#284): this customer or folder as a scope, i.e. every
+  // source under it.
+  $: ownScope = { groupId: node.id, name: node.name }
+  $: inScope = $scopes.some((s) => scopeKey(s) === scopeKey(ownScope))
+  $: coveredBy = coveringScope($scopes, ownScope, $scopeContext)
 </script>
 
 <div class="node">
+  <div class="group-row">
+  {#if $advancedFilter}
+    <input
+      type="checkbox"
+      class="scope-check"
+      checked={inScope || Boolean(coveredBy)}
+      disabled={Boolean(coveredBy)}
+      aria-label="Filter files in all sources in {node.name}"
+      title={coveredBy ? 'Already included through a folder above' : 'Filter files in every source in here'}
+      on:change={() => toggleScopeIn(ownScope)}
+    />
+  {/if}
   <button class="row group" style="padding-left: {depth * 14}px" on:click={() => dispatch('toggle', { id: node.id })}>
     <span class="chevron">{expanded ? '▾' : '▸'}</span>
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -30,6 +49,7 @@
     </svg>
     <span class="name">{node.name}</span>
   </button>
+  </div>
 
   {#if expanded}
     {#each node.children as child (child.id)}
@@ -57,6 +77,19 @@
 </div>
 
 <style>
+  .group-row {
+    display: flex;
+    align-items: center;
+  }
+  .group-row .row {
+    flex: 1;
+    min-width: 0;
+  }
+  .scope-check {
+    flex: 0 0 auto;
+    margin: 0 0 0 0.35rem;
+    accent-color: var(--accent);
+  }
   .row {
     display: flex;
     align-items: center;

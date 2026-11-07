@@ -165,3 +165,43 @@ def test_fetch_file_maps_too_large_to_413_and_leaves_nothing_behind(monkeypatch,
     with pytest.raises(FetchTooLargeError):
         agent_module.fetch_file(_source(), "big.log", destination)
     assert not destination.exists()
+
+
+# --- incremental follow (#254) ----------------------------------------------
+
+
+def test_read_range_sends_the_offset_and_a_capped_length(monkeypatch):
+    registry = _mock_registry(
+        monkeypatch,
+        send_command_sync_result={
+            "size": 18,
+            "head_b64": base64.b64encode(b"line").decode(),
+            "data_b64": base64.b64encode(b"line two\n").decode(),
+        },
+    )
+    assert agent_module.read_range(_source(), "app.log", 9, 10**9, 10**9) == (
+        18,
+        b"line",
+        b"line two\n",
+    )
+    registry.send_command_sync.assert_called_once_with(
+        7, "read_range", path="app.log", offset=9, length=1 << 20, head_length=4096
+    )
+
+
+def test_an_agent_older_than_0_6_cant_read_a_range(monkeypatch):
+    from app.agent_registry import AgentCommandError
+    from app.collectors.base import RangeNotSupportedError
+
+    _mock_registry(monkeypatch, side_effect=AgentCommandError('unknown command type "read_range"'))
+    with pytest.raises(RangeNotSupportedError):
+        agent_module.read_range(_source(), "app.log", 0, 10)
+
+
+def test_an_agent_sending_too_much_is_refused(monkeypatch):
+    from app.collectors.base import SourceError
+
+    too_much = base64.b64encode(b"x" * ((1 << 20) + 1)).decode()
+    _mock_registry(monkeypatch, send_command_sync_result={"size": 5, "data_b64": too_much})
+    with pytest.raises(SourceError):
+        agent_module.read_range(_source(), "app.log", 0, 10)

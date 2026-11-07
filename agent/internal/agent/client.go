@@ -50,6 +50,7 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 	// The backend matches rules case-insensitively for Windows agents, as
 	// NTFS does (#189); it can only know which OS this is if told.
 	header.Set(OSHeader, runtime.GOOS)
+	header.Set(VersionHeader, Version)
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.ServerURL, header)
 	if err != nil {
@@ -69,7 +70,7 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 			_ = conn.WriteControl(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent stopping"),
 				time.Now().Add(time.Second))
-			conn.Close()
+			_ = conn.Close()
 		case <-done:
 		}
 	}()
@@ -114,7 +115,7 @@ func connectAndServe(ctx context.Context, cfg Config) error {
 				// The connection is broken: closing it ends the read loop,
 				// and Run reconnects.
 				log.Printf("agent: write failed (%v), dropping the connection", err)
-				conn.Close()
+				_ = conn.Close()
 			}
 		}(cmd)
 	}
@@ -225,6 +226,18 @@ func handleCommand(cfg Config, cmd Command) any {
 			Type:       "fetch_result",
 			ID:         cmd.ID,
 			ContentB64: base64.StdEncoding.EncodeToString(content),
+		}
+	case "read_range":
+		size, head, data, err := HandleReadRange(cfg.BasePath, cmd.Path, cmd.Offset, cmd.Length, cmd.HeadLength)
+		if err != nil {
+			return ErrorResult{Type: "read_range_error", ID: cmd.ID, Error: err.Error()}
+		}
+		return ReadRangeResult{
+			Type:    "read_range_result",
+			ID:      cmd.ID,
+			Size:    size,
+			HeadB64: base64.StdEncoding.EncodeToString(head),
+			DataB64: base64.StdEncoding.EncodeToString(data),
 		}
 	default:
 		return ErrorResult{

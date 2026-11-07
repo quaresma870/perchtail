@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { createEventDispatcher, onMount, tick } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
@@ -24,6 +24,10 @@
   } from '../lib/types'
 
   export let params: { id?: string } = {}
+  /** In a popup over the sources (#302): no settings navigation or page
+   * header, a Cancel button, and `saved` / `cancel` instead of moving on. */
+  export let embedded = false
+  const dispatch = createEventDispatcher<{ saved: { id: number }; cancel: void }>()
 
   const isNew = !params.id
   const sourceId = params.id ? Number(params.id) : null
@@ -58,6 +62,9 @@
   $: rootsLimit = $systemSettings.source_max_roots
   let winrmScheme: 'https' | 'http' = 'https'
   let tlsCaPem = ''
+  // JEA endpoint (#169): the PowerShell session configuration name; empty =
+  // the WinRS shell.
+  let winrmConfiguration = ''
   let enabled = true
   let searchIndexingEnabled = false
   let username = ''
@@ -193,6 +200,7 @@
           hadRootsCount = source.roots.length
           winrmScheme = source.winrm_effective_scheme ?? 'https'
           tlsCaPem = source.tls_ca_pem ?? ''
+          winrmConfiguration = source.winrm_configuration ?? ''
           originalPaths = JSON.stringify(roots.map((r) => r.path))
           originalHostPort = `${source.host}:${source.port ?? ''}`
           enabled = source.enabled
@@ -203,8 +211,36 @@
       error = err instanceof ApiError ? err.detail : 'Failed to load source'
     } finally {
       loading = false
+      // After the reactive updates the load sets off.
+      await tick()
+      savedState = formState()
     }
   })
+
+  // Unsaved changes, so the popup can ask before closing (#302).
+  let savedState = ''
+  function formState(): string {
+    return JSON.stringify([
+      name,
+      customerId,
+      folderId,
+      protocol,
+      host,
+      port,
+      roots,
+      winrmScheme,
+      tlsCaPem,
+      winrmConfiguration,
+      enabled,
+      searchIndexingEnabled,
+      username,
+      password,
+      privateKey,
+    ])
+  }
+  export function isDirty(): boolean {
+    return !loading && formState() !== savedState
+  }
 
   function buildCredential(): Record<string, string> | null {
     if (protocol === 'local' || protocol === 'agent') return null
@@ -248,7 +284,11 @@
 
   function winrmPayload(): Record<string, string> {
     if (protocol !== 'winrm') return {}
-    return { winrm_scheme: winrmScheme, tls_ca_pem: winrmScheme === 'https' ? tlsCaPem : '' }
+    return {
+      winrm_scheme: winrmScheme,
+      tls_ca_pem: winrmScheme === 'https' ? tlsCaPem : '',
+      winrm_configuration: winrmConfiguration.trim(),
+    }
   }
 
   function locationPayload() {
@@ -280,6 +320,7 @@
         })
         // Land on the read-only overview, not back on this form (#157).
         justCreatedSourceId.set(created.id)
+        savedState = formState()
         push(`/settings/sources/${created.id}`)
       } else {
         await api.patch(`/sources/${sourceId}`, {
@@ -294,7 +335,9 @@
           search_indexing_enabled: searchIndexingEnabled,
           ...(credential ? { credential } : {}),
         })
-        push(`/settings/sources/${sourceId}`)
+        savedState = formState()
+        if (embedded && sourceId !== null) dispatch('saved', { id: sourceId })
+        else push(`/settings/sources/${sourceId}`)
       }
     } catch (err) {
       saveError = err instanceof ApiError ? err.detail : 'Failed to save source'
@@ -319,17 +362,21 @@
   }
 </script>
 
-<SettingsNav />
+{#if !embedded}
+  <SettingsNav />
+{/if}
 
-<div class="page">
-  <div class="header">
-    <h1>{isNew ? 'New source' : `Edit ${name}`}</h1>
-    <button
-      class="btn btn-ghost"
-      on:click={() => push(isNew ? '/settings/sources' : `/settings/sources/${sourceId}`)}
-      >{isNew ? '← back to sources' : '← back to source'}</button
-    >
-  </div>
+<div class="page" class:embedded>
+  {#if !embedded}
+    <div class="header">
+      <h1>{isNew ? 'New source' : `Edit ${name}`}</h1>
+      <button
+        class="btn btn-ghost"
+        on:click={() => push(isNew ? '/settings/sources' : `/settings/sources/${sourceId}`)}
+        >{isNew ? '← back to sources' : '← back to source'}</button
+      >
+    </div>
+  {/if}
 
   {#if loading}
     <p class="hint">Loading…</p>
@@ -512,6 +559,24 @@
           Prefer HTTPS.
         </p>
       {/if}
+      {#if protocol === 'winrm'}
+        <label>
+          JEA endpoint (optional)
+          <input
+            class="input"
+            bind:value={winrmConfiguration}
+            placeholder="PerchTail"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <span class="hint small">
+            The PowerShell endpoint registered with PerchTail's read-only JEA role
+            (docs/examples/jea): the account then needs no administrator rights or remote
+            shell, and can only list and read under the role's folders. Empty: a WinRS shell,
+            which needs an account with remote-shell rights.
+          </span>
+        </label>
+      {/if}
 
       <div class="roots">
         {#each roots as root, index (index)}
@@ -689,6 +754,9 @@
         <button class="btn btn-primary" type="submit" disabled={saving}>
           {saving ? 'Saving…' : 'Save'}
         </button>
+        {#if embedded}
+          <button class="btn btn-ghost" type="button" on:click={() => dispatch('cancel')}>Cancel</button>
+        {/if}
         {#if saveError}
           <p class="error save-error" role="alert">{saveError}</p>
         {/if}
@@ -716,6 +784,10 @@
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
+  }
+  .page.embedded {
+    padding: 0;
+    max-width: none;
   }
   .header {
     display: flex;

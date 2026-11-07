@@ -101,6 +101,11 @@ class Source(SQLModel, table=True):
     # WinRM only (#169): "https" or "http". Null keeps the pre-0.5.0 rule of
     # inferring it from the port (HTTPS on 5986 or no port, HTTP otherwise).
     winrm_scheme: str | None = None
+    # WinRM only (#169): the PowerShell session configuration (JEA endpoint)
+    # to connect to. Set, the connector speaks PSRP and calls only the
+    # reference read-only role's functions (docs/examples/jea); null keeps
+    # the WinRS shell, which needs remote-shell rights.
+    winrm_configuration: str | None = None
     # PEM CA certificate(s) trusted for this source's TLS listener (WinRM
     # over HTTPS) -- internal PKI or a self-signed certificate, without a
     # server-wide REQUESTS_CA_BUNDLE. Public data, not a secret.
@@ -123,6 +128,18 @@ class Source(SQLModel, table=True):
     # matched case-insensitively, as for SMB/WinRM. Null until an agent
     # that reports it (0.5.1 or later) has connected.
     agent_os: str | None = None
+    # The agent's own version, from the X-PerchTail-Agent-Version header it
+    # sends on connect (#215). Null until an agent that reports it (0.6 or
+    # later) has connected.
+    agent_version: str | None = None
+    # Reachability (#276), shared by everyone: "ok" or "failing", when it was
+    # last known, and the public reason when failing (never the raw error).
+    # Set by the background check and by every real operation on the source
+    # (app/source_status.py). Null until first known; agent sources use the
+    # live connection instead.
+    status: str | None = None
+    status_checked_at: datetime | None = None
+    status_message: str | None = None
     # Phase 3 full-text search (see app/search_index.py and ROADMAP.md):
     # opt-in, off by default — same "explicit opt-in, not on-by-default"
     # conservatism as the rule engine's zero-rules-matches-nothing default,
@@ -264,6 +281,28 @@ class AlertFileState(SQLModel, table=True):
     source_id: int = Field(foreign_key="source.id", primary_key=True)
     file_path: str = Field(primary_key=True)
     reported_through_line: int
+
+
+class UpdateCheckState(SQLModel, table=True):
+    """The last result of the release check (#215, app/update_check.py).
+    Singleton by convention, like AuditChainState. Keeps the ETag so a
+    check that finds nothing new is a 304 and doesn't count against
+    GitHub's unauthenticated rate limit."""
+
+    __tablename__ = "update_check_state"
+
+    id: int | None = Field(default=None, primary_key=True)
+    etag: str | None = None
+    latest_version: str | None = None
+    latest_name: str | None = None
+    latest_url: str | None = None
+    latest_published_at: datetime | None = None
+    last_checked_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_error: str | None = None
+    # The newest version already logged as update_check.available, so it's
+    # logged once per release, not once a day.
+    notified_version: str | None = None
 
 
 class SystemSetting(SQLModel, table=True):

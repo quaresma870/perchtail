@@ -7,10 +7,17 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
-from app import auth_events
+from app import auth_events, password_policy, preferences, profile
 from app.audit import record_audit_event
 from app.auth import mfa
-from app.auth.models import AuthSession, GlobalCapability, Role, SSOProviderConfig, User
+from app.auth.models import (
+    AuthProviderType,
+    AuthSession,
+    GlobalCapability,
+    Role,
+    SSOProviderConfig,
+    User,
+)
 from app.auth.providers.local import (
     LocalPasswordProvider,
     change_password,
@@ -74,11 +81,60 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+def password_policy_error(exc: password_policy.PasswordPolicyError) -> HTTPException:
+    """The 422 for a password the policy refuses (#245): the rule's message,
+    never the password."""
+    return HTTPException(
+        status_code=422,
+        detail={"message": str(exc), "error_code": f"password_{exc.rule}"},
+    )
+
+
+class PreferencesUpdate(BaseModel):
+    """PATCH /auth/preferences: a value sets the choice, null clears it back
+    to the System default, an omitted key is left as it is."""
+
+    explorer_sort: str | None = None
+    connections_view: str | None = None
+
+
+class ProfileUpdate(BaseModel):
+    """PATCH /auth/me: an omitted field is left as it is; an empty string
+    clears it."""
+
+    display_name: str | None = None
+    email: str | None = None
+
+
+def profile_error(exc: profile.ProfileError) -> HTTPException:
+    """409 for an email another account has, 422 for anything malformed."""
+    code = 409 if isinstance(exc, profile.EmailTakenError) else 422
+    return HTTPException(status_code=code, detail=str(exc))
+
+
+class PasswordPolicyPublic(BaseModel):
+    min_length: int
+    max_length: int
+    reject_simple: bool
+    reject_personal: bool
+    history: int
+    required_classes: int
+    max_age_days: int
+
+
 class UserPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     username: str
+    # My profile (#243). For an SSO account (auth_provider other than
+    # local) they come from the IdP and are read-only.
+    display_name: str | None
+    email: str | None
+    auth_provider: AuthProviderType
+    # The display choices this user made (#273); anything missing follows
+    # the System default (explorer_sort_default, connections_view_default).
+    preferences: dict[str, str]
     role_id: int
     active: bool
     must_change_password: bool
@@ -94,6 +150,10 @@ class UserPublic(BaseModel):
         return cls(
             id=user.id,
             username=user.username,
+            display_name=user.display_name,
+            email=user.email,
+            auth_provider=user.auth_provider,
+            preferences=preferences.own_choices(user),
             role_id=user.role_id,
             active=user.active,
             must_change_password=user.must_change_password,
@@ -220,6 +280,10 @@ def login(
             )
 
     record_success(payload.username)
+    # Expired password (#245): signed in, but only to change it.
+    if password_policy.password_expired(user, password_policy.get_policy(session)):
+        user.must_change_password = True
+        logger.info("user.password_expired", user_id=user.id)
     complete_login(session, user)
     _, token = create_session(session, user, user_agent=request.headers.get("user-agent"))
     _set_session_cookie(response, token)
@@ -253,12 +317,72 @@ def change_password_endpoint(
     # brute-force the account password at argon2 speed.
     _require_password_reconfirmation(user, payload.current_password)
 
+    try:
+        change_password(session, user, payload.new_password)
+    except password_policy.PasswordPolicyError as exc:
+        session.rollback()
+        raise password_policy_error(exc) from exc
     # Every other session was opened with the old password; it shouldn't
     # outlive it. This session (the one that just proved the password) stays.
+    # One commit, so the new password never lands without the revocation.
     revoke_all_sessions(session, user.id, except_token=session_token)
-    change_password(session, user, payload.new_password)
+    session.commit()
     session.refresh(user)
     return UserPublic.from_user(user)
+
+
+@router.patch("/me", response_model=UserPublic)
+def update_my_profile(
+    payload: ProfileUpdate,
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    """My profile (#243): the user's own display name and email. An SSO
+    account's come from the IdP on every sign-in, so they can't be edited
+    here."""
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        return UserPublic.from_user(user)
+    if user.auth_provider != AuthProviderType.local:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Your name and email come from your identity provider",
+        )
+    try:
+        profile.apply_profile(session, user, actor_id=user.id, changes=changes)
+    except profile.ProfileError as exc:
+        raise profile_error(exc) from exc
+    session.commit()
+    session.refresh(user)
+    return UserPublic.from_user(user)
+
+
+@router.patch("/preferences", response_model=UserPublic)
+def update_my_preferences(
+    payload: PreferencesUpdate,
+    user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session),
+):
+    """The signed-in user's own display preferences (#273). Not audited:
+    they change nothing but how this user's screens look."""
+    try:
+        preferences.update(user, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return UserPublic.from_user(user)
+
+
+@router.get("/password-policy", response_model=PasswordPolicyPublic)
+def get_password_policy(
+    user: User = Depends(get_current_user), session: Session = Depends(get_session)
+):
+    """The rules a new password must follow, shown next to password fields.
+    Open to any signed-in user, including one who must change their
+    password first."""
+    return PasswordPolicyPublic(**password_policy.get_policy(session).as_dict())
 
 
 class MfaEnrollResponse(BaseModel):

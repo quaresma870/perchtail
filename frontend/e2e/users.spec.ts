@@ -1,22 +1,26 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup, createUser } from './popups'
 
 const username = `e2e-user-${Date.now()}`
-const password = 'e2e-throwaway-password-123!'
+// Within the default password policy (#245): nothing from the username.
+const password = 'Lantern-Orbit-throwaway-58!'
 
 test('users: create, reset password, change role, deactivate/reactivate', async ({ page }) => {
-  await page.goto('/#/settings/users')
-
-  await page.getByPlaceholder('username or email').fill(username)
-  await page.getByPlaceholder('temporary password').fill(password)
   // The seeded builtin "No Access" role (app/bootstrap.py's
   // seed_no_access_role) always exists and grants nothing -- a safe default
   // for a throwaway test account.
-  await page.locator('.add-user select').selectOption({ label: 'No Access' })
-  await page.getByRole('button', { name: 'Create user' }).click()
+  await createUser(page, {
+    username,
+    password,
+    role: 'No Access',
+    displayName: 'Test Person',
+    email: `${username}@example.com`,
+  })
 
   const row = page.getByRole('row', { name: new RegExp(username) })
   await expect(row).toBeVisible()
   await expect(row.getByText('active', { exact: true })).toBeVisible()
+  await expect(row.getByText(`Test Person · ${username}@example.com`)).toBeVisible()
 
   // Role change persists through the real API, not just local state.
   await row.locator('select').selectOption({ label: 'Super Admin' })
@@ -25,13 +29,17 @@ test('users: create, reset password, change role, deactivate/reactivate', async 
   await expect(roleSelectAfterReload.locator('option:checked')).toHaveText('Super Admin')
   await roleSelectAfterReload.selectOption({ label: 'No Access' })
 
-  // Reset password shows a one-time temporary password row.
-  await page.getByRole('row', { name: new RegExp(username) }).getByRole('button', { name: 'reset password' }).click()
-  await expect(page.getByText('Temporary password (shown once):')).toBeVisible()
+  // Reset password asks first, then shows the one-time temporary password.
+  await page.getByRole('row', { name: new RegExp(username) }).getByRole('button', { name: 'Reset password' }).click()
+  await confirmPopup(page, 'Reset password')
+  const shown = page.getByRole('dialog', { name: 'Temporary password' })
+  await expect(shown.locator('code')).not.toBeEmpty()
+  await confirmPopup(page, 'Done')
 
   // Deactivate flips the status badge and the action's own label; reactivate
   // flips both back.
-  await page.getByRole('row', { name: new RegExp(username) }).getByRole('button', { name: 'deactivate' }).click()
+  await page.getByRole('row', { name: new RegExp(username) }).getByRole('button', { name: 'Deactivate' }).click()
+  await confirmPopup(page, 'Deactivate')
   const rowAfterDeactivate = page.getByRole('row', { name: new RegExp(username) })
   await expect(rowAfterDeactivate.getByText('inactive', { exact: true })).toBeVisible()
   await expect(rowAfterDeactivate.getByRole('button', { name: 'reactivate' })).toBeVisible()
@@ -43,7 +51,22 @@ test('users: create, reset password, change role, deactivate/reactivate', async 
   // Cleanup: deactivate again (soft-delete is the only affordance this page
   // gives -- see CLAUDE.md's "Deactivate (soft, keeps audit history) is the
   // default way to remove access").
-  await rowAfterReactivate.getByRole('button', { name: 'deactivate' }).click()
+  await rowAfterReactivate.getByRole('button', { name: 'Deactivate' }).click()
+  await confirmPopup(page, 'Deactivate')
+})
+
+test('users: the new-user popup closes on Escape and on Cancel without creating anything', async ({ page }) => {
+  await page.goto('/#/settings/users')
+  await page.getByRole('button', { name: '+ New user' }).click()
+  const dialog = page.getByRole('dialog', { name: 'New user' })
+  await expect(dialog.getByLabel('Username')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await page.getByRole('button', { name: '+ New user' }).click()
+  await dialog.getByLabel('Username').fill('should-not-exist')
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.getByRole('row', { name: /should-not-exist/ })).toHaveCount(0)
 })
 
 test('users list sorts and filters (#238)', async ({ page }) => {

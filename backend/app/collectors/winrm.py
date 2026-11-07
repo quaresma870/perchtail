@@ -9,6 +9,7 @@ from pathlib import Path
 import winrm
 
 from app.collectors import base as collector_base
+from app.collectors import winrm_jea
 from app.collectors.base import DirEntry, PathOutsideBaseError
 from app.config import get_settings
 from app.crypto import decrypt_credential
@@ -81,6 +82,7 @@ def _session(source: Source) -> winrm.Session:
 
 _OUTSIDE_BASE = "PERCHTAIL_OUTSIDE_BASE"
 _NOT_A_DIRECTORY = "PERCHTAIL_NOT_A_DIRECTORY"
+_NOT_FOUND = "PERCHTAIL_NOT_FOUND"
 
 
 def _run_ps(source: Source, script: str) -> str:
@@ -91,8 +93,18 @@ def _run_ps(source: Source, script: str) -> str:
             raise PathOutsideBaseError("path outside the base path")
         if _NOT_A_DIRECTORY in out:
             raise NotADirectoryError("not a directory")
+        if _NOT_FOUND in out:
+            raise FileNotFoundError("not found")
         raise RuntimeError(result.std_err.decode("utf-8", errors="replace"))
     return out
+
+
+def _require_file(path: str) -> str:
+    """PowerShell that stops the script when `path` (already quoted) isn't
+    a file. Without it a missing file failed only with non-terminating
+    errors, the script still exited 0 with no output, and the file read as
+    empty instead of "not found" (#272, found in the 0.6.0-rc.1 lab)."""
+    return f"if (-not [IO.File]::Exists({path})) {{ Write-Output '{_NOT_FOUND}'; exit 5 }}; "
 
 
 def _containment_guard(source: Source, relative_path: str) -> str:
@@ -133,6 +145,8 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     accented file name (`ação.log`) used to make the whole listing fail to
     decode (#168). Base64 sidesteps the code page entirely, the same way
     fetch_file already returns content."""
+    if source.winrm_configuration:
+        return winrm_jea.list_directory(source, rules, relative_path)
     path = _remote_path(source, relative_path)
     # Junctions and symlinks are left out of the listing (never followed),
     # and listing a file is "not found" rather than the file itself.
@@ -142,7 +156,10 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         f"{{ Write-Output '{_NOT_A_DIRECTORY}'; exit 4 }}; "
         f"$j = Get-ChildItem -LiteralPath {_ps_quote(path)} | "
         "Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | "
-        "Select-Object Name, PSIsContainer, Length | ConvertTo-Json -Compress; "
+        # MTime (#273): last write, in Unix milliseconds (UTC).
+        "Select-Object Name, PSIsContainer, Length, "
+        "@{n='MTime';e={[DateTimeOffset]::new($_.LastWriteTimeUtc).ToUnixTimeMilliseconds()}} "
+        "| ConvertTo-Json -Compress; "
         "if ($j) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)) }"
     )
     try:
@@ -150,9 +167,14 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     except PathOutsideBaseError:
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
+    return parse_listing(output, relative_path, rules)
+
+
+def parse_listing(output: str, relative_path: str, rules: list[Rule]) -> list[DirEntry]:
+    """A listing's base64 UTF-8 JSON (from the script above, or from the JEA
+    role's Get-PerchTailListing) as rule-filtered entries."""
     if not output:
         return []
-
     raw = json.loads(base64.b64decode(output).decode("utf-8"))
     if isinstance(raw, dict):
         raw = [raw]
@@ -165,13 +187,17 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         if not is_entry_visible(child_path, is_dir, rules, case_insensitive=True):
             continue
         size = 0 if is_dir else int(item.get("Length") or 0)
-        entries.append(DirEntry(name=name, path=child_path, is_dir=is_dir, size=size))
+        mtime_ms = item.get("MTime")
+        mtime = mtime_ms / 1000 if isinstance(mtime_ms, int | float) else None
+        entries.append(DirEntry(name=name, path=child_path, is_dir=is_dir, size=size, mtime=mtime))
     return entries
 
 
 def list_drives(source: Source) -> list[str]:
     """The host's file-system drive roots (`C:\\`, `D:\\`), for the Base path
-    picker (#159)."""
+    picker (#159). Behind a JEA endpoint (#169): the folders its role allows."""
+    if source.winrm_configuration:
+        return winrm_jea.list_drives(source)
     script = (
         "$j = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root | "
         "ConvertTo-Json -Compress; "
@@ -195,11 +221,18 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     The file is opened with FileShare.ReadWrite so a log another process is
     still writing can be read. Refuses anything over MAX_FETCH_MB before
     transferring a single block."""
+    if source.winrm_configuration:
+        return winrm_jea.fetch_file(source, relative_path, destination)
     path = _ps_quote(_remote_path(source, relative_path))
     guard = _containment_guard(source, relative_path)
     limit = collector_base.max_fetch_bytes()
     try:
-        size = int(_run_ps(source, guard + f"(Get-Item -LiteralPath {path}).Length").strip() or 0)
+        size = int(
+            _run_ps(
+                source, guard + _require_file(path) + f"(Get-Item -LiteralPath {path}).Length"
+            ).strip()
+            or 0
+        )
     except PathOutsideBaseError:
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
@@ -245,3 +278,57 @@ def local_copy(source: Source, relative_path: str):
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path
+
+
+def read_range(
+    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+) -> collector_base.RangeRead:
+    """Incremental follow (#254): the file's size, its first `head` bytes and
+    up to `length` bytes from `offset`, in one PowerShell round trip that
+    seeks before reading, so nothing else is transferred."""
+    if source.winrm_configuration:
+        return winrm_jea.read_range(source, relative_path, offset, length, head)
+    path = _ps_quote(_remote_path(source, relative_path))
+    guard = _containment_guard(source, relative_path)
+    offset = max(int(offset), 0)
+    length = max(min(int(length), collector_base.RANGE_MAX_BYTES), 0)
+    head = max(min(int(head), collector_base.RANGE_MAX_HEAD_BYTES), 0)
+    script = (
+        guard
+        + _require_file(path)
+        + (
+            f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
+            "try { $len = $f.Length; "
+            f"$h = New-Object byte[] {head}; $hn = 0; "
+            # Read() may return less than asked: loop until the head is full or
+            # the file ends, or a short head would look like a rotated file.
+            "while ($hn -lt $h.Length) { $r = $f.Read($h, $hn, $h.Length - $hn); "
+            "if ($r -le 0) { break }; $hn += $r }; "
+            f"$b = New-Object byte[] {length}; $n = 0; "
+            f"if ({offset} -lt $len) {{ $f.Seek({offset}, 'Begin') | Out-Null; "
+            "$n = $f.Read($b, 0, $b.Length) }; "
+            '"$len|" + [Convert]::ToBase64String($h, 0, $hn) + "|" + '
+            "[Convert]::ToBase64String($b, 0, $n) } finally { $f.Close() }"
+        )
+    )
+    try:
+        output = _run_ps(source, script).strip()
+    except PathOutsideBaseError:
+        logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
+        raise
+    return parse_range(output)
+
+
+def parse_range(output: str) -> collector_base.RangeRead:
+    """ "size|head|data" (base64 parts), from the script above or the JEA
+    role's Read-PerchTailRange."""
+    try:
+        size_text, head_b64, data_b64 = output.splitlines()[-1].split("|", 2)
+        return collector_base.RangeRead(
+            int(size_text), base64.b64decode(head_b64), base64.b64decode(data_b64)
+        )
+    except (ValueError, IndexError) as exc:
+        raise collector_base.SourceError(
+            "unexpected answer from PowerShell",
+            public_message="The source sent an unexpected answer",
+        ) from exc

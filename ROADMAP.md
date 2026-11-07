@@ -1287,6 +1287,16 @@ surface (`Viewer.svelte`, `CodeMirrorPane.svelte`).
   reactive block keyed on `activeTab?.following` — a background tab
   doesn't keep polling, and switching back to a still-following tab
   resumes it automatically.
+  - **Superseded in 0.6 (#254): incremental follow.** Each poll now asks
+    `GET /sources/{id}/follow` for what was appended after the bytes the
+    viewer holds, and every connector reads just that range in one round
+    trip (`read_range`: SFTP and SMB seek, WinRM reads a range in one
+    PowerShell call, the agent has a `read_range` command). It is still a
+    fresh read from the source each time, only smaller. The answer also
+    carries the file's size and a hash of its first bytes, so a rotated
+    or truncated file is reloaded from the start. `.gz` files, archive
+    members and agents older than 0.6 keep the full reload. The pane
+    appends new text as one transaction instead of rebuilding the editor.
   - **Found and fixed a real bug while building this**: `CodeMirrorPane`
     rebuilds its entire `EditorState` (`view.setState(...)`) on every
     content/toggle change, which resets scroll to the top by default —

@@ -1,9 +1,8 @@
 <script lang="ts">
   import QRCode from 'qrcode'
-  import { api, ApiError } from '../lib/api'
-  import { currentUser, refreshCurrentUser } from '../lib/auth'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
-  import type { MfaBackupCodesResponse, MfaEnrollResponse } from '../lib/types'
+  import { api, ApiError } from '../api'
+  import { currentUser, refreshCurrentUser } from '../auth'
+  import type { MfaBackupCodesResponse, MfaEnrollResponse } from '../types'
 
   // Four states this page can be in, driven by $currentUser.mfa_enabled plus
   // local "mid enrollment" / "just confirmed" flags:
@@ -112,11 +111,9 @@
   }
 </script>
 
-<SettingsNav />
-
-<div class="page">
+<section class="panel">
   <div class="header">
-    <h1>Security</h1>
+    <h2 class="panel-title">Two-factor authentication</h2>
     <p class="hint">
       Optional two-factor authentication for your own local account, using an authenticator app
       (TOTP).
@@ -228,7 +225,7 @@
           <button class="btn btn-ghost" on:click={() => (showRegenerateForm = true)}>
             Regenerate backup codes
           </button>
-          <button class="btn btn-ghost danger" on:click={() => (showDisableForm = true)}>
+          <button class="btn btn-danger" on:click={() => (showDisableForm = true)}>
             Disable MFA
           </button>
         </div>
@@ -268,18 +265,16 @@
       {/if}
     </div>
   {/if}
-</div>
+</section>
 
 <style>
-  .page {
-    padding: 1.75rem 2rem;
-    max-width: 640px;
+  .panel {
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
   }
-  h1 {
-    font-size: 1.4rem;
+  .panel-title {
+    font-size: 1.1rem;
     margin: 0;
     color: var(--text);
   }
@@ -327,9 +322,6 @@
   .actions {
     display: flex;
     gap: 0.6rem;
-  }
-  .btn-ghost.danger {
-    color: var(--danger);
   }
   .btn-danger {
     background: var(--danger);

@@ -9,6 +9,9 @@ from app.db import get_session
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+# Within the default password policy (#245).
+TEMP_PASSWORD = "Temporary-Pass-2026"
+
 
 def _make_user(session, *, is_super_admin=False, global_capabilities=None) -> User:
     role = Role(
@@ -54,7 +57,8 @@ def admin_client(session, client_for):
 def test_admin_can_create_user_forces_password_change(session, admin_client):
     role = _make_target_role(session)
     response = admin_client.post(
-        "/users", json={"username": "jdoe@example.com", "password": "s3cret!", "role_id": role.id}
+        "/users",
+        json={"username": "jdoe@example.com", "password": TEMP_PASSWORD, "role_id": role.id},
     )
     assert response.status_code == 201
     assert response.json()["must_change_password"] is True
@@ -72,7 +76,7 @@ def test_manage_users_capability_sufficient(session, client_for):
     role = _make_target_role(session)
 
     response = client.post(
-        "/users", json={"username": "a@example.com", "password": "pw123456", "role_id": role.id}
+        "/users", json={"username": "a@example.com", "password": TEMP_PASSWORD, "role_id": role.id}
     )
     assert response.status_code == 201
 
@@ -80,17 +84,19 @@ def test_manage_users_capability_sufficient(session, client_for):
 def test_duplicate_username_rejected(session, admin_client):
     role = _make_target_role(session)
     admin_client.post(
-        "/users", json={"username": "dup@example.com", "password": "s3cret!", "role_id": role.id}
+        "/users",
+        json={"username": "dup@example.com", "password": TEMP_PASSWORD, "role_id": role.id},
     )
     response = admin_client.post(
-        "/users", json={"username": "dup@example.com", "password": "s3cret!", "role_id": role.id}
+        "/users",
+        json={"username": "dup@example.com", "password": TEMP_PASSWORD, "role_id": role.id},
     )
     assert response.status_code == 409
 
 
 def test_create_user_requires_existing_role(session, admin_client):
     response = admin_client.post(
-        "/users", json={"username": "a@example.com", "password": "s3cret!", "role_id": 999999}
+        "/users", json={"username": "a@example.com", "password": TEMP_PASSWORD, "role_id": 999999}
     )
     assert response.status_code == 404
 
@@ -99,7 +105,8 @@ def test_update_user_role_and_active(session, admin_client):
     role_a = _make_target_role(session, "A")
     role_b = _make_target_role(session, "B")
     created = admin_client.post(
-        "/users", json={"username": "a@example.com", "password": "s3cret!", "role_id": role_a.id}
+        "/users",
+        json={"username": "a@example.com", "password": TEMP_PASSWORD, "role_id": role_a.id},
     ).json()
 
     response = admin_client.patch(
@@ -113,7 +120,7 @@ def test_update_user_role_and_active(session, admin_client):
 def test_reset_password_forces_change_and_returns_temp_password(session, admin_client):
     role = _make_target_role(session)
     created = admin_client.post(
-        "/users", json={"username": "a@example.com", "password": "s3cret!", "role_id": role.id}
+        "/users", json={"username": "a@example.com", "password": TEMP_PASSWORD, "role_id": role.id}
     ).json()
 
     response = admin_client.post(f"/users/{created['id']}/reset-password")
@@ -131,7 +138,7 @@ def test_reset_password_signs_the_user_out_everywhere(session, admin_client):
 
     role = _make_target_role(session)
     created = admin_client.post(
-        "/users", json={"username": "b@example.com", "password": "s3cret!", "role_id": role.id}
+        "/users", json={"username": "b@example.com", "password": TEMP_PASSWORD, "role_id": role.id}
     ).json()
     _, token = create_session(session, session.get(User, created["id"]))
 
@@ -142,7 +149,7 @@ def test_reset_password_signs_the_user_out_everywhere(session, admin_client):
 def test_deactivate_is_soft_delete(session, admin_client):
     role = _make_target_role(session)
     created = admin_client.post(
-        "/users", json={"username": "a@example.com", "password": "s3cret!", "role_id": role.id}
+        "/users", json={"username": "a@example.com", "password": TEMP_PASSWORD, "role_id": role.id}
     ).json()
 
     response = admin_client.delete(f"/users/{created['id']}")
@@ -157,7 +164,8 @@ def test_user_list_includes_sign_in_method_and_last_login(session, admin_client)
     """#238: the Users list sorts and filters by these."""
     role = _make_target_role(session)
     admin_client.post(
-        "/users", json={"username": "jdoe@example.com", "password": "s3cret!", "role_id": role.id}
+        "/users",
+        json={"username": "jdoe@example.com", "password": TEMP_PASSWORD, "role_id": role.id},
     )
     listed = {u["username"]: u for u in admin_client.get("/users").json()}
     assert listed["jdoe@example.com"]["auth_provider"] == "local"

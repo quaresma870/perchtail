@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
-  import { api, ApiError } from '../lib/api'
-  import { logout } from '../lib/auth'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
-  import type { AuthSessionInfo } from '../lib/types'
+  import { api, ApiError } from '../api'
+  import { logout } from '../auth'
+  import { confirmAction } from '../confirm'
+  import type { AuthSessionInfo } from '../types'
 
   let sessions: AuthSessionInfo[] = []
   let loading = true
@@ -35,7 +35,13 @@
       push('/login')
       return
     }
-    if (!confirm('Revoke this session? That device or browser will be signed out.')) return
+    const ok = await confirmAction({
+      title: 'Revoke session',
+      message: 'Revoke this session? That device or browser will be signed out.',
+      confirmLabel: 'Revoke',
+      danger: true,
+    })
+    if (!ok) return
     revoking = { ...revoking, [s.id]: true }
     try {
       await api.delete(`/auth/sessions/${s.id}`)
@@ -50,11 +56,9 @@
   onMount(load)
 </script>
 
-<SettingsNav />
-
-<div class="page">
+<section class="panel">
   <div class="header">
-    <h1>Sessions</h1>
+    <h2 class="panel-title">Sessions</h2>
     <p class="hint">
       Every device or browser currently signed in as you. If you don't recognize one, revoke it.
     </p>
@@ -80,7 +84,7 @@
             </div>
           </div>
           <button
-            class="btn btn-ghost danger"
+            class="btn btn-danger"
             disabled={revoking[s.id]}
             on:click={() => revoke(s)}
           >
@@ -90,18 +94,16 @@
       {/each}
     </ul>
   {/if}
-</div>
+</section>
 
 <style>
-  .page {
-    padding: 1.75rem 2rem;
-    max-width: 820px;
+  .panel {
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
   }
-  h1 {
-    font-size: 1.4rem;
+  .panel-title {
+    font-size: 1.1rem;
     margin: 0;
     color: var(--text);
   }
@@ -141,10 +143,6 @@
   .badge-accent {
     background: var(--accent-soft);
     color: var(--accent-hover);
-  }
-  .btn-ghost.danger {
-    color: var(--danger);
-    flex: 0 0 auto;
   }
   .error {
     color: var(--danger);

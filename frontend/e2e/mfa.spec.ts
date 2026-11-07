@@ -1,20 +1,24 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
+import { confirmPopup, createUser } from './popups'
 import { totp } from './totp'
 
 const username = `e2e-mfa-user-${Date.now()}`
-const tempPassword = 'e2e-mfa-temp-password-123!'
-const newPassword = 'e2e-mfa-new-password-456!'
+// Within the default password policy (#245): nothing from the username.
+const tempPassword = 'Lantern-Orbit-temp-58!'
+const newPassword = 'Tagus-River-new-73!'
+
+// Log out sits in the top bar's user menu (#298).
+async function logOut(page: Page) {
+  await page.locator('nav').getByRole('button', { name: /^User menu/ }).click()
+  await page.getByRole('menuitem', { name: 'Log out' }).click()
+}
 
 test('mfa: enroll, login with a TOTP code, login with a backup code, disable', async ({
   page,
   browser,
 }) => {
   // --- create a throwaway local user (as the seeded super-admin) ---
-  await page.goto('/#/settings/users')
-  await page.getByPlaceholder('username or email').fill(username)
-  await page.getByPlaceholder('temporary password').fill(tempPassword)
-  await page.locator('.add-user select').selectOption({ label: 'No Access' })
-  await page.getByRole('button', { name: 'Create user' }).click()
+  await createUser(page, { username, password: tempPassword, role: 'No Access' })
   await expect(page.getByRole('row', { name: new RegExp(username) })).toBeVisible()
 
   // Everything below runs in a separate, logged-out browser context rather
@@ -38,10 +42,15 @@ test('mfa: enroll, login with a TOTP code, login with a backup code, disable', a
   await expect(userPage).toHaveURL(/#\/viewer$/)
 
   // --- enroll: QR + secret, confirm with a live TOTP code ---
-  await userPage.goto('/#/settings/security')
-  await userPage.getByRole('button', { name: 'Enable two-factor authentication' }).click()
-  await userPage.getByLabel('Current password').fill(newPassword)
-  await userPage.getByRole('button', { name: 'Continue' }).click()
+  // Two-factor authentication is a section of My profile (#243), next to
+  // the password change, which has its own "Current password" field.
+  await userPage.goto('/#/profile')
+  const mfa = userPage.locator('section.panel', {
+    has: userPage.getByRole('heading', { name: 'Two-factor authentication' }),
+  })
+  await mfa.getByRole('button', { name: 'Enable two-factor authentication' }).click()
+  await mfa.getByLabel('Current password').fill(newPassword)
+  await mfa.getByRole('button', { name: 'Continue' }).click()
   await expect(userPage.locator('img.qr')).toBeVisible()
   const secret = await userPage.locator('.secret code').innerText()
 
@@ -55,7 +64,7 @@ test('mfa: enroll, login with a TOTP code, login with a backup code, disable', a
   await expect(userPage.getByText('Two-factor authentication is on')).toBeVisible()
 
   // --- login now requires a second factor ---
-  await userPage.getByRole('button', { name: 'Log out' }).click()
+  await logOut(userPage)
   await expect(userPage).toHaveURL(/#\/login$/)
   await userPage.getByLabel('Username').fill(username)
   await userPage.getByLabel('Password').fill(newPassword)
@@ -77,7 +86,7 @@ test('mfa: enroll, login with a TOTP code, login with a backup code, disable', a
   await expect(userPage).toHaveURL(/#\/viewer$/)
 
   // --- a backup code works as a one-time substitute for the TOTP code ---
-  await userPage.getByRole('button', { name: 'Log out' }).click()
+  await logOut(userPage)
   await expect(userPage).toHaveURL(/#\/login$/)
   await userPage.getByLabel('Username').fill(username)
   await userPage.getByLabel('Password').fill(newPassword)
@@ -88,13 +97,13 @@ test('mfa: enroll, login with a TOTP code, login with a backup code, disable', a
   await expect(userPage).toHaveURL(/#\/viewer$/)
 
   // --- disable MFA, then confirm login no longer asks for a code ---
-  await userPage.goto('/#/settings/security')
-  await userPage.getByRole('button', { name: 'Disable MFA' }).click()
-  await userPage.getByLabel('Current password').fill(newPassword)
-  await userPage.getByRole('button', { name: 'Disable MFA' }).click()
+  await userPage.goto('/#/profile')
+  await mfa.getByRole('button', { name: 'Disable MFA' }).click()
+  await mfa.getByLabel('Current password').fill(newPassword)
+  await mfa.getByRole('button', { name: 'Disable MFA' }).click()
   await expect(userPage.getByText('Two-factor authentication is off')).toBeVisible()
 
-  await userPage.getByRole('button', { name: 'Log out' }).click()
+  await logOut(userPage)
   await expect(userPage).toHaveURL(/#\/login$/)
   await userPage.getByLabel('Username').fill(username)
   await userPage.getByLabel('Password').fill(newPassword)
@@ -107,8 +116,9 @@ test('mfa: enroll, login with a TOTP code, login with a backup code, disable', a
   await page.goto('/#/settings/users')
   await page
     .getByRole('row', { name: new RegExp(username) })
-    .getByRole('button', { name: 'deactivate' })
+    .getByRole('button', { name: 'Deactivate' })
     .click()
+  await confirmPopup(page, 'Deactivate')
   await expect(
     page.getByRole('row', { name: new RegExp(username) }).getByText('inactive', { exact: true }),
   ).toBeVisible()

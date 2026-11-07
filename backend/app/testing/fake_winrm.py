@@ -62,7 +62,8 @@ class _FakeWinRMSession:
         if size_match:
             content = self._content(size_match.group("path"))
             if content is None:
-                return _FakeResult(status_code=1, std_err=b"fake_winrm: file not found")
+                # What the real script's existence check answers (#272).
+                return _FakeResult(status_code=5, std_out=b"PERCHTAIL_NOT_FOUND")
             return _FakeResult(std_out=str(len(content)).encode())
 
         read_match = _READ_RE.search(script)

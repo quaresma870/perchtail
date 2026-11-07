@@ -204,6 +204,16 @@ Upgrading from a release before 0.5.0 moves the database, salt and
 `known_hosts` from `/data` into `/data/db` on first start; see the
 CHANGELOG's upgrade notes.
 
+**Update check.** Once a day, PerchTail asks the GitHub releases API which
+release is the latest (one unauthenticated request; nothing about your
+installation is sent, and pre-releases are never offered). Super admins see
+the result under **Settings → System → Updates**, with the upgrade steps for
+how this instance was installed. Turn it off there, or set
+`UPDATE_CHECK=false` to make sure PerchTail never makes that request (for
+example on a network without internet access). `HTTPS_PROXY` is honoured.
+The source overview also shows each push agent's version, and flags agents
+older than the server.
+
 ## Deployment: reverse proxy (nginx) + TLS
 
 **Never expose PerchTail's admin/viewer UI to the public internet without

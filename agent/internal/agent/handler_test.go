@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestHandleListReturnsFilesAndDirs(t *testing.T) {
@@ -175,5 +176,25 @@ func TestHandleListOfAFileIsNotADirectory(t *testing.T) {
 	}
 	if _, err := HandleList(base, "app.log"); !errors.Is(err, ErrNotADirectory) {
 		t.Fatalf("got %v, want ErrNotADirectory", err)
+	}
+}
+
+func TestHandleListReportsModificationTimes(t *testing.T) {
+	// #273: the explorer sorts by time.
+	base := t.TempDir()
+	file := filepath.Join(base, "app.log")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(file, when, when); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := HandleList(base, "")
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries %+v, err %v", entries, err)
+	}
+	if entries[0].MTimeMs != when.UnixMilli() {
+		t.Fatalf("mtime = %d, want %d", entries[0].MTimeMs, when.UnixMilli())
 	}
 }

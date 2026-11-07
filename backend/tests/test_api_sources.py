@@ -889,3 +889,58 @@ def test_deleting_a_source_leaves_an_audit_entry_that_names_it(session, admin_cl
 
     entry = session.exec(select(AuditLog).where(AuditLog.action == "source.delete")).one()
     assert entry.event_metadata == {"target_name": "app01", "target_context": customer.name}
+
+
+def test_an_agent_older_than_the_server_is_flagged(session, admin_client, monkeypatch):
+    """#215: the source page warns when the agent should be upgraded."""
+    monkeypatch.setattr("app.api.sources.APP_VERSION", "0.6.0")
+    customer = _make_customer(session)
+    agent = Source(
+        name="agent01",
+        customer_id=customer.id,
+        protocol=Protocol.agent,
+        host="agent01",
+        base_path="/var/log/app",
+    )
+    session.add(agent)
+    session.commit()
+    source_id = agent.id
+
+    def flagged(version):
+        source = session.get(Source, source_id)
+        source.agent_version = version
+        session.add(source)
+        session.commit()
+        body = admin_client.get(f"/sources/{source_id}").json()
+        return body["agent_version"], body["agent_outdated"]
+
+    assert flagged("0.5.3") == ("0.5.3", True)
+    assert flagged("0.6.0") == ("0.6.0", False)
+    assert flagged("dev") == ("dev", False)  # a local build isn't compared
+    assert flagged(None) == (None, False)
+
+
+def test_sources_carry_their_status(session, admin_client):
+    """#276: the explorer shows each source's reachability."""
+    customer = _make_customer(session)
+    remote = Source(
+        name="web01", customer_id=customer.id, protocol=Protocol.ssh, host="web01", base_path="/x"
+    )
+    agent = Source(
+        name="agent01", customer_id=customer.id, protocol=Protocol.agent, host="a", base_path="/x"
+    )
+    session.add_all([remote, agent])
+    session.commit()
+
+    body = admin_client.get(f"/sources/{remote.id}").json()
+    assert (body["status"], body["status_message"]) == ("unknown", None)
+
+    remote.status, remote.status_message = "failing", "The source isn't reachable"
+    session.add(remote)
+    session.commit()
+    body = admin_client.get(f"/sources/{remote.id}").json()
+    assert (body["status"], body["status_message"]) == ("failing", "The source isn't reachable")
+
+    # An agent source's status is its live connection.
+    body = admin_client.get(f"/sources/{agent.id}").json()
+    assert (body["status"], body["status_message"]) == ("failing", "The agent isn't connected")

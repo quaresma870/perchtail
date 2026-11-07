@@ -7,10 +7,14 @@ export interface FetchProblem {
   message: string
   /** Worth offering a "Try again" button: the cause may be transient. */
   retryable: boolean
+  /** The file isn't on the source any more (#272) -- as opposed to hidden
+   * by the rules, which looks the same as never having existed. */
+  missing?: boolean
 }
 
 interface ErrorBody {
   detail?: string | { message?: string; error_code?: string }
+  error_code?: string
 }
 
 export function describeFetchFailure(status: number, body: ErrorBody | null, name: string): FetchProblem {
@@ -20,6 +24,9 @@ export function describeFetchFailure(status: number, body: ErrorBody | null, nam
     case 413:
       return { message: serverMessage ? `${name}: ${serverMessage}` : `${name} is too large to open.`, retryable: false }
     case 404:
+      if (body?.error_code === 'not_found_on_source') {
+        return { message: `${name} no longer exists on the source.`, retryable: false, missing: true }
+      }
       return { message: `${name} wasn't found, or is hidden by this source's rules.`, retryable: false }
     case 403:
       return {

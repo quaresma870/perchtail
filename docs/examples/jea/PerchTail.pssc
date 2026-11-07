@@ -1,0 +1,19 @@
+@{
+    # The PerchTail JEA endpoint (#169). Register-PerchTailJea.ps1 fills in the
+    # group and registers it; see README.md next to this file.
+    SchemaVersion     = '2.0.0.0'
+    GUID              = '4f1d8b6e-2a93-4c57-b0e8-6d2c9a7f3e14'
+    Description       = 'PerchTail read-only log access'
+    # NoLanguage: callers can run the role's functions with parameters and
+    # nothing else.
+    SessionType       = 'RestrictedRemoteServer'
+    LanguageMode      = 'NoLanguage'
+    # Not a virtual account: the functions run as the connecting account, so
+    # its own file permissions still decide what it can read.
+    RunAsVirtualAccount = $false
+    RoleDefinitions   = @{
+        'PERCHTAIL_GROUP' = @{ RoleCapabilities = 'PerchTailReader' }
+    }
+    # Transcripts would record file contents; turn them on only if that's
+    # wanted (TranscriptDirectory = 'C:\ProgramData\PerchTail\Transcripts').
+}

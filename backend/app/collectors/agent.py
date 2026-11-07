@@ -9,7 +9,7 @@ from app.collectors.base import DirEntry
 from app.models import Rule, Source
 from app.rules import is_entry_visible, rules_case_insensitive
 
-__all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
+__all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy", "read_range"]
 
 # Size of each fetch_chunk the agent sends (#205): about 1.4 MB once
 # base64-encoded, well under uvicorn's 16 MiB WebSocket message limit.
@@ -31,8 +31,16 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
             child_path, raw["is_dir"], rules, case_insensitive=case_insensitive
         ):
             continue
+        # mtime_ms (#273): agents from 0.6 on; None from older ones.
+        mtime_ms = raw.get("mtime_ms")
         entries.append(
-            DirEntry(name=raw["name"], path=child_path, is_dir=raw["is_dir"], size=raw["size"])
+            DirEntry(
+                name=raw["name"],
+                path=child_path,
+                is_dir=raw["is_dir"],
+                size=raw["size"],
+                mtime=mtime_ms / 1000 if isinstance(mtime_ms, int) else None,
+            )
         )
     return entries
 
@@ -85,3 +93,34 @@ def local_copy(source: Source, relative_path: str):
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path
+
+
+def read_range(
+    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+) -> collector_base.RangeRead:
+    """Incremental follow (#254): the agent reads the file's first `head`
+    bytes and up to `length` bytes from `offset` off its own disk, and
+    answers with the file's size. An agent older than 0.6 doesn't know the
+    command: RangeNotSupportedError, and the viewer reloads the whole file
+    instead."""
+    try:
+        result = get_agent_registry().send_command_sync(
+            source.id,
+            "read_range",
+            path=relative_path,
+            offset=max(int(offset), 0),
+            length=max(min(int(length), collector_base.RANGE_MAX_BYTES), 0),
+            head_length=max(min(int(head), collector_base.RANGE_MAX_HEAD_BYTES), 0),
+        )
+    except AgentCommandError as exc:
+        if "unknown command type" in str(exc).lower():
+            raise collector_base.RangeNotSupportedError(str(exc)) from exc
+        raise
+    head_bytes = base64.b64decode(result.get("head_b64") or "")
+    data = base64.b64decode(result.get("data_b64") or "")
+    if (
+        len(data) > collector_base.RANGE_MAX_BYTES
+        or len(head_bytes) > collector_base.RANGE_MAX_HEAD_BYTES
+    ):
+        raise collector_base.SourceError("the agent sent more than it was asked for")
+    return collector_base.RangeRead(int(result.get("size", 0)), head_bytes, data)

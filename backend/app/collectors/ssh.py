@@ -208,6 +208,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                 child_path = f"{relative_path}/{attr.filename}" if relative_path else attr.filename
                 mode = attr.st_mode or 0
                 size = attr.st_size or 0
+                mtime = getattr(attr, "st_mtime", None)
                 if stat_module.S_ISLNK(mode):
                     try:
                         target = sftp.normalize(posixpath.join(remote_path, attr.filename))
@@ -218,11 +219,18 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                         continue  # dangling link: nothing to show
                     mode = target_attr.st_mode or 0
                     size = target_attr.st_size or 0
+                    mtime = getattr(target_attr, "st_mtime", None)
                 is_dir = stat_module.S_ISDIR(mode)
                 if not is_entry_visible(child_path, is_dir, rules, case_insensitive=False):
                     continue
                 entries.append(
-                    DirEntry(name=attr.filename, path=child_path, is_dir=is_dir, size=size)
+                    DirEntry(
+                        name=attr.filename,
+                        path=child_path,
+                        is_dir=is_dir,
+                        size=size,
+                        mtime=float(mtime) if mtime is not None else None,
+                    )
                 )
             return entries
         finally:
@@ -263,3 +271,23 @@ def local_copy(source: Source, relative_path: str):
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path
+
+
+def read_range(
+    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+) -> collector_base.RangeRead:
+    """Incremental follow (#254): the file's size, its first `head` bytes and
+    up to `length` bytes from `offset`, read with an SFTP seek -- nothing before the offset is
+    transferred."""
+    client = _connect(source)
+    try:
+        sftp = client.open_sftp()
+        try:
+            remote_path = _resolve_contained(sftp, source, relative_path)
+            with sftp.open(remote_path, "rb") as f:
+                size = f.stat().st_size or 0
+                return collector_base.read_range_from(f, size, offset, length, head)
+        finally:
+            sftp.close()
+    finally:
+        client.close()

@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup } from './popups'
 import { loadFixturePaths } from './fixture-paths'
 
 // A `local`-protocol source needs no credentials and reads straight off
@@ -16,7 +17,8 @@ test('full-text search: indexes a source and deep-links a hit into the viewer', 
 
   await page.goto('/#/settings/sources/new')
   await page.getByLabel('Name', { exact: true }).fill(sourceName)
-  await page.getByLabel('Protocol').selectOption('local')
+  // The editor is a popup over the sources list, which has its own Protocol filter (#302).
+  await page.getByRole('dialog').getByLabel('Protocol').selectOption('local')
   await page.getByLabel('Host').fill('localhost')
   await page.getByLabel('Base path').fill(fixtures.ssh.base_path)
   await page.getByLabel('Include in full-text search').check()
@@ -61,11 +63,11 @@ test('full-text search: indexes a source and deep-links a hit into the viewer', 
 
   // Cleanup.
   await page.goto('/#/settings/sources')
-  page.once('dialog', (dialog) => dialog.accept())
   await page
     .getByRole('row', { name: new RegExp(sourceName) })
-    .getByRole('button', { name: 'delete' })
+    .getByRole('button', { name: 'Delete' })
     .click()
+  await confirmPopup(page, 'Delete')
   await expect(page.getByRole('row', { name: new RegExp(sourceName) })).toHaveCount(0)
 })
 

@@ -210,6 +210,14 @@ def test_check_hides_raw_error_from_view_only_users(session, monkeypatch):
         ("open x.log: no such file or directory", "SourceNotFoundError"),
         ("open x.log: permission denied", "SourcePermissionError"),
         ("not a directory", "SourceNotFoundError"),
+        # A Windows agent's wording (#272, found in the 0.6.0-rc.1 lab).
+        (
+            "openat app/gone.log: The system cannot find the file specified.",
+            "SourceNotFoundError",
+        ),
+        ("openat gone/x.log: The system cannot find the path specified.", "SourceNotFoundError"),
+        ("readdirent app.log: The directory name is invalid.", "SourceNotFoundError"),
+        ("open secret.log: Access is denied.", "SourcePermissionError"),
     ],
 )
 def test_agent_refusals_map_like_the_other_connectors(message, expected_name):

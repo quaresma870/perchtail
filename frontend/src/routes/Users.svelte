@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import Modal from '../lib/components/Modal.svelte'
+  import PasswordRules from '../lib/components/PasswordRules.svelte'
+  import { confirmAction } from '../lib/confirm'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import SortableHeader from '../lib/components/SortableHeader.svelte'
   import {
@@ -20,11 +23,15 @@
 
   let newUsername = ''
   let newPassword = ''
+  let newDisplayName = ''
+  let newEmail = ''
   let newRoleId: number | null = null
   let creating = false
-
-  let tempPasswordFor: number | null = null
-  let tempPassword = ''
+  // Create and reset password open in popups (#301).
+  let newUserOpen = false
+  let createError = ''
+  let resetResult: { username: string; password: string } | null = null
+  let resetCopied = false
 
   async function load() {
     loading = true
@@ -42,17 +49,33 @@
     }
   }
 
+  function openNewUser() {
+    newUsername = ''
+    newPassword = ''
+    newDisplayName = ''
+    newEmail = ''
+    if (roles.length > 0 && !roles.some((r) => r.id === newRoleId)) newRoleId = roles[0].id
+    createError = ''
+    newUserOpen = true
+  }
+
   async function createUser() {
     if (!newUsername || !newPassword || newRoleId === null) return
     creating = true
-    error = ''
+    createError = ''
     try {
-      await api.post('/users', { username: newUsername, password: newPassword, role_id: newRoleId })
-      newUsername = ''
+      await api.post('/users', {
+        username: newUsername,
+        password: newPassword,
+        role_id: newRoleId,
+        display_name: newDisplayName,
+        email: newEmail,
+      })
+      newUserOpen = false
       newPassword = ''
       await load()
     } catch (err) {
-      error = err instanceof ApiError ? err.detail : 'Failed to create user'
+      createError = err instanceof ApiError ? err.detail : 'Failed to create user'
     } finally {
       creating = false
     }
@@ -68,6 +91,16 @@
   }
 
   async function toggleActive(user: AppUser) {
+    if (
+      user.active &&
+      !(await confirmAction({
+        title: 'Deactivate user',
+        message: `Deactivate ${user.username}? They're signed out and can't sign in until reactivated; their history is kept.`,
+        confirmLabel: 'Deactivate',
+        danger: true,
+      }))
+    )
+      return
     try {
       if (user.active) {
         await api.delete(`/users/${user.id}`)
@@ -80,13 +113,29 @@
     }
   }
 
+  async function copyResetPassword() {
+    if (!resetResult) return
+    try {
+      await navigator.clipboard.writeText(resetResult.password)
+      resetCopied = true
+    } catch {
+      resetCopied = false
+    }
+  }
+
   async function resetPassword(user: AppUser) {
+    const ok = await confirmAction({
+      title: 'Reset password',
+      message: `Reset the password of ${user.username}? They get a temporary password and must choose a new one when they sign in.`,
+      confirmLabel: 'Reset password',
+    })
+    if (!ok) return
     try {
       const result = await api.post<{ temporary_password: string }>(
         `/users/${user.id}/reset-password`,
       )
-      tempPasswordFor = user.id
-      tempPassword = result.temporary_password
+      resetCopied = false
+      resetResult = { username: user.username, password: result.temporary_password }
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to reset password'
     }
@@ -116,7 +165,7 @@
 
   $: filtered = users.filter(
     (u) =>
-      matchesText([u.username, roleName(u.role_id)], view.text) &&
+      matchesText([u.username, u.display_name ?? '', u.email ?? '', roleName(u.role_id)], view.text) &&
       (!view.roleId || u.role_id === Number(view.roleId)) &&
       (!view.status || (view.status === 'active') === u.active) &&
       (!view.provider || (view.provider === 'local') === (u.auth_provider === 'local')),
@@ -133,7 +182,12 @@
 <SettingsNav />
 
 <div class="page">
-  <h1>Users</h1>
+  <div class="page-head">
+    <h1>Users</h1>
+    {#if !loading}
+      <button class="btn btn-primary" on:click={openNewUser}>+ New user</button>
+    {/if}
+  </div>
 
   {#if loading}
     <p class="hint">Loading…</p>
@@ -146,7 +200,7 @@
       <input
         class="input filter-text"
         type="search"
-        placeholder="Filter by username or role"
+        placeholder="Filter by username, name, email or role"
         aria-label="Filter users"
         bind:value={view.text}
       />
@@ -187,7 +241,14 @@
         <tbody>
           {#each visible as user (user.id)}
             <tr>
-              <td class="username">{user.username}</td>
+              <td class="username">
+                {user.username}
+                {#if user.display_name || user.email}
+                  <div class="user-sub">
+                    {[user.display_name, user.email].filter(Boolean).join(' · ')}
+                  </div>
+                {/if}
+              </td>
               <td>
                 <select
                   class="input"
@@ -210,20 +271,19 @@
               </td>
               <td>{signInLabel(user)}</td>
               <td class="last-login">{formatLogin(user.last_login_at)}</td>
-              <td class="actions">
-                <button class="link" on:click={() => resetPassword(user)}>reset password</button>
-                <button class="link" on:click={() => toggleActive(user)}>
-                  {user.active ? 'deactivate' : 'reactivate'}
-                </button>
+              <td>
+                <div class="row-actions">
+                  {#if user.auth_provider === 'local'}
+                    <button class="btn btn-ghost btn-sm" on:click={() => resetPassword(user)}>Reset password</button>
+                  {/if}
+                  {#if user.active}
+                    <button class="btn btn-danger btn-sm" on:click={() => toggleActive(user)}>Deactivate</button>
+                  {:else}
+                    <button class="btn btn-ghost btn-sm" on:click={() => toggleActive(user)}>Reactivate</button>
+                  {/if}
+                </div>
               </td>
             </tr>
-            {#if tempPasswordFor === user.id}
-              <tr>
-                <td colspan="6" class="temp-password">
-                  Temporary password (shown once): <code>{tempPassword}</code>
-                </td>
-              </tr>
-            {/if}
           {/each}
           {#if users.length > 0 && visible.length === 0}
             <tr>
@@ -236,25 +296,53 @@
       </table>
     </div>
 
-    <form class="add-user card" on:submit|preventDefault={createUser}>
-      <h2>New user</h2>
-      <input class="input" placeholder="username or email" bind:value={newUsername} required />
-      <input
-        class="input"
-        type="password"
-        placeholder="temporary password"
-        bind:value={newPassword}
-        required
-      />
-      <select class="input" bind:value={newRoleId}>
-        {#each roles as role (role.id)}
-          <option value={role.id}>{role.name}</option>
-        {/each}
-      </select>
-      <button class="btn btn-primary" type="submit" disabled={creating}>
-        {creating ? 'Creating…' : 'Create user'}
-      </button>
-    </form>
+    {#if newUserOpen}
+      <Modal title="New user" on:close={() => (newUserOpen = false)}>
+        <form id="new-user-form" class="modal-form" on:submit|preventDefault={createUser}>
+          <label class="field">Username <input class="input" bind:value={newUsername} required /></label>
+          <label class="field">Display name (optional) <input class="input" bind:value={newDisplayName} /></label>
+          <label class="field">Email (optional) <input class="input" type="email" bind:value={newEmail} /></label>
+          <label class="field"
+            >Temporary password
+            <input class="input" type="password" autocomplete="new-password" bind:value={newPassword} required />
+          </label>
+          <PasswordRules />
+          <label class="field"
+            >Role
+            <select class="input" bind:value={newRoleId}>
+              {#each roles as role (role.id)}
+                <option value={role.id}>{role.name}</option>
+              {/each}
+            </select>
+          </label>
+          {#if createError}
+            <p class="error" role="alert">{createError}</p>
+          {/if}
+        </form>
+        <svelte:fragment slot="footer">
+          <button class="btn btn-ghost" type="button" on:click={() => (newUserOpen = false)}>Cancel</button>
+          <button class="btn btn-primary" type="submit" form="new-user-form" disabled={creating}>
+            {creating ? 'Creating…' : 'Create user'}
+          </button>
+        </svelte:fragment>
+      </Modal>
+    {/if}
+
+    {#if resetResult}
+      <Modal title="Temporary password" on:close={() => (resetResult = null)}>
+        <p class="modal-text">
+          The new temporary password of <strong>{resetResult.username}</strong>, shown only now. Give it to them
+          safely; they'll choose a new one when they sign in.
+        </p>
+        <code class="temp-password">{resetResult.password}</code>
+        <svelte:fragment slot="footer">
+          <button class="btn btn-ghost" type="button" on:click={copyResetPassword}
+            >{resetCopied ? 'Copied' : 'Copy'}</button
+          >
+          <button class="btn btn-primary" type="button" on:click={() => (resetResult = null)}>Done</button>
+        </svelte:fragment>
+      </Modal>
+    {/if}
   {/if}
 </div>
 
@@ -292,11 +380,6 @@
     color: var(--text-muted);
     text-align: center;
   }
-  h2 {
-    font-size: 1rem;
-    margin: 0;
-    color: var(--text);
-  }
   table {
     width: 100%;
     border-collapse: collapse;
@@ -321,6 +404,11 @@
   tbody tr:last-child {
     border-bottom: none;
   }
+  .user-sub {
+    font-size: 0.78rem;
+    color: var(--text-faint);
+    margin-top: 0.15rem;
+  }
   .username {
     font-weight: 600;
     color: var(--text);
@@ -343,25 +431,33 @@
     background: none;
     color: var(--accent-hover);
     cursor: pointer;
-    margin-right: 0.6rem;
     font-size: 0.85rem;
     padding: 0;
   }
-  .temp-password {
-    background: var(--warning-soft);
-    color: var(--text);
-    font-size: 0.85rem;
+  .page-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
   }
-  .add-user {
-    padding: 1.25rem 1.5rem;
+  .modal-form {
     display: flex;
     flex-direction: column;
     gap: 0.7rem;
-    max-width: 360px;
   }
-  button[type='submit'] {
-    align-self: flex-start;
-    padding: 0.6rem 1.2rem;
+  .modal-text {
+    margin: 0;
+    font-size: 0.86rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .temp-password {
+    padding: 0.6rem 0.8rem;
+    border-radius: var(--radius-sm);
+    background: var(--warning-soft);
+    color: var(--text);
+    font-size: 0.95rem;
+    user-select: all;
   }
   .error {
     color: var(--danger);

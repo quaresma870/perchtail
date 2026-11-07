@@ -5,12 +5,37 @@
   import ConnectionCard from '../lib/components/ConnectionCard.svelte'
   import ConnectionsTree from '../lib/components/ConnectionsTree.svelte'
   import SourceNode from '../lib/components/SourceNode.svelte'
+  import ScopeResults from '../lib/components/ScopeResults.svelte'
+  import {
+    advancedFilter,
+    clearScopes,
+    compileMatcher,
+    contextFromTree,
+    filterOptions,
+    isGroupScope,
+    isMatcherError,
+    removeScope,
+    scopeContext,
+    scopeKey,
+    scopes,
+    sourceScopesOf,
+    stopSearches,
+    type Scope,
+  } from '../lib/explorer-scope'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
   import DiffPane from '../lib/components/DiffPane.svelte'
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
+  import FindBar from '../lib/components/FindBar.svelte'
+  import { compileFind, type FindSpec } from '../lib/find-in-document'
+  import { countAppended, countMatches, matchIndexAt, type MatchCount } from '../lib/find-count'
+  import ToolbarIcon from '../lib/components/ToolbarIcon.svelte'
   import { buildConnectionTree } from '../lib/connection-tree'
   import { filterConnections } from '../lib/connection-filter'
   import { readFetchFailure, type FetchProblem } from '../lib/fetch-errors'
+  import { trackedFetch } from '../lib/server-status'
+  import { parentPath, refreshFolder, startAutoRefresh, stopAutoRefresh } from '../lib/explorer-refresh'
+  import { connectionsViewPreference, migrateLegacyViewChoice, savePreference } from '../lib/preferences'
+  import { countLines, followUrl, readFollowHeaders, tailIntervalMs } from '../lib/follow'
   import { canFormat, formatContent } from '../lib/format-content'
   import { languageForFilename } from '../lib/file-language'
   import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
@@ -29,8 +54,8 @@
    * Search). */
   export let params: { sourceId?: string } = {}
 
-  const FOLLOW_INTERVAL_MS = 2000
-  const VIEW_PREF_KEY = 'perchtail.connectionsView'
+  // How often Tail polls (#254, #283): a System setting, 1 to 10 s.
+  $: followIntervalMs = tailIntervalMs($systemSettings.tail_interval_seconds)
 
   const focusSourceId = params.sourceId ? Number(params.sourceId) : null
 
@@ -47,7 +72,99 @@
   let notice: (FetchProblem & { retry?: () => void }) | null = null
 
   let paneRef: CodeMirrorPane | null = null
-  let findAllOpen = false
+  // One find bar for Find and Find all (#299). Its search is highlighted in
+  // the editor; Find all lists the matching lines below, for the search as
+  // it was when Find all was pressed.
+  let findOpen = false
+  let findSpec: FindSpec = { query: '', caseSensitive: false, useRegex: false, wholeWord: false }
+  let findBar: FindBar | null = null
+  let findAllSpec: FindSpec | null = null
+  $: findAllOpen = findAllSpec !== null
+  $: editorFind = findOpen && findSpec.query ? findSpec : null
+  $: findPattern = editorFind ? compileFind(findSpec.query, findSpec) : null
+
+  // "3 of 120": every match counted, per line, in the background.
+  let findCount: MatchCount | null = null
+  let currentMatch = 0
+  let findLines: string[] = []
+  let countedText = ''
+  let countedPattern: RegExp | null = null
+  let stopCount: (() => void) | null = null
+  let countTimer: ReturnType<typeof setTimeout> | null = null
+  $: restartCount(findPattern, findPattern ? displayContent : '')
+  function restartCount(pattern: RegExp | null, text: string) {
+    if (countTimer) clearTimeout(countTimer)
+    // Tail only adds lines at the end: count those, not the whole file again.
+    if (
+      pattern !== null &&
+      pattern === countedPattern &&
+      findCount?.done &&
+      text.length > countedText.length &&
+      text.startsWith(countedText)
+    ) {
+      const result = countAppended(findCount, findLines, text.slice(countedText.lastIndexOf('\n') + 1), pattern)
+      findLines = result.lines
+      findCount = result.count
+      countedText = text
+      return
+    }
+    stopCount?.()
+    stopCount = null
+    findCount = null
+    currentMatch = 0
+    countedText = ''
+    countedPattern = null
+    if (!pattern) return
+    // Waits for a pause in typing before counting a big file.
+    countTimer = setTimeout(() => {
+      findLines = text.split('\n')
+      countedText = text
+      countedPattern = pattern
+      stopCount = countMatches(findLines, pattern, (c) => (findCount = { ...c }))
+    }, 120)
+  }
+
+  async function openFind() {
+    // The selection only starts a new search: with the bar open it's
+    // usually the current match, which would replace a regex.
+    const selected = findOpen ? '' : (paneRef?.selectedText() ?? '')
+    if (selected) findSpec = { ...findSpec, query: selected }
+    findOpen = true
+    await tick()
+    findBar?.focus()
+  }
+
+  function closeFind() {
+    findOpen = false
+    restartCount(null, '')
+  }
+
+  // The position ("3 of 120") shows once the reader moves to a match, and
+  // is kept up to date as the count changes; a new search starts without it.
+  let navigated = false
+  $: findSpec, (navigated = false)
+
+  function stepFind(forward: boolean) {
+    if (!paneRef || !findPattern) return
+    if (forward) paneRef.findNext()
+    else paneRef.findPrevious()
+    navigated = true
+    updateCurrentMatch()
+  }
+
+  function updateCurrentMatch() {
+    const at = paneRef?.selectionStart()
+    currentMatch =
+      navigated && at && findCount?.done && findPattern
+        ? matchIndexAt(findCount, findLines, findPattern, at.line, at.column)
+        : 0
+  }
+  $: findCount, updateCurrentMatch()
+
+  function runFindAll() {
+    if (!findSpec.query || !findPattern) return
+    findAllSpec = { ...findSpec }
+  }
   let goToLineOpen = false
   let goToLineValue = ''
   let goToLineInput: HTMLInputElement | null = null
@@ -74,23 +191,56 @@
     : ''
   $: sourceNames = new Set(tabs.map((t) => t.sourceId)).size > 1
 
-  $: filteredAllSources = filterConnections(allSources, connectionsQuery)
+  // Advanced filter (#274): the box filters files in the ticked sources and
+  // folders instead of connections; the explorer lists every source for
+  // picking, and shows the matching files once something is ticked.
+  let fileQuery = ''
+  // While ticking, the tree stays; the files show on "Show the files" or as
+  // soon as something is typed in the filter.
+  let pickingScopes = true
+  $: showScoped = $advancedFilter && $scopes.length > 0 && !pickingScopes
+  $: if ($scopes.length === 0) pickingScopes = true
+  const scopeLabel = (scope: Scope) =>
+    isGroupScope(scope) ? scope.name : `${sourceLabel(scope.sourceId)}${scope.path ? ` › ${scope.path}` : ''}`
+  // Which sources sit under each customer and folder (#284), from every
+  // source the user can see, not only the ones the search box shows.
+  $: scopeContext.set(contextFromTree(buildConnectionTree(allSources)))
+  $: compiledFilter = compileMatcher(fileQuery, $filterOptions)
+  $: fileMatcher = isMatcherError(compiledFilter) ? null : compiledFilter
+
+  $: filteredAllSources = filterConnections(allSources, $advancedFilter ? '' : connectionsQuery)
 
   // List or tree: the admin's default (Settings -> System), and -- when
-  // switching is allowed -- each browser remembers its own last choice (#156).
-  let connectionsView: 'list' | 'tree' = 'list'
-  let viewChosenLocally = false
+  // switching is allowed -- each user's own choice, kept on the server so
+  // it follows them (#156, #273).
   $: switchable = $systemSettings.connections_view_switchable
-  $: if (!switchable || !viewChosenLocally) connectionsView = $systemSettings.connections_view_default
+  $: connectionsView = switchable ? $connectionsViewPreference : $systemSettings.connections_view_default
 
   function chooseView(view: 'list' | 'tree') {
-    connectionsView = view
-    viewChosenLocally = true
-    try {
-      localStorage.setItem(VIEW_PREF_KEY, view)
-    } catch {
-      // storage unavailable: the choice just isn't remembered
-    }
+    savePreference('connections_view', view)
+  }
+
+  // Open folders re-list themselves (#272); the interval is a System setting.
+  $: startAutoRefresh($systemSettings.explorer_refresh_seconds)
+
+  // Source statuses (#276) are re-read with the same rhythm (every minute
+  // when auto-refresh is off), quietly: no "Loading…", and nothing while
+  // the browser tab is hidden.
+  let statusTimer: ReturnType<typeof setInterval> | null = null
+  let statusSeconds = 0
+  $: restartStatusTimer($systemSettings.explorer_refresh_seconds || 60)
+  function restartStatusTimer(seconds: number) {
+    if (statusTimer && seconds === statusSeconds) return
+    if (statusTimer) clearInterval(statusTimer)
+    statusSeconds = seconds
+    statusTimer = setInterval(async () => {
+      if (document.hidden) return
+      try {
+        allSources = await api.get<Source[]>('/sources')
+      } catch {
+        // the banner (server-status) says when PerchTail doesn't answer
+      }
+    }, seconds * 1000)
   }
 
   $: expandedTreeIds = new Set(
@@ -163,9 +313,12 @@
       return true
     }
     try {
-      const response = await fetch(openUrl(sourceId, path, member), { credentials: 'include' })
+      const response = await trackedFetch(openUrl(sourceId, path, member), { credentials: 'include' })
       if (!response.ok) {
         const problem = await readFetchFailure(response, name)
+        // Gone from the source (#272): its folder is listed again, so it
+        // leaves the tree.
+        if (problem.missing) refreshFolder(sourceId, parentPath(path))
         notice = {
           ...problem,
           retry: problem.retryable
@@ -174,7 +327,12 @@
         }
         return false
       }
-      const content = await response.text()
+      const bytes = await response.arrayBuffer()
+      // Streaming, so a character the file's end splits is completed by
+      // the first Follow answer (#254) instead of turning into two U+FFFD.
+      const decoder = new TextDecoder()
+      const content = decoder.decode(bytes, { stream: true })
+      followDecoders.set(key, decoder)
       const tab: Tab = {
         key,
         sourceId,
@@ -190,6 +348,12 @@
         markPatterns: [],
         format: 'none',
         following: false,
+        byteSize: bytes.byteLength,
+        followHead: response.headers.get('x-follow-head'),
+        // A .gz file or an archive member is decompressed on the server: only
+        // the whole of it can be reloaded.
+        followMode: member || name.toLowerCase().endsWith('.gz') ? 'reload' : 'incremental',
+        newLines: 0,
       }
       notice = null
       ensureSeverityPatterns(sourceId)
@@ -220,7 +384,7 @@
   // the same log on two servers can be diffed (#162).
   async function pickCompareTarget(sourceId: number, path: string, member: string | null, name: string) {
     try {
-      const response = await fetch(openUrl(sourceId, path, member), { credentials: 'include' })
+      const response = await trackedFetch(openUrl(sourceId, path, member), { credentials: 'include' })
       if (!response.ok) {
         notice = await readFetchFailure(response, name)
         compareArmed = false
@@ -265,6 +429,8 @@
   }
 
   function closeTab(tab: Tab) {
+    followDecoders.delete(tab.key)
+    followStarted.delete(tab.key)
     const remaining = tabs.filter((t) => t.key !== tab.key)
     setState({
       tabs: remaining,
@@ -344,23 +510,40 @@
     updateActiveTab({ format: mode, bookmarks: [] })
   }
 
-  // Re-fetch the active tab in place (Reload, and every Follow tick); the
-  // previous scratch reference is released once the new one lands.
+  // Re-fetch a tab in place (Reload; Follow when only the whole file can be
+  // fetched, or after a rotation); the previous scratch reference is
+  // released once the new one lands.
   async function reloadActiveTab() {
-    if (!activeTab) return
-    const tab = activeTab
+    if (activeTab) await reloadTab(activeTab)
+  }
+
+  async function reloadTab(tab: Tab) {
     try {
-      const response = await fetch(openUrl(tab.sourceId, tab.path, tab.member), {
+      const response = await trackedFetch(openUrl(tab.sourceId, tab.path, tab.member), {
         credentials: 'include',
       })
       if (!response.ok) {
         const problem = await readFetchFailure(response, tab.name)
+        if (problem.missing) {
+          markMissing(tab)
+          return
+        }
         notice = { ...problem, retry: problem.retryable ? reloadActiveTab : undefined }
         return
       }
-      const content = await response.text()
+      const bytes = await response.arrayBuffer()
+      const decoder = new TextDecoder()
+      const content = decoder.decode(bytes, { stream: true })
       const scratchKey = response.headers.get('x-scratch-key')
-      setState({ tabs: tabs.map((t) => (t.key === tab.key ? { ...t, content, scratchKey } : t)) })
+      const followHead = response.headers.get('x-follow-head')
+      followDecoders.set(tab.key, decoder)
+      setState({
+        tabs: tabs.map((t) =>
+          t.key === tab.key
+            ? { ...t, content, scratchKey, byteSize: bytes.byteLength, followHead, newLines: 0, missing: false }
+            : t,
+        ),
+      })
       if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
     } catch {
       notice = { message: `${tab.name}: the server could not be reached.`, retryable: true, retry: reloadActiveTab }
@@ -368,7 +551,86 @@
   }
 
   function toggleFollow() {
-    if (activeTab) updateActiveTab({ following: !activeTab.following })
+    if (!activeTab) return
+    if (activeTab.following) followStarted.delete(activeTab.key)
+    updateActiveTab({ following: !activeTab.following, newLines: 0 })
+  }
+
+  // Incremental follow (#254). Per-tab streaming decoders, so a character
+  // split across two answers decodes whole, and the tabs whose follow was
+  // already announced (audited once, on the first poll). Not reactive.
+  const followDecoders = new Map<string, TextDecoder>()
+  const followStarted = new Set<string>()
+  // A burst bigger than one answer is read in a few more right away.
+  const FOLLOW_ROUNDS_PER_TICK = 8
+
+  // The file left the source (#272): Follow stops, the tab keeps what it
+  // had and is marked, its folder is listed again, and a note says so once.
+  function markMissing(tab: Tab) {
+    updateTab(tab.key, { following: false, missing: true })
+    followStarted.delete(tab.key)
+    refreshFolder(tab.sourceId, parentPath(tab.path))
+    notice = {
+      message: `${tab.name} no longer exists on the source. The tab keeps what it had; Tail stopped.`,
+      retryable: false,
+    }
+  }
+
+  function updateTab(key: string, patch: Partial<Tab>) {
+    setState({ tabs: tabs.map((t) => (t.key === key ? { ...t, ...patch } : t)) })
+  }
+
+  async function followIncrementally(tab: Tab) {
+    let byteSize = tab.byteSize
+    let followHead = tab.followHead
+    let appended = ''
+    for (let round = 0; round < FOLLOW_ROUNDS_PER_TICK; round++) {
+      const start = !followStarted.has(tab.key)
+      const response = await trackedFetch(followUrl(tab.sourceId, tab.path, byteSize, followHead, start), {
+        credentials: 'include',
+      })
+      if (response.status === 409) {
+        // A .gz file, an archive member or an agent older than 0.6: this
+        // tab reloads the whole file from now on.
+        followStarted.add(tab.key)
+        updateTab(tab.key, { followMode: 'reload' })
+        await reloadTab(tab)
+        return
+      }
+      if (!response.ok) {
+        const problem = await readFetchFailure(response, tab.name)
+        if (problem.missing) markMissing(tab)
+        else notice = problem
+        return
+      }
+      followStarted.add(tab.key)
+      const answer = readFollowHeaders(response.headers, byteSize)
+      if (answer.reset) {
+        await reloadTab(tab)
+        notice = { message: `${tab.name} was rotated or truncated: reloaded from the start.`, retryable: false }
+        return
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      let decoder = followDecoders.get(tab.key)
+      if (!decoder) {
+        decoder = new TextDecoder()
+        followDecoders.set(tab.key, decoder)
+      }
+      appended += decoder.decode(bytes, { stream: true })
+      byteSize = answer.offset
+      followHead = answer.head
+      if (!answer.more) break
+    }
+    // A Reload while this was in flight replaced the content: drop the answer.
+    const current = tabs.find((t) => t.key === tab.key)
+    if (!current || current.byteSize !== tab.byteSize) return
+    const readingAbove = appended !== '' && tab.key === activeKey && !(paneRef?.isAtBottom() ?? true)
+    updateTab(tab.key, {
+      content: current.content + appended,
+      byteSize,
+      followHead,
+      newLines: readingAbove ? current.newLines + countLines(appended) : current.newLines,
+    })
   }
 
   let followTimer: ReturnType<typeof setInterval> | null = null
@@ -382,20 +644,39 @@
   }
 
   async function followTick() {
-    if (followPolling) return
+    // A hidden browser tab doesn't poll, to spare the sources (#254).
+    if (followPolling || document.hidden || !activeTab?.following) return
     followPolling = true
+    const tab = activeTab
     try {
-      await reloadActiveTab()
+      if (tab.followMode === 'incremental') await followIncrementally(tab)
+      else await reloadTab(tab)
+    } catch {
+      notice = { message: `${tab.name}: the server could not be reached.`, retryable: true }
     } finally {
       followPolling = false
     }
   }
 
-  $: {
+  // Restarted only when the followed tab or the interval changes, not on
+  // every append.
+  $: followedKey = activeTab?.following ? activeTab.key : null
+  $: restartFollow(followedKey, followIntervalMs)
+
+  function restartFollow(key: string | null, intervalMs: number) {
     stopFollowTimer()
-    if (activeTab?.following) {
-      followTimer = setInterval(followTick, FOLLOW_INTERVAL_MS)
-    }
+    if (key === null) return
+    followTimer = setInterval(followTick, intervalMs)
+    followTick()
+  }
+
+  function jumpToEnd() {
+    paneRef?.scrollToEnd()
+    if (activeTab) updateActiveTab({ newLines: 0 })
+  }
+
+  function onReachedBottom() {
+    if (activeTab && activeTab.newLines > 0) updateActiveTab({ newLines: 0 })
   }
 
   async function doCopySelectedLines() {
@@ -425,7 +706,7 @@
     if (!activeTab) return
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
       event.preventDefault()
-      paneRef?.openSearch()
+      openFind()
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'g') {
       event.preventDefault()
       openGoToLine()
@@ -433,15 +714,7 @@
   }
 
   onMount(async () => {
-    try {
-      const stored = localStorage.getItem(VIEW_PREF_KEY)
-      if (stored === 'list' || stored === 'tree') {
-        connectionsView = stored
-        viewChosenLocally = true
-      }
-    } catch {
-      // storage unavailable
-    }
+    migrateLegacyViewChoice()
     window.addEventListener('keydown', handleKeydown)
     await loadSources()
     for (const tab of tabs) ensureSeverityPatterns(tab.sourceId)
@@ -460,20 +733,44 @@
   onDestroy(() => {
     // Tabs stay open in viewerState; only this view's timers stop.
     window.removeEventListener('keydown', handleKeydown)
+    stopCount?.()
+    if (countTimer) clearTimeout(countTimer)
     if (copyStatusTimer) clearTimeout(copyStatusTimer)
     stopFollowTimer()
+    stopAutoRefresh()
+    if (statusTimer) clearInterval(statusTimer)
   })
 </script>
 
 <div class="viewer">
   <aside class="explorer">
     <div class="explorer-header">
-      <input
-        class="input search-box"
-        type="search"
-        placeholder="Search by folder, customer, or host…"
-        bind:value={connectionsQuery}
-      />
+      {#if $advancedFilter}
+        <input
+          class="input search-box"
+          type="search"
+          aria-label="Filter files"
+          placeholder="Filter files in the ticked sources and folders (text, glob like app-*.log, or regex)"
+          bind:value={fileQuery}
+          on:input={() => { if (fileQuery.trim() && $scopes.length > 0) pickingScopes = false }}
+        />
+      {:else}
+        <input
+          class="input search-box"
+          type="search"
+          placeholder="Search by folder, customer, or host…"
+          bind:value={connectionsQuery}
+        />
+      {/if}
+      <button
+        class="view-toggle-btn advanced-toggle"
+        class:active={$advancedFilter}
+        aria-pressed={$advancedFilter}
+        title="Advanced filter: tick sources and folders, then filter their files by name"
+        on:click={() => advancedFilter.update((on) => !on)}
+      >
+        Advanced filter
+      </button>
       {#if switchable}
         <div class="view-toggle" role="group" aria-label="View">
           <button
@@ -493,11 +790,84 @@
         </div>
       {/if}
     </div>
+    {#if $advancedFilter}
+      <div class="scope-bar">
+        <label class="filter-option">
+          <input type="checkbox" bind:checked={$filterOptions.regex} />
+          Regex
+        </label>
+        <label class="filter-option">
+          <input type="checkbox" bind:checked={$filterOptions.matchCase} />
+          Match case
+        </label>
+        {#if isMatcherError(compiledFilter)}
+          <span class="filter-error" role="status">{compiledFilter.error}</span>
+        {/if}
+        {#if $scopes.length === 0}
+          <span class="hint">Tick the sources and folders to filter files in.</span>
+        {:else}
+          {#each $scopes as scope (scopeKey(scope))}
+            <span class="scope-chip">
+              {scopeLabel(scope)}
+              <button
+                class="link"
+                aria-label="Remove {scopeLabel(scope)} from the filter"
+                on:click={() => removeScope(scope)}>✕</button
+              >
+            </span>
+          {/each}
+          <button class="link" on:click={clearScopes}>Clear all</button>
+          <button class="link" on:click={() => (pickingScopes = !pickingScopes)}>
+            {pickingScopes ? `Show the files (${$scopes.length})` : 'Add or change'}
+          </button>
+          {#if showScoped}
+            <button class="link" title="Stop searching folders in every selection" on:click={() => stopSearches.update((n) => n + 1)}>
+              Stop all
+            </button>
+          {/if}
+        {/if}
+      </div>
+    {/if}
     <div class="explorer-body">
       {#if loading}
         <p class="hint">Loading…</p>
       {:else if loadError}
         <p class="error">{loadError}</p>
+      {:else if showScoped}
+        <div class="scoped-results">
+          {#each $scopes as scope (scopeKey(scope))}
+            {#if isGroupScope(scope)}
+              {@const members = sourceScopesOf(scope, $scopeContext)}
+              <div class="group-scope">
+                <div class="group-scope-head">
+                  <span>{scope.name}</span>
+                  <span class="count">{members.length} {members.length === 1 ? 'source' : 'sources'}</span>
+                  <button
+                    class="link"
+                    aria-label="Remove {scope.name} from the filter"
+                    on:click={() => removeScope(scope)}>✕</button
+                  >
+                </div>
+                {#each members as member (scopeKey(member))}
+                  <ScopeResults
+                    scope={member}
+                    sourceName={sourceLabel(member.sourceId)}
+                    matcher={fileMatcher}
+                    partOfGroup
+                    on:open={handleOpen}
+                  />
+                {/each}
+              </div>
+            {:else}
+              <ScopeResults
+                {scope}
+                sourceName={sourceLabel(scope.sourceId)}
+                matcher={fileMatcher}
+                on:open={handleOpen}
+              />
+            {/if}
+          {/each}
+        </div>
       {:else if filteredAllSources.length === 0}
         <p class="hint">
           {connectionsQuery.trim() ? 'No connections match that search.' : 'No sources visible to your account.'}
@@ -536,7 +906,7 @@
       <div class="tabs">
         {#each tabs as tab (tab.key)}
           <div class="tab" class:active={tab.key === activeKey} title={`${tab.sourceName} › ${tab.member ? `${tab.path} › ${tab.member}` : tab.path}`}>
-            <button class="tab-label" on:click={() => handleTabClick(tab)}>
+            <button class="tab-label" class:missing={tab.missing} on:click={() => handleTabClick(tab)}>
               <span class="source-dot" style="background: hsl({sourceHue(tab.sourceId)} 65% 55%)"></span>
               {#if sourceNames}
                 <span class="tab-source">{tab.sourceName} ›</span>
@@ -586,18 +956,30 @@
           <div class="toolbar-left">
             <button
               class="btn-toggle"
-              title="Search this file (Ctrl/Cmd+F). Ctrl/Cmd+G goes to a line."
-              on:click={() => paneRef?.openSearch()}
+              title="Find in this file, or list every matching line (Ctrl/Cmd+F)"
+              class:active={findOpen}
+              aria-pressed={findOpen}
+              on:click={() => (findOpen ? closeFind() : openFind())}
             >
-              ⌕ Find
+              Find
             </button>
-            <button
-              class="btn-toggle"
-              class:active={findAllOpen}
-              on:click={() => (findAllOpen = !findAllOpen)}
-            >
-              Find All
-            </button>
+            {#if goToLineOpen}
+              <form class="go-to-line" on:submit|preventDefault={submitGoToLine}>
+                <input
+                  class="input"
+                  type="number"
+                  min="1"
+                  placeholder="Line #"
+                  bind:value={goToLineValue}
+                  bind:this={goToLineInput}
+                  on:keydown={(e) => e.key === 'Escape' && (goToLineOpen = false)}
+                  on:blur={() => (goToLineOpen = false)}
+                />
+              </form>
+            {:else}
+              <button class="btn-toggle" title="Go to a line (Ctrl/Cmd+G)" on:click={openGoToLine}>Go to line</button>
+            {/if}
+            <span class="tb-sep" aria-hidden="true"></span>
             <button
               class="btn-toggle"
               class:active={compareArmed}
@@ -611,15 +993,8 @@
             {/if}
             <button
               class="btn-toggle"
-              class:active={activeTab.following}
-              title="Follow new content like tail -f -- polls and re-fetches the whole file every few seconds"
-              on:click={toggleFollow}
-            >
-              Follow
-            </button>
-            <button
-              class="btn-toggle"
               class:active={activeTab.wrapEnabled}
+              aria-pressed={activeTab.wrapEnabled}
               on:click={toggleWrap}
             >
               Wrap
@@ -627,6 +1002,7 @@
             <button
               class="btn-toggle"
               class:active={activeTab.showWhitespace}
+              aria-pressed={activeTab.showWhitespace}
               on:click={toggleShowWhitespace}
             >
               Show chars
@@ -684,101 +1060,147 @@
             {#if activeTab.markPatterns.length > 0}
               <button class="link" on:click={clearMarks}>Clear highlights</button>
             {/if}
-            {#if goToLineOpen}
-              <form class="go-to-line" on:submit|preventDefault={submitGoToLine}>
-                <input
-                  class="input"
-                  type="number"
-                  min="1"
-                  placeholder="Line #"
-                  bind:value={goToLineValue}
-                  bind:this={goToLineInput}
-                  on:keydown={(e) => e.key === 'Escape' && (goToLineOpen = false)}
-                  on:blur={() => (goToLineOpen = false)}
-                />
-              </form>
-            {:else}
-              <button class="btn-toggle" on:click={openGoToLine}>Go to line</button>
+            <span class="tb-sep" aria-hidden="true"></span>
+            <button
+              class="btn-toggle tail"
+              class:active={activeTab.following}
+              aria-pressed={activeTab.following}
+              title={activeTab.followMode === 'incremental'
+                ? "Show new lines as they're written, like tail -f: fetches only what was appended"
+                : "Show new lines as they're written: reloads the whole file (compressed files, archive members, agents older than 0.6)"}
+              on:click={toggleFollow}
+            >
+              {#if activeTab.following}<span class="live-dot" aria-hidden="true"></span>{/if}
+              Tail
+            </button>
+            {#if activeTab.following}
+              <!-- Only while Tail is on (#283); set under Settings -> System. -->
+              <span class="follow-interval" title="How often Tail checks for new lines (Settings → System)">
+                every {followIntervalMs / 1000} s
+              </span>
             {/if}
           </div>
           <div class="toolbar-right">
             {#if copyStatus}
               <span class="hint copy-status">{copyStatus === 'copied' ? 'Copied' : 'Nothing selected'}</span>
             {/if}
-            <button class="link" title="Copy selected lines with line numbers" on:click={doCopySelectedLines}>
-              Copy lines
-            </button>
-            <button class="link" title="Reload from source" on:click={reloadActiveTab}>
-              ⟳ Reload
+            <button
+              class="icon-btn"
+              title="Copy selected lines with line numbers"
+              aria-label="Copy lines"
+              on:click={doCopySelectedLines}
+            >
+              <ToolbarIcon name="copy" />
             </button>
             <button
-              class="link"
-              class:active-marker={activeTab.bookmarks.length > 0}
+              class="icon-btn"
+              class:active={activeTab.bookmarks.length > 0}
               title="Toggle bookmark on current line"
+              aria-label="Bookmark"
               on:click={toggleBookmark}
             >
-              ⚑ Bookmark
+              <ToolbarIcon name="bookmark" />
             </button>
             {#if activeTab.bookmarks.length > 0}
               <button
-                class="link"
+                class="icon-btn"
                 title="Previous bookmark"
+                aria-label="Previous bookmark"
                 on:click={() => paneRef?.jumpToPreviousBookmark()}
               >
-                ‹ mark
+                <ToolbarIcon name="chevron-up" />
               </button>
-              <button class="link" title="Next bookmark" on:click={() => paneRef?.jumpToNextBookmark()}>
-                mark ›
+              <button
+                class="icon-btn"
+                title="Next bookmark"
+                aria-label="Next bookmark"
+                on:click={() => paneRef?.jumpToNextBookmark()}
+              >
+                <ToolbarIcon name="chevron-down" />
               </button>
             {/if}
             {#if activeSeverityPatterns.length > 0}
+              <span class="tb-sep" aria-hidden="true"></span>
+              <span class="problem-nav" title="Problems (severity patterns)">
+                <ToolbarIcon name="alert" />
+              </span>
               <button
-                class="link"
+                class="icon-btn"
                 title="Previous problem"
+                aria-label="Previous problem"
                 on:click={() => paneRef?.jumpToPreviousProblem()}
               >
-                ‹ problem
+                <ToolbarIcon name="chevron-up" />
               </button>
               <button
-                class="link"
+                class="icon-btn"
                 title="Next problem"
+                aria-label="Next problem"
                 on:click={() => paneRef?.jumpToNextProblem()}
               >
-                problem ›
+                <ToolbarIcon name="chevron-down" />
               </button>
             {/if}
+            <span class="tb-sep" aria-hidden="true"></span>
+            <button class="icon-btn" title="Reload from source" aria-label="Reload" on:click={reloadActiveTab}>
+              <ToolbarIcon name="refresh" />
+            </button>
             {#if canDownloadActive}
-            <a
-              class="link"
-              href={`/sources/${activeTab.sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 3v12" />
-                <path d="m6 11 6 6 6-6" />
-                <path d="M5 21h14" />
-              </svg>
-              Download
-            </a>
+              <a
+                class="icon-btn"
+                title="Download"
+                aria-label="Download"
+                href={`/sources/${activeTab.sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <ToolbarIcon name="download" />
+              </a>
             {/if}
           </div>
         </div>
-        <CodeMirrorPane
-          bind:this={paneRef}
-          content={displayContent}
-          severityPatterns={activeSeverityPatterns}
-          filename={activeTab.name}
-          wrapEnabled={activeTab.wrapEnabled}
-          showWhitespace={activeTab.showWhitespace}
-          bookmarks={activeTab.bookmarks}
-          markPatterns={activeTab.markPatterns}
-        />
-        {#if findAllOpen}
+        {#if findOpen}
+          <FindBar
+            bind:this={findBar}
+            bind:spec={findSpec}
+            total={findCount?.total ?? 0}
+            counting={findPattern !== null && !findCount?.done}
+            current={currentMatch}
+            invalid={findSpec.query !== '' && findPattern === null}
+            on:next={() => stepFind(true)}
+            on:previous={() => stepFind(false)}
+            on:findall={runFindAll}
+            on:close={closeFind}
+          />
+        {/if}
+        <!-- The Tail notice is anchored to the editor, not the whole area, so
+             it stays over the log when Find all is open below (#298). -->
+        <div class="editor-pane">
+          <CodeMirrorPane
+            bind:this={paneRef}
+            content={displayContent}
+            severityPatterns={activeSeverityPatterns}
+            filename={activeTab.name}
+            wrapEnabled={activeTab.wrapEnabled}
+            showWhitespace={activeTab.showWhitespace}
+            bookmarks={activeTab.bookmarks}
+            markPatterns={activeTab.markPatterns}
+            find={editorFind}
+            on:bottom={onReachedBottom}
+            on:findclosed={closeFind}
+          />
+          {#if activeTab.newLines > 0}
+            <button class="jump-to-end" on:click={jumpToEnd}>
+              {activeTab.newLines} new {activeTab.newLines === 1 ? 'line' : 'lines'} — jump to end ↓
+            </button>
+          {/if}
+        </div>
+        {#if findAllSpec}
           <FindInDocumentPanel
             content={displayContent}
+            spec={findAllSpec}
             on:jump={(e) => paneRef?.scrollToLine(e.detail.line)}
-            on:close={() => (findAllOpen = false)}
+            on:close={() => (findAllSpec = null)}
           />
         {/if}
       {:else}
@@ -823,6 +1245,67 @@
     gap: 0.5rem;
     padding: 0.75rem;
     border-bottom: 1px solid var(--border-soft);
+  }
+  .advanced-toggle {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+  .scope-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.5rem;
+    padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 0.78rem;
+  }
+  .filter-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .filter-error {
+    color: var(--danger);
+  }
+  .group-scope {
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .group-scope-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.65rem 0.1rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .group-scope-head span:first-child {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .group-scope-head .count {
+    font-weight: 400;
+    font-size: 0.72rem;
+    color: var(--text-faint);
+  }
+  .scope-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--text);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .search-box {
     width: 100%;
@@ -903,20 +1386,6 @@
     flex-direction: column;
     gap: 0.4rem;
   }
-  a.link {
-    border: none;
-    background: none;
-    color: var(--accent-hover);
-    cursor: pointer;
-    padding: 0;
-    font-size: 0.8rem;
-    text-align: left;
-    text-decoration: none;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    white-space: nowrap;
-  }
   .editor-area {
     flex: 1;
     display: flex;
@@ -924,6 +1393,33 @@
     min-width: 0;
     min-height: 0;
     background: var(--bg);
+    position: relative;
+  }
+  .editor-pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    position: relative;
+  }
+  .jump-to-end {
+    position: absolute;
+    right: 1.5rem;
+    bottom: 1.25rem;
+    z-index: 5;
+    padding: 0.4rem 0.8rem;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    color: var(--text);
+    font-size: 0.8rem;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  }
+  .follow-interval {
+    color: var(--text-faint);
+    font-size: 0.72rem;
+    white-space: nowrap;
   }
   .tabs {
     display: flex;
@@ -951,6 +1447,10 @@
     font-size: 0.8rem;
     cursor: pointer;
     color: var(--text-muted);
+  }
+  .tab-label.missing {
+    text-decoration: line-through;
+    opacity: 0.7;
   }
   .tab.active .tab-label {
     color: var(--text);
@@ -982,49 +1482,72 @@
     align-items: center;
     flex-wrap: wrap;
     row-gap: 0.4rem;
-    gap: 0.75rem;
+    gap: 0.15rem;
   }
   .pane-toolbar .hint {
     padding: 0;
     color: var(--text-faint);
     white-space: nowrap;
   }
-  .btn-toggle {
-    border: 1px solid var(--border);
+  /* Toolbar (#286): quiet buttons, no borders; only what's on gets a fill. */
+  .btn-toggle,
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border: none;
     background: transparent;
     color: var(--text-muted);
-    border-radius: 999px;
-    padding: 0.15rem 0.65rem;
-    font-size: 0.72rem;
-    font-weight: 600;
+    border-radius: var(--radius-sm);
+    padding: 0.22rem 0.45rem;
+    font: inherit;
+    font-size: 0.75rem;
     cursor: pointer;
     white-space: nowrap;
+    text-decoration: none;
   }
-  .btn-toggle:hover {
-    border-color: var(--accent-border);
+  .btn-toggle:hover,
+  .icon-btn:hover {
+    background: var(--bg-hover);
     color: var(--text);
   }
-  .btn-toggle.active {
-    background: var(--accent-soft);
-    border-color: var(--accent-border);
-    color: var(--accent-hover);
+  .btn-toggle:focus-visible,
+  .icon-btn:focus-visible {
+    outline: 1px solid var(--accent-border);
+    outline-offset: 1px;
   }
-  .pane-toolbar .link svg {
-    width: 13px;
-    height: 13px;
+  .btn-toggle.active,
+  .icon-btn.active {
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+  .icon-btn {
+    padding: 0.28rem;
+  }
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+  }
+  .tb-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--border);
+    margin: 0 0.15rem;
+    flex: 0 0 auto;
+  }
+  .problem-nav {
+    display: inline-flex;
+    color: var(--warning);
+    padding: 0 0.1rem 0 0.2rem;
   }
   .toolbar-right {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     row-gap: 0.4rem;
-    gap: 1rem;
-  }
-  .toolbar-right button.link {
-    font: inherit;
-  }
-  .toolbar-right button.link.active-marker {
-    color: var(--accent-hover);
+    gap: 0.15rem;
   }
   .copy-status {
     padding: 0;

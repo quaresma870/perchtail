@@ -16,6 +16,13 @@ export type GlobalCapability =
 export interface CurrentUser {
   id: number
   username: string
+  // My profile (#243); read-only for SSO accounts (auth_provider not 'local').
+  display_name: string | null
+  email: string | null
+  auth_provider: 'local' | 'oidc' | 'saml'
+  // The display choices this user made (#273); missing keys follow the
+  // System defaults.
+  preferences: Partial<Record<'explorer_sort' | 'connections_view', string>>
   role_id: number
   active: boolean
   must_change_password: boolean
@@ -63,6 +70,8 @@ export interface Source {
   // WinRM (#169): the stored scheme (null = still inferred from the port)
   // and the one in effect; a CA certificate trusted for its HTTPS listener.
   winrm_scheme: 'https' | 'http' | null
+  // JEA endpoint (#169), or null for the WinRS shell.
+  winrm_configuration: string | null
   winrm_effective_scheme: 'https' | 'http' | null
   tls_ca_pem: string | null
   enabled: boolean
@@ -73,6 +82,14 @@ export interface Source {
   agent_connected: boolean
   agent_last_seen_at: string | null
   agent_os: string | null
+  // The version the agent reported (#215), and whether it's older than the server.
+  agent_version: string | null
+  agent_outdated: boolean
+  // Reachability (#276): last known, shared by every user; for an agent
+  // source, its live connection.
+  status: 'ok' | 'failing' | 'unknown'
+  status_checked_at: string | null
+  status_message: string | null
   search_indexing_enabled: boolean
   // What the current user may do on this source (#174); the backend still
   // enforces every action on its own.
@@ -137,6 +154,8 @@ export interface RoleGrant {
 export interface AppUser {
   id: number
   username: string
+  display_name: string | null
+  email: string | null
   role_id: number
   active: boolean
   must_change_password: boolean
@@ -150,6 +169,9 @@ export interface BrowseEntry {
   is_dir: boolean
   size: number
   is_archive: boolean
+  // Last modification, seconds since the epoch (#273); null when the
+  // source doesn't say (push agents older than 0.6).
+  mtime?: number | null
 }
 
 export interface ConnectionCheckResult {
@@ -203,6 +225,51 @@ export interface SystemSettings {
   source_max_roots: number
   connections_view_switchable: boolean
   connections_view_default: 'list' | 'tree'
+  // The daily release check (#215); UPDATE_CHECK=false overrides it.
+  update_check_enabled: boolean
+  // Password policy (#245).
+  password_min_length: number
+  password_max_length: number
+  password_reject_simple: boolean
+  password_reject_personal: boolean
+  password_history: number
+  password_required_classes: number
+  password_max_age_days: number
+  // Explorer (#272, #273).
+  explorer_sort_default: ExplorerSort
+  explorer_refresh_seconds: number
+  tail_interval_seconds: number
+  // Background source check (#276), minutes; 0 = off.
+  source_check_minutes: number
+}
+
+export type ExplorerSort = 'name_asc' | 'name_desc' | 'mtime_desc' | 'mtime_asc' | 'size_desc'
+
+// GET /auth/password-policy (#245): the rules a new password must follow.
+export interface PasswordPolicy {
+  min_length: number
+  max_length: number
+  reject_simple: boolean
+  reject_personal: boolean
+  history: number
+  required_classes: number
+  max_age_days: number
+}
+
+// Settings -> System -> Updates (#215), super admins only.
+export interface UpdateStatus {
+  enabled: boolean
+  disabled_by_env: boolean
+  running_version: string
+  install_method: 'docker' | 'source'
+  latest_version: string | null
+  latest_name: string | null
+  latest_url: string | null
+  latest_published_at: string | null
+  update_available: boolean
+  last_checked_at: string | null
+  last_success_at: string | null
+  last_error: string | null
 }
 
 export interface AuditLogEntry {

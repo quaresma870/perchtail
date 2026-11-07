@@ -1,8 +1,18 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte'
+  import { createEventDispatcher, onMount, onDestroy } from 'svelte'
   import { EditorView, basicSetup } from 'codemirror'
   import { EditorState } from '@codemirror/state'
-  import { search, openSearchPanel } from '@codemirror/search'
+  import {
+    closeSearchPanel,
+    findNext as cmFindNext,
+    findPrevious as cmFindPrevious,
+    getSearchQuery,
+    openSearchPanel,
+    search,
+    searchPanelOpen,
+    SearchQuery,
+    setSearchQuery,
+  } from '@codemirror/search'
   import {
     bookmarkHighlighting,
     darkTheme,
@@ -17,6 +27,7 @@
   import type { MarkPattern } from '../mark-highlighting'
   import { findProblemLines, nextProblemLine, previousProblemLine } from '../severity-highlighting'
   import type { SeverityPattern } from '../types'
+  import { compileFind, type FindSpec } from '../find-in-document'
 
   export let content = ''
   export let severityPatterns: SeverityPattern[] = []
@@ -25,16 +36,47 @@
   export let showWhitespace = false
   export let bookmarks: number[] = []
   export let markPatterns: MarkPattern[] = []
+  /** The find bar's search (#299), or null while it's closed: highlighted
+   * in the editor and used by next/previous (Enter, F3). */
+  export let find: FindSpec | null = null
 
   let host: HTMLDivElement
   let view: EditorView | null = null
+  // `bottom`: the reader scrolled back to the end (the viewer clears its
+  // "N new lines" count, #254).
+  // `findclosed`: the editor closed its search (Escape in the editor).
+  const dispatch = createEventDispatcher<{ bottom: void; findclosed: void }>()
+
+  // The find bar lives in the viewer, outside the editor: the editor is
+  // rebuilt on every Wrap, Highlight or tab change, which would close a bar
+  // inside it. CodeMirror only highlights matches while its search panel is
+  // open, so the panel it opens is an empty, hidden one.
+  let applyingFind = false
+  const hiddenSearchPanel = search({
+    createPanel: () => {
+      const dom = document.createElement('div')
+      dom.className = 'find-highlights-only'
+      dom.hidden = true
+      return {
+        dom,
+        // CodeMirror's own keys (Mod-f, F3) can open it with no search in
+        // the bar; it closes again rather than highlight a stray query.
+        mount: () => {
+          if (!applyingFind && !find) queueMicrotask(closeStraySearch)
+        },
+        destroy: () => {
+          if (!applyingFind && !destroying) dispatch('findclosed')
+        },
+      }
+    },
+  })
 
   function extensions() {
     return [
       basicSetup,
       // basicSetup only wires the search *keymap* (Mod-f etc.), not this
       // extension itself — without it the panel has no state to open into.
-      search(),
+      hiddenSearchPanel,
       darkTheme,
       severityHighlighting(severityPatterns),
       bookmarkHighlighting(bookmarks),
@@ -81,6 +123,23 @@
   // bottom if the view was already there (the common "watching it grow"
   // case), otherwise the same absolute scroll offset, so an ordinary
   // toggle (Wrap, a mark, etc.) no longer disturbs a reader's place either.
+  // True when the only change is text appended to the content already shown
+  // (and Show whitespace, which scans the content, is off).
+  function appendOnly(): boolean {
+    return (
+      appliedContent !== null &&
+      content.length > appliedContent.length &&
+      severityPatterns === appliedPatterns &&
+      filename === appliedFilename &&
+      wrapEnabled === appliedWrap &&
+      !showWhitespace &&
+      showWhitespace === appliedShowWhitespace &&
+      bookmarks === appliedBookmarks &&
+      markPatterns === appliedMarkPatterns &&
+      content.startsWith(appliedContent)
+    )
+  }
+
   function syncView() {
     if (!view) return
     if (
@@ -95,8 +154,27 @@
       return
     }
     const wasAtBottom = isNearBottom(view)
+    if (appendOnly()) {
+      // Incremental follow (#254): only text was added at the end, so it
+      // goes in as one transaction -- no rebuild, the reader's place and
+      // selection stay where they are.
+      view.dispatch({
+        changes: { from: view.state.doc.length, insert: content.slice((appliedContent ?? '').length) },
+      })
+      if (wasAtBottom) view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight
+      appliedContent = content
+      return
+    }
     const previousScrollTop = view.scrollDOM.scrollTop
-    view.setState(EditorState.create({ doc: content, extensions: extensions() }))
+    // The rebuild drops the search panel; that's not the reader closing it.
+    applyingFind = true
+    try {
+      view.setState(EditorState.create({ doc: content, extensions: extensions() }))
+    } finally {
+      applyingFind = false
+    }
+    appliedFind = undefined
+    applyFind()
     view.scrollDOM.scrollTop = wasAtBottom ? view.scrollDOM.scrollHeight : previousScrollTop
     appliedContent = content
     appliedPatterns = severityPatterns
@@ -112,6 +190,13 @@
       state: EditorState.create({ doc: content, extensions: extensions() }),
       parent: host,
     })
+    applyFind()
+    let wasAtBottom = true
+    view.scrollDOM.addEventListener('scroll', () => {
+      const atBottom = view !== null && isNearBottom(view)
+      if (atBottom && !wasAtBottom) dispatch('bottom')
+      wasAtBottom = atBottom
+    })
     appliedContent = content
     appliedPatterns = severityPatterns
     appliedFilename = filename
@@ -120,6 +205,44 @@
     appliedBookmarks = bookmarks
     appliedMarkPatterns = markPatterns
   })
+
+  // Applies `find` to the editor: opens the hidden panel and sets the
+  // query, or closes it. Also run after every rebuild, which drops both.
+  let appliedFind: FindSpec | null | undefined = undefined
+  function closeStraySearch() {
+    if (!view || find || !searchPanelOpen(view.state)) return
+    applyingFind = true
+    try {
+      closeSearchPanel(view)
+    } finally {
+      applyingFind = false
+    }
+  }
+  function applyFind() {
+    if (!view || find === appliedFind) return
+    applyingFind = true
+    try {
+      if (find) {
+        if (!searchPanelOpen(view.state)) openSearchPanel(view)
+        const query = new SearchQuery({
+          // The same regex the bar counts and Find all lists (compileFind):
+          // text and whole word are already turned into it, so CodeMirror
+          // highlights exactly what's counted. An invalid one highlights
+          // nothing, as the bar says "Invalid regex".
+          search: compileFind(find.query, find)?.source ?? '(',
+          caseSensitive: find.caseSensitive,
+          regexp: true,
+        })
+        if (!query.eq(getSearchQuery(view.state))) view.dispatch({ effects: setSearchQuery.of(query) })
+      } else if (searchPanelOpen(view.state)) {
+        closeSearchPanel(view)
+      }
+    } finally {
+      applyingFind = false
+    }
+    appliedFind = find
+  }
+  $: find, applyFind()
 
   $: content,
     severityPatterns,
@@ -145,16 +268,40 @@
     view.focus()
   }
 
-  // Called from a page-level Ctrl/Cmd+F handler (Viewer.svelte) rather than
-  // relying on the browser reaching CodeMirror's own searchKeymap: clicking
-  // into .cm-content doesn't reliably focus it (it's not contentEditable,
-  // since the pane is read-only), so a plain browser keydown on Mod-F often
-  // never reaches the editor at all and falls through to the browser's own
-  // find bar instead. Calling this directly sidesteps that regardless of
-  // where focus currently is.
-  export function openSearch() {
+  export function isAtBottom(): boolean {
+    return view === null || isNearBottom(view)
+  }
+
+  export function scrollToEnd() {
     if (!view) return
-    openSearchPanel(view)
+    view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight
+  }
+
+  /** Moves to the next / previous match of `find`, wrapping around;
+   * false when there is none. */
+  export function findNext(): boolean {
+    return view !== null && cmFindNext(view)
+  }
+
+  export function findPrevious(): boolean {
+    return view !== null && cmFindPrevious(view)
+  }
+
+  /** Where the selection starts (1-based line, 0-based column), for the
+   * find bar's "3 of 120". */
+  export function selectionStart(): { line: number; column: number } | null {
+    if (!view) return null
+    const from = view.state.selection.main.from
+    const line = view.state.doc.lineAt(from)
+    return { line: line.number, column: from - line.from }
+  }
+
+  /** The selected text when it's on one line: what the find bar starts with. */
+  export function selectedText(): string {
+    if (!view) return ''
+    const { from, to } = view.state.selection.main
+    const text = view.state.sliceDoc(from, to)
+    return text.includes('\n') ? '' : text
   }
 
   // "Next/previous problem" step command (ROADMAP.md's severity-indicators
@@ -221,7 +368,11 @@
     return true
   }
 
+  // The editor going away (Compare, closing the tab) isn't the reader
+  // closing the search.
+  let destroying = false
   onDestroy(() => {
+    destroying = true
     view?.destroy()
   })
 </script>

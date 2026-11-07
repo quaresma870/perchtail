@@ -3,12 +3,13 @@
   import { onMount } from 'svelte'
   import { authChecked, currentUser, hasCapability, logout, refreshCurrentUser } from './lib/auth'
   import { currentHash } from './lib/hash'
+  import { serverReachable } from './lib/server-status'
   import { closeAllTabs } from './lib/viewer-tabs'
   import { refreshSystemSettings, refreshSystemSettingsIfStale, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
   import Sources from './routes/Sources.svelte'
-  import SourceEditor from './routes/SourceEditor.svelte'
+  import SourceEditorPopup from './routes/SourceEditorPopup.svelte'
   import SourceOverview from './routes/SourceOverview.svelte'
   import Folders from './routes/Folders.svelte'
   import Viewer from './routes/Viewer.svelte'
@@ -17,37 +18,37 @@
   import Alerts from './routes/Alerts.svelte'
   import SettingsIndex from './routes/SettingsIndex.svelte'
   import Roles from './routes/Roles.svelte'
-  import RoleEditor from './routes/RoleEditor.svelte'
+  import RoleEditorPopup from './routes/RoleEditorPopup.svelte'
   import Users from './routes/Users.svelte'
   import SsoSettings from './routes/SsoSettings.svelte'
   import SystemSettings from './routes/SystemSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
-  import SessionsSettings from './routes/SessionsSettings.svelte'
-  import SecuritySettings from './routes/SecuritySettings.svelte'
+  import Profile from './routes/Profile.svelte'
+  import UserMenu from './lib/components/UserMenu.svelte'
+  import ConfirmHost from './lib/components/ConfirmHost.svelte'
   import AuditLogSettings from './routes/AuditLogSettings.svelte'
 
   const routes = {
     '/login': Login,
     '/change-password': ChangePassword,
+    '/profile': Profile,
     '/viewer': Viewer,
     '/viewer/:sourceId': Viewer,
     '/search': Search,
     '/alerts': Alerts,
     '/settings': SettingsIndex,
     '/settings/sources': Sources,
-    '/settings/sources/new': SourceEditor,
-    '/settings/sources/:id/edit': SourceEditor,
+    '/settings/sources/new': SourceEditorPopup,
+    '/settings/sources/:id/edit': SourceEditorPopup,
     '/settings/sources/:id': SourceOverview,
     '/settings/folders': Folders,
     '/settings/roles': Roles,
-    '/settings/roles/new': RoleEditor,
-    '/settings/roles/:id': RoleEditor,
+    '/settings/roles/new': RoleEditorPopup,
+    '/settings/roles/:id': RoleEditorPopup,
     '/settings/users': Users,
     '/settings/sso': SsoSettings,
     '/settings/system': SystemSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
-    '/settings/sessions': SessionsSettings,
-    '/settings/security': SecuritySettings,
     '/settings/audit-log': AuditLogSettings,
     '/settings/import-export': ImportExportSettings,
   }
@@ -75,6 +76,11 @@
     $currentHash !== '/change-password'
   ) {
     push('/change-password')
+  }
+  // Settings -> Security and Sessions moved to My profile (#243); old links
+  // still land there for a release.
+  $: if ($currentHash === '/settings/security' || $currentHash === '/settings/sessions') {
+    push('/profile')
   }
   // The Search view can be turned off deployment-wide (Settings -> System);
   // guard the route itself, not just the nav link, so it's actually off for
@@ -126,9 +132,18 @@
       {/if}
       <a href="#/settings" class:active={isActive('/settings')}>Settings</a>
       <span class="spacer"></span>
-      <span class="username">{$currentUser.username}</span>
-      <button class="btn btn-ghost" on:click={handleLogout}>Log out</button>
+      <UserMenu
+        name={$currentUser.display_name ?? $currentUser.username}
+        active={isActive('/profile')}
+        on:logout={handleLogout}
+      />
     </nav>
+  {/if}
+
+  {#if !$serverReachable}
+    <div class="server-banner" role="alert">
+      Can't reach PerchTail — retrying… Source statuses may be out of date until it answers.
+    </div>
   {/if}
 
   {#if $authChecked}
@@ -136,6 +151,7 @@
       <Router {routes} />
     </div>
   {/if}
+  <ConfirmHost />
 </main>
 
 <style>
@@ -184,9 +200,12 @@
   .spacer {
     flex: 1;
   }
-  .username {
-    font-size: 0.82rem;
-    color: var(--text-faint);
+  .server-banner {
+    padding: 0.45rem 1.5rem;
+    background: var(--warning-soft);
+    color: var(--warning);
+    font-size: 0.85rem;
+    border-bottom: 1px solid var(--border-soft);
   }
   .content {
     flex: 1;

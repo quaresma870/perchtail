@@ -13,6 +13,8 @@
     sortRows,
     type SortState,
   } from '../lib/table-view'
+  import { sourceStatusView } from '../lib/source-status'
+  import { confirmAction } from '../lib/confirm'
   import type { Customer, Protocol, Source } from '../lib/types'
 
   let sources: Source[] = []
@@ -74,7 +76,13 @@
   }
 
   async function removeSource(source: Source) {
-    if (!confirm(`Delete source "${source.name}"? This cannot be undone.`)) return
+    const ok = await confirmAction({
+      title: 'Delete source',
+      message: `Delete the source "${source.name}" and its rules? This can't be undone.`,
+      confirmLabel: 'Delete',
+      danger: true,
+    })
+    if (!ok) return
     try {
       await api.delete(`/sources/${source.id}`)
       await load()
@@ -222,6 +230,17 @@
                       >✕ failed</span
                     >
                   {/if}
+                {:else if source.status === 'ok' || source.status === 'failing'}
+                  <!-- The shared, last known status (#276); click to check again. -->
+                  <button
+                    class="status link"
+                    class:status-ok={source.status === 'ok'}
+                    class:status-fail={source.status === 'failing'}
+                    title={sourceStatusView(source, null, true).tooltip + ' — click to check now'}
+                    on:click={() => checkConnection(source)}
+                  >
+                    {source.status === 'ok' ? '✓ reachable' : '✕ failing'}
+                  </button>
                 {:else}
                   <button class="status status-pending link" on:click={() => checkConnection(source)}>
                     ⏱ check
@@ -238,10 +257,11 @@
                   ▶
                 </button>
                 {#if !source.is_system && hasCapability($currentUser, 'create_source')}
-                  <button class="link" on:click={() => push(`/settings/sources/${source.id}/edit`)}
-                    >edit</button
+                  <button
+                    class="btn btn-ghost btn-sm"
+                    on:click={() => push(`/settings/sources/${source.id}/edit?from=list`)}>Edit</button
                   >
-                  <button class="link danger" on:click={() => removeSource(source)}>delete</button>
+                  <button class="btn btn-danger btn-sm" on:click={() => removeSource(source)}>Delete</button>
                 {/if}
               </td>
             </tr>
@@ -417,9 +437,6 @@
     cursor: pointer;
     padding: 0;
     font-size: 0.85rem;
-  }
-  button.link.danger {
-    color: var(--danger);
   }
   .empty {
     text-align: center;

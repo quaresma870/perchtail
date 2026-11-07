@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup } from './popups'
 import { loadFixturePaths } from './fixture-paths'
 
 // Bulk import (#179): preview shows the plan without writing, apply
@@ -44,10 +45,10 @@ test('bulk import: preview, apply, idempotent re-preview', async ({ page }) => {
   await expect(page.getByText('Nothing — everything already matches the file.')).toBeVisible()
 
   await page.goto('/#/settings/sources')
-  page.once('dialog', (dialog) => dialog.accept())
   await page
     .getByRole('row', { name: new RegExp(sourceName) })
-    .getByRole('button', { name: 'delete' })
+    .getByRole('button', { name: 'Delete' })
     .click()
+  await confirmPopup(page, 'Delete')
   await expect(page.getByRole('row', { name: new RegExp(sourceName) })).toHaveCount(0)
 })

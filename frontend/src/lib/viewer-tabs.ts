@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store'
 import type { FormatMode } from './format-content'
 import type { MarkPattern } from './mark-highlighting'
+import { advancedFilter, filterOptions, scopes } from './explorer-scope'
 
 /** One open file in the viewer. Tabs from several sources live side by
  * side (#162), so each carries its own source -- every reload, follow,
@@ -24,6 +25,18 @@ export interface Tab {
   format: FormatMode
   // "Follow" (tail -f) -- polled only while this tab is active.
   following: boolean
+  // The file is no longer on the source (#272): the tab keeps what it
+  // had, marked, and Follow stops.
+  missing?: boolean
+  // Incremental follow (#254): how many bytes of the file `content` holds,
+  // the server's identity of its start (from the last follow answer), and
+  // whether only what was appended can be fetched ('reload': .gz files,
+  // archive members and agents older than 0.6 reload the whole file).
+  byteSize: number
+  followHead: string | null
+  followMode: 'incremental' | 'reload'
+  // Lines appended while the reader was scrolled up, for "jump to end".
+  newLines: number
 }
 
 export interface ViewerState {
@@ -58,6 +71,10 @@ export function sourceHue(sourceId: number): number {
 }
 
 export async function closeAllTabs(): Promise<void> {
+  // The advanced filter's scopes go with the tabs (#274).
+  scopes.set([])
+  advancedFilter.set(false)
+  filterOptions.set({ regex: false, matchCase: false })
   let tabs: Tab[] = []
   viewerState.update((state) => {
     tabs = state.tabs

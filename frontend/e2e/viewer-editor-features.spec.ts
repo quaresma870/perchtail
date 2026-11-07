@@ -96,24 +96,61 @@ test('compare renders a diff against a second file and exits cleanly', async ({ 
 
 test('follow picks up appended content while enabled, and stops once disabled', async ({ page }) => {
   await treeFile(page, fileA).click()
-  await page.getByRole('button', { name: 'Follow' }).click()
+  await page.getByRole('button', { name: 'Tail', exact: true }).click()
 
   fs.appendFileSync(pathA, 'appended line\n')
   await expect(page.locator('.cm-content')).toContainText('appended line', { timeout: 6000 })
 
-  await page.getByRole('button', { name: 'Follow' }).click() // disable
+  await page.getByRole('button', { name: 'Tail', exact: true }).click() // disable
   await page.waitForTimeout(2500) // longer than one 2s poll interval
   fs.appendFileSync(pathA, 'should not appear once follow is off\n')
   await page.waitForTimeout(2500)
   await expect(page.locator('.cm-content')).not.toContainText('should not appear')
 })
 
-test('the Find button opens the search panel, same as Ctrl/Cmd+F', async ({ page }) => {
+test('one find bar: Find button or Ctrl/Cmd+F, next/previous with a count, Escape closes', async ({ page }) => {
+  // #299: one bar for Find and Find all.
   await treeFile(page, fileA).click()
   await expect(page.locator('.cm-content')).toContainText('"service"')
-  await expect(page.locator('.cm-search')).toHaveCount(0)
+  const find = page.getByRole('textbox', { name: 'Find', exact: true })
+  await expect(find).toHaveCount(0)
 
-  await page.getByRole('button', { name: '⌕ Find', exact: true }).click()
+  await page.getByRole('button', { name: 'Find', exact: true }).click()
+  await expect(find).toBeFocused()
+  await find.fill('service')
+  const status = page.locator('.find-bar .status')
+  await expect(status).toHaveText(/^\d+ match(es)?$/)
+  await expect(page.locator('.cm-searchMatch').first()).toBeVisible()
+  await find.press('Enter')
+  await expect(status).toHaveText(/^1 of \d+$/)
+  await find.press('Shift+Enter')
+  await expect(status).toHaveText(/^\d+ of \d+$/)
 
-  await expect(page.locator('.cm-search input[main-field]')).toBeFocused()
+  await find.press('Escape')
+  await expect(find).toHaveCount(0)
+  await expect(page.locator('.cm-searchMatch')).toHaveCount(0)
+  await page.locator('.cm-content').click()
+  await page.keyboard.press('ControlOrMeta+f')
+  await expect(find).toBeFocused()
+  await expect(find).toHaveValue('service')
+})
+
+test('find all can be resized by its handle', async ({ page }) => {
+  // #285: the handle on top of the panel resizes it (here by keyboard).
+  await treeFile(page, fileA).click()
+  await page.getByRole('button', { name: 'Find', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Find', exact: true }).fill('service')
+  // Alt+Enter is Find all, same as its button.
+  await page.getByRole('textbox', { name: 'Find', exact: true }).press('Alt+Enter')
+  const panel = page.locator('.find-all-panel')
+  await expect(panel).toBeVisible()
+  const before = (await panel.boundingBox())!.height
+  const handle = page.getByRole('separator', { name: 'Resize find all' })
+  await handle.focus()
+  await handle.press('ArrowUp')
+  await handle.press('ArrowUp')
+  await expect.poll(async () => (await panel.boundingBox())!.height).toBeGreaterThan(before + 30)
+  await expect(panel.locator('.title')).toContainText('service')
+  await page.getByRole('button', { name: 'Close find all' }).click()
+  await expect(panel).toHaveCount(0)
 })

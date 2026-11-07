@@ -15,6 +15,7 @@ from app import source_roots
 from app.collectors.base import (
     FetchTooLargeError,
     PathOutsideBaseError,
+    RangeNotSupportedError,
     SourceAuthError,
     SourceError,
     SourceHostKeyError,
@@ -172,9 +173,32 @@ def _from_powershell_text(text: str) -> SourceError | None:
 
 def translate_winrm(exc: BaseException) -> SourceError | None:
     import requests
+    from pypsrp import exceptions as psrp_exc
     from winrm import exceptions as winrm_exc
 
     text = str(exc)
+    # PSRP, for a source behind a JEA endpoint (#169).
+    if isinstance(exc, psrp_exc.AuthenticationError):
+        return SourceAuthError(text)
+    if isinstance(exc, psrp_exc.WinRMTransportError) and exc.code == 401:
+        return SourceAuthError(text)
+    if isinstance(exc, psrp_exc.WSManFaultError | psrp_exc.WinRMTransportError):
+        lowered = text.lower()
+        if "access is denied" in lowered or getattr(exc, "code", None) == 403:
+            return SourcePermissionError(
+                text,
+                public_message="The WinRM account isn't allowed to use the JEA endpoint "
+                "(see docs/examples/jea)",
+            )
+        # Windows names a missing endpoint by its resource URI (fault 2150858811),
+        # not as a missing "configuration".
+        if "ws-management catalog" in lowered or (
+            "configuration" in lowered and ("not found" in lowered or "cannot be found" in lowered)
+        ):
+            return SourceError(text, public_message="The JEA endpoint wasn't found on the server")
+        return SourceUnreachableError(text)
+    if isinstance(exc, psrp_exc.WinRMError):
+        return SourceUnreachableError(text)
     if isinstance(exc, winrm_exc.InvalidCredentialsError | winrm_exc.AuthenticationError):
         return SourceAuthError(text)
     if isinstance(exc, requests.exceptions.SSLError):
@@ -216,9 +240,16 @@ def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | 
         # leaving the base path over SSH, rather than 502 (F-L).
         if "path escapes from parent" in lowered or lowered.startswith("unsafe path"):
             return PathOutsideBaseError(text)
-        if "not a directory" in lowered:  # a list on a file (#206)
+        # A list on a file (#206): "not a directory", or on Windows "The
+        # directory name is invalid."
+        if "not a directory" in lowered or "directory name is invalid" in lowered:
             return SourceNotFoundError(text)
-        if "not exist" in lowered or "no such file" in lowered or "not found" in lowered:
+        # Windows agents say "The system cannot find the file (path)
+        # specified." (#272).
+        if any(
+            phrase in lowered
+            for phrase in ("not exist", "no such file", "not found", "cannot find the")
+        ):
             return SourceNotFoundError(text)
         if "permission" in lowered or "denied" in lowered or "outside" in lowered:
             return SourcePermissionError(text)
@@ -230,7 +261,24 @@ def translate_local(exc: BaseException) -> SourceError | None:
     return _common(exc)
 
 
-_PASS_THROUGH = (SourceError, FetchTooLargeError, PathOutsideBaseError)
+_PASS_THROUGH = (SourceError, FetchTooLargeError, PathOutsideBaseError, RangeNotSupportedError)
+
+
+@contextmanager
+def tracked(source) -> Iterator[None]:
+    """Records the source's reachability from a real operation (#276): ok
+    when it worked, failing for an error about reaching the source; an
+    error about one file changes nothing. Re-raises whatever it sees."""
+    from app import source_status
+
+    source_id = getattr(source, "id", None)
+    try:
+        yield
+    except Exception as exc:
+        if source_status.is_connectivity_error(exc):
+            source_status.record(source_id, False, source_status.failure_message(exc))
+        raise
+    source_status.record(source_id, True)
 
 
 @contextmanager
@@ -262,23 +310,30 @@ class TranslatingConnector:
     # virtual `label/...` tree.
 
     def list_directory(self, source, rules, relative_path: str = ""):
-        with translated(self._translate):
+        with tracked(source), translated(self._translate):
             if source_roots.is_multi_root(source):
                 return source_roots.list_directory(self._module, source, rules, relative_path)
             return self._module.list_directory(source, rules, relative_path)
 
     def fetch_file(self, source, relative_path: str, destination):
-        with translated(self._translate):
+        with tracked(source), translated(self._translate):
             if source_roots.is_multi_root(source):
                 source, relative_path = source_roots.split(source, relative_path)
             return self._module.fetch_file(source, relative_path, destination)
+
+    def read_range(self, source, relative_path: str, offset: int, length: int, head: int = 0):
+        """Incremental follow (#254): a RangeRead (collectors/base.py)."""
+        with tracked(source), translated(self._translate):
+            if source_roots.is_multi_root(source):
+                source, relative_path = source_roots.split(source, relative_path)
+            return self._module.read_range(source, relative_path, offset, length, head)
 
     @contextmanager
     def local_copy(self, source, relative_path: str):
         # Only the fetch is translated; exceptions from the caller's `with`
         # body propagate unchanged.
         with ExitStack() as stack:
-            with translated(self._translate):
+            with tracked(source), translated(self._translate):
                 if source_roots.is_multi_root(source):
                     source, relative_path = source_roots.split(source, relative_path)
                 local = stack.enter_context(self._module.local_copy(source, relative_path))
