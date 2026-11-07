@@ -4,6 +4,7 @@
   import { detailPairs, targetHref, targetTypeLabel } from '../lib/audit-format'
   import { currentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import { confirmAction } from '../lib/confirm'
   import type {
     AuditIntegrityStatus,
     AuditLogEntry,
@@ -99,12 +100,15 @@
   }
 
   async function recordKnownBreaks() {
-    const confirmed = confirm(
-      `Record the ${integrity.race_break_count} ${integrity.race_break_count === 1 ? 'break' : 'breaks'} ` +
+    const confirmed = await confirmAction({
+      title: 'Record known breaks',
+      message:
+        `Record the ${integrity.race_break_count} ${integrity.race_break_count === 1 ? 'break' : 'breaks'} ` +
         'from the #213 race as known? Verification will then accept ' +
         'exactly these rows. Any other break is still reported as tampering. This is ' +
         'itself written to the audit log.',
-    )
+      confirmLabel: 'Record as known',
+    })
     if (!confirmed) return
     recordingKnownBreaks = true
     try {

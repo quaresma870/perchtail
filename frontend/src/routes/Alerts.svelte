@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
   import { currentUser, hasCapability } from '../lib/auth'
+  import { confirmAction } from '../lib/confirm'
   import type { Alert, AlertCreate, Source } from '../lib/types'
 
   let alerts: Alert[] = []
@@ -78,7 +79,13 @@
   }
 
   async function removeAlert(alert: Alert) {
-    if (!confirm(`Delete alert "${alert.name}"? This cannot be undone.`)) return
+    const ok = await confirmAction({
+      title: 'Delete alert',
+      message: `Delete the alert "${alert.name}"? This can't be undone.`,
+      confirmLabel: 'Delete',
+      danger: true,
+    })
+    if (!ok) return
     try {
       await api.delete(`/alerts/${alert.id}`)
       await load()
@@ -194,7 +201,7 @@
                 <span class="switch-track"></span>
               </label>
             {/if}
-            <button class="btn btn-ghost danger" on:click={() => removeAlert(alert)}>Delete</button>
+            <button class="btn btn-danger btn-sm" on:click={() => removeAlert(alert)}>Delete</button>
           </div>
         </li>
       {/each}
@@ -290,9 +297,6 @@
   .badge-accent {
     background: var(--accent-soft);
     color: var(--accent-hover);
-  }
-  .btn-ghost.danger {
-    color: var(--danger);
   }
   .test-ok {
     color: var(--success);

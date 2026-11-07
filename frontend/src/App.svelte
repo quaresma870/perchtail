@@ -25,6 +25,7 @@
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
   import Profile from './routes/Profile.svelte'
   import UserMenu from './lib/components/UserMenu.svelte'
+  import ConfirmHost from './lib/components/ConfirmHost.svelte'
   import AuditLogSettings from './routes/AuditLogSettings.svelte'
 
   const routes = {
@@ -150,6 +151,7 @@
       <Router {routes} />
     </div>
   {/if}
+  <ConfirmHost />
 </main>
 
 <style>

@@ -28,6 +28,11 @@ release ships (0.x releases may include breaking changes between minors).
   the matching lines in the panel below. Enter / Shift+Enter move between
   matches, Alt+Enter runs Find all, Escape closes the bar, Ctrl/Cmd+F
   opens it with the selected text. The toolbar keeps one Find button.
+- **Settings: buttons and popups** (#301). Row actions in the settings
+  tables are buttons; creating and editing users, folders and SSO group
+  mappings opens a popup; deleting, revoking, deactivating and resetting
+  a password ask in a popup instead of the browser's confirmation. A
+  password reset shows the temporary password in a popup with Copy.
 
 ### Fixed
 - The Tail notice ("N new lines — jump to end") stays in the log's

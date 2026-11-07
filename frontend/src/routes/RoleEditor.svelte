@@ -244,7 +244,7 @@
                 </td>
                 <td>
                   {#if !isBuiltin}
-                    <button class="link danger" on:click={() => removeGrant(grant)}>remove</button>
+                    <button class="btn btn-danger btn-sm" on:click={() => removeGrant(grant)}>Remove</button>
                   {/if}
                 </td>
               </tr>
@@ -426,17 +426,6 @@
     border-color: var(--accent-border);
     background: var(--accent-soft);
     color: var(--accent-hover);
-  }
-  button.link {
-    border: none;
-    background: none;
-    color: var(--accent-hover);
-    cursor: pointer;
-    font-size: 0.85rem;
-    padding: 0;
-  }
-  button.link.danger {
-    color: var(--danger);
   }
   .empty {
     text-align: center;

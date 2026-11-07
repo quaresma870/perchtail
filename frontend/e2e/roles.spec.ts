@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup } from './popups'
 
 const roleName = `E2E Role ${Date.now()}`
 const customerName = `E2E Role Test Customer ${Date.now()}`
@@ -85,18 +86,19 @@ test('roles: create, global capabilities, grants (add + remove), duplicate, dele
   // (e.g. "<name> (copy)") -- two rows here confirms that assumption rather
   // than silently deleting the wrong count if it doesn't.
   await page.goto('/#/settings/roles')
-  page.on('dialog', (dialog) => dialog.accept())
   await expect(page.getByRole('row', { name: new RegExp(roleName) })).toHaveCount(2)
   await page
     .getByRole('row', { name: new RegExp(roleName) })
     .first()
-    .getByRole('button', { name: 'delete' })
+    .getByRole('button', { name: 'Delete' })
     .click()
+  await confirmPopup(page, 'Delete')
   await expect(page.getByRole('row', { name: new RegExp(roleName) })).toHaveCount(1)
   await page
     .getByRole('row', { name: new RegExp(roleName) })
-    .getByRole('button', { name: 'delete' })
+    .getByRole('button', { name: 'Delete' })
     .click()
+  await confirmPopup(page, 'Delete')
   await expect(page.getByRole('row', { name: new RegExp(roleName) })).toHaveCount(0)
 })
 

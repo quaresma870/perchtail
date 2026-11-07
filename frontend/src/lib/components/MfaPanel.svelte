@@ -225,7 +225,7 @@
           <button class="btn btn-ghost" on:click={() => (showRegenerateForm = true)}>
             Regenerate backup codes
           </button>
-          <button class="btn btn-ghost danger" on:click={() => (showDisableForm = true)}>
+          <button class="btn btn-danger" on:click={() => (showDisableForm = true)}>
             Disable MFA
           </button>
         </div>
@@ -322,9 +322,6 @@
   .actions {
     display: flex;
     gap: 0.6rem;
-  }
-  .btn-ghost.danger {
-    color: var(--danger);
   }
   .btn-danger {
     background: var(--danger);
