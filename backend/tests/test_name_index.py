@@ -344,3 +344,48 @@ def test_index_now_needs_run_now_and_the_index_on(session, tmp_path, client_for,
     session.add(source)
     session.commit()
     assert client_for(runner).post(f"/sources/{source.id}/name-index").status_code == 409
+
+
+def test_search_hides_files_a_rule_hides_since_the_last_pass(session, tmp_path, client_for):
+    source = _source(session, tmp_path)
+    _entry(session, source.id, "app.log")
+    _entry(session, source.id, "secret/key.pem")
+    session.add(
+        Rule(
+            source_id=source.id,
+            order=1,
+            type=RuleType.exclude,
+            pattern="secret/**",
+            pattern_kind=PatternKind.glob,
+        )
+    )
+    session.commit()
+    admin = _user(session, super_admin=True)
+    body = client_for(admin).get("/files", params={"q": "."}).json()
+    assert [h["path"] for h in body["hits"]] == ["app.log"]
+
+
+def test_regex_search_uses_re2_and_refuses_what_it_cannot_run():
+    assert (
+        compile_matcher(r"(a+)+$", regex=True).matches("x/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab")
+        is False
+    )
+    with pytest.raises(InvalidPattern):
+        compile_matcher(r"(?<=x)log", regex=True)  # lookbehind: not in RE2
+
+
+def test_short_text_matches_any_letter_case(session, tmp_path):
+    source = _source(session, tmp_path)
+    _entry(session, source.id, "Évora.log")
+    rows, _ = search_entries(session, compile_matcher("é", False), None, 0, 10)
+    assert [r[2] for r in rows] == ["Évora.log"]
+
+
+def test_a_source_is_queued_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(name_index, "index_source_names", lambda sid, engine: calls.append(sid))
+    blocker = __import__("threading").Event()
+    monkeypatch.setattr(name_index._pool, "submit", lambda fn: blocker.wait(0) or None)
+    assert name_index._enqueue(4242, None) is True
+    assert name_index._enqueue(4242, None) is False
+    name_index._pending.discard(4242)

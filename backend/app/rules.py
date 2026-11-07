@@ -28,6 +28,14 @@ def _re2_options(ignore_case: bool = False) -> "re2.Options":
     return options
 
 
+def compile_linear(pattern: str, ignore_case: bool = False):
+    """A regex compiled with RE2, which runs in linear time: for patterns
+    that come from users and run on the backend (rules, file-name search).
+    Raises re2.error for one RE2 can't compile (backreferences,
+    lookaround)."""
+    return re2.compile(pattern, _re2_options(ignore_case))
+
+
 def parse_pattern(raw: str, *, linear_time: bool = True) -> tuple[str, PatternKind]:
     """Splits the admin-facing `re:` prefix convention (CLAUDE.md's rule
     matching semantics) from the pattern itself. Raises InvalidPatternError

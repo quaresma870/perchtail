@@ -18,14 +18,18 @@ instead of its name."""
 import re
 from dataclasses import dataclass
 
+import re2
 from sqlalchemy import text
 from sqlmodel import Session
+
+from app.rules import compile_linear
 
 FTS_TABLE = "file_name_fts"
 _DELETE_ROW = (
     f"INSERT INTO {FTS_TABLE}({FTS_TABLE}, rowid, path) VALUES ('delete', old.id, old.path); "
 )
-# Trigrams need three characters; shorter text is matched without the index.
+# Trigrams need three characters; shorter text is matched without the index
+# (reading every row: still quick, and right for any letter case).
 _TRIGRAM = 3
 
 
@@ -76,7 +80,7 @@ class InvalidPattern(ValueError):
 @dataclass(frozen=True)
 class Matcher:
     by_path: bool
-    regex: re.Pattern | None  # None: plain text, see `needle`
+    regex: object | None  # a compiled RE2 or re pattern; None: plain text
     needle: str
     # The longest piece of text every match contains, to narrow the search
     # with the trigram index first ("" = no narrowing).
@@ -115,9 +119,10 @@ def compile_matcher(query: str, regex: bool) -> Matcher | None:
         return None
     by_path = "/" in q
     if regex:
+        # RE2 runs in linear time, so no pattern can make the search hang.
         try:
-            return Matcher(by_path, re.compile(q, re.IGNORECASE), "", "")
-        except re.error as exc:
+            return Matcher(by_path, compile_linear(q, ignore_case=True), "", "")
+        except re2.error as exc:
             raise InvalidPattern(str(exc)) from exc
     if re.search(r"[*?]", q):
         pieces = [p for p in re.split(r"[*?]+", q) if p]
@@ -155,10 +160,6 @@ def search_entries(
     if matcher is not None and len(matcher.literal) >= _TRIGRAM:
         join = f"JOIN {FTS_TABLE} f ON f.rowid = e.id AND f.path MATCH :phrase"
         params["phrase"] = _fts_phrase(matcher.literal)
-    elif matcher is not None and matcher.literal:
-        clauses.append("e.path LIKE :like ESCAPE '\\'")
-        escaped = matcher.literal.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        params["like"] = f"%{escaped}%"
 
     batch = max(limit * 4, 500)
     found: list[tuple[int, int, str, int, float | None]] = []

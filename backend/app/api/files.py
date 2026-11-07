@@ -17,8 +17,9 @@ from app.api.auth import get_current_active_user
 from app.auth.models import Capability, User
 from app.auth.rbac import visible_source_ids
 from app.db import get_session
-from app.models import Source
+from app.models import Rule, Source
 from app.name_index_store import InvalidPattern, compile_matcher, search_entries
+from app.rules import is_visible, rules_case_insensitive
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -74,9 +75,17 @@ def search_files(
     next_after = None
     if index_enabled and source_ids:
         rows, next_after = search_entries(session, matcher, source_ids, after, limit)
+        # The index is as of its last pass; the rules are checked now, so a
+        # file a rule hides since then isn't shown by name either.
+        by_id = {s.id: s for s in sources}
+        hit_ids = {sid for _id, sid, _p, _s, _m in rows}
+        rules: dict[int, list[Rule]] = {sid: [] for sid in hit_ids}
+        for rule in session.exec(select(Rule).where(Rule.source_id.in_(hit_ids))).all():
+            rules[rule.source_id].append(rule)
         hits = [
             FileHit(source_id=sid, path=path, size=size, mtime=mtime)
             for _id, sid, path, size, mtime in rows
+            if is_visible(path, rules[sid], case_insensitive=rules_case_insensitive(by_id[sid]))
         ]
 
     return FileSearchResult(
