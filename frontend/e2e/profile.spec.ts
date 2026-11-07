@@ -18,7 +18,7 @@ test('profile: set name and email, see sessions, old links land here', async ({ 
   await page.getByLabel('Email').fill(`E2E-${Date.now()}@Example.com`)
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page.getByText('Saved.')).toBeVisible()
-  await expect(page.locator('nav a.username')).toHaveText(name)
+  await expect(page.locator('nav .user-menu-name')).toHaveText(name)
   await expect(page.getByLabel('Email')).toHaveValue(/^e2e-\d+@example\.com$/)
 
   await page.reload()
@@ -33,5 +33,28 @@ test('profile: set name and email, see sessions, old links land here', async ({ 
   await page.getByLabel('Display name').fill('')
   await page.getByLabel('Email').fill('')
   await page.getByRole('button', { name: 'Save', exact: true }).click()
-  await expect(page.locator('nav a.username')).toHaveText(/e2e-admin/)
+  await expect(page.locator('nav .user-menu-name')).toHaveText(/e2e-admin/)
+})
+
+test('user menu: opens from the keyboard, goes to My profile, closes on Escape', async ({ page }) => {
+  await page.goto('/#/viewer')
+  const button = page.locator('nav').getByRole('button', { name: /^User menu/ })
+  await expect(button).toHaveAttribute('aria-expanded', 'false')
+  await button.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('menuitem', { name: 'My profile' })).toBeFocused()
+  await page.keyboard.press('ArrowDown')
+  await expect(page.getByRole('menuitem', { name: 'Log out' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('menu')).toHaveCount(0)
+  await expect(button).toBeFocused()
+
+  await button.click()
+  await page.getByRole('menuitem', { name: 'My profile' }).click()
+  await expect(page).toHaveURL(/#\/profile$/)
+  await expect(page.getByRole('menu')).toHaveCount(0)
+  // A click outside closes it.
+  await button.click()
+  await page.getByRole('heading', { name: 'My profile' }).click()
+  await expect(page.getByRole('menu')).toHaveCount(0)
 })

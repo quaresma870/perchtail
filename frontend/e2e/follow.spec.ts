@@ -38,3 +38,30 @@ test('follow appends only the new lines of a growing log', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Tail', exact: true }).click()
 })
+
+test('the new-lines notice stays over the log with Find all open', async ({ page }) => {
+  // A short window, so even a short log is taller than the editor and Tail
+  // raises the notice instead of scrolling.
+  await page.setViewportSize({ width: 1280, height: 560 })
+  await page.goto('/#/viewer')
+  await page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
+  await page.locator('.tree-body').getByRole('button', { name: 'perchtail.log' }).click()
+  await expect(page.locator('.cm-content')).not.toBeEmpty()
+  // Away from the end, so new lines raise the notice instead of scrolling.
+  // Clicked at the left edge: the middle of a long line scrolls sideways.
+  await page.locator('.cm-content').click({ position: { x: 5, y: 5 } })
+  await page.keyboard.press('Control+Home')
+
+  await page.getByRole('button', { name: 'Find all', exact: true }).click()
+  const panel = page.locator('.find-all-panel')
+  await expect(panel).toBeVisible()
+  await page.getByRole('button', { name: 'Tail', exact: true }).click()
+
+  const notice = page.locator('.jump-to-end')
+  await expect(notice).toBeVisible({ timeout: 20_000 })
+  const noticeBox = await notice.boundingBox()
+  const panelBox = await panel.boundingBox()
+  expect(noticeBox!.y + noticeBox!.height).toBeLessThanOrEqual(panelBox!.y)
+
+  await page.getByRole('button', { name: 'Tail', exact: true }).click()
+})

@@ -1068,22 +1068,26 @@
             {/if}
           </div>
         </div>
-        <CodeMirrorPane
-          bind:this={paneRef}
-          content={displayContent}
-          severityPatterns={activeSeverityPatterns}
-          filename={activeTab.name}
-          wrapEnabled={activeTab.wrapEnabled}
-          showWhitespace={activeTab.showWhitespace}
-          bookmarks={activeTab.bookmarks}
-          markPatterns={activeTab.markPatterns}
-          on:bottom={onReachedBottom}
-        />
-        {#if activeTab.newLines > 0}
-          <button class="jump-to-end" on:click={jumpToEnd}>
-            {activeTab.newLines} new {activeTab.newLines === 1 ? 'line' : 'lines'} — jump to end ↓
-          </button>
-        {/if}
+        <!-- The Tail notice is anchored to the editor, not the whole area, so
+             it stays over the log when Find all is open below (#298). -->
+        <div class="editor-pane">
+          <CodeMirrorPane
+            bind:this={paneRef}
+            content={displayContent}
+            severityPatterns={activeSeverityPatterns}
+            filename={activeTab.name}
+            wrapEnabled={activeTab.wrapEnabled}
+            showWhitespace={activeTab.showWhitespace}
+            bookmarks={activeTab.bookmarks}
+            markPatterns={activeTab.markPatterns}
+            on:bottom={onReachedBottom}
+          />
+          {#if activeTab.newLines > 0}
+            <button class="jump-to-end" on:click={jumpToEnd}>
+              {activeTab.newLines} new {activeTab.newLines === 1 ? 'line' : 'lines'} — jump to end ↓
+            </button>
+          {/if}
+        </div>
         {#if findAllOpen}
           <FindInDocumentPanel
             content={displayContent}
@@ -1281,6 +1285,13 @@
     min-width: 0;
     min-height: 0;
     background: var(--bg);
+    position: relative;
+  }
+  .editor-pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     position: relative;
   }
   .jump-to-end {
