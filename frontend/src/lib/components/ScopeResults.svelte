@@ -1,9 +1,11 @@
 <script lang="ts">
   // One source or folder of the advanced filter (#274, #284): the files
-  // whose names match the filter, in the explorer's order. The folders
-  // below are searched right away, breadth first, within limits (depth,
-  // folders, time) and through the shared listing limiter, with a Stop
-  // button. Every listing is the live browse, under the rules.
+  // whose names match the filter, in the explorer's order. Every folder
+  // below is searched right away, breadth first, through the shared
+  // listing limiter (a few listings at a time, so sources aren't flooded),
+  // with a Stop button. No cap on folders or time; only a depth guard
+  // against links that loop, and it says so when it's hit. Every listing
+  // is the live browse, under the rules.
   import { createEventDispatcher, onDestroy, onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { api, ApiError } from '../api'
@@ -22,13 +24,10 @@
    * searched if nothing matches. */
   export let partOfGroup = false
 
-  // How far the search goes, per source or folder ticked.
-  const MAX_DEPTH = 6
-  const MAX_FOLDERS = 300
-  const TIME_BUDGET_MS = 90_000
-  // Auto-refresh lists again the ticked folder and the folders that had
-  // files, not every folder searched.
-  const REFRESH_MAX_FOLDERS = 50
+  // A link to a folder above it (allowed inside the base over SSH and the
+  // agent) would make the search go down forever; no real log tree is
+  // this deep. Folders past it aren't searched, and the result says where.
+  const LOOP_GUARD_DEPTH = 32
 
   const dispatch = createEventDispatcher<{
     open: { sourceId: number; sourceName: string; path: string; member: null; name: string }
@@ -36,8 +35,12 @@
 
   // Folder path -> its entries, for every folder listed so far.
   let listings = new Map<string, BrowseEntry[]>()
-  let state: 'searching' | 'done' | 'limit' | 'stopped' = 'searching'
+  let state: 'searching' | 'done' | 'stopped' = 'searching'
   let error = ''
+  // Folders below that couldn't be listed, and the first folder where the
+  // loop guard stopped going down (shown to the user).
+  let unreadable = 0
+  let tooDeep: string | null = null
   let stopped = false
   let destroyed = false
 
@@ -47,10 +50,8 @@
     )
 
   async function search() {
-    const started = Date.now()
     const queue: { path: string; depth: number }[] = [{ path: scope.path, depth: 0 }]
     const inFlight = new Set<Promise<void>>()
-    let hitLimit = false
 
     const listOne = async (item: { path: string; depth: number }) => {
       try {
@@ -62,29 +63,25 @@
         listings = listings
         for (const entry of entries) {
           if (!entry.is_dir || entry.is_archive) continue
-          if (item.depth < MAX_DEPTH) queue.push({ path: entry.path, depth: item.depth + 1 })
-          else hitLimit = true
+          if (item.depth < LOOP_GUARD_DEPTH) queue.push({ path: entry.path, depth: item.depth + 1 })
+          else tooDeep ??= entry.path
         }
       } catch (err) {
         // The ticked folder itself failing is an error; a folder below it
-        // that can't be listed is skipped, the rest go on.
+        // that can't be listed is skipped (and counted), the rest go on.
         if (item.path === scope.path) error = err instanceof ApiError ? err.detail : 'Failed to load'
+        else unreadable += 1
       }
     }
 
     while ((queue.length > 0 || inFlight.size > 0) && !stopped && !destroyed) {
       while (queue.length > 0 && inFlight.size < PER_SOURCE && !stopped) {
-        if (listings.size + inFlight.size >= MAX_FOLDERS || Date.now() - started > TIME_BUDGET_MS) {
-          hitLimit = true
-          queue.length = 0
-          break
-        }
         const task: Promise<void> = listOne(queue.shift()!).finally(() => inFlight.delete(task))
         inFlight.add(task)
       }
       if (inFlight.size > 0) await Promise.race(inFlight)
     }
-    state = stopped ? 'stopped' : hitLimit ? 'limit' : 'done'
+    state = stopped ? 'stopped' : 'done'
   }
 
   function stop() {
@@ -98,15 +95,19 @@
     stop()
   }
 
-  // Auto-refresh (#272): the ticked folder and the folders that had files.
+  // Auto-refresh (#272): the ticked folder and the folders that had files,
+  // through the same limiter. A refresh still running when the next one
+  // is due makes that one wait for the following tick.
+  let refreshing = false
   async function refresh(): Promise<boolean> {
-    if (state === 'searching') return true
+    if (state === 'searching' || refreshing) return true
+    refreshing = true
     const paths = [
       scope.path,
       ...[...listings.entries()]
         .filter(([path, entries]) => path !== scope.path && entries.some((e) => !e.is_dir))
         .map(([path]) => path),
-    ].slice(0, REFRESH_MAX_FOLDERS)
+    ]
     try {
       const results = await Promise.all(
         paths.map((path) =>
@@ -127,6 +128,8 @@
       return true
     } catch {
       return false
+    } finally {
+      refreshing = false
     }
   }
 
@@ -151,7 +154,11 @@
       )
     : []
   $: label = scope.path ? `${sourceName} › ${scope.path}` : sourceName
-  $: hidden = partOfGroup && state !== 'searching' && !error && matches.length === 0
+  // A source of a ticked group with nothing to show is hidden once searched,
+  // unless the search was incomplete: that's always shown.
+  $: complete = state === 'done' && !tooDeep && unreadable === 0
+  $: hidden = partOfGroup && complete && !error && matches.length === 0
+  $: folderCount = `${listings.size} ${listings.size === 1 ? 'folder' : 'folders'}`
 </script>
 
 {#if !hidden}
@@ -196,17 +203,27 @@
         </button>
       {/each}
       {#if state === 'searching'}
-        <div class="hint">Searching… {listings.size} {listings.size === 1 ? 'folder' : 'folders'} so far</div>
+        <div class="hint">Searching… {folderCount} so far</div>
       {:else if matches.length === 0 && matcher}
         <div class="hint">{files.length === 0 ? 'No files here.' : 'No file names match.'}</div>
       {/if}
-      {#if state === 'limit'}
-        <div class="hint">
-          Stopped at the limit ({MAX_DEPTH} levels, {MAX_FOLDERS} folders or {TIME_BUDGET_MS / 1000} s) after
-          {listings.size} folders: tick a narrower folder to go further.
+      {#if state === 'stopped'}
+        <div class="warn">Stopped after {folderCount}: the folders not reached yet weren't searched.</div>
+      {:else if state === 'done'}
+        <div class="hint">Searched {folderCount}.</div>
+      {/if}
+      {#if tooDeep}
+        <div class="warn" title={tooDeep}>
+          Not searched below {LOOP_GUARD_DEPTH} levels ({relative(tooDeep)}): probably a link that loops back
+          to a folder above. Tick a folder further down to search there.
         </div>
-      {:else if state === 'stopped'}
-        <div class="hint">Stopped after {listings.size} {listings.size === 1 ? 'folder' : 'folders'}.</div>
+      {/if}
+      {#if unreadable > 0}
+        <div class="warn">
+          {unreadable} {unreadable === 1 ? 'folder' : 'folders'} couldn't be listed and {unreadable === 1
+            ? 'was'
+            : 'were'} skipped.
+        </div>
       {/if}
     {/if}
   </div>
@@ -285,5 +302,10 @@
   }
   .error {
     color: var(--danger);
+  }
+  .warn {
+    font-size: 0.78rem;
+    color: var(--warning);
+    padding: 0.15rem 1rem;
   }
 </style>
