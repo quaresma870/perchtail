@@ -8,6 +8,15 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Changed
+- **Advanced filter: no limit on folders or time** (#284). A ticked
+  source or folder is searched to the end, still a few listings at a
+  time per source, with Stop. When it's done it says how many folders it
+  searched; it says so as well when it was stopped, when folders couldn't
+  be listed, and when it didn't go below 32 levels (a guard against links
+  that loop back to a folder above). The refresh of the results no longer
+  stops at 50 folders.
+
 ## [0.6.0-rc.2] - 2026-11-07
 
 Second release candidate for 0.6.0, with the changes from the rc.1 lab
