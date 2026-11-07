@@ -1,28 +1,15 @@
 // Incremental follow (#254): the viewer asks only for what was appended
 // since the bytes it holds (GET /sources/{id}/follow), and appends it.
 
-export const FOLLOW_INTERVALS_MS = [1000, 2000, 5000, 10000, 30000] as const
-export const DEFAULT_FOLLOW_INTERVAL_MS = 2000
-const STORAGE_KEY = 'perchtail.followIntervalMs'
+// How often Tail polls is a System setting (#283), one of these.
+export const TAIL_INTERVALS_SECONDS = [1, 2, 5, 10] as const
+export const DEFAULT_TAIL_INTERVAL_SECONDS = 2
 
-/** The interval the viewer last used, if it's one of the offered ones. A
- * per-browser convenience: storage can be missing or blocked. */
-export function loadFollowInterval(): number {
-  try {
-    const stored = Number(localStorage.getItem(STORAGE_KEY))
-    if ((FOLLOW_INTERVALS_MS as readonly number[]).includes(stored)) return stored
-  } catch {
-    // private window or blocked storage: the default is fine
-  }
-  return DEFAULT_FOLLOW_INTERVAL_MS
-}
-
-export function saveFollowInterval(ms: number): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, String(ms))
-  } catch {
-    // not remembered, that's all
-  }
+/** The poll interval in ms for a System setting value, falling back to the
+ * default for anything that isn't offered. */
+export function tailIntervalMs(seconds: number | undefined): number {
+  const valid = (TAIL_INTERVALS_SECONDS as readonly number[]).includes(seconds ?? NaN)
+  return (valid ? seconds! : DEFAULT_TAIL_INTERVAL_SECONDS) * 1000
 }
 
 export function followUrl(

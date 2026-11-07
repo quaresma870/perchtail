@@ -238,6 +238,7 @@ export interface SystemSettings {
   // Explorer (#272, #273).
   explorer_sort_default: ExplorerSort
   explorer_refresh_seconds: number
+  tail_interval_seconds: number
   // Background source check (#276), minutes; 0 = off.
   source_check_minutes: number
 }

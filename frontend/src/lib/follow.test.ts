@@ -1,12 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import {
-  countLines,
-  DEFAULT_FOLLOW_INTERVAL_MS,
-  followUrl,
-  loadFollowInterval,
-  readFollowHeaders,
-  saveFollowInterval,
-} from './follow'
+import { describe, expect, it } from 'vitest'
+import { countLines, DEFAULT_TAIL_INTERVAL_SECONDS, followUrl, readFollowHeaders, tailIntervalMs } from './follow'
 
 describe('followUrl', () => {
   it('asks from the offset, with the head once known', () => {
@@ -54,14 +47,15 @@ describe('countLines', () => {
   })
 })
 
-describe('the remembered interval', () => {
-  afterEach(() => localStorage.clear())
+describe('the Tail interval', () => {
+  it('uses the System setting when it is one of the offered values', () => {
+    expect(tailIntervalMs(1)).toBe(1000)
+    expect(tailIntervalMs(10)).toBe(10000)
+  })
 
-  it('defaults, remembers an offered value and ignores anything else', () => {
-    expect(loadFollowInterval()).toBe(DEFAULT_FOLLOW_INTERVAL_MS)
-    saveFollowInterval(5000)
-    expect(loadFollowInterval()).toBe(5000)
-    localStorage.setItem('perchtail.followIntervalMs', '7')
-    expect(loadFollowInterval()).toBe(DEFAULT_FOLLOW_INTERVAL_MS)
+  it('falls back to the default for anything else', () => {
+    expect(tailIntervalMs(undefined)).toBe(DEFAULT_TAIL_INTERVAL_SECONDS * 1000)
+    expect(tailIntervalMs(30)).toBe(DEFAULT_TAIL_INTERVAL_SECONDS * 1000)
+    expect(tailIntervalMs(0)).toBe(DEFAULT_TAIL_INTERVAL_SECONDS * 1000)
   })
 })
