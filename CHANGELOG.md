@@ -9,8 +9,11 @@ release ships (0.x releases may include breaking changes between minors).
 ## [Unreleased]
 
 ### Changed
-- **Follow is now called Tail** (#283), and its interval shows only while
-  it's on.
+- **Follow is now called Tail** (#283). How often it checks for new
+  lines is a System setting (Settings → System → Tail interval: 1, 2, 5
+  or 10 seconds, 2 by default) instead of each user's choice, so sources
+  see a known load; the viewer shows it next to the button while Tail is
+  on. 30 seconds is no longer offered.
 - **No sort control in the explorer** (#282): folders are listed in the
   order set under Settings → System. The per-user choice made in
   0.6.0-rc.1 is kept but not used for now; it comes back as a "Sort by"

@@ -54,6 +54,7 @@ _DEFAULTS = {
     "password_max_age_days": 0,
     "explorer_sort_default": "name_asc",
     "explorer_refresh_seconds": 30,
+    "tail_interval_seconds": 2,
     "source_check_minutes": 10,
 }
 
@@ -183,3 +184,22 @@ def test_source_max_roots_is_bounded_by_the_hard_cap(session, client_for, value,
     assert response.status_code == status
     if status == 200:
         assert client.get("/system-settings").json()["source_max_roots"] == value
+
+
+@pytest.mark.parametrize("seconds", [1, 2, 5, 10])
+def test_tail_interval_is_one_of_the_offered_values(session, client_for, seconds):
+    # #283: a System setting, not each user's.
+    client = client_for(_make_user(session, is_super_admin=True))
+
+    response = client.patch("/system-settings", json={"tail_interval_seconds": seconds})
+    assert response.status_code == 200
+    assert client.get("/system-settings").json()["tail_interval_seconds"] == seconds
+
+
+@pytest.mark.parametrize("seconds", [0, 3, 30, -1])
+def test_tail_interval_refuses_other_values(session, client_for, seconds):
+    client = client_for(_make_user(session, is_super_admin=True))
+
+    response = client.patch("/system-settings", json={"tail_interval_seconds": seconds})
+    assert response.status_code == 422
+    assert client.get("/system-settings").json()["tail_interval_seconds"] == 2

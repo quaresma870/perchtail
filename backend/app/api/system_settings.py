@@ -20,6 +20,9 @@ require_manage = require_global_capability(
 
 
 ExplorerSort = Literal["name_asc", "name_desc", "mtime_desc", "mtime_asc", "size_desc"]
+# How often Tail polls an open file (#283): a System setting, not each
+# user's, so sources see a known load.
+TailIntervalSeconds = Literal[1, 2, 5, 10]
 
 
 class SystemSettingsPublic(BaseModel):
@@ -41,6 +44,7 @@ class SystemSettingsPublic(BaseModel):
     # Explorer (#272, #273).
     explorer_sort_default: ExplorerSort
     explorer_refresh_seconds: int
+    tail_interval_seconds: int
     # Background source check (#276), minutes; 0 = off.
     source_check_minutes: int
 
@@ -75,6 +79,7 @@ class SystemSettingsUpdate(BaseModel):
     explorer_sort_default: ExplorerSort | None = None
     # 0 = off; otherwise at least 5 s, so open folders can't hammer sources.
     explorer_refresh_seconds: int | None = Field(default=None, ge=0, le=3600)
+    tail_interval_seconds: TailIntervalSeconds | None = None
     source_check_minutes: int | None = Field(default=None, ge=0, le=1440)
 
 
@@ -95,6 +100,7 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         connections_view_default=system_settings.get_choice(session, "connections_view_default"),
         explorer_sort_default=system_settings.get_choice(session, "explorer_sort_default"),
         explorer_refresh_seconds=system_settings.get_int(session, "explorer_refresh_seconds"),
+        tail_interval_seconds=system_settings.get_int(session, "tail_interval_seconds"),
         source_check_minutes=system_settings.get_int(session, "source_check_minutes"),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
     )

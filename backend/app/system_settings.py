@@ -57,6 +57,9 @@ INT_DEFAULTS: dict[str, str] = {
     # How often the explorer re-lists the folders a user has open (#272), in
     # seconds; 0 turns it off. Only the listing, never file content.
     "explorer_refresh_seconds": "30",
+    # How often Tail checks an open file for new lines (#254, #283), in
+    # seconds: one of TAIL_INTERVALS_SECONDS.
+    "tail_interval_seconds": "2",
     # Background check of every source's reachability (#276), in minutes;
     # 0 turns it off. One connection per source per interval.
     "source_check_minutes": "10",

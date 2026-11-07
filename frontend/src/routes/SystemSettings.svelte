@@ -6,6 +6,7 @@
   import UpdatesCard from '../lib/components/UpdatesCard.svelte'
   import { systemSettings } from '../lib/settings'
   import { EXPLORER_SORTS } from '../lib/explorer-sort'
+  import { DEFAULT_TAIL_INTERVAL_SECONDS, TAIL_INTERVALS_SECONDS } from '../lib/follow'
   import type {
     ExplorerSort,
     MonitoringTokenResult,
@@ -69,6 +70,7 @@
       connectionsViewDefault = settings.connections_view_default
       connectionsViewSwitchable = settings.connections_view_switchable
       explorerSortDefault = settings.explorer_sort_default
+      tailIntervalSeconds = settings.tail_interval_seconds
       refreshSaved = settings.explorer_refresh_seconds
       refreshInput = String(refreshSaved)
       checkSaved = settings.source_check_minutes
@@ -105,6 +107,7 @@
 
   // Explorer (#272, #273).
   let explorerSortDefault: ExplorerSort = 'name_asc'
+  let tailIntervalSeconds: number = DEFAULT_TAIL_INTERVAL_SECONDS
   let refreshInput = '30'
   let refreshSaved = 30
   let refreshError = ''
@@ -136,6 +139,7 @@
     try {
       const settings = await api.patch<SystemSettings>('/system-settings', patch)
       explorerSortDefault = settings.explorer_sort_default
+      tailIntervalSeconds = settings.tail_interval_seconds
       refreshSaved = settings.explorer_refresh_seconds
       refreshInput = String(refreshSaved)
       systemSettings.set(settings)
@@ -362,10 +366,7 @@
       <div class="setting-row">
         <div>
           <div class="setting-name">File order</div>
-          <p class="hint">
-            How the explorer orders the files in a folder, for users who haven't picked their own
-            order (each user can, from the explorer, and keeps it). Folders always come first.
-          </p>
+          <p class="hint">How the explorer orders the files in a folder. Folders always come first.</p>
         </div>
         <select
           class="input view-select"
@@ -413,6 +414,27 @@
             Save
           </button>
         </div>
+      </div>
+
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Tail interval</div>
+          <p class="hint">
+            How often Tail checks an open file for new lines. Each check reads only what was
+            appended; a shorter interval is more live but asks the source more often.
+          </p>
+        </div>
+        <select
+          class="input view-select"
+          aria-label="Tail interval"
+          value={tailIntervalSeconds}
+          disabled={saving}
+          on:change={(e) => patchExplorer({ tail_interval_seconds: Number(e.currentTarget.value) })}
+        >
+          {#each TAIL_INTERVALS_SECONDS as seconds}
+            <option value={seconds}>{seconds} s</option>
+          {/each}
+        </select>
       </div>
 
       <div class="setting-row column">

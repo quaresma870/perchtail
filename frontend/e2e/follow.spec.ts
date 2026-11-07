@@ -29,8 +29,8 @@ test('follow appends only the new lines of a growing log', async ({ page }) => {
   )
 
   await page.getByRole('button', { name: 'Tail', exact: true }).click()
-  // The interval shows only while Tail is on (#283).
-  await page.getByLabel('Tail interval').selectOption('1000')
+  // The interval comes from Settings -> System (#283) and shows while Tail is on.
+  await expect(page.getByText('every 2 s', { exact: true })).toBeVisible()
   await appended
 
   await expect(page.locator('.cm-content')).toContainText('file.follow', { timeout: 10_000 })

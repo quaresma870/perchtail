@@ -32,15 +32,7 @@
   import { trackedFetch } from '../lib/server-status'
   import { parentPath, refreshFolder, startAutoRefresh, stopAutoRefresh } from '../lib/explorer-refresh'
   import { connectionsViewPreference, migrateLegacyViewChoice, savePreference } from '../lib/preferences'
-  import {
-    countLines,
-    FOLLOW_INTERVALS_MS,
-    followUrl,
-    formatInterval,
-    loadFollowInterval,
-    readFollowHeaders,
-    saveFollowInterval,
-  } from '../lib/follow'
+  import { countLines, followUrl, readFollowHeaders, tailIntervalMs } from '../lib/follow'
   import { canFormat, formatContent } from '../lib/format-content'
   import { languageForFilename } from '../lib/file-language'
   import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
@@ -59,8 +51,8 @@
    * Search). */
   export let params: { sourceId?: string } = {}
 
-  // How often Follow polls (#254): 1 s to 30 s, remembered per browser.
-  let followIntervalMs = loadFollowInterval()
+  // How often Tail polls (#254, #283): a System setting, 1 to 10 s.
+  $: followIntervalMs = tailIntervalMs($systemSettings.tail_interval_seconds)
 
   const focusSourceId = params.sourceId ? Number(params.sourceId) : null
 
@@ -467,11 +459,6 @@
     if (!activeTab) return
     if (activeTab.following) followStarted.delete(activeTab.key)
     updateActiveTab({ following: !activeTab.following, newLines: 0 })
-  }
-
-  function setFollowInterval(ms: number) {
-    followIntervalMs = ms
-    saveFollowInterval(ms)
   }
 
   // Incremental follow (#254). Per-tab streaming decoders, so a character
@@ -996,18 +983,10 @@
               Tail
             </button>
             {#if activeTab.following}
-              <!-- Only while Tail is on (#283). -->
-              <select
-                class="follow-interval"
-                aria-label="Tail interval"
-                title="How often Tail checks for new lines"
-                value={followIntervalMs}
-                on:change={(e) => setFollowInterval(Number(e.currentTarget.value))}
-              >
-                {#each FOLLOW_INTERVALS_MS as ms}
-                  <option value={ms}>{formatInterval(ms)}</option>
-                {/each}
-              </select>
+              <!-- Only while Tail is on (#283); set under Settings -> System. -->
+              <span class="follow-interval" title="How often Tail checks for new lines (Settings → System)">
+                every {followIntervalMs / 1000} s
+              </span>
             {/if}
           </div>
           <div class="toolbar-right">
@@ -1319,12 +1298,9 @@
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
   }
   .follow-interval {
-    background: var(--bg-elevated-2);
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    font-size: 0.75rem;
-    padding: 0.15rem 0.25rem;
+    color: var(--text-faint);
+    font-size: 0.72rem;
+    white-space: nowrap;
   }
   .tabs {
     display: flex;
