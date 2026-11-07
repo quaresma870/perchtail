@@ -6,7 +6,7 @@
   import { tabKey, memberPath } from '../tab-key'
   import { downloadHref } from '../download-href'
   import { registerFolder } from '../explorer-refresh'
-  import { advancedFilter, coveringScope, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
+  import { advancedFilter, coveringScope, scopeContext, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
   import { formatEntryTime, sortEntries } from '../explorer-sort'
   import { explorerSort } from '../preferences'
   import type { BrowseEntry } from '../types'
@@ -95,7 +95,7 @@
   // one already covered by a selected parent shows ticked and fixed.
   $: ownScope = { sourceId, path: entry.path }
   $: inScope = $scopes.some((s) => scopeKey(s) === scopeKey(ownScope))
-  $: coveredBy = coveringScope($scopes, ownScope)
+  $: coveredBy = coveringScope($scopes, ownScope, $scopeContext)
 
   let unregister: (() => void) | null = null
   $: if (canRefresh && expanded && loaded && !unregister) {
