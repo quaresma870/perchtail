@@ -4,11 +4,10 @@
 
 <h1 align="center">PerchTail</h1>
 
-> Live, rule-scoped log browsing across Linux and Windows servers — no agents,
-> nothing mirrored, nothing left behind.
+> Live, rule-scoped log browsing across Linux and Windows servers — agentless by default, nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.5.0%20%28pre--1.0%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.6.0%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -20,42 +19,17 @@
 
 ## Status
 
-🟢 **v0.5.0 — Phase 1 (MVP), Phase 1b (SSO), Phase 2 (push-agent), and
-Phase 3 (full-text search, saved-search webhook alerts, IdP
-group-claim-to-role auto-mapping, a detailed health endpoint) are all
-complete** (see [ROADMAP.md](ROADMAP.md) for the full phase breakdown).
-Agentless SSH/SFTP, SMB, and WinRM browsing, a Go push-agent for hosts
-that can't be reached inbound, ephemeral fetch (nothing mirrored),
-rule-scoped RBAC, OIDC single sign-on (local accounts still work
-alongside it), and opt-in full-text search with alerting over indexed
-sources all work end-to-end. The Viewer is one explorer across every
-source (list or tree), with tabs from several servers side by side and a
-Notepad++-style Find all; sources can read several folders, their Base
-path can be picked by browsing the host, and the whole configuration can
-be bulk imported and exported as YAML. Deployment-wide feature toggles live under
-Settings → System, including a full admin audit log (every login and
-source/rule/role/user/customer/folder/SSO/system-settings change, with
-type/action/date filters and an admin-configurable retention window).
+🟢 **v0.6.0** is the current release: usable today, still pre-1.0.
 
-Most of a pre-1.0 security-hardening pass is done too — login lockout,
-CSP/security headers, CI-blocking dependency and container-image
-vulnerability scanning, `CREDENTIAL_ENCRYPTION_KEY` rotation with a
-tooled migration path, salted PBKDF2 key derivation, persisted SSH
-host-key pinning, a Sessions page for revoking a login remotely, a
-DNS-rebind-safe outbound webhook fetcher, optional TOTP/MFA for local
-accounts, audit-log tamper-evidence (HMAC hash-chained, periodically
-verified), an operator allowlist for local-disk sources, decompression
-limits, and the fixes from a full code review and CodeQL scan in v0.3.0.
-See ROADMAP.md's "Security hardening" section for what's still open
-(mainly a formal third-party review). Covered
-end-to-end by `pytest` (backend), `vitest` (frontend units), and a
-Playwright suite that drives the real browser UI against real SSH/SMB
-test servers, not just mocks. Still pre-1.0 otherwise: SAML isn't built
-(OIDC already covers Azure AD/Entra ID, Okta, Google Workspace,
-Keycloak/Authentik, so it's only getting built if a real need shows up),
-and it hasn't seen production traffic beyond the maintainer's own use.
-See [CHANGELOG.md](CHANGELOG.md) for what's actually shipped versus
-planned.
+- **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
+- **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks.
+- **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults) and optional TOTP; OIDC single sign-on with group-to-role mapping.
+- **Operations:** settings in popups, an update check, a detailed health endpoint, an audit log that is hash-chained and verified, bulk YAML import and export.
+- **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
+
+**What's next.** 0.7 is the last feature release before 1.0. It removes the content index and the full-text Search page, so nothing from the logs is stored, and adds a file-name index with one search across sources, folders and files, live alerts, PostgreSQL support, push-agent upgrades from the portal, user groups and temporary access, notifications and API tokens. 1.0 adds no features: load tests and a sizing guide, OWASP ZAP, OpenSSF Scorecard and provenance in CI, and an external pentest. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+
+Tested with `pytest` (backend), `vitest` (frontend units) and a Playwright suite that drives the real UI against real SSH and SMB servers, and every release candidate is retested in a lab with Linux, Windows and push-agent sources before the release. SAML isn't built (OIDC covers Entra ID, Okta, Google Workspace and Keycloak), and PerchTail hasn't seen production traffic beyond the maintainer's own use.
 
 ## What it is
 
@@ -63,12 +37,7 @@ PerchTail gives support and ops engineers one place to browse, open, and downloa
 log files live from a mix of Linux and Windows servers — without installing
 anything on those servers, and without permanently copying their content anywhere.
 
-You configure **sources** (a host and how to reach it — SSH/SFTP, SMB, or WinRM),
-attach **rules** (which files and folders are visible, glob or regex, evaluated in
-order), and PerchTail lists and fetches matching files live, opened in a
-Notepad++/VS-Code-style viewer and downloadable as single files or zipped folders.
-Nothing is proactively mirrored or cached across views — every open is a fresh
-fetch, because the logs behind it are still being written.
+You configure **sources** (a host and how to reach it — SSH/SFTP, SMB, WinRM, or a push agent), attach **rules** (which files and folders are visible, glob or regex, evaluated in order), and PerchTail lists and fetches matching files live, opened in a Notepad++/VS-Code-style viewer and downloadable as single files or zipped folders. Nothing is proactively mirrored or cached across views — every open is a fresh fetch, because the logs behind it are still being written.
 
 RBAC is built in from day one: access is scoped per customer/environment, not just
 per user, so a support engineer working one account can't accidentally browse
@@ -104,19 +73,17 @@ verify anything that matters to your decision against current docs.
 
 ## Screenshots
 
-Sources, grouped by customer, with a protocol badge and connection status per row:
+Sources, with their customer, protocol and status, and the actions on each row:
 
-![Sources list, showing SSH/SMB/WinRM sources grouped under two customers with protocol badges and status](docs/images/screenshot-sources.png)
+![Sources list with SSH, SMB, WinRM and push-agent sources, their customer, protocol badge and status](docs/images/screenshot-sources.png)
 
-The viewer: a lazy-loaded folder tree feeding a CodeMirror pane, with `[error]`/`[warn]`
-tokens colored and error lines tinted:
+The viewer: the explorer with file sizes and a status dot per source, a log open with error lines tinted, the find bar ("1 of 1,823") and Find all listing every matching line below:
 
-![Viewer open on an app.log file, showing colored log-level tokens and a highlighted error line](docs/images/screenshot-viewer.png)
+![Viewer with app.log open, the find bar searching ERROR and the Find all panel listing the matching lines](docs/images/screenshot-viewer.png)
 
-A role's access grants — most-specific-scope-wins, resolved from customer down to a
-single source:
+A role in its editor, opened over the roles list: global capabilities and access grants, the most specific scope winning, from customer down to a single source:
 
-![Role editor showing toggle switches for global capabilities and a table of customer/source access grants](docs/images/screenshot-role-editor.png)
+![Role editor in a popup, with switches for global capabilities and a table of customer access grants](docs/images/screenshot-role-editor.png)
 
 ## Quick start
 
@@ -154,7 +121,7 @@ instead, replace `build: .` in `docker-compose.yml` with the image of that
 version (amd64 and arm64), for example:
 
 ```yaml
-    image: ghcr.io/quaresma870/perchtail:0.5.0
+    image: ghcr.io/quaresma870/perchtail:0.6.0
 ```
 
 Each [GitHub release](https://github.com/quaresma870/perchtail/releases)
@@ -303,6 +270,7 @@ publish in `docker-compose.yml` entirely rather than binding it to loopback.
   PerchTail on a Linux host without Docker, with a systemd unit
 - [docs/source-setup.md](docs/source-setup.md) — how to prepare a Linux or
   Windows server so PerchTail can reach it over SSH/SFTP, SMB, or WinRM
+- [docs/examples/jea](docs/examples/jea/README.md) — the read-only JEA endpoint for WinRM sources without a remote shell or administrator account
 - [docs/sso-setup.md](docs/sso-setup.md) — registering PerchTail as an OIDC
   client and setting up group-to-role mapping, with per-provider notes for
   Azure AD/Entra ID, Okta, Google Workspace, and Keycloak/Authentik
