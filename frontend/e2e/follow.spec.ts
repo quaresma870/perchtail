@@ -65,3 +65,25 @@ test('the new-lines notice stays over the log with Find all open', async ({ page
 
   await page.getByRole('button', { name: 'Tail', exact: true }).click()
 })
+
+test('find all draws only the rows in view, and keeps drawing them while scrolling', async ({ page }) => {
+  await page.goto('/#/viewer')
+  await page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
+  await page.locator('.tree-body').getByRole('button', { name: 'perchtail.log' }).click()
+  await expect(page.locator('.cm-content')).not.toBeEmpty()
+  await page.getByRole('button', { name: 'Find all', exact: true }).click()
+  // Every JSON log line has "event": many more rows than fit in the panel.
+  await page.getByPlaceholder('Find all in this file…').fill('event')
+  const rows = page.locator('.find-all-results .result-row')
+  await expect(rows.first()).toBeVisible()
+  const total = Number(await rows.first().getAttribute('aria-setsize'))
+  expect(total).toBeGreaterThan(60)
+  expect(await rows.count()).toBeLessThan(total)
+
+  const results = page.locator('.find-all-results')
+  await results.evaluate((el) => (el.scrollTop = el.scrollHeight))
+  const last = rows.last()
+  await expect(last).toHaveAttribute('aria-posinset', String(total))
+  await expect(last).toBeInViewport()
+  await expect(last.locator('.line-text')).not.toBeEmpty()
+})

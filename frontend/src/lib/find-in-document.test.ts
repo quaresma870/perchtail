@@ -1,68 +1,108 @@
 import { describe, expect, it } from 'vitest'
-import { copyText, findAllMatches, groupMatchesByLine, refineLines, segments, snippetAround } from './find-in-document'
+import {
+  compileFind,
+  copyText,
+  matchingLines,
+  refineLines,
+  rowView,
+  segments,
+  shownLength,
+  snippetAround,
+} from './find-in-document'
 
-describe('findAllMatches', () => {
+const found = (content: string, query: string, options = {}) =>
+  matchingLines(content.split('\n'), compileFind(query, options))
+
+describe('matchingLines', () => {
   const content = ['line one error here', 'line two ok', 'ERROR again on line three', 'error error same line'].join(
     '\n',
   )
 
-  it('returns no matches for an empty query', () => {
-    expect(findAllMatches(content, '')).toEqual({ matches: [], truncated: false })
+  it('finds nothing for an empty query or an invalid regex', () => {
+    expect(compileFind('')).toBeNull()
+    expect(compileFind('(unclosed', { useRegex: true })).toBeNull()
+    expect(found(content, '')).toEqual([])
+    expect(found(content, '(unclosed', { useRegex: true })).toEqual([])
   })
 
-  it('matches case-insensitively by default', () => {
-    const result = findAllMatches(content, 'error')
-    expect(result.matches.map((m) => m.line)).toEqual([1, 3, 4, 4])
-    expect(result.truncated).toBe(false)
+  it('matches case-insensitively by default, one entry per line', () => {
+    expect(found(content, 'error')).toEqual([1, 3, 4])
   })
 
   it('respects caseSensitive: true', () => {
-    const result = findAllMatches(content, 'error', { caseSensitive: true })
-    expect(result.matches.map((m) => m.line)).toEqual([1, 4, 4])
-  })
-
-  it('records the column offset and length of each match', () => {
-    const result = findAllMatches('foo bar foo', 'foo')
-    expect(result.matches).toEqual([
-      { line: 1, lineText: 'foo bar foo', matchStart: 0, matchLength: 3 },
-      { line: 1, lineText: 'foo bar foo', matchStart: 8, matchLength: 3 },
-    ])
+    expect(found(content, 'error', { caseSensitive: true })).toEqual([1, 4])
   })
 
   it('treats the query as a literal string by default, not a regex', () => {
-    const result = findAllMatches('a.b.c', '.')
-    // literal "." should only match the two literal dots, not every char
-    expect(result.matches).toHaveLength(2)
+    expect(found('a.b\nabc', '.')).toEqual([1])
   })
 
-  it('supports regex mode', () => {
-    const result = findAllMatches('a1 b22 c333', '\\d+', { useRegex: true })
-    expect(result.matches.map((m) => m.lineText.slice(m.matchStart, m.matchStart + m.matchLength))).toEqual([
-      '1',
-      '22',
-      '333',
-    ])
+  it('supports regex mode, empty matches included', () => {
+    expect(found('a1\nb\nc333', '\\d+', { useRegex: true })).toEqual([1, 3])
+    expect(found('abc\n\nx', '^', { useRegex: true })).toEqual([1, 2, 3])
   })
 
-  it('returns no matches for an invalid regex rather than throwing', () => {
-    expect(() => findAllMatches('anything', '(unclosed', { useRegex: true })).not.toThrow()
-    expect(findAllMatches('anything', '(unclosed', { useRegex: true })).toEqual({
-      matches: [],
-      truncated: false,
+  it('finds every line, with no limit', () => {
+    const many = Array.from({ length: 20000 }, () => 'error').join('\n')
+    expect(found(many, 'error')).toHaveLength(20000)
+  })
+})
+
+describe('rowView', () => {
+  const pattern = (q: string) => compileFind(q)!
+
+  it('highlights every match of a short line and counts them', () => {
+    expect(rowView('a-error-b-error', pattern('error'))).toEqual({
+      segments: [
+        { text: 'a-', hit: false },
+        { text: 'error', hit: true },
+        { text: '-b-', hit: false },
+        { text: 'error', hit: true },
+      ],
+      before: false,
+      after: false,
+      hits: 2,
     })
   })
 
-  it('does not loop forever on a zero-length-match regex', () => {
-    const result = findAllMatches('abc', 'x*', { useRegex: true, maxResults: 100 })
-    expect(result.truncated).toBe(false)
-    expect(result.matches.length).toBeGreaterThan(0)
+  it('cuts a long line from the start when the match is near it', () => {
+    const view = rowView(`ab-error-${'x'.repeat(50)}`, pattern('error'), 20, 5)
+    expect(view.before).toBe(false)
+    expect(view.after).toBe(true)
+    expect(view.segments).toEqual([
+      { text: 'ab-', hit: false },
+      { text: 'error', hit: true },
+      { text: '-xxxxxxxxxxx', hit: false },
+    ])
   })
 
-  it('truncates at maxResults and reports truncated: true', () => {
-    const manyLines = Array.from({ length: 10 }, () => 'error').join('\n')
-    const result = findAllMatches(manyLines, 'error', { maxResults: 3 })
-    expect(result.matches).toHaveLength(3)
-    expect(result.truncated).toBe(true)
+  it('starts a long line a little before a match that lies further on, counting all of them', () => {
+    const view = rowView(`${'x'.repeat(40)}error${'y'.repeat(40)}error`, pattern('error'), 20, 5)
+    expect(view).toEqual({
+      segments: [
+        { text: 'xxxxx', hit: false },
+        { text: 'error', hit: true },
+        { text: 'yyyyyyyyyy', hit: false },
+      ],
+      before: true,
+      after: true,
+      hits: 2,
+    })
+  })
+
+  it('cuts a match that crosses the end of the window', () => {
+    const view = rowView(`${'x'.repeat(18)}error${'y'.repeat(40)}`, pattern('error'), 20, 1)
+    expect(view.segments.at(-1)).toEqual({ text: 'er', hit: true })
+  })
+
+  it('draws a line matched only by an empty match without highlights', () => {
+    const view = rowView('abc', compileFind('x*', { useRegex: true })!)
+    expect(view).toEqual({ segments: [{ text: 'abc', hit: false }], before: false, after: false, hits: 0 })
+  })
+
+  it('counts the "…" markers in the shown length', () => {
+    expect(shownLength('abc', 20)).toBe(3)
+    expect(shownLength('x'.repeat(50), 20)).toBe(22)
   })
 })
 
@@ -87,41 +127,30 @@ describe('snippetAround', () => {
 })
 
 describe('Find All result lines (#155)', () => {
-  const content = 'error one error\nok\nerror two\nwarn three'
-
-  it('groups matches into one row per line with every range', () => {
-    const lines = groupMatchesByLine(findAllMatches(content, 'error').matches)
-    expect(lines.map((l) => l.line)).toEqual([1, 3])
-    expect(lines[0].text).toBe('error one error')
-    expect(lines[0].ranges).toEqual([
-      { start: 0, length: 5 },
-      { start: 10, length: 5 },
-    ])
-  })
+  const lines = 'error one error\nok\nerror two\nwarn three'.split('\n')
 
   it('refines results by search and by exclusion, chained', () => {
-    const lines = groupMatchesByLine(findAllMatches(content, 'e').matches)
-    const kept = refineLines(lines, { query: 'error', caseSensitive: false, useRegex: false, exclude: false })
-    expect(kept.map((l) => l.line)).toEqual([1, 3])
-    const dropped = refineLines(kept, { query: 'two', caseSensitive: false, useRegex: false, exclude: true })
-    expect(dropped.map((l) => l.line)).toEqual([1])
+    const all = matchingLines(lines, compileFind('e'))
+    const kept = refineLines(lines, all, { query: 'error', caseSensitive: false, useRegex: false, exclude: false })
+    expect(kept).toEqual([1, 3])
+    const dropped = refineLines(lines, kept, { query: 'two', caseSensitive: false, useRegex: false, exclude: true })
+    expect(dropped).toEqual([1])
   })
 
   it('leaves results unchanged for an invalid regex', () => {
-    const lines = groupMatchesByLine(findAllMatches(content, 'e').matches)
-    expect(refineLines(lines, { query: '(', caseSensitive: false, useRegex: true, exclude: false })).toEqual(lines)
+    const all = matchingLines(lines, compileFind('e'))
+    expect(refineLines(lines, all, { query: '(', caseSensitive: false, useRegex: true, exclude: false })).toEqual(all)
   })
 
   it('copies selected lines in file order, with or without numbers', () => {
-    const lines = groupMatchesByLine(findAllMatches(content, 'e').matches)
+    const all = matchingLines(lines, compileFind('e'))
     const selected = new Set([3, 1])
-    expect(copyText(lines, selected, false)).toBe('error one error\nerror two')
-    expect(copyText(lines, selected, true)).toBe('1: error one error\n3: error two')
+    expect(copyText(lines, all, selected, false)).toBe('error one error\nerror two')
+    expect(copyText(lines, all, selected, true)).toBe('1: error one error\n3: error two')
   })
 
-  it('splits a line into highlighted segments', () => {
-    const [row] = groupMatchesByLine(findAllMatches('a-error-b', 'error').matches)
-    expect(segments(row)).toEqual([
+  it('splits text into highlighted segments', () => {
+    expect(segments('a-error-b', [{ start: 2, length: 5 }])).toEqual([
       { text: 'a-', hit: false },
       { text: 'error', hit: true },
       { text: '-b', hit: false },

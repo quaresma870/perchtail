@@ -23,6 +23,13 @@ release ships (0.x releases may include breaking changes between minors).
 ### Fixed
 - The Tail notice ("N new lines — jump to end") stays in the log's
   corner instead of covering the Find all results (#298).
+- **Find all: no limit, and no missing rows.** Results stopped at 5,000
+  matches, and a long list of long lines (debug logs) drew blank or
+  missing rows while scrolling. Every matching line is now listed; only
+  the rows in view are drawn, each showing at most 10,000 characters of
+  its line (cut around the first match, marked with "…"). Copy and go to
+  line still use the whole line. A search for a common letter in a
+  100 MB log no longer runs the tab out of memory.
 
 ## [0.6.0-rc.2] - 2026-11-07
 
