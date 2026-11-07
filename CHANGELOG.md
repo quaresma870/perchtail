@@ -8,6 +8,9 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Fixed
+- Escape on a new source or role popup, before its lists finished loading, asked to discard changes although nothing was typed (#315, a known issue in 0.6.0).
+
 ## [0.6.0] - 2026-11-07
 
 The release after 0.5.3. It carries everything from the pre-releases
