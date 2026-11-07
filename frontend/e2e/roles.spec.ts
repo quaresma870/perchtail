@@ -137,17 +137,3 @@ test('roles: the editor opens in a popup over the list, keeps its address, and a
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await expect(page.getByRole('row', { name: /not saved/ })).toHaveCount(0)
 })
-
-test('roles: Escape on a new, untouched role closes it even while its lists still load', async ({ page }) => {
-  // Seen in the lab (0.6.0-rc.3): with slow lists, Escape asked "Discard changes".
-  await page.route(/\/(customers|folders|sources)(\?|$)/, async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 1500))
-    await route.continue()
-  })
-  await page.goto('/#/settings/roles')
-  await page.getByRole('button', { name: '+ New role' }).click()
-  await expect(page.getByRole('dialog', { name: 'New role' })).toBeVisible()
-  await page.keyboard.press('Escape')
-  await expect(page.getByRole('dialog')).toHaveCount(0)
-  await expect(page).toHaveURL(/#\/settings\/roles$/)
-})

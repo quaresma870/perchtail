@@ -8,10 +8,6 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
-### Fixed
-- Escape on a new source or role popup, before its lists finished
-  loading, asked to discard changes although nothing was typed.
-
 ## [0.6.0-rc.3] - 2026-11-07
 
 Third release candidate for 0.6.0, from the rc.2 lab review. Upgrade
