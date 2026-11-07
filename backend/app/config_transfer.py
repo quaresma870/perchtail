@@ -30,7 +30,7 @@ from app.audit import record_audit_event
 from app.crypto import decrypt_credential, encrypt_credential
 from app.logging_config import get_logger
 from app.models import Customer, Folder, PatternKind, Protocol, Rule, RuleType, Source
-from app.name_index import drop_source_names
+from app.name_index import drop_source_names, prune_hidden_names
 from app.rules import InvalidPatternError, parse_pattern
 from app.search_index import delete_source_index
 
@@ -703,6 +703,7 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         source.credential_ref = encrypt_credential(credential)
     if rules_change:
         _replace_rules(session, source, spec.rules)
+        prune_hidden_names(session, source)
     if location_changed or not (source.enabled and source.search_indexing_enabled):
         delete_source_index(session, source.id)
     if location_changed or not (source.enabled and source.name_index_enabled):

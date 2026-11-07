@@ -74,18 +74,26 @@ def search_files(
     hits: list[FileHit] = []
     next_after = None
     if index_enabled and source_ids:
-        rows, next_after = search_entries(session, matcher, source_ids, after, limit)
         # The index is as of its last pass; the rules are checked now, so a
-        # file a rule hides since then isn't shown by name either.
+        # file a rule hides since then is neither shown nor counted.
         by_id = {s.id: s for s in sources}
-        hit_ids = {sid for _id, sid, _p, _s, _m in rows}
-        rules: dict[int, list[Rule]] = {sid: [] for sid in hit_ids}
-        for rule in session.exec(select(Rule).where(Rule.source_id.in_(hit_ids))).all():
-            rules[rule.source_id].append(rule)
+        rules: dict[int, list[Rule]] = {}
+
+        def visible(source_id: int, path: str) -> bool:
+            if source_id not in rules:
+                rules[source_id] = list(
+                    session.exec(select(Rule).where(Rule.source_id == source_id)).all()
+                )
+            return is_visible(
+                path,
+                rules[source_id],
+                case_insensitive=rules_case_insensitive(by_id[source_id]),
+            )
+
+        rows, next_after = search_entries(session, matcher, source_ids, after, limit, visible)
         hits = [
             FileHit(source_id=sid, path=path, size=size, mtime=mtime)
             for _id, sid, path, size, mtime in rows
-            if is_visible(path, rules[sid], case_insensitive=rules_case_insensitive(by_id[sid]))
         ]
 
     return FileSearchResult(

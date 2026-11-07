@@ -16,6 +16,7 @@ A pattern containing `/` is matched against the file's path in the source
 instead of its name."""
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import re2
@@ -141,12 +142,16 @@ def search_entries(
     source_ids: set[int] | None,
     after_id: int,
     limit: int,
+    visible: Callable[[int, str], bool] | None = None,
 ) -> tuple[list[tuple[int, int, str, int, float | None]], int | None]:
     """Matching entries (id, source_id, path, size, mtime) with an id above
     `after_id`, at most `limit`, in id order, and the id to continue after
-    (None when there are no more). `source_ids` None means every source.
+    (None when no other match follows). `source_ids` None means every source.
     Rows are read in batches and filtered here, so there's no cap on how
-    many match -- only on how many come back per call."""
+    many match -- only on how many come back per call. `visible(source_id,
+    path)` drops rows the source's rules hide now; it's checked here, inside
+    the paging, so the returned cursor never points past a hidden row (which
+    would tell the caller one matched)."""
     if source_ids is not None and not source_ids:
         return [], None
     params: dict = {"after": after_id}
@@ -172,10 +177,13 @@ def search_entries(
             params,
         ).all()
         for row in rows:
-            if matcher is None or matcher.matches(row[2]):
+            if (matcher is None or matcher.matches(row[2])) and (
+                visible is None or visible(row[1], row[2])
+            ):
                 found.append(tuple(row))
-                if len(found) == limit:
-                    return found, row[0]
+                # One past the page: a cursor only when another match follows.
+                if len(found) > limit:
+                    return found[:limit], found[limit - 1][0]
         if len(rows) < batch:
             return found, None
         params["after"] = rows[-1][0]

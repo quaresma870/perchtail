@@ -389,3 +389,62 @@ def test_a_source_is_queued_once(monkeypatch):
     assert name_index._enqueue(4242, None) is True
     assert name_index._enqueue(4242, None) is False
     name_index._pending.discard(4242)
+
+
+# --- rules that change after a pass -------------------------------------------
+
+
+def _exclude(session, source, pattern, order=1):
+    session.add(
+        Rule(
+            source_id=source.id,
+            order=order,
+            type=RuleType.exclude,
+            pattern=pattern,
+            pattern_kind=PatternKind.glob,
+        )
+    )
+    session.commit()
+
+
+def test_the_cursor_never_points_past_a_hidden_match(session, tmp_path, client_for):
+    source = _source(session, tmp_path)
+    _entry(session, source.id, "app.log")
+    _entry(session, source.id, "secret/key.log")
+    _exclude(session, source, "secret/**")
+    admin = _user(session, super_admin=True)
+    body = client_for(admin).get("/files", params={"q": "log", "limit": 1}).json()
+    # A cursor here would tell the caller a hidden file also matched.
+    assert [h["path"] for h in body["hits"]] == ["app.log"] and body["next_after"] is None
+
+
+def test_a_rule_change_drops_the_names_it_hides_at_once(session, tmp_path, client_for):
+    from app.api.rules import router as rules_router
+
+    source = _source(session, tmp_path)
+    _entry(session, source.id, "app.log")
+    _entry(session, source.id, "secret/key.log")
+    admin = _user(session, super_admin=True)
+    client = client_for(admin)
+    client.app.include_router(rules_router)
+    response = client.post(
+        f"/sources/{source.id}/rules", json={"type": "exclude", "pattern": "secret/**"}
+    )
+    assert response.status_code == 201
+    session.expire_all()
+    assert _paths(session, source.id) == ["app.log"]
+
+
+def test_an_incomplete_pass_still_drops_what_the_rules_hide(session, tmp_path, monkeypatch):
+    from app.collectors import registry
+
+    source = _source(session, tmp_path)
+    _entry(session, source.id, "locked/old.log")
+    _entry(session, source.id, "secret/key.log")
+    _exclude(session, source, "secret/**")
+    tree = {"": [_file("app.log"), _dir("locked")]}
+    monkeypatch.setitem(registry.CONNECTORS, Protocol.local, _FakeConnector(tree, fail={"locked"}))
+    result = name_index.index_source_names(source.id, session.get_bind())
+    assert not result.complete
+    session.expire_all()
+    assert _paths(session, source.id) == ["app.log", "locked/old.log"]

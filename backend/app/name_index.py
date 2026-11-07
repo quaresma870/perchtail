@@ -15,6 +15,7 @@ part of the index.
 Storage and search are in app/name_index_store.py."""
 
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
@@ -26,6 +27,7 @@ from app import system_settings
 from app.collectors.base import DirEntry
 from app.logging_config import get_logger
 from app.models import FileNameEntry, Rule, Source
+from app.rules import is_visible, rules_case_insensitive
 from app.source_status import failure_message
 from app.timeutils import utcnow
 
@@ -112,9 +114,15 @@ def _walk(
 
 
 def _store(
-    session: Session, source_id: int, files: dict[str, DirEntry], result: NameIndexResult
+    session: Session,
+    source_id: int,
+    files: dict[str, DirEntry],
+    result: NameIndexResult,
+    hidden: Callable[[str], bool],
 ) -> None:
-    """Writes the differences, committing every COMMIT_EVERY rows."""
+    """Writes the differences, committing every COMMIT_EVERY rows. Rows the
+    current rules hide (`hidden(path)`) go even when the pass is incomplete,
+    so a tightened rule never leaves names behind."""
     now = utcnow()
     known = {
         path: (entry_id, size, mtime)
@@ -151,8 +159,12 @@ def _store(
             )
             result.changed += 1
             written()
-    if result.complete:
-        gone = [entry_id for path, (entry_id, _s, _m) in known.items() if path not in files]
+    gone = [
+        entry_id
+        for path, (entry_id, _s, _m) in known.items()
+        if path not in files and (result.complete or hidden(path))
+    ]
+    if gone:
         for start in range(0, len(gone), 500):
             chunk = gone[start : start + 500]
             session.execute(delete(FileNameEntry).where(col(FileNameEntry.id).in_(chunk)))
@@ -187,7 +199,14 @@ def index_source_names(source_id: int, engine=None) -> NameIndexResult | None:
 
         with Session(engine) as session:
             if result.message is None or files:
-                _store(session, source_id, files, result)
+                case_insensitive = rules_case_insensitive(source)
+                _store(
+                    session,
+                    source_id,
+                    files,
+                    result,
+                    lambda path: not is_visible(path, rules, case_insensitive=case_insensitive),
+                )
             row = session.get(Source, source_id)
             if row is not None:
                 row.name_indexed_at = utcnow()
@@ -270,6 +289,27 @@ def drop_source_names(session: Session, source_id: int) -> None:
         source.name_index_files = None
         source.name_index_message = None
         session.add(source)
+
+
+def prune_hidden_names(session: Session, source: Source) -> int:
+    """Drops the names the source's rules hide now (the caller commits).
+    Called when its rules change, so a tightened rule hides names at once,
+    not at the next pass. Returns how many were dropped."""
+    session.flush()
+    rules = list(session.exec(select(Rule).where(Rule.source_id == source.id)).all())
+    case_insensitive = rules_case_insensitive(source)
+    hidden = [
+        entry_id
+        for entry_id, path in session.exec(
+            select(FileNameEntry.id, FileNameEntry.path).where(FileNameEntry.source_id == source.id)
+        ).all()
+        if not is_visible(path, rules, case_insensitive=case_insensitive)
+    ]
+    for start in range(0, len(hidden), 500):
+        session.execute(
+            delete(FileNameEntry).where(col(FileNameEntry.id).in_(hidden[start : start + 500]))
+        )
+    return len(hidden)
 
 
 def index_in_background(source_id: int) -> bool:
