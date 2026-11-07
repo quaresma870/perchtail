@@ -82,6 +82,7 @@ def _session(source: Source) -> winrm.Session:
 
 _OUTSIDE_BASE = "PERCHTAIL_OUTSIDE_BASE"
 _NOT_A_DIRECTORY = "PERCHTAIL_NOT_A_DIRECTORY"
+_NOT_FOUND = "PERCHTAIL_NOT_FOUND"
 
 
 def _run_ps(source: Source, script: str) -> str:
@@ -92,8 +93,18 @@ def _run_ps(source: Source, script: str) -> str:
             raise PathOutsideBaseError("path outside the base path")
         if _NOT_A_DIRECTORY in out:
             raise NotADirectoryError("not a directory")
+        if _NOT_FOUND in out:
+            raise FileNotFoundError("not found")
         raise RuntimeError(result.std_err.decode("utf-8", errors="replace"))
     return out
+
+
+def _require_file(path: str) -> str:
+    """PowerShell that stops the script when `path` (already quoted) isn't
+    a file. Without it a missing file failed only with non-terminating
+    errors, the script still exited 0 with no output, and the file read as
+    empty instead of "not found" (#272, found in the 0.6.0-rc.1 lab)."""
+    return f"if (-not [IO.File]::Exists({path})) {{ Write-Output '{_NOT_FOUND}'; exit 5 }}; "
 
 
 def _containment_guard(source: Source, relative_path: str) -> str:
@@ -216,7 +227,12 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     guard = _containment_guard(source, relative_path)
     limit = collector_base.max_fetch_bytes()
     try:
-        size = int(_run_ps(source, guard + f"(Get-Item -LiteralPath {path}).Length").strip() or 0)
+        size = int(
+            _run_ps(
+                source, guard + _require_file(path) + f"(Get-Item -LiteralPath {path}).Length"
+            ).strip()
+            or 0
+        )
     except PathOutsideBaseError:
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
@@ -277,19 +293,23 @@ def read_range(
     offset = max(int(offset), 0)
     length = max(min(int(length), collector_base.RANGE_MAX_BYTES), 0)
     head = max(min(int(head), collector_base.RANGE_MAX_HEAD_BYTES), 0)
-    script = guard + (
-        f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
-        "try { $len = $f.Length; "
-        f"$h = New-Object byte[] {head}; $hn = 0; "
-        # Read() may return less than asked: loop until the head is full or
-        # the file ends, or a short head would look like a rotated file.
-        "while ($hn -lt $h.Length) { $r = $f.Read($h, $hn, $h.Length - $hn); "
-        "if ($r -le 0) { break }; $hn += $r }; "
-        f"$b = New-Object byte[] {length}; $n = 0; "
-        f"if ({offset} -lt $len) {{ $f.Seek({offset}, 'Begin') | Out-Null; "
-        "$n = $f.Read($b, 0, $b.Length) }; "
-        '"$len|" + [Convert]::ToBase64String($h, 0, $hn) + "|" + '
-        "[Convert]::ToBase64String($b, 0, $n) } finally { $f.Close() }"
+    script = (
+        guard
+        + _require_file(path)
+        + (
+            f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
+            "try { $len = $f.Length; "
+            f"$h = New-Object byte[] {head}; $hn = 0; "
+            # Read() may return less than asked: loop until the head is full or
+            # the file ends, or a short head would look like a rotated file.
+            "while ($hn -lt $h.Length) { $r = $f.Read($h, $hn, $h.Length - $hn); "
+            "if ($r -le 0) { break }; $hn += $r }; "
+            f"$b = New-Object byte[] {length}; $n = 0; "
+            f"if ({offset} -lt $len) {{ $f.Seek({offset}, 'Begin') | Out-Null; "
+            "$n = $f.Read($b, 0, $b.Length) }; "
+            '"$len|" + [Convert]::ToBase64String($h, 0, $hn) + "|" + '
+            "[Convert]::ToBase64String($b, 0, $n) } finally { $f.Close() }"
+        )
     )
     try:
         output = _run_ps(source, script).strip()
