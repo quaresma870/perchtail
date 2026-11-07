@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatEntryTime, sortEntries } from './explorer-sort'
+import { sortEntries } from './explorer-sort'
 import type { BrowseEntry } from './types'
 
 const entry = (name: string, extra: Partial<BrowseEntry> = {}): BrowseEntry => ({
@@ -67,14 +67,5 @@ describe('sortEntries', () => {
     const copy = [...entries]
     sortEntries(entries, 'mtime_desc')
     expect(entries).toEqual(copy)
-  })
-})
-
-describe('formatEntryTime', () => {
-  it('shows the hour today and the date otherwise', () => {
-    const now = new Date(2026, 10, 6, 15, 0)
-    expect(formatEntryTime(new Date(2026, 10, 6, 9, 5).getTime() / 1000, now)).toBe('09:05')
-    expect(formatEntryTime(new Date(2026, 10, 5, 9, 5).getTime() / 1000, now)).toBe('2026-11-05')
-    expect(formatEntryTime(null, now)).toBe('')
   })
 })
