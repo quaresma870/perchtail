@@ -11,18 +11,37 @@
 export interface FindOptions {
   caseSensitive?: boolean
   useRegex?: boolean
+  /** Only matches not inside a longer word (letters, digits or _ around). */
+  wholeWord?: boolean
 }
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/** What the find bar searches for (#299): shared by the editor's
+ * highlights and next/previous, the count, and Find all. */
+export interface FindSpec {
+  query: string
+  caseSensitive: boolean
+  useRegex: boolean
+  wholeWord: boolean
+}
+
 /** The query as a global regex, or null when it's empty or (while typing)
  * an invalid regex -- no matches rather than an error. */
 export function compileFind(query: string, options: FindOptions = {}): RegExp | null {
   if (!query) return null
+  const source = options.useRegex ? query : escapeRegex(query)
+  // Always unicode (u), as CodeMirror compiles a regex: the editor
+  // highlights this same regex (see CodeMirrorPane), so the count and Find
+  // all agree with what's highlighted.
+  const flags = options.caseSensitive ? 'gu' : 'giu'
   try {
-    return new RegExp(options.useRegex ? query : escapeRegex(query), options.caseSensitive ? 'g' : 'gi')
+    if (options.wholeWord) {
+      return new RegExp(`(?<![\\p{L}\\p{N}_])(?:${source})(?![\\p{L}\\p{N}_])`, flags)
+    }
+    return new RegExp(source, flags)
   } catch {
     return null
   }

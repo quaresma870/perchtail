@@ -7,6 +7,7 @@
     refineLines,
     rowView,
     shownLength,
+    type FindSpec,
     type RefineStep,
     type RowView,
   } from '../find-in-document'
@@ -17,13 +18,11 @@
    * (click, Ctrl/Cmd+click, Shift+click, Ctrl/Cmd+A) and a right-click menu
    * copies them, narrows the results further (search in results / exclude
    * matching, chainable with a way back), or jumps to the line. Purely
-   * client-side over the already-fetched content. */
+   * client-side over the already-fetched content. The search itself comes
+   * from the find bar (#299). */
   export let content = ''
+  export let spec: FindSpec
 
-  let query = ''
-  let caseSensitive = false
-  let useRegex = false
-  let queryInput: HTMLInputElement
   let resultsEl: HTMLDivElement
 
   let steps: RefineStep[] = []
@@ -38,7 +37,7 @@
 
   const dispatch = createEventDispatcher<{ jump: { line: number }; close: void }>()
 
-  onMount(() => queryInput?.focus())
+  onMount(() => resultsEl?.focus())
 
   // Resizable (#285): dragging the handle on top, or its arrow keys, sets
   // the height; null keeps the default share of the pane.
@@ -86,7 +85,7 @@
   // The file's lines, split once per content; the results are line numbers
   // (1-based) into it -- all of them, with no limit.
   $: fileLines = content.split('\n')
-  $: pattern = compileFind(query, { caseSensitive, useRegex })
+  $: pattern = compileFind(spec.query, spec)
   $: baseLines = matchingLines(fileLines, pattern)
   $: lines = steps.reduce((acc, step) => refineLines(fileLines, acc, step), baseLines)
   // What each drawn row shows, worked out once per row and search.
@@ -101,7 +100,7 @@
     return v
   }
   // A new search starts a new result set: refinements and selection reset.
-  $: query, caseSensitive, useRegex, resetRefinements()
+  $: spec, resetRefinements()
 
   function resetRefinements() {
     steps = []
@@ -184,7 +183,15 @@
 
   function applyRefine() {
     if (refining && refineQuery.trim()) {
-      steps = [...steps, { query: refineQuery.trim(), caseSensitive, useRegex, exclude: refining.exclude }]
+      steps = [
+        ...steps,
+        {
+          query: refineQuery.trim(),
+          caseSensitive: spec.caseSensitive,
+          useRegex: spec.useRegex,
+          exclude: refining.exclude,
+        },
+      ]
       selected = new Set()
       anchor = null
       toTop()
@@ -241,28 +248,18 @@
     on:keydown={resizeByKey}
   ></div>
   <div class="find-all-header">
-    <input
-      class="input"
-      type="text"
-      placeholder="Find all in this file…"
-      bind:value={query}
-      bind:this={queryInput}
-    />
-    <label class="option">
-      <input type="checkbox" bind:checked={caseSensitive} />
-      Match case
-    </label>
-    <label class="option">
-      <input type="checkbox" bind:checked={useRegex} />
-      Regex
-    </label>
+    <span class="title"
+      >Find all <q>{spec.query}</q>{#if spec.caseSensitive || spec.wholeWord || spec.useRegex}<span class="options"
+          >{[spec.caseSensitive && 'match case', spec.wholeWord && 'whole word', spec.useRegex && 'regex']
+            .filter(Boolean)
+            .join(', ')}</span
+        >{/if}</span
+    >
     <span class="count">
-      {#if !query}
-        &nbsp;
-      {:else if lines.length === 0}
+      {#if lines.length === 0}
         No matches
       {:else}
-        {lines.length} line{lines.length === 1 ? '' : 's'}
+        {lines.length.toLocaleString()} line{lines.length === 1 ? '' : 's'}
       {/if}
     </span>
     <button class="close" on:click={() => dispatch('close')} aria-label="Close find all">×</button>
@@ -396,20 +393,23 @@
     padding: 0.5rem 0.75rem;
     border-bottom: 1px solid var(--border-soft);
   }
-  .find-all-header .input {
+  .title {
     flex: 1;
     min-width: 0;
-  }
-  .option {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    font-size: 0.78rem;
-    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
+    font-size: 0.8rem;
+    color: var(--text-muted);
   }
-  .option input {
-    width: auto;
+  .title q {
+    color: var(--text);
+    font-family: var(--font-mono);
+  }
+  .options {
+    margin-left: 0.5rem;
+    color: var(--text-faint);
+    font-size: 0.74rem;
   }
   .count {
     font-size: 0.78rem;
