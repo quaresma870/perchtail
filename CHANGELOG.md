@@ -8,6 +8,31 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.6.0-rc.1] - 2026-11-07
+
+First release candidate for 0.6.0. Upgrade notes:
+- **Back up `DATA_DIR` first**, as for every release. Six migrations run
+  on start; they only add columns and tables (update check state, agent
+  version, password history, display name and email, user preferences,
+  source status, the WinRM JEA endpoint).
+- **Upgrade the push agents** to get incremental Follow, file times and
+  the agent version in the source overview. Older agents keep working:
+  Follow reloads the whole file, and their files show no time.
+- **The update check makes one outbound request a day** to the GitHub
+  releases API (nothing about the installation is sent). Set
+  `UPDATE_CHECK=false` to turn it off entirely, for example on an
+  air-gapped install.
+- **A background check now connects to every source every 10 minutes**
+  (one connection, not audited) to show its status. Change the interval
+  or turn it off (0) under Settings → System.
+- From source: reinstall `backend/requirements.txt`, which adds `pypsrp`
+  for JEA endpoints.
+- Settings → Security and Settings → Sessions moved to **My profile**;
+  the old links lead there.
+- New under Settings → System: password policy (NIST defaults, stricter
+  rules off), open-folder refresh (30 s), default file order, source
+  check interval, update check.
+
 ### Added
 - **Update check** (#215). Once a day PerchTail asks the GitHub releases
   API for the latest release, and super admins see under
