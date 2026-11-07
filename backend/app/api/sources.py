@@ -9,9 +9,10 @@ from typing import Literal
 from cryptography import x509
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import delete as sa_delete
 from sqlmodel import Session, select
 
-from app import source_roots, source_status
+from app import source_roots, source_status, system_settings
 from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
@@ -39,12 +40,14 @@ from app.logging_config import get_logger
 from app.models import (
     Alert,
     Customer,
+    FileNameEntry,
     Folder,
     Protocol,
     Rule,
     SeverityPattern,
     Source,
 )
+from app.name_index import drop_source_names, index_in_background
 from app.search_index import delete_source_index
 from app.version import APP_VERSION
 from app.versions import is_newer
@@ -112,6 +115,13 @@ class SourcePublic(BaseModel):
     status_checked_at: datetime | None
     status_message: str | None
     search_indexing_enabled: bool
+    # File-name index (#304): on/off, when it last listed the source, how
+    # many files it found, and why the last pass stopped short (None = it
+    # reached every folder).
+    name_index_enabled: bool
+    name_indexed_at: datetime | None
+    name_index_files: int | None
+    name_index_message: str | None
     # What the requesting user may do on this source (view, download,
     # manage_rules, run_now), so the UI can hide actions it would refuse --
     # e.g. Download buttons for a view-only role (#174). Informational only:
@@ -138,6 +148,7 @@ class SourceCreate(BaseModel):
     # username + password); omitted entirely for `local`, which needs none.
     credential: dict | None = None
     search_indexing_enabled: bool = False
+    name_index_enabled: bool = True
 
 
 class SourceUpdate(BaseModel):
@@ -157,6 +168,7 @@ class SourceUpdate(BaseModel):
     enabled: bool | None = None
     credential: dict | None = None
     search_indexing_enabled: bool | None = None
+    name_index_enabled: bool | None = None
 
 
 class ConnectionCheckResult(BaseModel):
@@ -247,6 +259,10 @@ def _to_public(
         agent_outdated=is_newer(APP_VERSION, source.agent_version),
         **_status_fields(source),
         search_indexing_enabled=source.search_indexing_enabled,
+        name_index_enabled=source.name_index_enabled,
+        name_indexed_at=source.name_indexed_at,
+        name_index_files=source.name_index_files,
+        name_index_message=source.name_index_message,
         my_capabilities=(
             [c for c in Capability if resolve_capability(session, user, source, c)]
             if user is not None
@@ -545,6 +561,7 @@ def create_source(
         enabled=payload.enabled,
         credential_ref=encrypt_credential(payload.credential) if payload.credential else None,
         search_indexing_enabled=payload.search_indexing_enabled,
+        name_index_enabled=payload.name_index_enabled,
     )
     session.add(source)
     session.flush()
@@ -646,6 +663,8 @@ def update_source(
         source.credential_ref = encrypt_credential(payload.credential)
     if payload.search_indexing_enabled is not None:
         source.search_indexing_enabled = payload.search_indexing_enabled
+    if payload.name_index_enabled is not None:
+        source.name_index_enabled = payload.name_index_enabled
     after = {
         "name": source.name,
         "enabled": source.enabled,
@@ -660,6 +679,10 @@ def update_source(
         # host or path is a different set of files (#159), so what was
         # indexed (and how far alerts got into each file) no longer applies.
         delete_source_index(session, source.id)
+    if location_changed or not (source.enabled and source.name_index_enabled):
+        # The file-name index (#304) follows the same rule: off means its
+        # names are dropped now, and another host or path is other files.
+        drop_source_names(session, source.id)
 
     changes = {k: {"from": before[k], "to": after[k]} for k in before if before[k] != after[k]}
     if payload.credential is not None:
@@ -705,6 +728,7 @@ def delete_source(
     # outlive it and resurface under a later source (see app.models.NO_ID_REUSE).
     delete_scope_grants(session, ScopeType.source, source_id)
     delete_source_index(session, source_id)
+    session.execute(sa_delete(FileNameEntry).where(FileNameEntry.source_id == source_id))
     for model in (Alert, SeverityPattern):
         for row in session.exec(select(model).where(model.source_id == source_id)).all():
             session.delete(row)
@@ -717,6 +741,33 @@ def delete_source(
         target_id=source_id,
     )
     session.commit()
+
+
+class NameIndexStart(BaseModel):
+    started: bool
+
+
+@router.post(
+    "/{source_id}/name-index", response_model=NameIndexStart, status_code=status.HTTP_202_ACCEPTED
+)
+def index_names_now(
+    source: Source = Depends(require_capability(Capability.run_now, get_current_active_user)),
+    session: Session = Depends(get_session),
+):
+    """'Index now' for the file-name index (#304): lists the source's files
+    again in the background, without waiting for the next pass. `started`
+    is false when a pass for this source is already running."""
+    if not system_settings.get_bool(session, "name_index_enabled"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The file-name index is off (Settings → System)",
+        )
+    if not (source.enabled and source.name_index_enabled):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The file-name index is off for this source",
+        )
+    return NameIndexStart(started=index_in_background(source.id))
 
 
 @router.post("/{source_id}/check", response_model=ConnectionCheckResult)

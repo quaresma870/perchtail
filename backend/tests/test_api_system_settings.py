@@ -56,6 +56,8 @@ _DEFAULTS = {
     "explorer_refresh_seconds": 30,
     "tail_interval_seconds": 2,
     "source_check_minutes": 10,
+    "name_index_enabled": True,
+    "name_index_minutes": 15,
 }
 
 
@@ -203,3 +205,10 @@ def test_tail_interval_refuses_other_values(session, client_for, seconds):
     response = client.patch("/system-settings", json={"tail_interval_seconds": seconds})
     assert response.status_code == 422
     assert client.get("/system-settings").json()["tail_interval_seconds"] == 2
+
+
+@pytest.mark.parametrize("minutes", [4, 1441])
+def test_name_index_interval_is_kept_between_5_minutes_and_a_day(session, client_for, minutes):
+    admin = _make_user(session, is_super_admin=True)
+    response = client_for(admin).patch("/system-settings", json={"name_index_minutes": minutes})
+    assert response.status_code == 422

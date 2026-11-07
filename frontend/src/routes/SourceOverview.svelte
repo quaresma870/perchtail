@@ -6,6 +6,7 @@
   import RuleEditor from '../lib/components/RuleEditor.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import { justCreatedSourceId } from '../lib/source-created'
+  import { ago } from '../lib/source-status'
   import type { AgentTokenResult, ConnectionCheckResult, Source } from '../lib/types'
 
   /** Read-only overview of a source -- where creating one lands (#157),
@@ -71,6 +72,27 @@
       error = err instanceof ApiError ? err.detail : 'Failed to load source'
     } finally {
       if (id === sourceId) loading = false
+    }
+  }
+
+  // "Index now" for the file-name index (#304).
+  let indexing = false
+  let indexNote = ''
+  $: canIndexNow = source?.my_capabilities.includes('run_now') ?? false
+
+  async function indexNow() {
+    if (!source) return
+    indexing = true
+    indexNote = ''
+    try {
+      const result = await api.post<{ started: boolean }>(`/sources/${source.id}/name-index`)
+      indexNote = result.started
+        ? 'Listing the files in the background. Reload this page in a moment to see the result.'
+        : 'Already listing this source.'
+    } catch (err) {
+      indexNote = err instanceof ApiError ? err.detail : 'Failed to start the listing'
+    } finally {
+      indexing = false
     }
   }
 
@@ -208,6 +230,26 @@
           {/if}
         </dd>
       {/if}
+      <dt>File names</dt>
+      <dd>
+        {#if !source.name_index_enabled}
+          not indexed (turned off for this source)
+        {:else if source.name_indexed_at}
+          {(source.name_index_files ?? 0).toLocaleString()}
+          {source.name_index_files === 1 ? 'file' : 'files'}, listed {ago(source.name_indexed_at, new Date())}
+          {#if source.name_index_message}
+            <span class="index-note">— {source.name_index_message}</span>
+          {/if}
+        {:else}
+          not listed yet
+        {/if}
+        {#if source.name_index_enabled && canIndexNow}
+          <button class="btn btn-ghost btn-sm index-now" disabled={indexing} on:click={indexNow}>Index now</button>
+        {/if}
+        {#if indexNote}
+          <p class="hint index-note" role="status">{indexNote}</p>
+        {/if}
+      </dd>
     </dl>
 
     {#if ruleCount === 0}
@@ -354,5 +396,11 @@
   }
   .error {
     color: var(--danger);
+  }
+  .index-now {
+    margin-left: 0.6rem;
+  }
+  .index-note {
+    color: var(--text-muted);
   }
 </style>

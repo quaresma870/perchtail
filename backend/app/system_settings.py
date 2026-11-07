@@ -17,6 +17,9 @@ BOOL_DEFAULTS: dict[str, str] = {
     # "password" key for a hardcoded password; these are setting names.
     "password_reject_simple": "true",  # nosec B105
     "password_reject_personal": "true",  # nosec B105
+    # The file-name index (#304, app/name_index.py): names, sizes and times
+    # of every source's rule-visible files, never content. On by default.
+    "name_index_enabled": "true",
 }
 
 # Enumerated string settings: key -> (default, allowed values). A value
@@ -63,6 +66,9 @@ INT_DEFAULTS: dict[str, str] = {
     # Background check of every source's reachability (#276), in minutes;
     # 0 turns it off. One connection per source per interval.
     "source_check_minutes": "10",
+    # How old a source's file-name index may get (#304), in minutes: each
+    # source is listed again once its index is older than this.
+    "name_index_minutes": "15",
 }
 
 

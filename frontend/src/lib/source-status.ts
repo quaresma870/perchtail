@@ -8,7 +8,7 @@ export interface StatusView {
   tooltip: string
 }
 
-function ago(iso: string | null, now: Date): string {
+export function ago(iso: string | null, now: Date): string {
   if (!iso) return ''
   // The API's datetimes are UTC without a zone.
   const when = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`)

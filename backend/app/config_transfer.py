@@ -30,6 +30,7 @@ from app.audit import record_audit_event
 from app.crypto import decrypt_credential, encrypt_credential
 from app.logging_config import get_logger
 from app.models import Customer, Folder, PatternKind, Protocol, Rule, RuleType, Source
+from app.name_index import drop_source_names
 from app.rules import InvalidPatternError, parse_pattern
 from app.search_index import delete_source_index
 
@@ -49,6 +50,7 @@ _SOURCE_KEYS = {
     "roots",
     "enabled",
     "search_indexing_enabled",
+    "name_index_enabled",
     "credential",
     "rules",
     "winrm_scheme",
@@ -98,6 +100,7 @@ class _SourceSpec:
     roots: list[dict] | None
     enabled: bool
     search_indexing_enabled: bool
+    name_index_enabled: bool
     credential: dict | None
     rules: list[_RuleSpec] | None
     winrm_scheme: str | None = None
@@ -256,7 +259,11 @@ def _parse_source(
         problems.append(Problem(f"{where}.port", "port must be a number from 1 to 65535"))
         return
     flags = {}
-    for flag, default in (("enabled", True), ("search_indexing_enabled", False)):
+    for flag, default in (
+        ("enabled", True),
+        ("search_indexing_enabled", False),
+        ("name_index_enabled", True),
+    ):
         value = node.get(flag, default)
         if not isinstance(value, bool):
             problems.append(Problem(f"{where}.{flag}", f"{flag} must be true or false"))
@@ -587,6 +594,7 @@ def _create_source(session, spec, customer_id, folder_id, credential, apply, use
         roots=spec.roots,
         enabled=spec.enabled,
         search_indexing_enabled=spec.search_indexing_enabled,
+        name_index_enabled=spec.name_index_enabled,
         credential_ref=encrypt_credential(credential) if credential else None,
         winrm_scheme=spec.winrm_scheme,
         tls_ca_pem=spec.tls_ca_pem,
@@ -635,6 +643,7 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         "roots": spec.roots,
         "enabled": spec.enabled,
         "search_indexing_enabled": spec.search_indexing_enabled,
+        "name_index_enabled": spec.name_index_enabled,
         "winrm_scheme": spec.winrm_scheme,
         "tls_ca_pem": spec.tls_ca_pem,
     }
@@ -696,6 +705,8 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         _replace_rules(session, source, spec.rules)
     if location_changed or not (source.enabled and source.search_indexing_enabled):
         delete_source_index(session, source.id)
+    if location_changed or not (source.enabled and source.name_index_enabled):
+        drop_source_names(session, source.id)
     session.add(source)
     audit_changes = {k: v for k, v in changes.items()}
     if "tls_ca_pem" in audit_changes:
@@ -771,6 +782,8 @@ def _source_out(source: Source) -> dict:
         out["enabled"] = False
     if source.search_indexing_enabled:
         out["search_indexing_enabled"] = True
+    if not source.name_index_enabled:
+        out["name_index_enabled"] = False
     out["rules"] = [_rule_out(r) for r in sorted(source.rules, key=lambda r: r.order)]
     return out
 

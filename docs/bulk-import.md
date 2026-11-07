@@ -60,6 +60,7 @@ A source:
 | `roots` | no | two or more `{label, path}` to read several folders, see [Several folders in one source](source-setup.md#several-folders-in-one-source) |
 | `enabled` | no | default `true` |
 | `search_indexing_enabled` | no | default `false` |
+| `name_index_enabled` | no | default `true`: the source's file names (never content) go into the file-name index |
 | `credential` | no | `username` plus `password` or `private_key`; see below |
 | `rules` | no | replaces the source's rules when given; leave it out to keep the rules it has |
 

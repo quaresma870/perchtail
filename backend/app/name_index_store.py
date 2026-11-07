@@ -1,0 +1,180 @@
+"""Storage and search for the file-name index (#304): the SQLite-specific
+part, kept in one module so another database (PostgreSQL, #306) only needs
+its own version of these functions.
+
+`file_name_entry` (app/models.py FileNameEntry) holds one row per file; the
+`file_name_fts` FTS5 table indexes its `path` with the trigram tokenizer,
+which answers "contains this text" without reading every row. Triggers keep
+the two in step, so code only ever writes `file_name_entry`.
+
+Matching follows the explorer's filter (frontend/src/lib/explorer-scope.ts
+compileMatcher), always case-insensitive:
+- text: found anywhere in the file name;
+- a glob (`*`, `?`): the whole name, `*` within a folder, `**` across;
+- a regex: found anywhere in the name.
+A pattern containing `/` is matched against the file's path in the source
+instead of its name."""
+
+import re
+from dataclasses import dataclass
+
+from sqlalchemy import text
+from sqlmodel import Session
+
+FTS_TABLE = "file_name_fts"
+_DELETE_ROW = (
+    f"INSERT INTO {FTS_TABLE}({FTS_TABLE}, rowid, path) VALUES ('delete', old.id, old.path); "
+)
+# Trigrams need three characters; shorter text is matched without the index.
+_TRIGRAM = 3
+
+
+def ensure_name_index_schema(target_engine) -> None:
+    """Creates the FTS5 table and its sync triggers if missing. Like
+    db.ensure_search_schema, FTS5 tables can't be declared as SQLModel
+    tables, so startup, the migration and the tests' session fixture call
+    this after create_all()."""
+    with target_engine.begin() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :n"), {"n": FTS_TABLE}
+        ).scalar()
+        if exists:
+            return
+        conn.execute(
+            text(
+                f"CREATE VIRTUAL TABLE {FTS_TABLE} USING fts5("
+                "path, content='file_name_entry', content_rowid='id', tokenize='trigram')"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TRIGGER file_name_entry_ai AFTER INSERT ON file_name_entry BEGIN "
+                f"INSERT INTO {FTS_TABLE}(rowid, path) VALUES (new.id, new.path); END"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TRIGGER file_name_entry_ad AFTER DELETE ON file_name_entry BEGIN "
+                f"{_DELETE_ROW}END"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TRIGGER file_name_entry_au AFTER UPDATE OF path ON file_name_entry BEGIN "
+                f"{_DELETE_ROW}"
+                f"INSERT INTO {FTS_TABLE}(rowid, path) VALUES (new.id, new.path); END"
+            )
+        )
+        # Rows that were already there (an upgrade of a populated table).
+        conn.execute(text(f"INSERT INTO {FTS_TABLE}({FTS_TABLE}) VALUES ('rebuild')"))
+
+
+class InvalidPattern(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Matcher:
+    by_path: bool
+    regex: re.Pattern | None  # None: plain text, see `needle`
+    needle: str
+    # The longest piece of text every match contains, to narrow the search
+    # with the trigram index first ("" = no narrowing).
+    literal: str
+
+    def matches(self, path: str) -> bool:
+        target = path if self.by_path else path.rsplit("/", 1)[-1]
+        if self.regex is None:
+            return self.needle in target.casefold()
+        return self.regex.search(target) is not None
+
+
+def _glob_to_regex(glob: str) -> str:
+    out, i = [], 0
+    while i < len(glob):
+        if glob.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif glob[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif glob[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(glob[i]))
+            i += 1
+    return "".join(out)
+
+
+def compile_matcher(query: str, regex: bool) -> Matcher | None:
+    """None for an empty query (everything matches); InvalidPattern for a
+    regex that doesn't compile."""
+    q = query.strip()
+    if not q:
+        return None
+    by_path = "/" in q
+    if regex:
+        try:
+            return Matcher(by_path, re.compile(q, re.IGNORECASE), "", "")
+        except re.error as exc:
+            raise InvalidPattern(str(exc)) from exc
+    if re.search(r"[*?]", q):
+        pieces = [p for p in re.split(r"[*?]+", q) if p]
+        literal = max(pieces, key=len) if pieces else ""
+        return Matcher(by_path, re.compile(f"^{_glob_to_regex(q)}$", re.IGNORECASE), "", literal)
+    return Matcher(by_path, None, q.casefold(), q)
+
+
+def _fts_phrase(literal: str) -> str:
+    return '"' + literal.replace('"', '""') + '"'
+
+
+def search_entries(
+    session: Session,
+    matcher: Matcher | None,
+    source_ids: set[int] | None,
+    after_id: int,
+    limit: int,
+) -> tuple[list[tuple[int, int, str, int, float | None]], int | None]:
+    """Matching entries (id, source_id, path, size, mtime) with an id above
+    `after_id`, at most `limit`, in id order, and the id to continue after
+    (None when there are no more). `source_ids` None means every source.
+    Rows are read in batches and filtered here, so there's no cap on how
+    many match -- only on how many come back per call."""
+    if source_ids is not None and not source_ids:
+        return [], None
+    params: dict = {"after": after_id}
+    clauses = ["e.id > :after"]
+    if source_ids is not None:
+        ids = sorted(source_ids)
+        names = [f"s{i}" for i in range(len(ids))]
+        clauses.append(f"e.source_id IN ({', '.join(':' + n for n in names)})")
+        params.update(dict(zip(names, ids, strict=True)))
+    join = ""
+    if matcher is not None and len(matcher.literal) >= _TRIGRAM:
+        join = f"JOIN {FTS_TABLE} f ON f.rowid = e.id AND f.path MATCH :phrase"
+        params["phrase"] = _fts_phrase(matcher.literal)
+    elif matcher is not None and matcher.literal:
+        clauses.append("e.path LIKE :like ESCAPE '\\'")
+        escaped = matcher.literal.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params["like"] = f"%{escaped}%"
+
+    batch = max(limit * 4, 500)
+    found: list[tuple[int, int, str, int, float | None]] = []
+    while True:
+        rows = session.execute(
+            text(
+                f"SELECT e.id, e.source_id, e.path, e.size, e.mtime FROM file_name_entry e {join} "
+                f"WHERE {' AND '.join(clauses)} ORDER BY e.id LIMIT {batch}"
+            ),
+            params,
+        ).all()
+        for row in rows:
+            if matcher is None or matcher.matches(row[2]):
+                found.append(tuple(row))
+                if len(found) == limit:
+                    return found, row[0]
+        if len(rows) < batch:
+            return found, None
+        params["after"] = rows[-1][0]

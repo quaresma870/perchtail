@@ -5,6 +5,7 @@ import textwrap
 
 import pytest
 import yaml
+from app import config_transfer
 from app.api.auth import get_current_active_user
 from app.api.config_transfer import router as config_router
 from app.auth.models import AuditLog, Role, User
@@ -360,3 +361,25 @@ def test_a_port_change_without_a_credential_points_at_the_port(session, client):
     assert result["applied"] is False
     wheres = [p["where"] for p in result["problems"] if "credential again" in p["message"]]
     assert len(wheres) == 1 and wheres[0].endswith(".port")
+
+
+def test_name_index_flag_round_trips(session):
+    yaml_text = """
+version: 1
+customers:
+  - name: Acme
+    sources:
+      - name: quiet
+        protocol: ssh
+        host: h1
+        base_path: /var/log
+        name_index_enabled: false
+"""
+    items, problems = config_transfer.run(
+        session, config_transfer.parse(yaml_text), credentials={}, apply=True, user_id=None
+    )
+    assert problems == []
+    session.commit()
+    source = session.exec(select(Source).where(Source.name == "quiet")).one()
+    assert source.name_index_enabled is False
+    assert "name_index_enabled: false" in config_transfer.export(session)

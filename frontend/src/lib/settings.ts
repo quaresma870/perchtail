@@ -25,6 +25,8 @@ export const systemSettings = writable<SystemSettings>({
   explorer_refresh_seconds: 30,
   tail_interval_seconds: 2,
   source_check_minutes: 10,
+  name_index_enabled: true,
+  name_index_minutes: 15,
 })
 
 let loadedAt = 0
