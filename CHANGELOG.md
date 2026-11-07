@@ -8,6 +8,13 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.6.0-rc.3] - 2026-11-07
+
+Third release candidate for 0.6.0, from the rc.2 lab review. Upgrade
+notes, from 0.6.0-rc.2: no migrations, no new settings, and push agents
+don't need upgrading. From earlier versions, follow the rc.2 and rc.1
+notes below as well.
+
 ### Changed
 - **Advanced filter: no limit on folders or time** (#284). A ticked
   source or folder is searched to the end, still a few listings at a
@@ -37,6 +44,16 @@ release ships (0.x releases may include breaking changes between minors).
   source's own page) they were opened from, keeping their address, so
   links, back and reload still work. Closing with unsaved changes asks
   first.
+
+### Deprecated
+- **Content indexing, the Search page and the current Alerts go away in
+  0.7** (#303). The content index is the only place PerchTail keeps text
+  from the logs, against its promise that nothing from the sources is
+  kept. In 0.7 the upgrade deletes the indexed text; searching inside a
+  file stays (Find and Find all), file names get an index of their own,
+  on by default and with no content (#304), and Alerts watch new lines
+  live instead of the index (#305). PostgreSQL support comes in 0.7 too
+  (#306).
 
 ### Fixed
 - The Tail notice ("N new lines — jump to end") stays in the log's
