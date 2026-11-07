@@ -8,6 +8,74 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-07
+
+The release after 0.5.3. It carries everything from the pre-releases
+0.6.0-rc.1, rc.2 and rc.3, whose sections in
+[CHANGELOG.md](https://github.com/quaresma870/perchtail/blob/v0.6.0/CHANGELOG.md)
+list every change; the code is the one retested in the lab as rc.3, on
+Linux, Windows (SMB, WinRM, JEA) and push agent sources.
+
+### Upgrading from 0.5.3
+- **Back up `DATA_DIR` first**, with PerchTail stopped. Six migrations
+  run on start; they only add columns and tables (update check state,
+  agent version, password history, display name and email, user
+  preferences, source status, the WinRM JEA endpoint).
+- **Upgrade the push agents** to get incremental Tail, file times and
+  the agent version in the source overview. Older agents keep working:
+  Tail reloads the whole file, and their files show no time.
+- **The update check makes one outbound request a day** to the GitHub
+  releases API (nothing about the installation is sent). Set
+  `UPDATE_CHECK=false` to turn it off entirely, for example on an
+  air-gapped install.
+- **A background check connects to every source every 10 minutes** (one
+  connection, not audited) to show its status. Change the interval or
+  turn it off (0) under Settings → System.
+- From source: reinstall `backend/requirements.txt`, which adds `pypsrp`
+  for JEA endpoints.
+- Settings → Security and Settings → Sessions moved to **My profile**, in
+  the user menu at the top right; the old links lead there.
+- New under Settings → System: password policy (NIST defaults, stricter
+  rules off), Tail interval (2 s), open-folder refresh (30 s), default
+  file order, source check interval, update check.
+
+### Highlights
+- **Viewer:** Tail fetches only the new lines (like `tail -f`), at an
+  interval set under Settings → System. One find bar for Find and Find
+  all, with Match case, Whole word, Regex and "3 of 120"; Find all lists
+  every matching line, with no limit, even in logs of 100 MB. A quieter
+  toolbar.
+- **Explorer:** each file shows its size (the time on hover); open
+  folders refresh themselves; a status dot on each source says whether
+  it answers; an advanced filter searches file names across ticked
+  sources, folders of sources and whole customers, recursively, as
+  text, glob or regex.
+- **WinRM without a remote shell:** a read-only JEA endpoint
+  (`docs/examples/jea`) that lists and reads only the allowed folders,
+  as an account with no administrator rights.
+- **Update check:** super admins see the running and the latest version,
+  with the upgrade steps, under Settings → System → Updates.
+- **Accounts:** a password policy (NIST SP 800-63B defaults); My profile
+  with name, email, password, two-factor authentication and sessions; a
+  user menu in the top bar.
+- **Settings:** row actions are buttons; creating, editing and deleting
+  open in popups, the source and role editors included.
+
+### Deprecated
+- **Content indexing, the Search page and the current Alerts go away in
+  0.7** (#303). The content index is the only place PerchTail keeps text
+  from the logs, against its promise that nothing from the sources is
+  kept. In 0.7 the upgrade deletes the indexed text; searching inside a
+  file stays (Find and Find all), file names get an index of their own,
+  on by default and with no content (#304), and Alerts watch new lines
+  live instead of the index (#305). PostgreSQL support comes in 0.7 too
+  (#306).
+
+### Known issues
+- Pressing Escape on a new, untouched source or role popup while its
+  lists are still loading asks to discard changes; choose Discard, or
+  wait a moment. Fixed in 0.7 (#315).
+
 ## [0.6.0-rc.3] - 2026-11-07
 
 Third release candidate for 0.6.0, from the rc.2 lab review. Upgrade
