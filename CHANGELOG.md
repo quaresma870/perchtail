@@ -8,6 +8,16 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Changed
+- **Follow is now called Tail** (#283), and its interval shows only while
+  it's on.
+- **No sort control in the explorer** (#282): folders are listed in the
+  order set under Settings → System. The per-user choice made in
+  0.6.0-rc.1 is kept but not used for now; it comes back as a "Sort by"
+  action on folders.
+- **Find all can be resized** (#285): drag the line on top of the panel,
+  or focus it and use the arrow keys. This browser remembers the height.
+
 ### Fixed
 - **Files that disappear, on Windows** (#272). Over WinRM (without a JEA
   endpoint), a file that was gone opened as an empty file, and Follow

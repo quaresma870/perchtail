@@ -9,6 +9,7 @@
     type LineResult,
     type RefineStep,
   } from '../find-in-document'
+  import { clampPanelHeight, KEY_STEP_PX, loadPanelHeight, MIN_PANEL_PX, savePanelHeight } from '../panel-size'
 
   /** Notepad++-style "Find All" (#155): one row per matching line with the
    * whole line shown and every match highlighted; rows can be selected
@@ -37,6 +38,49 @@
   const dispatch = createEventDispatcher<{ jump: { line: number }; close: void }>()
 
   onMount(() => queryInput?.focus())
+
+  // Resizable (#285): dragging the handle on top, or its arrow keys, sets
+  // the height; null keeps the default share of the pane.
+  let panelEl: HTMLDivElement
+  let heightPx: number | null = loadPanelHeight()
+  let dragging = false
+
+  function availableHeight(): number {
+    // The panel and the editor above it share the pane.
+    return panelEl?.parentElement?.clientHeight ?? window.innerHeight
+  }
+
+  function setHeight(px: number) {
+    heightPx = clampPanelHeight(px, availableHeight())
+  }
+
+  function startDrag(event: PointerEvent) {
+    event.preventDefault()
+    dragging = true
+    const startY = event.clientY
+    const startHeight = panelEl.getBoundingClientRect().height
+    const handle = event.currentTarget as HTMLElement
+    handle.setPointerCapture(event.pointerId)
+    const move = (e: PointerEvent) => setHeight(startHeight + (startY - e.clientY))
+    const stop = () => {
+      dragging = false
+      handle.removeEventListener('pointermove', move)
+      handle.removeEventListener('pointerup', stop)
+      handle.removeEventListener('pointercancel', stop)
+      if (heightPx !== null) savePanelHeight(heightPx)
+    }
+    handle.addEventListener('pointermove', move)
+    handle.addEventListener('pointerup', stop)
+    handle.addEventListener('pointercancel', stop)
+  }
+
+  function resizeByKey(event: KeyboardEvent) {
+    const step = event.key === 'ArrowUp' ? KEY_STEP_PX : event.key === 'ArrowDown' ? -KEY_STEP_PX : 0
+    if (!step) return
+    event.preventDefault()
+    setHeight(panelEl.getBoundingClientRect().height + step)
+    if (heightPx !== null) savePanelHeight(heightPx)
+  }
 
   $: result = findAllMatches(content, query, { caseSensitive, useRegex })
   $: baseLines = groupMatchesByLine(result.matches)
@@ -142,7 +186,25 @@
 
 <svelte:window on:click={() => (menu = null)} />
 
-<div class="find-all-panel">
+<div
+  class="find-all-panel"
+  class:dragging
+  bind:this={panelEl}
+  style={heightPx !== null ? `height: ${heightPx}px` : undefined}
+>
+  <!-- svelte-ignore a11y-no-noninteractive-tabindex a11y-no-noninteractive-element-interactions -->
+  <div
+    class="resize-handle"
+    role="separator"
+    aria-orientation="horizontal"
+    aria-label="Resize find all"
+    aria-valuemin={MIN_PANEL_PX}
+    aria-valuenow={heightPx ?? undefined}
+    title="Drag to resize"
+    tabindex="0"
+    on:pointerdown={startDrag}
+    on:keydown={resizeByKey}
+  ></div>
   <div class="find-all-header">
     <input
       class="input"
@@ -262,6 +324,25 @@
     border-top: 1px solid var(--border-soft);
     background: var(--bg-elevated);
     position: relative;
+  }
+  .find-all-panel.dragging {
+    user-select: none;
+  }
+  .resize-handle {
+    position: absolute;
+    top: -4px;
+    left: 0;
+    right: 0;
+    height: 8px;
+    cursor: row-resize;
+    z-index: 2;
+    touch-action: none;
+  }
+  .resize-handle:hover,
+  .resize-handle:focus-visible,
+  .find-all-panel.dragging .resize-handle {
+    background: linear-gradient(transparent 3px, var(--accent-border) 3px, var(--accent-border) 5px, transparent 5px);
+    outline: none;
   }
   .find-all-header {
     display: flex;

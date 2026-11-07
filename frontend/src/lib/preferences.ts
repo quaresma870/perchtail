@@ -9,9 +9,13 @@ import { EXPLORER_SORTS } from './explorer-sort'
 
 type PreferenceKey = 'explorer_sort' | 'connections_view'
 
-export const explorerSort = derived([currentUser, systemSettings], ([$user, $settings]) => {
-  const chosen = $user?.preferences?.explorer_sort
-  return (EXPLORER_SORTS.some((s) => s.value === chosen) ? chosen : $settings.explorer_sort_default) as ExplorerSort
+// The order folders are listed in. The explorer has no sort control (#282):
+// the System default decides, and a user's own `explorer_sort` (kept on the
+// server) is ignored until it comes back as "Sort by" in the folder menu,
+// so a choice made in 0.6.0-rc.1 can't get stuck with no way to change it.
+export const explorerSort = derived(systemSettings, ($settings) => {
+  const chosen = $settings.explorer_sort_default
+  return (EXPLORER_SORTS.some((s) => s.value === chosen) ? chosen : 'name_asc') as ExplorerSort
 })
 
 export const connectionsViewPreference = derived(

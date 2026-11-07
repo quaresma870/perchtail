@@ -11,7 +11,7 @@ else.
 | `Get-PerchTailListing -Path` | A folder's files and subfolders (name, size, last write) |
 | `Get-PerchTailSize -Path` | A file's size |
 | `Read-PerchTailBlock -Path -Offset -Length` | Up to 4 MiB of a file |
-| `Read-PerchTailRange -Path -Offset -Length -HeadLength` | A range and the file's start, for incremental Follow |
+| `Read-PerchTailRange -Path -Offset -Length -HeadLength` | A range and the file's start, for Tail (incremental follow) |
 
 Every function:
 
