@@ -24,6 +24,7 @@
   import SystemSettings from './routes/SystemSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
   import Profile from './routes/Profile.svelte'
+  import UserMenu from './lib/components/UserMenu.svelte'
   import AuditLogSettings from './routes/AuditLogSettings.svelte'
 
   const routes = {
@@ -130,13 +131,11 @@
       {/if}
       <a href="#/settings" class:active={isActive('/settings')}>Settings</a>
       <span class="spacer"></span>
-      <a
-        href="#/profile"
-        class="username"
-        class:active={isActive('/profile')}
-        title="My profile">{$currentUser.display_name ?? $currentUser.username}</a
-      >
-      <button class="btn btn-ghost" on:click={handleLogout}>Log out</button>
+      <UserMenu
+        name={$currentUser.display_name ?? $currentUser.username}
+        active={isActive('/profile')}
+        on:logout={handleLogout}
+      />
     </nav>
   {/if}
 
@@ -198,10 +197,6 @@
   }
   .spacer {
     flex: 1;
-  }
-  .username {
-    font-size: 0.82rem;
-    color: var(--text-faint);
   }
   .server-banner {
     padding: 0.45rem 1.5rem;

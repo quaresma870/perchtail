@@ -16,6 +16,13 @@ release ships (0.x releases may include breaking changes between minors).
   be listed, and when it didn't go below 32 levels (a guard against links
   that loop back to a folder above). The refresh of the results no longer
   stops at 50 folders.
+- **A user menu in the top bar** (#298): your initials, name and an arrow,
+  opening My profile and Log out (the separate Log out button goes). It
+  works from the keyboard too.
+
+### Fixed
+- The Tail notice ("N new lines — jump to end") stays in the log's
+  corner instead of covering the Find all results (#298).
 
 ## [0.6.0-rc.2] - 2026-11-07
 

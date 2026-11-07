@@ -1,10 +1,16 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { totp } from './totp'
 
 const username = `e2e-mfa-user-${Date.now()}`
 // Within the default password policy (#245): nothing from the username.
 const tempPassword = 'Lantern-Orbit-temp-58!'
 const newPassword = 'Tagus-River-new-73!'
+
+// Log out sits in the top bar's user menu (#298).
+async function logOut(page: Page) {
+  await page.locator('nav').getByRole('button', { name: /^User menu/ }).click()
+  await page.getByRole('menuitem', { name: 'Log out' }).click()
+}
 
 test('mfa: enroll, login with a TOTP code, login with a backup code, disable', async ({
   page,
@@ -61,7 +67,7 @@ test('mfa: enroll, login with a TOTP code, login with a backup code, disable', a
   await expect(userPage.getByText('Two-factor authentication is on')).toBeVisible()
 
   // --- login now requires a second factor ---
-  await userPage.locator('nav').getByRole('button', { name: 'Log out' }).click()
+  await logOut(userPage)
   await expect(userPage).toHaveURL(/#\/login$/)
   await userPage.getByLabel('Username').fill(username)
   await userPage.getByLabel('Password').fill(newPassword)
@@ -83,7 +89,7 @@ test('mfa: enroll, login with a TOTP code, login with a backup code, disable', a
   await expect(userPage).toHaveURL(/#\/viewer$/)
 
   // --- a backup code works as a one-time substitute for the TOTP code ---
-  await userPage.locator('nav').getByRole('button', { name: 'Log out' }).click()
+  await logOut(userPage)
   await expect(userPage).toHaveURL(/#\/login$/)
   await userPage.getByLabel('Username').fill(username)
   await userPage.getByLabel('Password').fill(newPassword)
@@ -100,7 +106,7 @@ test('mfa: enroll, login with a TOTP code, login with a backup code, disable', a
   await mfa.getByRole('button', { name: 'Disable MFA' }).click()
   await expect(userPage.getByText('Two-factor authentication is off')).toBeVisible()
 
-  await userPage.locator('nav').getByRole('button', { name: 'Log out' }).click()
+  await logOut(userPage)
   await expect(userPage).toHaveURL(/#\/login$/)
   await userPage.getByLabel('Username').fill(username)
   await userPage.getByLabel('Password').fill(newPassword)
