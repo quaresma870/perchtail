@@ -8,6 +8,13 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.6.0-rc.3] - 2026-11-07
+
+Third release candidate for 0.6.0, from the rc.2 lab review. Upgrade
+notes, from 0.6.0-rc.2: no migrations, no new settings, and push agents
+don't need upgrading. From earlier versions, follow the rc.2 and rc.1
+notes below as well.
+
 ### Changed
 - **Advanced filter: no limit on folders or time** (#284). A ticked
   source or folder is searched to the end, still a few listings at a
