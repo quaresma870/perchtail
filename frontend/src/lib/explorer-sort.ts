@@ -40,12 +40,3 @@ export function sortEntries(entries: BrowseEntry[], mode: ExplorerSort): BrowseE
   return [...entries].sort(compare)
 }
 
-/** A compact time for the tree: the hour today, the date otherwise. */
-export function formatEntryTime(mtime: number | null | undefined, now = new Date()): string {
-  if (mtime === null || mtime === undefined) return ''
-  const when = new Date(mtime * 1000)
-  const sameDay = when.toDateString() === now.toDateString()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  if (sameDay) return `${pad(when.getHours())}:${pad(when.getMinutes())}`
-  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
-}

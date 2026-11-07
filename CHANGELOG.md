@@ -23,6 +23,48 @@ notes below as well.
   be listed, and when it didn't go below 32 levels (a guard against links
   that loop back to a folder above). The refresh of the results no longer
   stops at 50 folders.
+- **A user menu in the top bar** (#298): your initials, name and an arrow,
+  opening My profile and Log out (the separate Log out button goes). It
+  works from the keyboard too.
+- **The explorer shows each file's size** ("3.5 MB") instead of the
+  time it was last modified; hovering a file shows the exact size and
+  the time. Also in the advanced filter's results.
+- **One find bar for Find and Find all** (#299), above the editor:
+  text, Match case, Whole word and Regex, previous/next with "3 of 120"
+  (every match counted, in the background), and Find all, which lists
+  the matching lines in the panel below. Enter / Shift+Enter move between
+  matches, Alt+Enter runs Find all, Escape closes the bar, Ctrl/Cmd+F
+  opens it with the selected text. The toolbar keeps one Find button.
+- **Settings: buttons and popups** (#301). Row actions in the settings
+  tables are buttons; creating and editing users, folders and SSO group
+  mappings opens a popup; deleting, revoking, deactivating and resetting
+  a password ask in a popup instead of the browser's confirmation. A
+  password reset shows the temporary password in a popup with Copy.
+- **Source and role editors in a popup** (#302) over the list (or the
+  source's own page) they were opened from, keeping their address, so
+  links, back and reload still work. Closing with unsaved changes asks
+  first.
+
+### Deprecated
+- **Content indexing, the Search page and the current Alerts go away in
+  0.7** (#303). The content index is the only place PerchTail keeps text
+  from the logs, against its promise that nothing from the sources is
+  kept. In 0.7 the upgrade deletes the indexed text; searching inside a
+  file stays (Find and Find all), file names get an index of their own,
+  on by default and with no content (#304), and Alerts watch new lines
+  live instead of the index (#305). PostgreSQL support comes in 0.7 too
+  (#306).
+
+### Fixed
+- The Tail notice ("N new lines — jump to end") stays in the log's
+  corner instead of covering the Find all results (#298).
+- **Find all: no limit, and no missing rows.** Results stopped at 5,000
+  matches, and a long list of long lines (debug logs) drew blank or
+  missing rows while scrolling. Every matching line is now listed; only
+  the rows in view are drawn, each showing at most 10,000 characters of
+  its line (cut around the first match, marked with "…"). Copy and go to
+  line still use the whole line. A search for a common letter in a
+  100 MB log no longer runs the tab out of memory.
 
 ## [0.6.0-rc.2] - 2026-11-07
 

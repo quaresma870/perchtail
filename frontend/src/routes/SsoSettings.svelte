@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
+  import Modal from '../lib/components/Modal.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import { confirmAction } from '../lib/confirm'
   import type { ConnectionCheckResult, GroupRoleMapping, Role, SSOProvider } from '../lib/types'
 
   let provider: SSOProvider | null = null
@@ -104,10 +106,21 @@
     }
   }
 
+  // Adding a mapping opens a popup (#301).
+  let mappingOpen = false
+  let mappingFormError = ''
+
+  function openNewMapping() {
+    newMappingGroup = ''
+    newMappingRoleId = ''
+    mappingFormError = ''
+    mappingOpen = true
+  }
+
   async function createMapping() {
     if (newMappingRoleId === '') return
     creatingMapping = true
-    mappingsError = ''
+    mappingFormError = ''
     try {
       const order = mappings.length ? Math.max(...mappings.map((m) => m.order)) + 1 : 0
       await api.post('/sso/group-mappings', {
@@ -115,18 +128,23 @@
         group_name: newMappingGroup,
         role_id: newMappingRoleId,
       })
-      newMappingGroup = ''
-      newMappingRoleId = ''
+      mappingOpen = false
       await loadMappings()
     } catch (err) {
-      mappingsError = err instanceof ApiError ? err.detail : 'Failed to create mapping'
+      mappingFormError = err instanceof ApiError ? err.detail : 'Failed to create mapping'
     } finally {
       creatingMapping = false
     }
   }
 
   async function deleteMapping(mapping: GroupRoleMapping) {
-    if (!confirm(`Remove the mapping for group "${mapping.group_name}"?`)) return
+    const ok = await confirmAction({
+      title: 'Remove mapping',
+      message: `Remove the mapping for the group "${mapping.group_name}"? Users in that group keep the role they have now.`,
+      confirmLabel: 'Remove',
+      danger: true,
+    })
+    if (!ok) return
     try {
       await api.delete(`/sso/group-mappings/${mapping.id}`)
       await loadMappings()
@@ -151,9 +169,13 @@
 
   async function handleDelete() {
     if (!provider) return
-    if (!confirm(`Remove SSO provider "${provider.name}"? Existing SSO users keep their accounts.`)) {
-      return
-    }
+    const ok = await confirmAction({
+      title: 'Remove SSO provider',
+      message: `Remove the SSO provider "${provider.name}"? Existing SSO users keep their accounts.`,
+      confirmLabel: 'Remove',
+      danger: true,
+    })
+    if (!ok) return
     try {
       await api.delete(`/sso/${provider.id}`)
       provider = null
@@ -253,7 +275,7 @@
           <button class="btn btn-ghost" type="button" disabled={testing} on:click={handleTest}>
             {testing ? 'Testing…' : 'Test connection'}
           </button>
-          <button class="btn btn-ghost danger" type="button" on:click={handleDelete}>
+          <button class="btn btn-danger" type="button" on:click={handleDelete}>
             Remove
           </button>
         {/if}
@@ -290,11 +312,7 @@
               <code class="group-name">{mapping.group_name}</code>
               <span class="arrow">→</span>
               <span class="badge badge-accent">{mapping.role_name}</span>
-              <button
-                class="btn btn-ghost danger"
-                type="button"
-                on:click={() => deleteMapping(mapping)}
-              >
+              <button class="btn btn-danger btn-sm" type="button" on:click={() => deleteMapping(mapping)}>
                 Remove
               </button>
             </li>
@@ -302,24 +320,38 @@
         </ul>
       {/if}
 
-      <form class="mapping-create" on:submit|preventDefault={createMapping}>
-        <input
-          class="input mono"
-          bind:value={newMappingGroup}
-          placeholder="IdP group name"
-          required
-        />
-        <select class="input" bind:value={newMappingRoleId} required>
-          <option value="" disabled>Role…</option>
-          {#each roles as role (role.id)}
-            <option value={role.id}>{role.name}</option>
-          {/each}
-        </select>
-        <button class="btn btn-ghost" type="submit" disabled={creatingMapping}>
-          {creatingMapping ? 'Adding…' : '+ Add mapping'}
-        </button>
-      </form>
+      <div>
+        <button class="btn btn-ghost" type="button" on:click={openNewMapping}>+ Add mapping</button>
+      </div>
     </div>
+  {/if}
+
+  {#if mappingOpen}
+    <Modal title="New group mapping" on:close={() => (mappingOpen = false)}>
+      <form id="mapping-form" class="modal-form" on:submit|preventDefault={createMapping}>
+        <label class="field"
+          >IdP group name <input class="input mono" bind:value={newMappingGroup} required /></label
+        >
+        <label class="field"
+          >Role
+          <select class="input" bind:value={newMappingRoleId} required>
+            <option value="" disabled>Choose a role…</option>
+            {#each roles as role (role.id)}
+              <option value={role.id}>{role.name}</option>
+            {/each}
+          </select>
+        </label>
+        {#if mappingFormError}
+          <p class="error" role="alert">{mappingFormError}</p>
+        {/if}
+      </form>
+      <svelte:fragment slot="footer">
+        <button class="btn btn-ghost" type="button" on:click={() => (mappingOpen = false)}>Cancel</button>
+        <button class="btn btn-primary" type="submit" form="mapping-form" disabled={creatingMapping}>
+          {creatingMapping ? 'Adding…' : 'Add mapping'}
+        </button>
+      </svelte:fragment>
+    </Modal>
   {/if}
 </div>
 
@@ -373,9 +405,6 @@
     display: flex;
     gap: 0.6rem;
     align-items: center;
-  }
-  button.danger {
-    color: var(--danger);
   }
   .test-result {
     margin: 0;
@@ -457,13 +486,9 @@
     background: var(--accent-soft);
     color: var(--accent-hover);
   }
-  .mapping-create {
+  .modal-form {
     display: flex;
-    flex-direction: row;
-    gap: 0.6rem;
-    padding: 0;
-  }
-  .mapping-create .input {
-    flex: 1;
+    flex-direction: column;
+    gap: 0.7rem;
   }
 </style>

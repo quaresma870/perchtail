@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup } from './popups'
 
 // Only the admin settings CRUD is covered here, not a real SSO login round
 // trip -- that would need a real OIDC IdP stood up, which is out of scope
@@ -12,8 +13,6 @@ const groupName = `e2e-group-${Date.now()}`
 test('SSO settings: create provider, test connection (expected failure), group mapping, remove', async ({
   page,
 }) => {
-  page.on('dialog', (dialog) => dialog.accept())
-
   await page.goto('/#/settings/sso')
   await page.getByLabel('Display name').fill(providerName)
   await page.getByLabel('Issuer URL').fill('https://issuer.invalid.example/tenant')
@@ -28,17 +27,22 @@ test('SSO settings: create provider, test connection (expected failure), group m
   await expect(page.locator('.test-result')).toContainText('✕')
 
   // Group -> role mapping.
-  await page.locator('.mapping-create input').fill(groupName)
-  await page.locator('.mapping-create select').selectOption({ label: 'No Access' })
   await page.getByRole('button', { name: '+ Add mapping' }).click()
+  const mappingDialog = page.getByRole('dialog', { name: 'New group mapping' })
+  await mappingDialog.getByLabel('IdP group name').fill(groupName)
+  await mappingDialog.getByLabel('Role').selectOption({ label: 'No Access' })
+  await mappingDialog.getByRole('button', { name: 'Add mapping' }).click()
+  await expect(mappingDialog).toHaveCount(0)
 
   const mappingRow = page.locator('.mapping-row', { hasText: groupName })
   await expect(mappingRow).toBeVisible()
   await expect(mappingRow.getByText('No Access')).toBeVisible()
   await mappingRow.getByRole('button', { name: 'Remove' }).click()
+  await confirmPopup(page, 'Remove')
   await expect(mappingRow).toHaveCount(0)
 
   // Cleanup: remove the provider itself.
   await page.locator('.actions').getByRole('button', { name: 'Remove' }).click()
+  await confirmPopup(page, 'Remove')
   await expect(page.getByRole('button', { name: 'Test connection' })).toHaveCount(0)
 })

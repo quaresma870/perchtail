@@ -151,7 +151,7 @@
             on
           </label>
           {#if !readOnly}
-            <button class="link danger" on:click={() => deletePattern(pattern)}>delete</button>
+            <button class="btn btn-danger btn-sm" on:click={() => deletePattern(pattern)}>Delete</button>
           {/if}
         </div>
       {/each}
@@ -256,18 +256,6 @@
     font-size: 0.72rem;
     color: var(--text-faint);
     white-space: nowrap;
-  }
-  button.link {
-    border: none;
-    background: none;
-    color: var(--accent-hover);
-    cursor: pointer;
-    padding: 0;
-    font-size: 0.8rem;
-    white-space: nowrap;
-  }
-  button.link.danger {
-    color: var(--danger);
   }
   .add-row {
     display: flex;

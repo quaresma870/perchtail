@@ -108,20 +108,40 @@ test('follow picks up appended content while enabled, and stops once disabled', 
   await expect(page.locator('.cm-content')).not.toContainText('should not appear')
 })
 
-test('the Find button opens the search panel, same as Ctrl/Cmd+F', async ({ page }) => {
+test('one find bar: Find button or Ctrl/Cmd+F, next/previous with a count, Escape closes', async ({ page }) => {
+  // #299: one bar for Find and Find all.
   await treeFile(page, fileA).click()
   await expect(page.locator('.cm-content')).toContainText('"service"')
-  await expect(page.locator('.cm-search')).toHaveCount(0)
+  const find = page.getByRole('textbox', { name: 'Find', exact: true })
+  await expect(find).toHaveCount(0)
 
   await page.getByRole('button', { name: 'Find', exact: true }).click()
+  await expect(find).toBeFocused()
+  await find.fill('service')
+  const status = page.locator('.find-bar .status')
+  await expect(status).toHaveText(/^\d+ match(es)?$/)
+  await expect(page.locator('.cm-searchMatch').first()).toBeVisible()
+  await find.press('Enter')
+  await expect(status).toHaveText(/^1 of \d+$/)
+  await find.press('Shift+Enter')
+  await expect(status).toHaveText(/^\d+ of \d+$/)
 
-  await expect(page.locator('.cm-search input[main-field]')).toBeFocused()
+  await find.press('Escape')
+  await expect(find).toHaveCount(0)
+  await expect(page.locator('.cm-searchMatch')).toHaveCount(0)
+  await page.locator('.cm-content').click()
+  await page.keyboard.press('ControlOrMeta+f')
+  await expect(find).toBeFocused()
+  await expect(find).toHaveValue('service')
 })
 
 test('find all can be resized by its handle', async ({ page }) => {
   // #285: the handle on top of the panel resizes it (here by keyboard).
   await treeFile(page, fileA).click()
-  await page.getByRole('button', { name: 'Find all', exact: true }).click()
+  await page.getByRole('button', { name: 'Find', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Find', exact: true }).fill('service')
+  // Alt+Enter is Find all, same as its button.
+  await page.getByRole('textbox', { name: 'Find', exact: true }).press('Alt+Enter')
   const panel = page.locator('.find-all-panel')
   await expect(panel).toBeVisible()
   const before = (await panel.boundingBox())!.height
@@ -130,5 +150,7 @@ test('find all can be resized by its handle', async ({ page }) => {
   await handle.press('ArrowUp')
   await handle.press('ArrowUp')
   await expect.poll(async () => (await panel.boundingBox())!.height).toBeGreaterThan(before + 30)
-  await page.getByRole('button', { name: 'Find all', exact: true }).click()
+  await expect(panel.locator('.title')).toContainText('service')
+  await page.getByRole('button', { name: 'Close find all' }).click()
+  await expect(panel).toHaveCount(0)
 })

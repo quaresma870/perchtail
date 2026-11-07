@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup, createFolder } from './popups'
 
 // Connections-home's "Tree" view (ROADMAP.md's folder-tree navigation
 // item) groups RBAC-visible sources by customer -> nested folder path,
@@ -46,12 +47,9 @@ test('connections-home tree: nests sources by customer/folder and search auto-ex
 
   await page.goto('/#/settings/folders')
   await page.locator('#customer-select').selectOption({ label: customerName })
-  await page.getByPlaceholder('New folder name').fill('EU')
-  await page.getByRole('button', { name: '+ New folder' }).click()
+  await createFolder(page, 'EU')
   await expect(folderRow(page, 'EU')).toBeVisible()
-  await folderRow(page, 'EU').getByRole('button', { name: '+ Subfolder' }).click()
-  await page.getByPlaceholder('New folder name').fill('Prod')
-  await page.getByRole('button', { name: '+ New folder' }).click()
+  await createFolder(page, 'Prod', folderRow(page, 'EU'))
   await expect(folderRow(page, 'Prod')).toBeVisible()
 
   await createSource(page, nestedSourceName, { folderLabel: '— Prod' })
@@ -96,17 +94,18 @@ test('connections-home tree: nests sources by customer/folder and search auto-ex
   // customer deletion yet).
   await page.goto('/#/settings/sources')
   for (const name of [rootSourceName, nestedSourceName]) {
-    page.once('dialog', (dialog) => dialog.accept())
-    await page.getByRole('row', { name: new RegExp(name) }).getByRole('button', { name: 'delete' }).click()
+    await page.getByRole('row', { name: new RegExp(name) }).getByRole('button', { name: 'Delete' }).click()
+    await confirmPopup(page, 'Delete')
     await expect(page.getByRole('row', { name: new RegExp(name) })).toHaveCount(0)
   }
 
   await page.goto('/#/settings/folders')
   await page.locator('#customer-select').selectOption({ label: customerName })
-  await folderRow(page, 'Prod').locator('.move-select').selectOption('')
   await folderRow(page, 'Prod').getByRole('button', { name: 'Delete' }).click()
+  await confirmPopup(page, 'Delete')
   await expect(folderRow(page, 'Prod')).toHaveCount(0)
   await folderRow(page, 'EU').getByRole('button', { name: 'Delete' }).click()
+  await confirmPopup(page, 'Delete')
   await expect(folderRow(page, 'EU')).toHaveCount(0)
 
   const customers = await page.request.get('/customers').then((r) => r.json())

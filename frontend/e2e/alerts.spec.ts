@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup } from './popups'
 
 // example.com resolves to a real, public, non-loopback/non-private address
 // so app/webhook_safety.py's SSRF guard (checked at alert-create time)
@@ -32,7 +33,7 @@ test('alerts: create, test webhook, toggle enabled, delete', async ({ page }) =>
   await row.locator('label.switch').click()
   await expect(page.locator('.alert-row', { hasText: alertName }).locator('input[type=checkbox]')).not.toBeChecked()
 
-  page.once('dialog', (dialog) => dialog.accept())
   await page.locator('.alert-row', { hasText: alertName }).getByRole('button', { name: 'Delete' }).click()
+  await confirmPopup(page, 'Delete')
   await expect(page.locator('.alert-row', { hasText: alertName })).toHaveCount(0)
 })

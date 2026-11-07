@@ -11,7 +11,8 @@
   import { api, ApiError } from '../api'
   import { registerFolder } from '../explorer-refresh'
   import { removeScope, stopSearches, type Matcher, type PathScope } from '../explorer-scope'
-  import { formatEntryTime, sortEntries } from '../explorer-sort'
+  import { sortEntries } from '../explorer-sort'
+  import { fileDetails, formatSize } from '../file-details'
   import { listingLimiter, PER_SOURCE } from '../listing-limiter'
   import { explorerSort } from '../preferences'
   import type { BrowseEntry } from '../types'
@@ -185,6 +186,7 @@
         <button
           class="file"
           aria-label={relative(entry.path)}
+          title={fileDetails(entry)}
           on:click={() =>
             dispatch('open', {
               sourceId: scope.sourceId,
@@ -195,11 +197,7 @@
             })}
         >
           <span class="path">{relative(entry.path)}</span>
-          {#if entry.mtime}
-            <span class="time" title={new Date(entry.mtime * 1000).toLocaleString()}
-              >{formatEntryTime(entry.mtime)}</span
-            >
-          {/if}
+          <span class="size">{formatSize(entry.size)}</span>
         </button>
       {/each}
       {#if state === 'searching'}
@@ -288,7 +286,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .time {
+  .size {
     flex: 0 0 auto;
     font-size: 0.72rem;
     color: var(--text-faint);

@@ -159,6 +159,48 @@ code,
   color: var(--text);
 }
 
+/* Row actions in settings tables (#301): small outlined buttons, the
+   destructive ones in red. */
+.btn-sm {
+  padding: 0.28rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+.btn-danger {
+  background: transparent;
+  border-color: rgba(248, 113, 113, 0.4);
+  color: var(--danger);
+}
+.btn-danger:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+.btn-danger-solid {
+  background: #dc2626;
+  color: #fff;
+}
+.btn-danger-solid:hover {
+  background: #ef4444;
+}
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.row-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+/* Label above field, in popup forms. */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
 .card {
   background: var(--bg-elevated);
   border: 1px solid var(--border-soft);

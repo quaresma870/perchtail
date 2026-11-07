@@ -165,7 +165,7 @@
             on:change={() => updateRule(rule)}
           />
           {#if !readOnly}
-            <button class="link danger" on:click={() => deleteRule(rule)}>delete</button>
+            <button class="btn btn-danger btn-sm" on:click={() => deleteRule(rule)}>Delete</button>
           {/if}
         </div>
       {/each}
@@ -303,18 +303,6 @@
   }
   .notes-input {
     flex: 0 0 140px;
-  }
-  button.link {
-    border: none;
-    background: none;
-    color: var(--accent-hover);
-    cursor: pointer;
-    padding: 0;
-    font-size: 0.8rem;
-    white-space: nowrap;
-  }
-  button.link.danger {
-    color: var(--danger);
   }
   .add-row {
     display: flex;

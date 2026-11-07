@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { createEventDispatcher, onMount, tick } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser } from '../lib/auth'
@@ -16,6 +16,10 @@
   } from '../lib/types'
 
   export let params: { id?: string } = {}
+  /** In a popup over the roles (#302): no settings navigation or page
+   * header, a Cancel button, and `saved` / `cancel` instead of moving on. */
+  export let embedded = false
+  const dispatch = createEventDispatcher<{ saved: { id: number }; cancel: void }>()
 
   const isNew = !params.id
   const roleId = params.id ? Number(params.id) : null
@@ -88,8 +92,21 @@
       error = err instanceof ApiError ? err.detail : 'Failed to load role'
     } finally {
       loading = false
+      await tick()
+      savedState = formState()
     }
   })
+
+  // Unsaved changes, so the popup can ask before closing (#302): the form,
+  // and a grant being prepared but not added yet. Grants added or removed
+  // are saved at once.
+  let savedState = ''
+  function formState(): string {
+    return JSON.stringify([name, isSuperAdmin, Array.from(globalCaps).sort()])
+  }
+  export function isDirty(): boolean {
+    return !loading && (formState() !== savedState || newScopeId !== null || newCaps.size > 0)
+  }
 
   function scopeLabel(grant: RoleGrant): string {
     if (grant.scope_type === 'customer') {
@@ -118,10 +135,14 @@
       }
       if (isNew) {
         const created = await api.post<Role>('/roles', payload)
+        savedState = formState()
+        // On to the new role, to add its grants.
         push(`/settings/roles/${created.id}`)
       } else {
         await api.patch(`/roles/${roleId}`, payload)
         await loadRole()
+        savedState = formState()
+        if (embedded && roleId !== null) dispatch('saved', { id: roleId })
       }
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to save role'
@@ -157,13 +178,17 @@
   }
 </script>
 
-<SettingsNav />
+{#if !embedded}
+  <SettingsNav />
+{/if}
 
-<div class="page">
-  <div class="header">
-    <h1>{isNew ? 'New role' : `Role: ${name}`}</h1>
-    <button class="btn btn-ghost" on:click={() => push('/settings/roles')}>← back to roles</button>
-  </div>
+<div class="page" class:embedded>
+  {#if !embedded}
+    <div class="header">
+      <h1>{isNew ? 'New role' : `Role: ${name}`}</h1>
+      <button class="btn btn-ghost" on:click={() => push('/settings/roles')}>← back to roles</button>
+    </div>
+  {/if}
 
   {#if loading}
     <p class="hint">Loading…</p>
@@ -210,9 +235,14 @@
         {/each}
       </fieldset>
 
-      <button class="btn btn-primary" type="submit" disabled={saving || isBuiltin}>
-        {saving ? 'Saving…' : 'Save'}
-      </button>
+      <div class="save-row">
+        <button class="btn btn-primary" type="submit" disabled={saving || isBuiltin}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {#if embedded}
+          <button class="btn btn-ghost" type="button" on:click={() => dispatch('cancel')}>Cancel</button>
+        {/if}
+      </div>
     </form>
 
     {#if !isNew}
@@ -244,7 +274,7 @@
                 </td>
                 <td>
                   {#if !isBuiltin}
-                    <button class="link danger" on:click={() => removeGrant(grant)}>remove</button>
+                    <button class="btn btn-danger btn-sm" on:click={() => removeGrant(grant)}>Remove</button>
                   {/if}
                 </td>
               </tr>
@@ -297,6 +327,14 @@
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
+  }
+  .page.embedded {
+    padding: 0;
+    max-width: none;
+  }
+  .save-row {
+    display: flex;
+    gap: 0.5rem;
   }
   .header {
     display: flex;
@@ -426,17 +464,6 @@
     border-color: var(--accent-border);
     background: var(--accent-soft);
     color: var(--accent-hover);
-  }
-  button.link {
-    border: none;
-    background: none;
-    color: var(--accent-hover);
-    cursor: pointer;
-    font-size: 0.85rem;
-    padding: 0;
-  }
-  button.link.danger {
-    color: var(--danger);
   }
   .empty {
     text-align: center;

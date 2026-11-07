@@ -25,6 +25,9 @@
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
   import DiffPane from '../lib/components/DiffPane.svelte'
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
+  import FindBar from '../lib/components/FindBar.svelte'
+  import { compileFind, type FindSpec } from '../lib/find-in-document'
+  import { countAppended, countMatches, matchIndexAt, type MatchCount } from '../lib/find-count'
   import ToolbarIcon from '../lib/components/ToolbarIcon.svelte'
   import { buildConnectionTree } from '../lib/connection-tree'
   import { filterConnections } from '../lib/connection-filter'
@@ -69,7 +72,99 @@
   let notice: (FetchProblem & { retry?: () => void }) | null = null
 
   let paneRef: CodeMirrorPane | null = null
-  let findAllOpen = false
+  // One find bar for Find and Find all (#299). Its search is highlighted in
+  // the editor; Find all lists the matching lines below, for the search as
+  // it was when Find all was pressed.
+  let findOpen = false
+  let findSpec: FindSpec = { query: '', caseSensitive: false, useRegex: false, wholeWord: false }
+  let findBar: FindBar | null = null
+  let findAllSpec: FindSpec | null = null
+  $: findAllOpen = findAllSpec !== null
+  $: editorFind = findOpen && findSpec.query ? findSpec : null
+  $: findPattern = editorFind ? compileFind(findSpec.query, findSpec) : null
+
+  // "3 of 120": every match counted, per line, in the background.
+  let findCount: MatchCount | null = null
+  let currentMatch = 0
+  let findLines: string[] = []
+  let countedText = ''
+  let countedPattern: RegExp | null = null
+  let stopCount: (() => void) | null = null
+  let countTimer: ReturnType<typeof setTimeout> | null = null
+  $: restartCount(findPattern, findPattern ? displayContent : '')
+  function restartCount(pattern: RegExp | null, text: string) {
+    if (countTimer) clearTimeout(countTimer)
+    // Tail only adds lines at the end: count those, not the whole file again.
+    if (
+      pattern !== null &&
+      pattern === countedPattern &&
+      findCount?.done &&
+      text.length > countedText.length &&
+      text.startsWith(countedText)
+    ) {
+      const result = countAppended(findCount, findLines, text.slice(countedText.lastIndexOf('\n') + 1), pattern)
+      findLines = result.lines
+      findCount = result.count
+      countedText = text
+      return
+    }
+    stopCount?.()
+    stopCount = null
+    findCount = null
+    currentMatch = 0
+    countedText = ''
+    countedPattern = null
+    if (!pattern) return
+    // Waits for a pause in typing before counting a big file.
+    countTimer = setTimeout(() => {
+      findLines = text.split('\n')
+      countedText = text
+      countedPattern = pattern
+      stopCount = countMatches(findLines, pattern, (c) => (findCount = { ...c }))
+    }, 120)
+  }
+
+  async function openFind() {
+    // The selection only starts a new search: with the bar open it's
+    // usually the current match, which would replace a regex.
+    const selected = findOpen ? '' : (paneRef?.selectedText() ?? '')
+    if (selected) findSpec = { ...findSpec, query: selected }
+    findOpen = true
+    await tick()
+    findBar?.focus()
+  }
+
+  function closeFind() {
+    findOpen = false
+    restartCount(null, '')
+  }
+
+  // The position ("3 of 120") shows once the reader moves to a match, and
+  // is kept up to date as the count changes; a new search starts without it.
+  let navigated = false
+  $: findSpec, (navigated = false)
+
+  function stepFind(forward: boolean) {
+    if (!paneRef || !findPattern) return
+    if (forward) paneRef.findNext()
+    else paneRef.findPrevious()
+    navigated = true
+    updateCurrentMatch()
+  }
+
+  function updateCurrentMatch() {
+    const at = paneRef?.selectionStart()
+    currentMatch =
+      navigated && at && findCount?.done && findPattern
+        ? matchIndexAt(findCount, findLines, findPattern, at.line, at.column)
+        : 0
+  }
+  $: findCount, updateCurrentMatch()
+
+  function runFindAll() {
+    if (!findSpec.query || !findPattern) return
+    findAllSpec = { ...findSpec }
+  }
   let goToLineOpen = false
   let goToLineValue = ''
   let goToLineInput: HTMLInputElement | null = null
@@ -611,7 +706,7 @@
     if (!activeTab) return
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
       event.preventDefault()
-      paneRef?.openSearch()
+      openFind()
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'g') {
       event.preventDefault()
       openGoToLine()
@@ -638,6 +733,8 @@
   onDestroy(() => {
     // Tabs stay open in viewerState; only this view's timers stop.
     window.removeEventListener('keydown', handleKeydown)
+    stopCount?.()
+    if (countTimer) clearTimeout(countTimer)
     if (copyStatusTimer) clearTimeout(copyStatusTimer)
     stopFollowTimer()
     stopAutoRefresh()
@@ -859,18 +956,12 @@
           <div class="toolbar-left">
             <button
               class="btn-toggle"
-              title="Search this file (Ctrl/Cmd+F). Ctrl/Cmd+G goes to a line."
-              on:click={() => paneRef?.openSearch()}
+              title="Find in this file, or list every matching line (Ctrl/Cmd+F)"
+              class:active={findOpen}
+              aria-pressed={findOpen}
+              on:click={() => (findOpen ? closeFind() : openFind())}
             >
               Find
-            </button>
-            <button
-              class="btn-toggle"
-              class:active={findAllOpen}
-              aria-pressed={findAllOpen}
-              on:click={() => (findAllOpen = !findAllOpen)}
-            >
-              Find all
             </button>
             {#if goToLineOpen}
               <form class="go-to-line" on:submit|preventDefault={submitGoToLine}>
@@ -1068,27 +1159,48 @@
             {/if}
           </div>
         </div>
-        <CodeMirrorPane
-          bind:this={paneRef}
-          content={displayContent}
-          severityPatterns={activeSeverityPatterns}
-          filename={activeTab.name}
-          wrapEnabled={activeTab.wrapEnabled}
-          showWhitespace={activeTab.showWhitespace}
-          bookmarks={activeTab.bookmarks}
-          markPatterns={activeTab.markPatterns}
-          on:bottom={onReachedBottom}
-        />
-        {#if activeTab.newLines > 0}
-          <button class="jump-to-end" on:click={jumpToEnd}>
-            {activeTab.newLines} new {activeTab.newLines === 1 ? 'line' : 'lines'} — jump to end ↓
-          </button>
+        {#if findOpen}
+          <FindBar
+            bind:this={findBar}
+            bind:spec={findSpec}
+            total={findCount?.total ?? 0}
+            counting={findPattern !== null && !findCount?.done}
+            current={currentMatch}
+            invalid={findSpec.query !== '' && findPattern === null}
+            on:next={() => stepFind(true)}
+            on:previous={() => stepFind(false)}
+            on:findall={runFindAll}
+            on:close={closeFind}
+          />
         {/if}
-        {#if findAllOpen}
+        <!-- The Tail notice is anchored to the editor, not the whole area, so
+             it stays over the log when Find all is open below (#298). -->
+        <div class="editor-pane">
+          <CodeMirrorPane
+            bind:this={paneRef}
+            content={displayContent}
+            severityPatterns={activeSeverityPatterns}
+            filename={activeTab.name}
+            wrapEnabled={activeTab.wrapEnabled}
+            showWhitespace={activeTab.showWhitespace}
+            bookmarks={activeTab.bookmarks}
+            markPatterns={activeTab.markPatterns}
+            find={editorFind}
+            on:bottom={onReachedBottom}
+            on:findclosed={closeFind}
+          />
+          {#if activeTab.newLines > 0}
+            <button class="jump-to-end" on:click={jumpToEnd}>
+              {activeTab.newLines} new {activeTab.newLines === 1 ? 'line' : 'lines'} — jump to end ↓
+            </button>
+          {/if}
+        </div>
+        {#if findAllSpec}
           <FindInDocumentPanel
             content={displayContent}
+            spec={findAllSpec}
             on:jump={(e) => paneRef?.scrollToLine(e.detail.line)}
-            on:close={() => (findAllOpen = false)}
+            on:close={() => (findAllSpec = null)}
           />
         {/if}
       {:else}
@@ -1281,6 +1393,13 @@
     min-width: 0;
     min-height: 0;
     background: var(--bg);
+    position: relative;
+  }
+  .editor-pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     position: relative;
   }
   .jump-to-end {

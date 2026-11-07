@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup, createFolder } from './popups'
 
 // Folders are always scoped to a customer, and there's no dedicated
 // customer-creation UI (SourceEditor's inline "+ Create new customer…" is
@@ -11,11 +12,8 @@ const customerName = `E2E Folders Corp ${stamp}`
 const sourceName = `e2e-folders-source-${stamp}`
 
 function folderRow(page: import('@playwright/test').Page, name: string) {
-  // A folder row's "move to" <select> lists every OTHER folder's name as
-  // an <option>, which counts toward the row's own text content even
-  // though it's not visible -- scope to `.name` specifically (only ever
-  // this row's own folder name) so e.g. matching "EU" doesn't also catch
-  // "Prod"'s row (which lists EU as a valid move target).
+  // Scoped to `.name` (only ever this row's own folder name), so "EU"
+  // doesn't also match a row whose name merely contains it.
   return page.locator('.row').filter({ has: page.locator('.name', { hasText: new RegExp(`^${name}$`) }) })
 }
 
@@ -34,44 +32,50 @@ test('folders: create nested folders, rename, move, delete-protection, then dele
   await page.goto('/#/settings/folders')
   await page.locator('#customer-select').selectOption({ label: customerName })
 
-  await page.getByPlaceholder('New folder name').fill('EU')
-  await page.getByRole('button', { name: '+ New folder' }).click()
+  await createFolder(page, 'EU')
   await expect(folderRow(page, 'EU')).toBeVisible()
 
-  await folderRow(page, 'EU').getByRole('button', { name: '+ Subfolder' }).click()
-  await page.getByPlaceholder('New folder name').fill('Production')
-  await page.getByRole('button', { name: '+ New folder' }).click()
+  await createFolder(page, 'Production', folderRow(page, 'EU'))
   await expect(folderRow(page, 'Production')).toBeVisible()
 
-  // Rename.
+  // Rename, in a popup (#301).
   await folderRow(page, 'Production').getByRole('button', { name: 'Rename' }).click()
-  await page.locator('.rename-form input').fill('Prod')
-  await page.getByRole('button', { name: 'Save' }).click()
+  const renameDialog = page.getByRole('dialog', { name: 'Rename folder' })
+  await renameDialog.getByLabel('Name').fill('Prod')
+  await renameDialog.getByRole('button', { name: 'Save' }).click()
+  await expect(renameDialog).toHaveCount(0)
   await expect(folderRow(page, 'Prod')).toBeVisible()
   await expect(folderRow(page, 'Production')).toHaveCount(0)
 
   // Delete-protection: a folder with a child folder can't be deleted.
   await folderRow(page, 'EU').getByRole('button', { name: 'Delete' }).click()
+  await confirmPopup(page, 'Delete')
   await expect(page.locator('.row-error')).toContainText(/sub-folders or sources/)
   await expect(folderRow(page, 'EU')).toBeVisible()
 
   // Move: re-parent "Prod" back to top level so "EU" becomes deletable too.
-  await folderRow(page, 'Prod').locator('.move-select').selectOption('')
-  await expect(folderRow(page, 'Prod').locator('.move-select')).toHaveValue('')
+  await folderRow(page, 'Prod').getByRole('button', { name: 'Move' }).click()
+  const moveDialog = page.getByRole('dialog', { name: 'Move "Prod"' })
+  await moveDialog.getByLabel('Move under').selectOption({ label: '(top level)' })
+  await moveDialog.getByRole('button', { name: 'Move' }).click()
+  await expect(moveDialog).toHaveCount(0)
+  await expect(folderRow(page, 'Prod').locator('.indent')).toHaveAttribute('style', /width: 0px/)
 
   await folderRow(page, 'Prod').getByRole('button', { name: 'Delete' }).click()
+  await confirmPopup(page, 'Delete')
   await expect(folderRow(page, 'Prod')).toHaveCount(0)
   await folderRow(page, 'EU').getByRole('button', { name: 'Delete' }).click()
+  await confirmPopup(page, 'Delete')
   await expect(folderRow(page, 'EU')).toHaveCount(0)
 
   // Cleanup: source via the Sources admin UI, customer via a direct API
   // call (no admin UI exposes customer deletion yet).
   await page.goto('/#/settings/sources')
-  page.once('dialog', (dialog) => dialog.accept())
   await page
     .getByRole('row', { name: new RegExp(sourceName) })
-    .getByRole('button', { name: 'delete' })
+    .getByRole('button', { name: 'Delete' })
     .click()
+  await confirmPopup(page, 'Delete')
   await expect(page.getByRole('row', { name: new RegExp(sourceName) })).toHaveCount(0)
 
   const customers = await page.request.get('/customers').then((r) => r.json())
