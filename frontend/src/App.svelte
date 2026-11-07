@@ -9,7 +9,7 @@
   import Login from './routes/Login.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
   import Sources from './routes/Sources.svelte'
-  import SourceEditor from './routes/SourceEditor.svelte'
+  import SourceEditorPopup from './routes/SourceEditorPopup.svelte'
   import SourceOverview from './routes/SourceOverview.svelte'
   import Folders from './routes/Folders.svelte'
   import Viewer from './routes/Viewer.svelte'
@@ -18,7 +18,7 @@
   import Alerts from './routes/Alerts.svelte'
   import SettingsIndex from './routes/SettingsIndex.svelte'
   import Roles from './routes/Roles.svelte'
-  import RoleEditor from './routes/RoleEditor.svelte'
+  import RoleEditorPopup from './routes/RoleEditorPopup.svelte'
   import Users from './routes/Users.svelte'
   import SsoSettings from './routes/SsoSettings.svelte'
   import SystemSettings from './routes/SystemSettings.svelte'
@@ -38,13 +38,13 @@
     '/alerts': Alerts,
     '/settings': SettingsIndex,
     '/settings/sources': Sources,
-    '/settings/sources/new': SourceEditor,
-    '/settings/sources/:id/edit': SourceEditor,
+    '/settings/sources/new': SourceEditorPopup,
+    '/settings/sources/:id/edit': SourceEditorPopup,
     '/settings/sources/:id': SourceOverview,
     '/settings/folders': Folders,
     '/settings/roles': Roles,
-    '/settings/roles/new': RoleEditor,
-    '/settings/roles/:id': RoleEditor,
+    '/settings/roles/new': RoleEditorPopup,
+    '/settings/roles/:id': RoleEditorPopup,
     '/settings/users': Users,
     '/settings/sso': SsoSettings,
     '/settings/system': SystemSettings,

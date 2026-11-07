@@ -259,7 +259,7 @@
                 {#if !source.is_system && hasCapability($currentUser, 'create_source')}
                   <button
                     class="btn btn-ghost btn-sm"
-                    on:click={() => push(`/settings/sources/${source.id}/edit`)}>Edit</button
+                    on:click={() => push(`/settings/sources/${source.id}/edit?from=list`)}>Edit</button
                   >
                   <button class="btn btn-danger btn-sm" on:click={() => removeSource(source)}>Delete</button>
                 {/if}

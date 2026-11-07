@@ -15,7 +15,8 @@ test('SMB source: create, row-based rules (last-match-wins), browse, delete', as
 
   await page.goto('/#/settings/sources/new')
   await page.getByLabel('Name', { exact: true }).fill(sourceName)
-  await page.getByLabel('Protocol').selectOption('smb')
+  // The editor is a popup over the sources list, which has its own Protocol filter (#302).
+  await page.getByRole('dialog').getByLabel('Protocol').selectOption('smb')
   await page.getByLabel('Host').fill(smb.host)
   await page.getByLabel('Port').fill(String(smb.port))
   await page.getByLabel('Base path').fill(smb.base_path)

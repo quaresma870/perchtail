@@ -17,7 +17,8 @@ test('WinRM source: create, add rule, browse over the mocked connector, delete',
 }) => {
   await page.goto('/#/settings/sources/new')
   await page.getByLabel('Name', { exact: true }).fill(sourceName)
-  await page.getByLabel('Protocol').selectOption('winrm')
+  // The editor is a popup over the sources list, which has its own Protocol filter (#302).
+  await page.getByRole('dialog').getByLabel('Protocol').selectOption('winrm')
   await page.getByLabel('Host').fill('e2e-fake-winrm-host')
   await page.getByLabel('Base path').fill(FIXTURE_ROOT)
   await page.getByLabel('Username').fill('svc')
