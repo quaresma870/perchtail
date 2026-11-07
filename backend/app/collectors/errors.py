@@ -240,9 +240,16 @@ def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | 
         # leaving the base path over SSH, rather than 502 (F-L).
         if "path escapes from parent" in lowered or lowered.startswith("unsafe path"):
             return PathOutsideBaseError(text)
-        if "not a directory" in lowered:  # a list on a file (#206)
+        # A list on a file (#206): "not a directory", or on Windows "The
+        # directory name is invalid."
+        if "not a directory" in lowered or "directory name is invalid" in lowered:
             return SourceNotFoundError(text)
-        if "not exist" in lowered or "no such file" in lowered or "not found" in lowered:
+        # Windows agents say "The system cannot find the file (path)
+        # specified." (#272).
+        if any(
+            phrase in lowered
+            for phrase in ("not exist", "no such file", "not found", "cannot find the")
+        ):
             return SourceNotFoundError(text)
         if "permission" in lowered or "denied" in lowered or "outside" in lowered:
             return SourcePermissionError(text)

@@ -327,3 +327,37 @@ def test_read_range_loops_for_the_head_and_refuses_garbage(fake_session):
         winrm_module.read_range(_source(), "app.log", 0, 10, 4)
     # A short Read() mustn't leave the head short: it reads until full or EOF.
     assert "while ($hn -lt $h.Length)" in script_text["last"]
+
+
+# --- a file that isn't there (#272, found in the 0.6.0-rc.1 lab) -----------
+
+
+def _missing_file(script):
+    # What Windows does: the existence check stops the script with the marker.
+    if "[IO.File]::Exists(" in script:
+        return FakeResult(status_code=5, std_out=b"PERCHTAIL_NOT_FOUND\r\n")
+    return FakeResult()
+
+
+def test_fetch_file_of_a_missing_file_is_not_found_not_empty(fake_session, tmp_path):
+    from app.collectors.base import SourceNotFoundError
+    from app.collectors.errors import translate_winrm
+
+    fake_session.handler = _missing_file
+    destination = tmp_path / "out"
+    with pytest.raises(FileNotFoundError) as caught:
+        winrm_module.fetch_file(_source(), "app/gone.log", destination)
+    assert not destination.exists()
+    # The check runs before the size is read, after the junction guard.
+    script = fake_session.scripts_run[0]
+    assert script.index("[IO.File]::Exists(") < script.index("Get-Item")
+    assert script.index("ReparsePoint") < script.index("[IO.File]::Exists(")
+    assert isinstance(translate_winrm(caught.value), SourceNotFoundError)
+
+
+def test_read_range_of_a_missing_file_is_not_found(fake_session):
+    fake_session.handler = _missing_file
+    with pytest.raises(FileNotFoundError):
+        winrm_module.read_range(_source(), "app/gone.log", 0, 10, 4)
+    script = fake_session.scripts_run[0]
+    assert script.index("[IO.File]::Exists(") < script.index("[IO.File]::Open(")

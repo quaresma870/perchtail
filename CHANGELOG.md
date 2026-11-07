@@ -8,6 +8,13 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Fixed
+- **Files that disappear, on Windows** (#272). Over WinRM (without a JEA
+  endpoint), a file that was gone opened as an empty file, and Follow
+  on it said "The source sent an unexpected answer"; a Windows push agent
+  answered "The source returned an error". Both now say the file is no
+  longer on the source, as SSH, SMB and Linux agents do.
+
 ## [0.6.0-rc.1] - 2026-11-07
 
 First release candidate for 0.6.0. Upgrade notes:
