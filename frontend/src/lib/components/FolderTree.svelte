@@ -7,7 +7,8 @@
   import { downloadHref } from '../download-href'
   import { registerFolder } from '../explorer-refresh'
   import { advancedFilter, coveringScope, scopeContext, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
-  import { formatEntryTime, sortEntries } from '../explorer-sort'
+  import { sortEntries } from '../explorer-sort'
+  import { fileDetails, formatSize } from '../file-details'
   import { explorerSort } from '../preferences'
   import type { BrowseEntry } from '../types'
 
@@ -150,7 +151,8 @@
     class:active={isActive}
     class:new={isNew}
   >
-    <!-- aria-label: the file name only, not the time shown next to it. -->
+    <!-- aria-label: the file name only, not the size shown next to it; the
+         size and modification time are in the hover text. -->
     {#if $advancedFilter && canRefresh}
       <input
         type="checkbox"
@@ -166,6 +168,7 @@
       class="label"
       style="padding-left: {depth * 14}px"
       aria-label={entry.name}
+      title={entry.is_dir ? undefined : fileDetails(entry)}
       on:click={toggle}
     >
       {#if canExpand}
@@ -200,10 +203,8 @@
         {/if}
       </span>
       <span class="name">{entry.name}</span>
-      {#if !entry.is_dir && entry.mtime}
-        <span class="time" title={new Date(entry.mtime * 1000).toLocaleString()}
-          >{formatEntryTime(entry.mtime)}</span
-        >
+      {#if !entry.is_dir}
+        <span class="size">{formatSize(entry.size)}</span>
       {/if}
     </button>
     {#if canRefresh && expanded}
@@ -272,7 +273,7 @@
     background: var(--success-soft);
     transition: background 1s;
   }
-  .time {
+  .size {
     margin-left: auto;
     padding-left: 0.5rem;
     font-size: 0.72rem;

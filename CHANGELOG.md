@@ -19,6 +19,9 @@ release ships (0.x releases may include breaking changes between minors).
 - **A user menu in the top bar** (#298): your initials, name and an arrow,
   opening My profile and Log out (the separate Log out button goes). It
   works from the keyboard too.
+- **The explorer shows each file's size** ("3.5 MB") instead of the
+  time it was last modified; hovering a file shows the exact size and
+  the time. Also in the advanced filter's results.
 
 ### Fixed
 - The Tail notice ("N new lines — jump to end") stays in the log's
