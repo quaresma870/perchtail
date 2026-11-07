@@ -1,7 +1,7 @@
 import { writable } from 'svelte/store'
 import type { FormatMode } from './format-content'
 import type { MarkPattern } from './mark-highlighting'
-import { advancedFilter, scopes } from './explorer-scope'
+import { advancedFilter, filterOptions, scopes } from './explorer-scope'
 
 /** One open file in the viewer. Tabs from several sources live side by
  * side (#162), so each carries its own source -- every reload, follow,
@@ -74,6 +74,7 @@ export async function closeAllTabs(): Promise<void> {
   // The advanced filter's scopes go with the tabs (#274).
   scopes.set([])
   advancedFilter.set(false)
+  filterOptions.set({ regex: false, matchCase: false })
   let tabs: Tab[] = []
   viewerState.update((state) => {
     tabs = state.tabs

@@ -2,7 +2,7 @@
   import { createEventDispatcher, onDestroy, onMount } from 'svelte'
   import { api, ApiError } from '../api'
   import { registerFolder } from '../explorer-refresh'
-  import { advancedFilter, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
+  import { advancedFilter, coveringScope, scopeContext, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
   import { sortEntries } from '../explorer-sort'
   import { explorerSort } from '../preferences'
   import { serverReachable } from '../server-status'
@@ -112,6 +112,8 @@
   // Advanced filter (#274): this source as a scope.
   $: ownScope = { sourceId: source.id, path: '' }
   $: inScope = $scopes.some((s) => scopeKey(s) === scopeKey(ownScope))
+  // A ticked customer or folder of sources already includes it (#284).
+  $: coveredBy = coveringScope($scopes, ownScope, $scopeContext)
 
   let unregister: (() => void) | null = null
   $: if (expanded && loaded && !unregister) {
@@ -152,9 +154,10 @@
     <input
       type="checkbox"
       class="scope-check"
-      checked={inScope}
+      checked={inScope || Boolean(coveredBy)}
+      disabled={Boolean(coveredBy)}
       aria-label="Filter files in {source.name}"
-      title="Filter files in this source"
+      title={coveredBy ? 'Already included through a folder above' : 'Filter files in this source'}
       on:change={() => toggleScopeIn(ownScope)}
     />
   {/if}

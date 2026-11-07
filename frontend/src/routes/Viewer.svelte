@@ -9,9 +9,18 @@
   import {
     advancedFilter,
     clearScopes,
+    compileMatcher,
+    contextFromTree,
+    filterOptions,
+    isGroupScope,
+    isMatcherError,
     removeScope,
+    scopeContext,
     scopeKey,
     scopes,
+    sourceScopesOf,
+    stopSearches,
+    type Scope,
   } from '../lib/explorer-scope'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
   import DiffPane from '../lib/components/DiffPane.svelte'
@@ -103,8 +112,13 @@
   let pickingScopes = true
   $: showScoped = $advancedFilter && $scopes.length > 0 && !pickingScopes
   $: if ($scopes.length === 0) pickingScopes = true
-  const scopeLabel = (sourceId: number, path: string) =>
-    `${sourceLabel(sourceId)}${path ? ` › ${path}` : ''}`
+  const scopeLabel = (scope: Scope) =>
+    isGroupScope(scope) ? scope.name : `${sourceLabel(scope.sourceId)}${scope.path ? ` › ${scope.path}` : ''}`
+  // Which sources sit under each customer and folder (#284), from every
+  // source the user can see, not only the ones the search box shows.
+  $: scopeContext.set(contextFromTree(buildConnectionTree(allSources)))
+  $: compiledFilter = compileMatcher(fileQuery, $filterOptions)
+  $: fileMatcher = isMatcherError(compiledFilter) ? null : compiledFilter
 
   $: filteredAllSources = filterConnections(allSources, $advancedFilter ? '' : connectionsQuery)
 
@@ -651,7 +665,7 @@
           class="input search-box"
           type="search"
           aria-label="Filter files"
-          placeholder="Filter files in the ticked sources and folders (text, or a glob like app-*.log)"
+          placeholder="Filter files in the ticked sources and folders (text, glob like app-*.log, or regex)"
           bind:value={fileQuery}
           on:input={() => { if (fileQuery.trim() && $scopes.length > 0) pickingScopes = false }}
         />
@@ -693,15 +707,26 @@
     </div>
     {#if $advancedFilter}
       <div class="scope-bar">
+        <label class="filter-option">
+          <input type="checkbox" bind:checked={$filterOptions.regex} />
+          Regex
+        </label>
+        <label class="filter-option">
+          <input type="checkbox" bind:checked={$filterOptions.matchCase} />
+          Match case
+        </label>
+        {#if isMatcherError(compiledFilter)}
+          <span class="filter-error" role="status">{compiledFilter.error}</span>
+        {/if}
         {#if $scopes.length === 0}
           <span class="hint">Tick the sources and folders to filter files in.</span>
         {:else}
           {#each $scopes as scope (scopeKey(scope))}
             <span class="scope-chip">
-              {scopeLabel(scope.sourceId, scope.path)}
+              {scopeLabel(scope)}
               <button
                 class="link"
-                aria-label="Remove {scopeLabel(scope.sourceId, scope.path)} from the filter"
+                aria-label="Remove {scopeLabel(scope)} from the filter"
                 on:click={() => removeScope(scope)}>✕</button
               >
             </span>
@@ -710,6 +735,11 @@
           <button class="link" on:click={() => (pickingScopes = !pickingScopes)}>
             {pickingScopes ? `Show the files (${$scopes.length})` : 'Add or change'}
           </button>
+          {#if showScoped}
+            <button class="link" title="Stop searching folders in every selection" on:click={() => stopSearches.update((n) => n + 1)}>
+              Stop all
+            </button>
+          {/if}
         {/if}
       </div>
     {/if}
@@ -721,12 +751,36 @@
       {:else if showScoped}
         <div class="scoped-results">
           {#each $scopes as scope (scopeKey(scope))}
-            <ScopeResults
-              {scope}
-              sourceName={sourceLabel(scope.sourceId)}
-              query={fileQuery}
-              on:open={handleOpen}
-            />
+            {#if isGroupScope(scope)}
+              {@const members = sourceScopesOf(scope, $scopeContext)}
+              <div class="group-scope">
+                <div class="group-scope-head">
+                  <span>{scope.name}</span>
+                  <span class="count">{members.length} {members.length === 1 ? 'source' : 'sources'}</span>
+                  <button
+                    class="link"
+                    aria-label="Remove {scope.name} from the filter"
+                    on:click={() => removeScope(scope)}>✕</button
+                  >
+                </div>
+                {#each members as member (scopeKey(member))}
+                  <ScopeResults
+                    scope={member}
+                    sourceName={sourceLabel(member.sourceId)}
+                    matcher={fileMatcher}
+                    partOfGroup
+                    on:open={handleOpen}
+                  />
+                {/each}
+              </div>
+            {:else}
+              <ScopeResults
+                {scope}
+                sourceName={sourceLabel(scope.sourceId)}
+                matcher={fileMatcher}
+                on:open={handleOpen}
+              />
+            {/if}
           {/each}
         </div>
       {:else if filteredAllSources.length === 0}
@@ -1091,6 +1145,40 @@
     padding: 0.4rem 0.75rem;
     border-bottom: 1px solid var(--border-soft);
     font-size: 0.78rem;
+  }
+  .filter-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .filter-error {
+    color: var(--danger);
+  }
+  .group-scope {
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .group-scope-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.65rem 0.1rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .group-scope-head span:first-child {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .group-scope-head .count {
+    font-weight: 400;
+    font-size: 0.72rem;
+    color: var(--text-faint);
   }
   .scope-chip {
     display: inline-flex;

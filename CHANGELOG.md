@@ -15,6 +15,16 @@ release ships (0.x releases may include breaking changes between minors).
   order set under Settings → System. The per-user choice made in
   0.6.0-rc.1 is kept but not used for now; it comes back as a "Sort by"
   action on folders.
+- **Advanced filter searches subfolders and whole customers, with regex**
+  (#284). Ticking a source or folder now searches the folders below it
+  right away (up to 6 levels, 300 folders or 90 seconds per source, two
+  listings at a time per source and six overall), with progress and a
+  Stop button. In the Tree view, customers and folders of sources can be
+  ticked too: every source under them is searched. Regex and Match case
+  options, as in Find all; a pattern with `/` matches the path below the
+  ticked folder (`app/*.log`, `**/2026-11/*.gz`). An invalid regex says
+  so. Results refresh by listing again the ticked folder and the folders
+  that had files, not every folder searched.
 - **Find all can be resized** (#285): drag the line on top of the panel,
   or focus it and use the arrow keys. This browser remembers the height.
 
