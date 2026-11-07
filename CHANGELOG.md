@@ -33,6 +33,10 @@ release ships (0.x releases may include breaking changes between minors).
   mappings opens a popup; deleting, revoking, deactivating and resetting
   a password ask in a popup instead of the browser's confirmation. A
   password reset shows the temporary password in a popup with Copy.
+- **Source and role editors in a popup** (#302) over the list (or the
+  source's own page) they were opened from, keeping their address, so
+  links, back and reload still work. Closing with unsaved changes asks
+  first.
 
 ### Fixed
 - The Tail notice ("N new lines — jump to end") stays in the log's

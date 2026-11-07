@@ -113,3 +113,27 @@ test('roles: built-in roles open read-only in the editor', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Save' })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'Add grant' })).toHaveCount(0)
 })
+
+test('roles: the editor opens in a popup over the list, keeps its address, and asks before dropping changes', async ({
+  page,
+}) => {
+  // #302.
+  await page.goto('/#/settings/roles')
+  await page.getByRole('button', { name: '+ New role' }).click()
+  await expect(page).toHaveURL(/#\/settings\/roles\/new$/)
+  const editor = page.getByRole('dialog', { name: 'New role' })
+  await expect(editor).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Roles', exact: true })).toBeVisible()
+
+  await editor.getByLabel('Name', { exact: true }).fill('not saved')
+  await page.keyboard.press('Escape')
+  const discard = page.getByRole('dialog', { name: 'Discard changes' })
+  await expect(discard).toBeVisible()
+  await discard.getByRole('button', { name: 'Cancel' }).click()
+  await expect(editor).toBeVisible()
+  await editor.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await confirmPopup(page, 'Discard')
+  await expect(page).toHaveURL(/#\/settings\/roles$/)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page.getByRole('row', { name: /not saved/ })).toHaveCount(0)
+})
