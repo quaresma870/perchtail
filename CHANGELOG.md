@@ -8,6 +8,20 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.6.0-rc.2] - 2026-11-07
+
+Second release candidate for 0.6.0, with the changes from the rc.1 lab
+review. Upgrade notes, from 0.6.0-rc.1:
+- No migrations.
+- New System setting **Tail interval** (Settings → System): 1, 2, 5 or
+  10 seconds, 2 by default. The interval each browser remembered in rc.1
+  is no longer used.
+- The per-user file order chosen in rc.1 is no longer used; the order
+  set under Settings → System applies to everyone.
+- Push agents don't need upgrading from rc.1.
+
+From 0.5.3, follow the 0.6.0-rc.1 notes below as well.
+
 ### Changed
 - **Follow is now called Tail** (#283). How often it checks for new
   lines is a System setting (Settings → System → Tail interval: 1, 2, 5
@@ -37,7 +51,7 @@ release ships (0.x releases may include breaking changes between minors).
 
 ### Fixed
 - **Files that disappear, on Windows** (#272). Over WinRM (without a JEA
-  endpoint), a file that was gone opened as an empty file, and Follow
+  endpoint), a file that was gone opened as an empty file, and Tail
   on it said "The source sent an unexpected answer"; a Windows push agent
   answered "The source returned an error". Both now say the file is no
   longer on the source, as SSH, SMB and Linux agents do.
