@@ -25,6 +25,7 @@
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
   import DiffPane from '../lib/components/DiffPane.svelte'
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
+  import ToolbarIcon from '../lib/components/ToolbarIcon.svelte'
   import { buildConnectionTree } from '../lib/connection-tree'
   import { filterConnections } from '../lib/connection-filter'
   import { readFetchFailure, type FetchProblem } from '../lib/fetch-errors'
@@ -874,15 +875,33 @@
               title="Search this file (Ctrl/Cmd+F). Ctrl/Cmd+G goes to a line."
               on:click={() => paneRef?.openSearch()}
             >
-              ⌕ Find
+              Find
             </button>
             <button
               class="btn-toggle"
               class:active={findAllOpen}
+              aria-pressed={findAllOpen}
               on:click={() => (findAllOpen = !findAllOpen)}
             >
-              Find All
+              Find all
             </button>
+            {#if goToLineOpen}
+              <form class="go-to-line" on:submit|preventDefault={submitGoToLine}>
+                <input
+                  class="input"
+                  type="number"
+                  min="1"
+                  placeholder="Line #"
+                  bind:value={goToLineValue}
+                  bind:this={goToLineInput}
+                  on:keydown={(e) => e.key === 'Escape' && (goToLineOpen = false)}
+                  on:blur={() => (goToLineOpen = false)}
+                />
+              </form>
+            {:else}
+              <button class="btn-toggle" title="Go to a line (Ctrl/Cmd+G)" on:click={openGoToLine}>Go to line</button>
+            {/if}
+            <span class="tb-sep" aria-hidden="true"></span>
             <button
               class="btn-toggle"
               class:active={compareArmed}
@@ -896,32 +915,8 @@
             {/if}
             <button
               class="btn-toggle"
-              class:active={activeTab.following}
-              aria-pressed={activeTab.following}
-              title={activeTab.followMode === 'incremental'
-                ? "Show new lines as they're written, like tail -f: fetches only what was appended"
-                : "Show new lines as they're written: reloads the whole file (compressed files, archive members, agents older than 0.6)"}
-              on:click={toggleFollow}
-            >
-              Tail
-            </button>
-            {#if activeTab.following}
-              <!-- Only while Tail is on (#283). -->
-              <select
-                class="follow-interval"
-                aria-label="Tail interval"
-                title="How often Tail checks for new lines"
-                value={followIntervalMs}
-                on:change={(e) => setFollowInterval(Number(e.currentTarget.value))}
-              >
-                {#each FOLLOW_INTERVALS_MS as ms}
-                  <option value={ms}>{formatInterval(ms)}</option>
-                {/each}
-              </select>
-            {/if}
-            <button
-              class="btn-toggle"
               class:active={activeTab.wrapEnabled}
+              aria-pressed={activeTab.wrapEnabled}
               on:click={toggleWrap}
             >
               Wrap
@@ -929,6 +924,7 @@
             <button
               class="btn-toggle"
               class:active={activeTab.showWhitespace}
+              aria-pressed={activeTab.showWhitespace}
               on:click={toggleShowWhitespace}
             >
               Show chars
@@ -986,83 +982,110 @@
             {#if activeTab.markPatterns.length > 0}
               <button class="link" on:click={clearMarks}>Clear highlights</button>
             {/if}
-            {#if goToLineOpen}
-              <form class="go-to-line" on:submit|preventDefault={submitGoToLine}>
-                <input
-                  class="input"
-                  type="number"
-                  min="1"
-                  placeholder="Line #"
-                  bind:value={goToLineValue}
-                  bind:this={goToLineInput}
-                  on:keydown={(e) => e.key === 'Escape' && (goToLineOpen = false)}
-                  on:blur={() => (goToLineOpen = false)}
-                />
-              </form>
-            {:else}
-              <button class="btn-toggle" on:click={openGoToLine}>Go to line</button>
+            <span class="tb-sep" aria-hidden="true"></span>
+            <button
+              class="btn-toggle tail"
+              class:active={activeTab.following}
+              aria-pressed={activeTab.following}
+              title={activeTab.followMode === 'incremental'
+                ? "Show new lines as they're written, like tail -f: fetches only what was appended"
+                : "Show new lines as they're written: reloads the whole file (compressed files, archive members, agents older than 0.6)"}
+              on:click={toggleFollow}
+            >
+              {#if activeTab.following}<span class="live-dot" aria-hidden="true"></span>{/if}
+              Tail
+            </button>
+            {#if activeTab.following}
+              <!-- Only while Tail is on (#283). -->
+              <select
+                class="follow-interval"
+                aria-label="Tail interval"
+                title="How often Tail checks for new lines"
+                value={followIntervalMs}
+                on:change={(e) => setFollowInterval(Number(e.currentTarget.value))}
+              >
+                {#each FOLLOW_INTERVALS_MS as ms}
+                  <option value={ms}>{formatInterval(ms)}</option>
+                {/each}
+              </select>
             {/if}
           </div>
           <div class="toolbar-right">
             {#if copyStatus}
               <span class="hint copy-status">{copyStatus === 'copied' ? 'Copied' : 'Nothing selected'}</span>
             {/if}
-            <button class="link" title="Copy selected lines with line numbers" on:click={doCopySelectedLines}>
-              Copy lines
-            </button>
-            <button class="link" title="Reload from source" on:click={reloadActiveTab}>
-              ⟳ Reload
+            <button
+              class="icon-btn"
+              title="Copy selected lines with line numbers"
+              aria-label="Copy lines"
+              on:click={doCopySelectedLines}
+            >
+              <ToolbarIcon name="copy" />
             </button>
             <button
-              class="link"
-              class:active-marker={activeTab.bookmarks.length > 0}
+              class="icon-btn"
+              class:active={activeTab.bookmarks.length > 0}
               title="Toggle bookmark on current line"
+              aria-label="Bookmark"
               on:click={toggleBookmark}
             >
-              ⚑ Bookmark
+              <ToolbarIcon name="bookmark" />
             </button>
             {#if activeTab.bookmarks.length > 0}
               <button
-                class="link"
+                class="icon-btn"
                 title="Previous bookmark"
+                aria-label="Previous bookmark"
                 on:click={() => paneRef?.jumpToPreviousBookmark()}
               >
-                ‹ mark
+                <ToolbarIcon name="chevron-up" />
               </button>
-              <button class="link" title="Next bookmark" on:click={() => paneRef?.jumpToNextBookmark()}>
-                mark ›
+              <button
+                class="icon-btn"
+                title="Next bookmark"
+                aria-label="Next bookmark"
+                on:click={() => paneRef?.jumpToNextBookmark()}
+              >
+                <ToolbarIcon name="chevron-down" />
               </button>
             {/if}
             {#if activeSeverityPatterns.length > 0}
+              <span class="tb-sep" aria-hidden="true"></span>
+              <span class="problem-nav" title="Problems (severity patterns)">
+                <ToolbarIcon name="alert" />
+              </span>
               <button
-                class="link"
+                class="icon-btn"
                 title="Previous problem"
+                aria-label="Previous problem"
                 on:click={() => paneRef?.jumpToPreviousProblem()}
               >
-                ‹ problem
+                <ToolbarIcon name="chevron-up" />
               </button>
               <button
-                class="link"
+                class="icon-btn"
                 title="Next problem"
+                aria-label="Next problem"
                 on:click={() => paneRef?.jumpToNextProblem()}
               >
-                problem ›
+                <ToolbarIcon name="chevron-down" />
               </button>
             {/if}
+            <span class="tb-sep" aria-hidden="true"></span>
+            <button class="icon-btn" title="Reload from source" aria-label="Reload" on:click={reloadActiveTab}>
+              <ToolbarIcon name="refresh" />
+            </button>
             {#if canDownloadActive}
-            <a
-              class="link"
-              href={`/sources/${activeTab.sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 3v12" />
-                <path d="m6 11 6 6 6-6" />
-                <path d="M5 21h14" />
-              </svg>
-              Download
-            </a>
+              <a
+                class="icon-btn"
+                title="Download"
+                aria-label="Download"
+                href={`/sources/${activeTab.sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <ToolbarIcon name="download" />
+              </a>
             {/if}
           </div>
         </div>
@@ -1272,20 +1295,6 @@
     flex-direction: column;
     gap: 0.4rem;
   }
-  a.link {
-    border: none;
-    background: none;
-    color: var(--accent-hover);
-    cursor: pointer;
-    padding: 0;
-    font-size: 0.8rem;
-    text-align: left;
-    text-decoration: none;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    white-space: nowrap;
-  }
   .editor-area {
     flex: 1;
     display: flex;
@@ -1378,49 +1387,72 @@
     align-items: center;
     flex-wrap: wrap;
     row-gap: 0.4rem;
-    gap: 0.75rem;
+    gap: 0.15rem;
   }
   .pane-toolbar .hint {
     padding: 0;
     color: var(--text-faint);
     white-space: nowrap;
   }
-  .btn-toggle {
-    border: 1px solid var(--border);
+  /* Toolbar (#286): quiet buttons, no borders; only what's on gets a fill. */
+  .btn-toggle,
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border: none;
     background: transparent;
     color: var(--text-muted);
-    border-radius: 999px;
-    padding: 0.15rem 0.65rem;
-    font-size: 0.72rem;
-    font-weight: 600;
+    border-radius: var(--radius-sm);
+    padding: 0.22rem 0.45rem;
+    font: inherit;
+    font-size: 0.75rem;
     cursor: pointer;
     white-space: nowrap;
+    text-decoration: none;
   }
-  .btn-toggle:hover {
-    border-color: var(--accent-border);
+  .btn-toggle:hover,
+  .icon-btn:hover {
+    background: var(--bg-hover);
     color: var(--text);
   }
-  .btn-toggle.active {
-    background: var(--accent-soft);
-    border-color: var(--accent-border);
-    color: var(--accent-hover);
+  .btn-toggle:focus-visible,
+  .icon-btn:focus-visible {
+    outline: 1px solid var(--accent-border);
+    outline-offset: 1px;
   }
-  .pane-toolbar .link svg {
-    width: 13px;
-    height: 13px;
+  .btn-toggle.active,
+  .icon-btn.active {
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+  .icon-btn {
+    padding: 0.28rem;
+  }
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+  }
+  .tb-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--border);
+    margin: 0 0.15rem;
+    flex: 0 0 auto;
+  }
+  .problem-nav {
+    display: inline-flex;
+    color: var(--warning);
+    padding: 0 0.1rem 0 0.2rem;
   }
   .toolbar-right {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     row-gap: 0.4rem;
-    gap: 1rem;
-  }
-  .toolbar-right button.link {
-    font: inherit;
-  }
-  .toolbar-right button.link.active-marker {
-    color: var(--accent-hover);
+    gap: 0.15rem;
   }
   .copy-status {
     padding: 0;
