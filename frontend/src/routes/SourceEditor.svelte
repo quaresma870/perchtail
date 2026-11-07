@@ -181,6 +181,9 @@
   }
 
   onMount(async () => {
+    // A new source's form starts as it is now: Escape while the customers
+    // still load mustn't count as unsaved changes.
+    savedState = formState()
     try {
       await loadCustomers()
       if (sourceId !== null) {
