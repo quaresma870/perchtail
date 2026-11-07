@@ -113,7 +113,7 @@ test('the Find button opens the search panel, same as Ctrl/Cmd+F', async ({ page
   await expect(page.locator('.cm-content')).toContainText('"service"')
   await expect(page.locator('.cm-search')).toHaveCount(0)
 
-  await page.getByRole('button', { name: '⌕ Find', exact: true }).click()
+  await page.getByRole('button', { name: 'Find', exact: true }).click()
 
   await expect(page.locator('.cm-search input[main-field]')).toBeFocused()
 })
@@ -121,7 +121,7 @@ test('the Find button opens the search panel, same as Ctrl/Cmd+F', async ({ page
 test('find all can be resized by its handle', async ({ page }) => {
   // #285: the handle on top of the panel resizes it (here by keyboard).
   await treeFile(page, fileA).click()
-  await page.getByRole('button', { name: 'Find All', exact: true }).click()
+  await page.getByRole('button', { name: 'Find all', exact: true }).click()
   const panel = page.locator('.find-all-panel')
   await expect(panel).toBeVisible()
   const before = (await panel.boundingBox())!.height
@@ -130,5 +130,5 @@ test('find all can be resized by its handle', async ({ page }) => {
   await handle.press('ArrowUp')
   await handle.press('ArrowUp')
   await expect.poll(async () => (await panel.boundingBox())!.height).toBeGreaterThan(before + 30)
-  await page.getByRole('button', { name: 'Find All', exact: true }).click()
+  await page.getByRole('button', { name: 'Find all', exact: true }).click()
 })

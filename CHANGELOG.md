@@ -25,6 +25,10 @@ release ships (0.x releases may include breaking changes between minors).
   ticked folder (`app/*.log`, `**/2026-11/*.gz`). An invalid regex says
   so. Results refresh by listing again the ticked folder and the folders
   that had files, not every folder searched.
+- **Quieter viewer toolbar** (#286): buttons without borders, grouped
+  (find, view, Tail) with thin dividers; only what's on gets a fill, and
+  Tail shows a green dot while it runs. Copy lines, bookmarks, problems,
+  Reload and Download are icons on the right, with tooltips.
 - **Find all can be resized** (#285): drag the line on top of the panel,
   or focus it and use the arrow keys. This browser remembers the height.
 
