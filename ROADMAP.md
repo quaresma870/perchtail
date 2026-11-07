@@ -9,6 +9,27 @@ Each Phase 1 milestone below is meant to become a GitHub Milestone with these
 items as issues, once the repo is up. Checkboxes here track the plan; issue
 links can be added as they're created.
 
+## Release plan to 1.0
+
+Decided after 0.6.0: one more feature release, then a 1.0 that only validates and hardens. Every release still goes through a release candidate retested in the lab first. Tracked as the GitHub milestones [0.7](https://github.com/quaresma870/perchtail/milestone/1) and [1.0](https://github.com/quaresma870/perchtail/milestone/2).
+
+**0.7 — everything that comes before 1.0**
+- Nothing from the logs is kept: remove the content index and the full-text Search page (#303); Alerts evaluate new lines live (#305).
+- Search at scale: a file-name index, on by default (#304), and one search in the explorer for sources, folders and files (#300).
+- Viewer: context menus (#287), split view with synchronized scrolling (#288), bookmark and tab shortcuts (#289), several files merged into one timeline (#250).
+- Access: user groups and grants on users (#246), temporary access (#247), masking sensitive data by role (#249).
+- Database: PostgreSQL support, SQLite staying the default (#306).
+- Operations: upgrade push agents from the portal (#319), one-click server upgrade for Docker installs, opt-in (#320), bulk credential update and credential age (#248).
+- Integrations: email, Slack and Teams notifications (#251), password reset by email (#244), audit log export and forwarding (#252), personal API tokens (#253).
+- Fix: Escape on a new source or role popup (#315, known issue in 0.6.0).
+
+**1.0 — no new features**
+- Load tests in the lab and a sizing guide, for SQLite and PostgreSQL (#277).
+- Security level 3: OWASP ZAP baseline in CI, OpenSSF Scorecard, provenance attestations; an external pentest (#124).
+- Fixes from those, documentation, and the launch (see "Community" below).
+
+**After 1.0, only if there's demand:** SAML, k3s manifests, multiple replicas for high availability (see the sections below).
+
 ## Phase 1 — MVP
 
 Order matters: auth/RBAC and the rule engine are load-bearing for everything
