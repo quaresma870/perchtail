@@ -3,6 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import { confirmAction } from '../lib/confirm'
   import type { Role } from '../lib/types'
 
   let roles: Role[] = []
@@ -31,7 +32,13 @@
   }
 
   async function remove(role: Role) {
-    if (!confirm(`Delete role "${role.name}"?`)) return
+    const ok = await confirmAction({
+      title: 'Delete role',
+      message: `Delete the role "${role.name}"? This can't be undone.`,
+      confirmLabel: 'Delete',
+      danger: true,
+    })
+    if (!ok) return
     try {
       await api.delete(`/roles/${role.id}`)
       await load()
@@ -74,14 +81,16 @@
                 {#if role.is_builtin}<span class="badge badge-muted">built-in</span>{/if}
               </td>
               <td class="caps">{role.global_capabilities.join(', ') || '—'}</td>
-              <td class="actions">
-                <button class="link" on:click={() => push(`/settings/roles/${role.id}`)}
-                  >edit</button
-                >
-                <button class="link" on:click={() => duplicate(role)}>duplicate</button>
-                {#if !role.is_builtin}
-                  <button class="link danger" on:click={() => remove(role)}>delete</button>
-                {/if}
+              <td>
+                <div class="row-actions">
+                  <button class="btn btn-ghost btn-sm" on:click={() => push(`/settings/roles/${role.id}`)}
+                    >Edit</button
+                  >
+                  <button class="btn btn-ghost btn-sm" on:click={() => duplicate(role)}>Duplicate</button>
+                  {#if !role.is_builtin}
+                    <button class="btn btn-danger btn-sm" on:click={() => remove(role)}>Delete</button>
+                  {/if}
+                </div>
               </td>
             </tr>
           {/each}
@@ -148,18 +157,6 @@
   }
   .caps {
     color: var(--text-muted);
-  }
-  button.link {
-    border: none;
-    background: none;
-    color: var(--accent-hover);
-    cursor: pointer;
-    margin-right: 0.6rem;
-    font-size: 0.85rem;
-    padding: 0;
-  }
-  button.link.danger {
-    color: var(--danger);
   }
   .error {
     color: var(--danger);

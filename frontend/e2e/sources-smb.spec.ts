@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup } from './popups'
 import { loadFixturePaths } from './fixture-paths'
 
 // Real smbd (backend/scripts/setup_e2e_test_servers.sh), not a mocked
@@ -54,10 +55,10 @@ test('SMB source: create, row-based rules (last-match-wins), browse, delete', as
   await expect(explorer.getByRole('button', { name: 'hello.log' })).toHaveCount(0)
 
   await page.goto('/#/settings/sources')
-  page.once('dialog', (dialog) => dialog.accept())
   await page
     .getByRole('row', { name: new RegExp(sourceName) })
-    .getByRole('button', { name: 'delete' })
+    .getByRole('button', { name: 'Delete' })
     .click()
+  await confirmPopup(page, 'Delete')
   await expect(page.getByRole('row', { name: new RegExp(sourceName) })).toHaveCount(0)
 })

@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { confirmPopup } from './popups'
 import { loadFixturePaths } from './fixture-paths'
 
 // A `local`-protocol source needs no credentials and reads straight off
@@ -61,11 +62,11 @@ test('full-text search: indexes a source and deep-links a hit into the viewer', 
 
   // Cleanup.
   await page.goto('/#/settings/sources')
-  page.once('dialog', (dialog) => dialog.accept())
   await page
     .getByRole('row', { name: new RegExp(sourceName) })
-    .getByRole('button', { name: 'delete' })
+    .getByRole('button', { name: 'Delete' })
     .click()
+  await confirmPopup(page, 'Delete')
   await expect(page.getByRole('row', { name: new RegExp(sourceName) })).toHaveCount(0)
 })
 

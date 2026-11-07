@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte'
+  import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
   import FolderManagerRow from '../lib/components/FolderManagerRow.svelte'
+  import Modal from '../lib/components/Modal.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import { confirmAction } from '../lib/confirm'
   import { nestFoldersFlat, nestFoldersTree } from '../lib/folder-tree'
   import type { Customer, Folder } from '../lib/types'
 
@@ -11,16 +13,16 @@
   let folders: Folder[] = []
   let loading = true
   let error = ''
-
-  let newFolderName = ''
-  let newFolderParentId: number | null = null
-  let newFolderInput: HTMLInputElement | null = null
-  let creating = false
-  let createError = ''
-
-  let renamingId: number | null = null
-  let renameValue = ''
   let errorsById: Record<number, string> = {}
+
+  // New folder, rename and move open in a popup (#301).
+  type Editing =
+    | { kind: 'create'; name: string; parentId: number | null }
+    | { kind: 'rename'; id: number; name: string }
+    | { kind: 'move'; id: number; name: string; parentId: number | null }
+  let editing: Editing | null = null
+  let saving = false
+  let editError = ''
 
   $: tree = nestFoldersTree(folders)
   $: flatOptions = nestFoldersFlat(folders)
@@ -39,9 +41,8 @@
 
   function selectCustomer(id: number) {
     selectedCustomerId = id
-    renamingId = null
     errorsById = {}
-    newFolderParentId = null
+    editing = null
     loadFolders()
   }
 
@@ -61,77 +62,76 @@
     }
   })
 
-  async function createFolder() {
-    const name = newFolderName.trim()
-    if (!name || selectedCustomerId === null) return
-    creating = true
-    createError = ''
+  const folderById = (id: number) => folders.find((f) => f.id === id)
+
+  function open(next: Editing) {
+    editError = ''
+    editing = next
+  }
+
+  // A folder can't move into itself or under one of its own subfolders (the
+  // backend refuses it too); those aren't offered.
+  function subtreeIds(id: number): Set<number> {
+    const ids = new Set<number>([id])
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const f of folders) {
+        if (f.parent_folder_id !== null && ids.has(f.parent_folder_id) && !ids.has(f.id)) {
+          ids.add(f.id)
+          grew = true
+        }
+      }
+    }
+    return ids
+  }
+  $: moveOptions =
+    editing?.kind === 'move'
+      ? flatOptions.filter((opt) => !subtreeIds((editing as { id: number }).id).has(opt.folder.id))
+      : flatOptions
+
+  async function save() {
+    if (!editing) return
+    const name = 'name' in editing ? editing.name.trim() : ''
+    if (editing.kind !== 'move' && !name) return
+    saving = true
+    editError = ''
     try {
-      const created = await api.post<Folder>('/folders', {
-        name,
-        customer_id: selectedCustomerId,
-        parent_folder_id: newFolderParentId,
-      })
-      folders = [...folders, created]
-      newFolderName = ''
-      newFolderParentId = null
+      if (editing.kind === 'create') {
+        if (selectedCustomerId === null) return
+        const created = await api.post<Folder>('/folders', {
+          name,
+          customer_id: selectedCustomerId,
+          parent_folder_id: editing.parentId,
+        })
+        folders = [...folders, created]
+      } else if (editing.kind === 'rename') {
+        const id = editing.id
+        const updated = await api.patch<Folder>(`/folders/${id}`, { name })
+        folders = folders.map((f) => (f.id === id ? updated : f))
+      } else {
+        const id = editing.id
+        const updated = await api.patch<Folder>(`/folders/${id}`, { parent_folder_id: editing.parentId })
+        folders = folders.map((f) => (f.id === id ? updated : f))
+      }
+      editing = null
     } catch (err) {
-      createError = err instanceof ApiError ? err.detail : 'Failed to create folder'
+      editError = err instanceof ApiError ? err.detail : 'Failed to save the folder'
     } finally {
-      creating = false
-    }
-  }
-
-  async function startAddChild(parentId: number) {
-    newFolderParentId = parentId
-    newFolderName = ''
-    createError = ''
-    await tick()
-    newFolderInput?.focus()
-    newFolderInput?.scrollIntoView({ block: 'nearest' })
-  }
-
-  function startRename(id: number) {
-    const folder = folders.find((f) => f.id === id)
-    if (!folder) return
-    renamingId = id
-    renameValue = folder.name
-    errorsById = { ...errorsById, [id]: '' }
-  }
-
-  function cancelRename() {
-    renamingId = null
-  }
-
-  async function submitRename(id: number) {
-    const name = renameValue.trim()
-    if (!name) return
-    try {
-      const updated = await api.patch<Folder>(`/folders/${id}`, { name })
-      folders = folders.map((f) => (f.id === id ? updated : f))
-      renamingId = null
-    } catch (err) {
-      errorsById = {
-        ...errorsById,
-        [id]: err instanceof ApiError ? err.detail : 'Failed to rename folder',
-      }
-    }
-  }
-
-  async function moveFolder(id: number, parentId: number | null) {
-    errorsById = { ...errorsById, [id]: '' }
-    try {
-      const updated = await api.patch<Folder>(`/folders/${id}`, { parent_folder_id: parentId })
-      folders = folders.map((f) => (f.id === id ? updated : f))
-    } catch (err) {
-      errorsById = {
-        ...errorsById,
-        [id]: err instanceof ApiError ? err.detail : 'Failed to move folder',
-      }
+      saving = false
     }
   }
 
   async function deleteFolder(id: number) {
+    const folder = folderById(id)
+    if (!folder) return
+    const ok = await confirmAction({
+      title: 'Delete folder',
+      message: `Delete the folder "${folder.name}"? A folder that still holds sources or subfolders can't be deleted.`,
+      confirmLabel: 'Delete',
+      danger: true,
+    })
+    if (!ok) return
     errorsById = { ...errorsById, [id]: '' }
     try {
       await api.delete(`/folders/${id}`)
@@ -143,6 +143,9 @@
       }
     }
   }
+
+  const title = (e: Editing) =>
+    e.kind === 'create' ? 'New folder' : e.kind === 'rename' ? 'Rename folder' : `Move "${e.name}"`
 </script>
 
 <SettingsNav />
@@ -150,6 +153,11 @@
 <div class="page">
   <div class="header">
     <h1>Folders</h1>
+    {#if !loading && customers.length > 0}
+      <button class="btn btn-primary" on:click={() => open({ kind: 'create', name: '', parentId: null })}
+        >+ New folder</button
+      >
+    {/if}
   </div>
 
   {#if loading}
@@ -184,44 +192,49 @@
           {#each tree as node (node.folder.id)}
             <FolderManagerRow
               {node}
-              {flatOptions}
-              {renamingId}
-              {renameValue}
               {errorsById}
-              on:startRename={(e) => startRename(e.detail.id)}
-              on:renameInput={(e) => (renameValue = e.detail.value)}
-              on:submitRename={(e) => submitRename(e.detail.id)}
-              on:cancelRename={cancelRename}
-              on:move={(e) => moveFolder(e.detail.id, e.detail.parentId)}
-              on:addChild={(e) => startAddChild(e.detail.parentId)}
+              on:rename={(e) => open({ kind: 'rename', id: e.detail.id, name: folderById(e.detail.id)?.name ?? '' })}
+              on:move={(e) => {
+                const folder = folderById(e.detail.id)
+                if (folder) open({ kind: 'move', id: folder.id, name: folder.name, parentId: folder.parent_folder_id })
+              }}
+              on:addChild={(e) => open({ kind: 'create', name: '', parentId: e.detail.parentId })}
               on:delete={(e) => deleteFolder(e.detail.id)}
             />
           {/each}
         </div>
       {/if}
-
-      <form class="add-form" on:submit|preventDefault={createFolder}>
-        <input
-          class="input"
-          type="text"
-          placeholder="New folder name"
-          bind:value={newFolderName}
-          bind:this={newFolderInput}
-        />
-        <select class="input parent-select" bind:value={newFolderParentId}>
-          <option value={null}>(top level)</option>
-          {#each flatOptions as opt (opt.folder.id)}
-            <option value={opt.folder.id}>{'—'.repeat(opt.depth)} {opt.folder.name}</option>
-          {/each}
-        </select>
-        <button class="btn btn-primary" type="submit" disabled={creating || !newFolderName.trim()}>
-          {creating ? 'Creating…' : '+ New folder'}
-        </button>
-      </form>
-      {#if createError}
-        <p class="error">{createError}</p>
-      {/if}
     </div>
+  {/if}
+
+  {#if editing}
+    <Modal title={title(editing)} on:close={() => (editing = null)}>
+      <form id="folder-form" class="modal-form" on:submit|preventDefault={save}>
+        {#if editing.kind !== 'move'}
+          <label class="field">Name <input class="input" type="text" bind:value={editing.name} required /></label>
+        {/if}
+        {#if editing.kind !== 'rename'}
+          <label class="field"
+            >{editing.kind === 'move' ? 'Move under' : 'Inside'}
+            <select class="input" bind:value={editing.parentId}>
+              <option value={null}>(top level)</option>
+              {#each moveOptions as opt (opt.folder.id)}
+                <option value={opt.folder.id}>{'—'.repeat(opt.depth)} {opt.folder.name}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
+        {#if editError}
+          <p class="error" role="alert">{editError}</p>
+        {/if}
+      </form>
+      <svelte:fragment slot="footer">
+        <button class="btn btn-ghost" type="button" on:click={() => (editing = null)}>Cancel</button>
+        <button class="btn btn-primary" type="submit" form="folder-form" disabled={saving}>
+          {saving ? 'Saving…' : editing.kind === 'create' ? 'Create folder' : editing.kind === 'move' ? 'Move' : 'Save'}
+        </button>
+      </svelte:fragment>
+    </Modal>
   {/if}
 </div>
 
@@ -255,25 +268,10 @@
   .card {
     padding: 1rem 1.25rem;
   }
-  .tree {
-    margin-bottom: 1rem;
-  }
-  .add-form {
+  .modal-form {
     display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-    padding-top: 0.75rem;
-    border-top: 1px solid var(--border-soft);
-  }
-  .add-form .input {
-    width: auto;
-    flex: 1;
-    min-width: 180px;
-  }
-  .parent-select {
-    max-width: 220px;
-    font-size: 0.85rem;
+    flex-direction: column;
+    gap: 0.7rem;
   }
   .empty {
     text-align: center;
@@ -282,6 +280,7 @@
   }
   .error {
     color: var(--danger);
+    margin: 0;
   }
   .hint {
     color: var(--text-faint);

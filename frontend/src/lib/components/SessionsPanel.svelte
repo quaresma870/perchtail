@@ -3,6 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../api'
   import { logout } from '../auth'
+  import { confirmAction } from '../confirm'
   import type { AuthSessionInfo } from '../types'
 
   let sessions: AuthSessionInfo[] = []
@@ -34,7 +35,13 @@
       push('/login')
       return
     }
-    if (!confirm('Revoke this session? That device or browser will be signed out.')) return
+    const ok = await confirmAction({
+      title: 'Revoke session',
+      message: 'Revoke this session? That device or browser will be signed out.',
+      confirmLabel: 'Revoke',
+      danger: true,
+    })
+    if (!ok) return
     revoking = { ...revoking, [s.id]: true }
     try {
       await api.delete(`/auth/sessions/${s.id}`)
@@ -77,7 +84,7 @@
             </div>
           </div>
           <button
-            class="btn btn-ghost danger"
+            class="btn btn-danger"
             disabled={revoking[s.id]}
             on:click={() => revoke(s)}
           >
@@ -136,10 +143,6 @@
   .badge-accent {
     background: var(--accent-soft);
     color: var(--accent-hover);
-  }
-  .btn-ghost.danger {
-    color: var(--danger);
-    flex: 0 0 auto;
   }
   .error {
     color: var(--danger);
