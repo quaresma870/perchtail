@@ -346,8 +346,16 @@ def post_webhook(url: str, payload: dict) -> str | None:
         return None
     except UnsafeWebhookURLError as exc:
         return f"blocked: {exc}"
+    except httpx.HTTPStatusError as exc:
+        # Never the URL: its path or query often carries the webhook's secret,
+        # and this text is logged and shown on the alert.
+        return f"HTTP {exc.response.status_code}"
+    except httpx.TimeoutException:
+        return "timed out"
     except httpx.HTTPError as exc:
-        return str(exc) or exc.__class__.__name__
+        text = str(exc)
+        name = exc.__class__.__name__
+        return name if not text or "://" in text else f"{name}: {text}"
 
 
 def _backoff(attempts: int) -> timedelta:
@@ -362,8 +370,12 @@ def deliver_due(session: Session) -> None:
         select(AlertDelivery).where(AlertDelivery.next_attempt_at <= now)
     ).all():
         alert = session.get(Alert, delivery.alert_id)
-        if alert is None:
+        owner = session.get(User, alert.user_id) if alert is not None else None
+        if alert is None or not alert.enabled or not owner_may_alert(owner):
+            # Turned off, or its owner may no longer alert: what was matched
+            # before doesn't go out any more either.
             session.delete(delivery)
+            session.commit()
             continue
         error = post_webhook(alert.webhook_url, delivery.payload)
         delivery.attempts += 1

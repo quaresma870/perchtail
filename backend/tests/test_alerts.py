@@ -426,3 +426,27 @@ def test_only_files_that_changed_size_are_read(session, tmp_path, monkeypatch):
     )
     assert _lines(check_alert(session, alert)) == ["refused"]
     assert reads == ["busy.log"]
+
+
+def test_a_queued_delivery_is_dropped_once_the_owner_may_not_alert(session, monkeypatch):
+    user = _user(session)
+    alert = _alert(session, user)
+    posted = _posts(monkeypatch)
+    queue_delivery(session, alert, [alerts.Hit(1, "src", "app.log", 0, "refused")])
+    user.active = False
+    session.add(user)
+    session.commit()
+    deliver_due(session)
+    assert posted == [] and session.exec(select(AlertDelivery)).all() == []
+
+
+def test_a_webhook_error_never_carries_the_url(monkeypatch):
+    import httpx
+
+    def fake_post(url, json, headers, extensions):
+        request = httpx.Request("POST", url)
+        response = httpx.Response(500, request=request)
+        raise httpx.HTTPStatusError("boom " + url, request=request, response=response)
+
+    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
+    assert post_webhook("https://example.com/hook?token=s3cret", {}) == "HTTP 500"
