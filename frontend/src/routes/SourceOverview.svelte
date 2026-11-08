@@ -152,11 +152,20 @@
       <div class="header-actions">
         <button
           class="btn btn-primary"
-          disabled={ruleCount === 0}
-          title={ruleCount === 0 ? 'Add an include rule first: a source with no rules shows nothing' : undefined}
+          disabled={!source.enabled || ruleCount === 0}
+          title={!source.enabled
+            ? 'This source is disabled: turn it on in its settings to browse it'
+            : ruleCount === 0
+              ? 'Add an include rule first: a source with no rules shows nothing'
+              : undefined}
           on:click={() => push(`/viewer/${sourceId}`)}>Browse</button
         >
-        <button class="btn btn-ghost" disabled={checking} on:click={testConnection}>
+        <button
+          class="btn btn-ghost"
+          disabled={checking || !source.enabled}
+          title={source.enabled ? undefined : 'This source is disabled: turn it on in its settings to test it'}
+          on:click={testConnection}
+        >
           {checking ? 'Testing…' : 'Test connection'}
         </button>
         {#if canManage}

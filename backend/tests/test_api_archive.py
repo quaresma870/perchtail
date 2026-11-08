@@ -833,3 +833,62 @@ def test_source_open_names_the_source_and_its_customer(app_client, session, fake
 
     event = session.exec(select(AuditLog).where(AuditLog.action == "source.open")).one()
     assert event.event_metadata == {"target_name": source.name, "target_context": "Acme"}
+
+
+# --- a disabled source is off ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("get", "browse?path="),
+        ("get", "open?path=app.log"),
+        ("get", "follow?path=app.log&offset=0"),
+        ("get", "download?path=app.log"),
+        ("get", "download-zip?path="),
+    ],
+)
+def test_a_disabled_source_is_not_read_whatever_the_grants(
+    session, app_client, tmp_path, method, path
+):
+    app, client = app_client
+    (tmp_path / "app.log").write_text("line\n")
+    source = _make_local_source(session, tmp_path)
+    _add_rule(session, source, 0, RuleType.include, "**")
+    source.enabled = False
+    session.add(source)
+    session.commit()
+    _make_user(session, app, is_super_admin=True)
+    response = getattr(client, method)(f"/sources/{source.id}/{path}")
+    assert response.status_code == 409
+    assert "disabled" in response.json()["detail"]
+
+
+def test_closing_a_tab_still_works_on_a_disabled_source(session, app_client, tmp_path):
+    app, client = app_client
+    source = _make_local_source(session, tmp_path)
+    source.enabled = False
+    session.add(source)
+    session.commit()
+    _make_user(session, app, is_super_admin=True)
+    response = client.post(f"/sources/{source.id}/close", json={"path": "app.log"})
+    assert response.status_code == 204
+
+
+def test_checking_a_disabled_source_does_not_contact_it(session, tmp_path, monkeypatch):
+    from app.api.sources import router as sources_router
+
+    contacted = []
+    monkeypatch.setattr(
+        "app.api.sources.source_status.check", lambda *a, **k: contacted.append(a) or []
+    )
+    app = FastAPI()
+    app.include_router(sources_router)
+    app.dependency_overrides[get_session] = lambda: session
+    source = _make_local_source(session, tmp_path)
+    source.enabled = False
+    session.add(source)
+    session.commit()
+    _make_user(session, app, is_super_admin=True)
+    response = TestClient(app).post(f"/sources/{source.id}/check")
+    assert response.status_code == 409 and contacted == []

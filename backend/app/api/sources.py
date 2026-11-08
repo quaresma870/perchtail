@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 
 from app import source_roots, source_status, system_settings
 from app.agent_registry import get_agent_registry
+from app.api.archive import SOURCE_DISABLED
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import AuditLog, Capability, GlobalCapability, ScopeType, User
@@ -784,7 +785,10 @@ def check_connection(
     Anyone with `view` can run it, so the answer is the mapped, actionable
     message (SourceError.public_message) plus the effective base path; the
     raw library error, which can carry UNC paths, host keys or internals,
-    is added only for users who can manage sources (#170)."""
+    is added only for users who can manage sources (#170). A disabled
+    source is off, so it isn't contacted (409)."""
+    if not source.enabled:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=SOURCE_DISABLED)
     connector = _CONNECTORS.get(source.protocol)
     if connector is None:
         return ConnectionCheckResult(ok=False, detail=f"protocol {source.protocol} not supported")

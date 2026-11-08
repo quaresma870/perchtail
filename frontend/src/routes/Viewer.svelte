@@ -236,7 +236,8 @@
     statusTimer = setInterval(async () => {
       if (document.hidden) return
       try {
-        allSources = await api.get<Source[]>('/sources')
+        allSources = viewable(await api.get<Source[]>('/sources'))
+        closeTabsOfHiddenSources()
       } catch {
         // the banner (server-status) says when PerchTail doesn't answer
       }
@@ -261,16 +262,23 @@
     viewerState.update((state) => ({ ...state, ...patch }))
   }
 
+  // A disabled source keeps its configuration (Settings → Sources) but is
+  // off: it isn't shown here at all, and the server refuses to read it.
+  function viewable(sources: Source[]): Source[] {
+    return sources.filter((s) => s.enabled)
+  }
+
   async function loadSources() {
     loading = true
     loadError = ''
     try {
-      allSources = await api.get<Source[]>('/sources')
+      allSources = viewable(await api.get<Source[]>('/sources'))
+      closeTabsOfHiddenSources()
     } catch {
       loadError = 'Failed to load sources'
     }
     try {
-      recentSources = await api.get<Source[]>('/sources/recent')
+      recentSources = viewable(await api.get<Source[]>('/sources/recent'))
     } catch {
       recentSources = []
     }
@@ -438,6 +446,30 @@
         activeKey === tab.key ? (remaining.length > 0 ? remaining[remaining.length - 1].key : null) : activeKey,
     })
     if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
+  }
+
+  // Tabs of a source that isn't in the list any more (disabled, deleted, or
+  // no longer granted) close, so nothing of it stays on screen. Only after
+  // a list was actually loaded: an empty list from a failed request mustn't
+  // close everything.
+  function closeTabsOfHiddenSources() {
+    const shown = new Set(allSources.map((s) => s.id))
+    const hidden = tabs.filter((t) => !shown.has(t.sourceId))
+    if (hidden.length === 0) return
+    for (const tab of hidden) {
+      followDecoders.delete(tab.key)
+      followStarted.delete(tab.key)
+      if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
+    }
+    const remaining = tabs.filter((t) => shown.has(t.sourceId))
+    setState({
+      tabs: remaining,
+      activeKey: remaining.some((t) => t.key === activeKey)
+        ? activeKey
+        : remaining.length > 0
+          ? remaining[remaining.length - 1].key
+          : null,
+    })
   }
 
   function updateActiveTab(patch: Partial<Tab>) {
