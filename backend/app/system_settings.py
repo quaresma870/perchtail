@@ -71,6 +71,9 @@ INT_DEFAULTS: dict[str, str] = {
     # Live alerts (#305, app/alerts.py): how often a pass reads what was
     # appended to the files alerts watch.
     "alerts_interval_seconds": "60",
+    # Credentials older than this are flagged in the Sources list (#248);
+    # 0 turns the warning off.
+    "credential_max_age_days": "90",
 }
 
 

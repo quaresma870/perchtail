@@ -51,6 +51,8 @@ class SystemSettingsPublic(BaseModel):
     name_index_minutes: int
     # Live alerts (#305).
     alerts_interval_seconds: int
+    # Credential age warning (#248); 0 = off.
+    credential_max_age_days: int
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -89,6 +91,7 @@ class SystemSettingsUpdate(BaseModel):
     name_index_minutes: int | None = Field(default=None, ge=5, le=1440)
     # At least 15 s (the scheduler's tick), at most an hour.
     alerts_interval_seconds: int | None = Field(default=None, ge=15, le=3600)
+    credential_max_age_days: int | None = Field(default=None, ge=0, le=3650)
 
 
 _PASSWORD_INTS = (
@@ -112,6 +115,7 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         source_check_minutes=system_settings.get_int(session, "source_check_minutes"),
         name_index_minutes=system_settings.get_int(session, "name_index_minutes"),
         alerts_interval_seconds=system_settings.get_int(session, "alerts_interval_seconds"),
+        credential_max_age_days=system_settings.get_int(session, "credential_max_age_days"),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
     )
 

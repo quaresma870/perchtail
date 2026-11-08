@@ -49,6 +49,7 @@ from app.models import (
     Source,
 )
 from app.name_index import drop_source_names, index_in_background
+from app.timeutils import utcnow
 from app.version import APP_VERSION
 from app.versions import is_newer
 
@@ -99,6 +100,8 @@ class SourcePublic(BaseModel):
     is_system: bool
     rule_count: int
     has_credential: bool
+    # When the credential was last set (#248); null if unknown or none.
+    credential_updated_at: datetime | None = None
     has_agent_token: bool
     agent_connected: bool
     agent_last_seen_at: datetime | None
@@ -246,6 +249,7 @@ def _to_public(
         is_system=source.is_system,
         rule_count=rule_count,
         has_credential=source.credential_ref is not None,
+        credential_updated_at=source.credential_updated_at,
         has_agent_token=source.agent_token_hash is not None,
         agent_connected=(
             source.protocol == Protocol.agent and get_agent_registry().is_connected(source.id)
@@ -556,6 +560,7 @@ def create_source(
         tls_ca_pem=_validate_ca_pem(payload.protocol, payload.tls_ca_pem),
         enabled=payload.enabled,
         credential_ref=encrypt_credential(payload.credential) if payload.credential else None,
+        credential_updated_at=utcnow() if payload.credential else None,
         name_index_enabled=payload.name_index_enabled,
     )
     session.add(source)
@@ -658,6 +663,7 @@ def update_source(
         disconnect_after_commit(session, source.id, "source disabled")
     if payload.credential is not None:
         source.credential_ref = encrypt_credential(payload.credential)
+        source.credential_updated_at = utcnow()
     if payload.name_index_enabled is not None:
         source.name_index_enabled = payload.name_index_enabled
     after = {
@@ -1050,3 +1056,102 @@ def pick_folder(
         entries=entries[:_PICKER_MAX_ENTRIES],
         truncated=len(entries) > _PICKER_MAX_ENTRIES,
     )
+
+
+# --- Bulk credential update (#248) ----------------------------------------
+
+_CREDENTIAL_PROTOCOLS = (Protocol.ssh, Protocol.smb, Protocol.winrm)
+_MAX_BULK_SOURCES = 200
+
+
+class BulkCredentialRequest(BaseModel):
+    source_ids: list[int] = Field(min_length=1, max_length=_MAX_BULK_SOURCES)
+    credential: dict
+    # Test the new credential against each source first and update only the
+    # ones where it works.
+    test_first: bool = True
+
+
+class BulkCredentialResult(BaseModel):
+    source_id: int
+    name: str | None
+    status: Literal["updated", "failed", "skipped"]
+    detail: str | None = None
+
+
+@router.post("/credentials", response_model=list[BulkCredentialResult])
+def update_credentials(
+    payload: BulkCredentialRequest,
+    user: User = Depends(require_manage),
+    session: Session = Depends(get_session),
+):
+    """Sets one new credential on many sources at once (#248) -- e.g. a
+    service account's new password. Each source still stores its own
+    encrypted copy; nothing is shared between them. With test_first, a
+    source is only updated if the new credential reaches it. Audited per
+    source, without the secret."""
+    credential = {k: v for k, v in payload.credential.items() if v}
+    if set(credential) - {"username", "password", "private_key"} or not credential.get("username"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A credential is a username plus a password or a private_key",
+        )
+    if not (credential.get("password") or credential.get("private_key")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A credential needs a password or a private_key",
+        )
+    results: list[BulkCredentialResult] = []
+    for source_id in dict.fromkeys(payload.source_ids):
+        source = session.get(Source, source_id)
+        if source is None:
+            results.append(
+                BulkCredentialResult(
+                    source_id=source_id, name=None, status="skipped", detail="Not found"
+                )
+            )
+            continue
+        if source.is_system or source.protocol not in _CREDENTIAL_PROTOCOLS:
+            results.append(
+                BulkCredentialResult(
+                    source_id=source_id,
+                    name=source.name,
+                    status="skipped",
+                    detail="This source doesn't use a credential",
+                )
+            )
+            continue
+        encrypted = encrypt_credential(credential)
+        if payload.test_first:
+            trial = source_roots.with_base_path(source, source.base_path)
+            trial.roots = source.roots
+            trial.credential_ref = encrypted
+            connector = _CONNECTORS.get(source.protocol)
+            failures = source_status.check(trial, connector) if connector else []
+            reaching = [exc for _root, exc in failures if source_status.is_connectivity_error(exc)]
+            if reaching:
+                results.append(
+                    BulkCredentialResult(
+                        source_id=source_id,
+                        name=source.name,
+                        status="failed",
+                        detail=source_status.failure_message(reaching[0]),
+                    )
+                )
+                continue
+        source.credential_ref = encrypted
+        source.credential_updated_at = utcnow()
+        session.add(source)
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="source.credential_update",
+            target_type="source",
+            target_id=source.id,
+            metadata={"via": "bulk", "tested": payload.test_first},
+        )
+        results.append(
+            BulkCredentialResult(source_id=source_id, name=source.name, status="updated")
+        )
+    session.commit()
+    return results
