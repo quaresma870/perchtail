@@ -14,6 +14,28 @@ import { expect, test } from '@playwright/test'
 // reuseExistingServer setting explicitly supports.
 const marker = Date.now()
 
+type Page = import('@playwright/test').Page
+
+// Each filter is a dropdown in its own group, named by the group's label
+// ("Action", "Source", "System settings"...), with a search box on top.
+function filterGroup(page: Page, label: string) {
+  return page
+    .locator('.filter-group')
+    .filter({ has: page.locator('.filter-label', { hasText: new RegExp(`^${label}$`) }) })
+}
+
+async function pick(page: Page, group: string, option: string) {
+  const toggle = filterGroup(page, group).locator('.dropdown-toggle')
+  await toggle.click()
+  await filterGroup(page, group).locator('.dropdown-panel').getByLabel(option, { exact: true }).check()
+  await page.keyboard.press('Escape')
+  await expect(toggle).toContainText(option)
+}
+
+async function pickAction(page: Page, action: string) {
+  await pick(page, 'Action', action)
+}
+
 test('audit log: retention control writes a system_settings.update entry, filter by type finds it', async ({
   page,
 }) => {
@@ -27,11 +49,10 @@ test('audit log: retention control writes a system_settings.update entry, filter
 
   await page.goto('/#/settings/audit-log')
 
-  // "Type" is a chip-style checkbox list built from whatever target_types
-  // are actually in the table (see backend/app/api/audit.py's GET
-  // /audit/filters) -- "system_settings" is guaranteed present since the
+  // One dropdown per target type in the table (see backend/app/api/audit.py's
+  // GET /audit/filters) -- "System settings" is guaranteed present since the
   // retention save above just wrote one.
-  await page.locator('.chip', { hasText: 'system_settings' }).click()
+  await pick(page, 'System settings', 'Every system settings')
 
   const row = page.locator('tbody tr', { hasText: String(marker) })
   await expect(row).toBeVisible()
@@ -46,14 +67,13 @@ test('audit log: retention control writes a system_settings.update entry, filter
   await expect(page.locator('.retention-input')).toHaveValue(originalValue)
 })
 
-test('audit log: action multi-select and date-range filters narrow the table', async ({
+test('audit log: action dropdown and date-range filters narrow the table', async ({
   page,
 }) => {
   await page.goto('/#/settings/audit-log')
 
-  const actionSelect = page.locator('.action-select')
-  await expect(actionSelect).toBeVisible()
-  await actionSelect.selectOption('system_settings.update')
+  // The action filter is a dropdown with a checkbox per action.
+  await pickAction(page, 'system_settings.update')
   await expect(page.locator('tbody tr').first()).toBeVisible()
   await expect(
     page.locator('tbody tr td:nth-child(3)').first(),
@@ -89,7 +109,7 @@ test('audit log: opening a source names it in the Target column (#239)', async (
   await page.locator('.explorer').getByRole('button', { name: 'PerchTail application logs' }).click()
 
   await page.goto('/#/settings/audit-log')
-  await page.locator('.action-select').selectOption('source.open')
+  await pickAction(page, 'source.open')
   const target = page.locator('tbody tr td.target').first()
   await expect(target).toContainText('PerchTail application logs')
   await expect(target).toContainText('system')

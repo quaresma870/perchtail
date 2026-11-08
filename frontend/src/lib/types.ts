@@ -306,6 +306,8 @@ export interface AuditLogPage {
 export interface AuditLogFilterOptions {
   actions: string[]
   target_types: string[]
+  /** Per named target type, the targets in the log (newest first). */
+  targets: Record<string, { id: number; name: string }[]>
 }
 
 export interface AuditIntegrityStatus {

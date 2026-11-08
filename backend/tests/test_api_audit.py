@@ -460,3 +460,83 @@ def test_a_page_of_entries_is_named_in_a_few_queries(session, client_for):
 
     assert {item["target_context"] for item in items} == {"Vodacom / level0 / level1 / level2"}
     assert len(statements) < 15, statements
+
+
+# --- sorting (#358) -----------------------------------------------------------
+
+
+def test_sorting_by_action_covers_every_entry_not_just_the_page(session, client_for):
+    user = _make_user(session, is_super_admin=True)
+    for action in ("source.update", "folder.create", "user.login", "rule.create"):
+        _seed(session, user.id, count=1, action=action)
+    client = client_for(user)
+
+    first = client.get("/audit", params={"sort": "action", "order": "asc", "limit": 2}).json()
+    second = client.get(
+        "/audit", params={"sort": "action", "order": "asc", "limit": 2, "offset": 2}
+    ).json()
+    actions = [item["action"] for item in first["items"] + second["items"]]
+    assert actions == ["folder.create", "rule.create", "source.update", "user.login"]
+    descending = client.get("/audit", params={"sort": "action", "order": "desc"}).json()
+    assert [item["action"] for item in descending["items"]] == list(reversed(actions))
+
+
+def test_sorting_by_user_and_the_default_newest_first(session, client_for):
+    zed = _make_user(session, is_super_admin=True)
+    zed.username = "zed"
+    amy = _make_user(session, is_super_admin=True)
+    amy.username = "amy"
+    session.add_all([zed, amy])
+    session.commit()
+    _seed(session, zed.id, count=1, action="source.create")
+    _seed(session, amy.id, count=1, action="source.update")
+    client = client_for(zed)
+
+    by_user = client.get("/audit", params={"sort": "user", "order": "asc"}).json()["items"]
+    assert [item["action"] for item in by_user] == ["source.update", "source.create"]
+    newest = client.get("/audit").json()["items"]
+    assert newest[0]["timestamp"] >= newest[-1]["timestamp"]
+
+
+def test_an_unknown_sort_is_refused(session, client_for):
+    user = _make_user(session, is_super_admin=True)
+    client = client_for(user)
+    assert client.get("/audit", params={"sort": "details"}).status_code == 422
+    assert client.get("/audit", params={"order": "sideways"}).status_code == 422
+
+
+# --- filtering by single targets (#358) ---------------------------------------
+
+
+def test_filtering_by_single_targets_and_whole_types(session, client_for):
+    user = _make_user(session, is_super_admin=True)
+    _seed(session, user.id, count=3, action="source.update", target_type="source")
+    _seed(session, user.id, count=2, action="role.update", target_type="role")
+    client = client_for(user)
+
+    one = client.get("/audit", params={"target": "source:1"}).json()
+    assert [(i["target_type"], i["target_id"]) for i in one["items"]] == [("source", 1)]
+    mixed = client.get("/audit", params={"target": ["source:2"], "target_type": ["role"]}).json()
+    assert sorted((i["target_type"], i["target_id"]) for i in mixed["items"]) == [
+        ("role", 0),
+        ("role", 1),
+        ("source", 2),
+    ]
+    assert client.get("/audit", params={"target": "source:x"}).status_code == 422
+
+
+def test_filter_options_list_each_types_targets_with_a_name(session, client_for):
+    user = _make_user(session, is_super_admin=True)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="source.delete",
+        target_type="source",
+        target_id=999,
+        metadata={"target_name": "gone-source"},
+    )
+    session.commit()
+    _seed(session, user.id, count=1, action="role.update", target_type="role")
+    body = client_for(user).get("/audit/filters").json()
+    assert {"id": 999, "name": "gone-source"} in body["targets"]["source"]
+    assert [t["id"] for t in body["targets"]["role"]] == [0]

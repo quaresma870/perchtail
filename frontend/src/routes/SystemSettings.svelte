@@ -303,48 +303,9 @@
       <p class="error">{error}</p>
     {/if}
 
-    <div class="card">
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">Search</div>
-          <p class="hint">
-            Full-text search across indexed sources. Turning this off hides the Search nav entry
-            and page for everyone — it doesn't stop or clear background indexing on its own, so
-            re-enabling it later picks back up where the index already is.
-          </p>
-        </div>
-        <label class="switch">
-          <input
-            type="checkbox"
-            checked={searchViewEnabled}
-            disabled={saving}
-            on:change={toggleSearchView}
-          />
-          <span class="switch-track"></span>
-        </label>
-      </div>
-
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">Audit log</div>
-          <p class="hint">
-            The audit log page under Settings, listing logins and every source/rule/role/user/
-            customer/folder/SSO/system-settings change. Turning this off hides the page and
-            redirects away from it for every user — it doesn't stop new events from being
-            recorded, so re-enabling it later shows the full history again.
-          </p>
-        </div>
-        <label class="switch">
-          <input
-            type="checkbox"
-            checked={auditViewEnabled}
-            disabled={saving}
-            on:change={toggleAuditView}
-          />
-          <span class="switch-track"></span>
-        </label>
-      </div>
-
+    <div class="grid">
+    <section class="card">
+      <h2 class="section-title">Explorer</h2>
       <div class="setting-row">
         <div>
           <div class="setting-name">Connections view</div>
@@ -461,7 +422,42 @@
           {/each}
         </select>
       </div>
+    </section>
 
+    <div class="card">
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Monitoring</div>
+          <p class="hint">
+            Bearer token for external monitoring (Zabbix, Prometheus, etc.) to poll
+            <code>GET /monitoring/health</code> — separate from user login, since a monitoring
+            system can't do an interactive session. The token is shown once, right after it's
+            generated; regenerating it invalidates whatever token was issued before.
+          </p>
+        </div>
+        {#if monitoringTokenError}
+          <p class="error">{monitoringTokenError}</p>
+        {/if}
+        <button
+          type="button"
+          class="btn btn-ghost"
+          on:click={generateMonitoringToken}
+          disabled={generatingMonitoringToken}
+        >
+          {generatingMonitoringToken
+            ? 'Generating…'
+            : monitoringConfigured
+              ? 'Regenerate token'
+              : 'Generate token'}
+        </button>
+        {#if monitoringToken}
+          <code class="token-box">{monitoringToken}</code>
+        {/if}
+      </div>
+    </div>
+
+    <section class="card">
+      <h2 class="section-title">Sources</h2>
       <div class="setting-row column">
         <div>
           <div class="setting-name">Check sources in the background</div>
@@ -548,37 +544,6 @@
 
       <div class="setting-row column">
         <div>
-          <div class="setting-name">Audit log retention</div>)
-          <p class="hint">
-            Entries older than this are purged automatically on a daily sweep. 0 keeps every entry
-            forever.
-          </p>
-        </div>
-        {#if retentionError}
-          <p class="error">{retentionError}</p>
-        {/if}
-        <div class="retention-row">
-          <input
-            class="input retention-input"
-            type="number"
-            min="0"
-            step="1"
-            bind:value={retentionInput}
-          />
-          <span class="hint">days</span>
-          <button
-            type="button"
-            class="btn btn-ghost"
-            on:click={saveRetention}
-            disabled={retentionSaving || Number(retentionInput) === auditRetentionDays}
-          >
-            {retentionSaving ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-      </div>
-
-      <div class="setting-row column">
-        <div>
           <div class="setting-name">Folders per source</div>
           <p class="hint">
             How many folders one source may read. 1 turns several folders per source off. At most
@@ -609,7 +574,86 @@
           </button>
         </div>
       </div>
-    </div>
+    </section>
+
+    {#if $currentUser?.is_super_admin}
+      <UpdatesCard />
+    {/if}
+
+    <section class="card">
+      <h2 class="section-title">Search and audit log</h2>
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Search</div>
+          <p class="hint">
+            Full-text search across indexed sources. Turning this off hides the Search nav entry
+            and page for everyone — it doesn't stop or clear background indexing on its own, so
+            re-enabling it later picks back up where the index already is.
+          </p>
+        </div>
+        <label class="switch">
+          <input
+            type="checkbox"
+            checked={searchViewEnabled}
+            disabled={saving}
+            on:change={toggleSearchView}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Audit log</div>
+          <p class="hint">
+            The audit log page under Settings, listing logins and every source/rule/role/user/
+            customer/folder/SSO/system-settings change. Turning this off hides the page and
+            redirects away from it for every user — it doesn't stop new events from being
+            recorded, so re-enabling it later shows the full history again.
+          </p>
+        </div>
+        <label class="switch">
+          <input
+            type="checkbox"
+            checked={auditViewEnabled}
+            disabled={saving}
+            on:change={toggleAuditView}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Audit log retention</div>
+          <p class="hint">
+            Entries older than this are purged automatically on a daily sweep. 0 keeps every entry
+            forever.
+          </p>
+        </div>
+        {#if retentionError}
+          <p class="error">{retentionError}</p>
+        {/if}
+        <div class="retention-row">
+          <input
+            class="input retention-input"
+            type="number"
+            min="0"
+            step="1"
+            bind:value={retentionInput}
+          />
+          <span class="hint">days</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={saveRetention}
+            disabled={retentionSaving || Number(retentionInput) === auditRetentionDays}
+          >
+            {retentionSaving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </section>
 
     {#if policyDraft}
       <div class="card">
@@ -695,49 +739,13 @@
         </div>
       </div>
     {/if}
-
-    <div class="card">
-      <div class="setting-row column">
-        <div>
-          <div class="setting-name">Monitoring</div>
-          <p class="hint">
-            Bearer token for external monitoring (Zabbix, Prometheus, etc.) to poll
-            <code>GET /monitoring/health</code> — separate from user login, since a monitoring
-            system can't do an interactive session. The token is shown once, right after it's
-            generated; regenerating it invalidates whatever token was issued before.
-          </p>
-        </div>
-        {#if monitoringTokenError}
-          <p class="error">{monitoringTokenError}</p>
-        {/if}
-        <button
-          type="button"
-          class="btn btn-ghost"
-          on:click={generateMonitoringToken}
-          disabled={generatingMonitoringToken}
-        >
-          {generatingMonitoringToken
-            ? 'Generating…'
-            : monitoringConfigured
-              ? 'Regenerate token'
-              : 'Generate token'}
-        </button>
-        {#if monitoringToken}
-          <code class="token-box">{monitoringToken}</code>
-        {/if}
-      </div>
     </div>
-
-    {#if $currentUser?.is_super_admin}
-      <UpdatesCard />
-    {/if}
   {/if}
 </div>
 
 <style>
   .page {
     padding: 1.75rem 2rem;
-    max-width: 640px;
     display: flex;
     flex-direction: column;
     gap: 1.1rem;
@@ -756,6 +764,24 @@
   .card {
     display: flex;
     flex-direction: column;
+  }
+  /* Settings are grouped in cards that fill the page width (#357): two or
+     three columns on a wide screen, one on a narrow one. */
+  .grid {
+    columns: 3 420px;
+    column-gap: 1.1rem;
+  }
+  .grid > :global(*) {
+    break-inside: avoid;
+    margin-bottom: 1.1rem;
+  }
+  .section-title {
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin: 0.9rem 1.1rem 0.2rem;
   }
   .setting-row {
     display: flex;

@@ -47,6 +47,16 @@ test('folders: create nested folders, rename, move, delete-protection, then dele
   await expect(folderRow(page, 'Prod')).toBeVisible()
   await expect(folderRow(page, 'Production')).toHaveCount(0)
 
+  // Drag and drop (#355): the source onto a folder, then back to the top
+  // level; the move goes through the API, so it survives a reload.
+  const sourceRow = page.locator('.row.source, .loose-source').filter({ hasText: sourceName })
+  await sourceRow.dragTo(folderRow(page, 'EU'))
+  await page.reload()
+  await page.locator('#customer-select').selectOption({ label: customerName })
+  await expect(page.locator('.row.source').filter({ hasText: sourceName })).toBeVisible()
+  await page.locator('.row.source').filter({ hasText: sourceName }).dragTo(page.locator('.top-level'))
+  await expect(page.locator('.loose-source').filter({ hasText: sourceName })).toBeVisible()
+
   // Delete-protection: a folder with a child folder can't be deleted.
   await folderRow(page, 'EU').getByRole('button', { name: 'Delete' }).click()
   await confirmPopup(page, 'Delete')
