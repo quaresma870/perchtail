@@ -3,6 +3,7 @@ import importlib
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -13,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app import name_index, source_status
 from app.agent_registry import get_agent_registry
 from app.alerts import run_alert_pass
 from app.api.agent_ws import router as agent_ws_router
@@ -55,6 +57,8 @@ from app.data_layout import leftover_legacy_database
 from app.data_layout import report as report_data_layout
 from app.db import engine, init_db
 from app.health import mark_started
+from app.jobs import register as register_job
+from app.jobs import shutdown as shutdown_background_work
 from app.logging_config import configure_logging, get_logger
 from app.name_index import run_name_index_sweep
 from app.scheduler import scheduler
@@ -255,40 +259,80 @@ async def lifespan(app: FastAPI):
         backfill_sso_user_issuers(session)
 
     store = get_scratch_store()
-    scheduler.add_job(
+    # Nothing in scratch can be in use yet: whatever is there was left by a
+    # crash or a killed container (#329).
+    db_file = settings.database_url.removeprefix("sqlite:///")
+    store.clear_leftovers(
+        protected=[Path(settings.data_dir), Path(settings.log_dir), Path(db_file).parent]
+    )
+    sweep = timedelta(seconds=settings.scratch_sweep_interval_seconds)
+    register_job(
+        scheduler,
+        "scratch_idle_sweep",
+        "Scratch idle sweep",
         store.sweep_idle,
-        "interval",
-        seconds=settings.scratch_sweep_interval_seconds,
+        sweep,
         kwargs={"idle_seconds": settings.scratch_idle_seconds},
     )
-    scheduler.add_job(
-        store.enforce_size_guard,
-        "interval",
-        seconds=settings.scratch_sweep_interval_seconds,
+    register_job(
+        scheduler, "scratch_size_guard", "Scratch size guard", store.enforce_size_guard, sweep
     )
     # Live alerts (#305): ticks every 15 s and runs a pass once the interval
     # set in Settings -> System has gone by.
-    scheduler.add_job(run_alert_pass, "interval", seconds=15, max_instances=1)
-    scheduler.add_job(
-        run_audit_purge_sweep,
-        "interval",
-        seconds=settings.audit_purge_interval_seconds,
-    )
-    scheduler.add_job(run_session_purge_sweep, "interval", hours=1)
-    scheduler.add_job(run_update_check, "interval", hours=1)
+    register_job(scheduler, "alert_pass", "Live alerts", run_alert_pass, timedelta(seconds=15))
     # File-name index (#304): every minute it lists whatever sources are due.
-    scheduler.add_job(run_name_index_sweep, "interval", minutes=1, max_instances=1)
+    register_job(
+        scheduler, "name_index_sweep", "File-name index", run_name_index_sweep, timedelta(minutes=1)
+    )
     # Background source check (#276): every minute it checks whatever is due.
-    scheduler.add_job(run_source_checks, "interval", minutes=1, max_instances=1)
-    scheduler.add_job(
+    register_job(
+        scheduler, "source_checks", "Source checks", run_source_checks, timedelta(minutes=1)
+    )
+    # The long-interval jobs catch up after a restart (#327): with a fresh
+    # interval on every start, a container restarted more often than the
+    # interval never ran them.
+    register_job(
+        scheduler,
+        "audit_purge",
+        "Audit log purge",
+        run_audit_purge_sweep,
+        timedelta(seconds=settings.audit_purge_interval_seconds),
+        catch_up=True,
+    )
+    register_job(
+        scheduler,
+        "session_purge",
+        "Expired session purge",
+        run_session_purge_sweep,
+        timedelta(hours=1),
+        catch_up=True,
+    )
+    register_job(
+        scheduler,
+        "update_check",
+        "Update check",
+        run_update_check,
+        timedelta(hours=1),
+        catch_up=True,
+    )
+    register_job(
+        scheduler,
+        "audit_integrity_check",
+        "Audit log integrity check",
         run_audit_integrity_check,
-        "interval",
-        days=settings.audit_integrity_check_interval_days,
+        timedelta(days=settings.audit_integrity_check_interval_days),
+        catch_up=True,
     )
     scheduler.start()
     logger.info("startup.complete")
     yield
-    scheduler.shutdown(wait=False)
+    # Let running jobs and pool work finish, within a limit (#335).
+    await asyncio.to_thread(
+        shutdown_background_work,
+        scheduler,
+        [name_index.pool(), source_status.pool()],
+        settings.shutdown_timeout_seconds,
+    )
 
 
 app = FastAPI(title="PerchTail", version=APP_VERSION, lifespan=lifespan)

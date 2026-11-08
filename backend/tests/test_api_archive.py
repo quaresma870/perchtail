@@ -46,11 +46,21 @@ class FakeSFTPClient:
         pass
 
 
+class FakeChannel:
+    timeout = None
+
+    def settimeout(self, seconds):
+        self.timeout = seconds
+
+
 class FakeSSHClient:
     def __init__(self, sftp: FakeSFTPClient):
         self._sftp = sftp
 
     def open_sftp(self):
+        if not hasattr(self._sftp, "get_channel"):
+            channel = FakeChannel()
+            self._sftp.get_channel = lambda: channel
         return self._sftp
 
     def close(self):

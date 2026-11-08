@@ -67,12 +67,22 @@ class FakeSFTPClient:
         self.closed = True
 
 
+class FakeChannel:
+    timeout = None
+
+    def settimeout(self, seconds):
+        self.timeout = seconds
+
+
 class FakeSSHClient:
     def __init__(self, sftp: FakeSFTPClient):
         self._sftp = sftp
         self.closed = False
 
     def open_sftp(self):
+        if not hasattr(self._sftp, "get_channel"):
+            channel = FakeChannel()
+            self._sftp.get_channel = lambda: channel
         return self._sftp
 
     def close(self):
@@ -127,6 +137,12 @@ class FakeParamikoClient:
     def save_host_keys(self, path):
         self.saved_to.append(path)
 
+    def get_transport(self):
+        if not hasattr(self, "transport"):
+            self.transport = SimpleNamespace(keepalive=None)
+            self.transport.set_keepalive = lambda s: setattr(self.transport, "keepalive", s)
+        return self.transport
+
     def close(self):
         pass
 
@@ -143,7 +159,9 @@ def _patch_ssh_infra(monkeypatch, tmp_path, *, connect_raises=None, policy="tofu
         ssh_module,
         "get_settings",
         lambda: SimpleNamespace(
-            ssh_known_hosts_path=str(tmp_path / "known_hosts"), ssh_host_key_policy=policy
+            ssh_known_hosts_path=str(tmp_path / "known_hosts"),
+            ssh_host_key_policy=policy,
+            remote_read_timeout_seconds=60,
         ),
     )
     created: list[FakeParamikoClient] = []
@@ -210,7 +228,11 @@ def test_connect_creates_the_known_hosts_parent_directory(monkeypatch, tmp_path)
     monkeypatch.setattr(
         ssh_module,
         "get_settings",
-        lambda: SimpleNamespace(ssh_known_hosts_path=str(nested), ssh_host_key_policy="tofu"),
+        lambda: SimpleNamespace(
+            ssh_known_hosts_path=str(nested),
+            ssh_host_key_policy="tofu",
+            remote_read_timeout_seconds=60,
+        ),
     )
     monkeypatch.setattr(ssh_module.paramiko, "SSHClient", FakeParamikoClient)
 
@@ -502,3 +524,23 @@ def test_read_range_refuses_a_link_out_of_the_base(monkeypatch):
     monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
     with pytest.raises(ssh_module.PathOutsideBaseError):
         ssh_module.read_range(_source(), "app.log", 0, 10)
+
+
+def test_connect_sets_read_deadlines_and_keepalive(monkeypatch, tmp_path):
+    """#343: a server that stalls after login can't block a thread forever."""
+    created = _patch_ssh_infra(monkeypatch, tmp_path)
+    ssh_module._connect(_source())
+    kwargs = created[0].connect_calls[0][2]
+    assert kwargs["banner_timeout"] == kwargs["auth_timeout"] == 60
+    assert kwargs["channel_timeout"] == 60
+    assert created[0].transport.keepalive == ssh_module.KEEPALIVE_SECONDS
+
+
+def test_sftp_reads_have_a_timeout(monkeypatch):
+    monkeypatch.setattr(
+        ssh_module, "get_settings", lambda: SimpleNamespace(remote_read_timeout_seconds=42)
+    )
+    sftp = FakeSFTPClient(listing=[FakeAttr("app.log", False, 10)])
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+    ssh_module.list_directory(_source(), [_rule(1, RuleType.include, "**/*.log")])
+    assert sftp.get_channel().timeout == 42

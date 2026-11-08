@@ -249,3 +249,31 @@ def test_health_reports_logs_and_size_limit_pressure(admin_client, tmp_path, mon
     body = logs()
     assert body["size_limit_deleted_early"] is True
     assert body["size_limit_newest_deleted_day"] == "2026-10-30"
+
+
+def test_health_shows_each_jobs_last_run(session, admin_client):
+    """#327: a job that fails, or never ran, shows in the health report."""
+    from app.models import JobRun
+
+    session.add(
+        JobRun(
+            job_id="job",
+            last_started_at=datetime(2026, 1, 1, 12, 0),
+            last_finished_at=datetime(2026, 1, 1, 12, 1),
+            last_ok=False,
+            last_error="RuntimeError: boom",
+            last_duration_ms=60000,
+        )
+    )
+    session.commit()
+
+    token = admin_client.post("/monitoring/token").json()["token"]
+    body = admin_client.get(
+        "/monitoring/health", headers={"Authorization": f"Bearer {token}"}
+    ).json()
+    (job,) = body["scheduler"]["jobs"]
+    assert job["id"] == "job"
+    assert job["last_ok"] is False
+    assert job["last_error"] == "RuntimeError: boom"
+    assert job["last_finished_at"] == "2026-01-01T12:01:00"
+    assert job["last_success_at"] is None

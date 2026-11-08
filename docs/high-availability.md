@@ -2,7 +2,7 @@
 
 **Where PerchTail stands today: single-instance by design, not by oversight.**
 SQLite (with a raw FTS5 virtual table for the file-name index), an in-process
-APScheduler running five background jobs, and in-memory state for
+APScheduler running nine background jobs, and in-memory state for
 login-throttle lockouts and live push-agent WebSocket connections are all
 deliberate choices for a self-hosted, single-deployment tool (see CLAUDE.md's
 tech-stack rationale). None of that is safe to run as multiple simultaneous
@@ -73,6 +73,7 @@ spec:
       labels:
         app: perchtail
     spec:
+      terminationGracePeriodSeconds: 30 # above SHUTDOWN_TIMEOUT_SECONDS (20)
       containers:
         - name: perchtail
           image: ghcr.io/quaresma870/perchtail:latest # pin a real tag in production
@@ -149,6 +150,8 @@ Nothing here requires an application change. This is the recommended
 default for most self-hosted deployments, including a product organization
 running PerchTail as an internal tool.
 
+**Stop grace period.** On shutdown PerchTail stops starting background jobs and gives the running ones (an audit purge, an alert pass, a file-name index pass, source checks) up to `SHUTDOWN_TIMEOUT_SECONDS` (20 by default) to finish before it exits. The orchestrator must wait longer than that before it kills the container, or a rollout still cuts that work off mid-run: Docker's default is 10 seconds, so `docker-compose.yml` sets `stop_grace_period: 30s`; Kubernetes waits `terminationGracePeriodSeconds` (30 by default, set explicitly above). Raise both together if you raise `SHUTDOWN_TIMEOUT_SECONDS`.
+
 ## Solution 1: active-passive (warm standby)
 
 **Load balancing type: failover only — the standby pod never receives live
@@ -212,9 +215,10 @@ Four independent pieces of work:
    lockout counters into Postgres or Redis so every replica sees the same
    state.
 3. **Split into a stateless web tier and a dedicated single-replica worker
-   tier.** The five APScheduler jobs wired up in `app/main.py`'s lifespan
-   (scratch idle-sweep, scratch size-guard, live alerts, audit purge,
-   audit integrity check) currently run in-process, once per pod — with
+   tier.** The nine APScheduler jobs wired up in `app/main.py`'s lifespan
+   (scratch idle-sweep, scratch size-guard, live alerts, file-name index,
+   source checks, audit purge, audit integrity check, session purge, update
+   check) currently run in-process, once per pod — with
    `replicas: N`, that's N independent, uncoordinated copies of each job
    racing against the same database. The standard fix: `replicas: N` web
    pods that serve HTTP only, plus one dedicated `replicas: 1` worker pod

@@ -13,13 +13,23 @@ server so every user sees the same thing.
   every second doesn't write every second.
 - `run_source_checks` is the APScheduler job: every minute it checks the
   sources whose status is older than the System interval (10 minutes by
-  default, 0 = off), stalest first, one at a time. Push-agent sources are
+  default, 0 = off), stalest first, WORKERS at a time (#343). A check that
+  runs past check_deadline() is given up on and counts as failing, so one
+  stalled source only holds its own worker. Push-agent sources are
   skipped: their status is the live connection.
+- After FAILURES_BEFORE_BACKOFF failed background checks in a row, a
+  source's background checks (and its file-name index passes) back off for
+  a growing, jittered time capped at BACKOFF_CAP; it stays "failing" until
+  any operation on it works. Kept on the source row, so a restart doesn't
+  reset it. Browsing it is never blocked by this.
 
 Only the public message (SourceError.public_message) is stored; the raw
 error stays in the server log, as for the source page's "Check"."""
 
+import random
 import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, wait
 from datetime import timedelta
 
 from sqlmodel import Session, col, select
@@ -32,9 +42,11 @@ from app.collectors.base import (
     SourceTLSError,
     SourceUnreachableError,
 )
+from app.config import get_settings
 from app.logging_config import get_logger
 from app.models import Protocol, Source
 from app.timeutils import utcnow
+from app.worker_pool import DrainablePool
 
 logger = get_logger(__name__)
 
@@ -49,6 +61,17 @@ _MAX_MESSAGE = 300
 # results don't each hit the database.
 _last_written: dict[int, tuple[str, str | None, object]] = {}
 _lock = threading.Lock()
+# Background checks run at once; the pool outlives each pass and is drained
+# at shutdown (app/jobs.py).
+WORKERS = 4
+FAILURES_BEFORE_BACKOFF = 3
+BACKOFF_CAP = timedelta(minutes=30)
+TIMED_OUT = "The source didn't answer in time"
+_pool = DrainablePool(WORKERS, "source-check")
+_pass_lock = threading.Lock()
+# Sources whose check is still running, possibly past its deadline, so a
+# stalled one isn't handed another worker by the next pass.
+_in_flight: set[int] = set()
 # Off in the test suite (tests/conftest.py), which doesn't point app.db.engine
 # at its database; the tests of this module turn it back on.
 ENABLED = True
@@ -90,6 +113,9 @@ def record(source_id: int | None, ok: bool, message: str | None = None) -> None:
             source.status = status
             source.status_message = message
             source.status_checked_at = now
+            if ok:  # any success ends a backoff
+                source.check_failures = 0
+                source.check_backoff_until = None
             session.add(source)
             session.commit()
     except Exception as exc:  # noqa: BLE001 - status is best-effort
@@ -133,9 +159,102 @@ def check_interval(session: Session) -> timedelta | None:
     return timedelta(minutes=minutes) if minutes > 0 else None
 
 
+def check_deadline() -> float:
+    """Seconds a background check may take before it's given up on: a
+    connect plus a stalled read, with room to spare."""
+    return get_settings().remote_read_timeout_seconds * 2 + 10
+
+
+def backoff_delay(failures: int, interval: timedelta) -> timedelta:
+    """Doubles from twice the check interval with each failure past the
+    threshold, capped, minus up to a quarter as jitter so sources that
+    failed together don't come back together."""
+    steps = max(failures - FAILURES_BEFORE_BACKOFF, 0)
+    delay = min(interval * 2 ** (steps + 1), BACKOFF_CAP)
+    return delay * random.uniform(0.75, 1.0)
+
+
+def _note_failure(source_id: int, interval: timedelta) -> None:
+    if not ENABLED:
+        return
+    from app.db import engine  # deferred, so tests can patch app.db.engine
+
+    try:
+        with Session(engine) as session:
+            source = session.get(Source, source_id)
+            if source is None:
+                return
+            source.check_failures = (source.check_failures or 0) + 1
+            if source.check_failures >= FAILURES_BEFORE_BACKOFF:
+                delay = backoff_delay(source.check_failures, interval)
+                source.check_backoff_until = utcnow() + delay
+                logger.warning(
+                    "source.check.backing_off",
+                    source_id=source_id,
+                    failures=source.check_failures,
+                    seconds=int(delay.total_seconds()),
+                )
+            session.add(source)
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - best effort, like record()
+        logger.warning("source.backoff_not_saved", source_id=source_id, error=str(exc))
+
+
+def record_background_check(
+    source_id: int | None, failures: list[tuple[dict, Exception]], interval: timedelta
+) -> None:
+    """record_check, plus the backoff count when it couldn't reach the
+    source (a success resets it in record())."""
+    record_check(source_id, failures)
+    if source_id is not None and any(is_connectivity_error(exc) for _r, exc in failures):
+        _note_failure(source_id, interval)
+
+
+class _Task:
+    def __init__(self, source: Source):
+        self.source = source
+        self.started: float | None = None
+        self.finished = False
+        self.abandoned = False
+
+
+def _run_check(task: _Task, connector, interval: timedelta) -> None:
+    task.started = time.monotonic()
+    try:
+        failures = check(task.source, connector)
+    finally:
+        with _lock:
+            _in_flight.discard(task.source.id)
+            task.finished = True
+            abandoned = task.abandoned
+    if not abandoned:
+        record_background_check(task.source.id, failures, interval)
+
+
+def _give_up(task: _Task, interval: timedelta) -> None:
+    with _lock:
+        if task.finished:
+            return
+        task.abandoned = True
+    logger.warning("source.check.timed_out", source_id=task.source.id)
+    record(task.source.id, False, TIMED_OUT)
+    _note_failure(task.source.id, interval)
+
+
 def run_source_checks() -> None:
     """The background check, run every minute by APScheduler: checks the
-    sources whose status is older than the interval, stalest first."""
+    sources whose status is older than the interval, stalest first, in the
+    pool. Returns once each has finished or run past its deadline; a pass
+    already running makes this one a no-op."""
+    if not _pass_lock.acquire(blocking=False):
+        return
+    try:
+        _run_pass()
+    finally:
+        _pass_lock.release()
+
+
+def _run_pass() -> None:
     from app.collectors.registry import CONNECTORS
     from app.db import engine
 
@@ -143,23 +262,59 @@ def run_source_checks() -> None:
         interval = check_interval(session)
         if interval is None:
             return
-        cutoff = utcnow() - interval
+        now = utcnow()
+        cutoff = now - interval
         due = session.exec(
             select(Source)
             .where(
                 Source.enabled.is_(True),
                 Source.protocol != Protocol.agent,
                 (col(Source.status_checked_at).is_(None)) | (Source.status_checked_at < cutoff),
+                (col(Source.check_backoff_until).is_(None)) | (Source.check_backoff_until <= now),
             )
             .order_by(col(Source.status_checked_at).is_(None).desc(), Source.status_checked_at)
         ).all()
         for source in due:
             session.expunge(source)
+
+    running = []
     for source in due:
         connector = CONNECTORS.get(source.protocol)
         if connector is None:
             continue
-        record_check(source.id, check(source, connector))
+        with _lock:
+            if source.id in _in_flight:
+                continue
+            _in_flight.add(source.id)
+        task = _Task(source)
+        future = _pool.submit(_run_check, task, connector, interval)
+        if future is None:  # shutting down
+            with _lock:
+                _in_flight.discard(source.id)
+            break
+        running.append((task, future))
+
+    deadline = check_deadline()
+    while running:
+        wait([future for _t, future in running], timeout=0.25, return_when=FIRST_COMPLETED)
+        clock = time.monotonic()
+        still = []
+        for task, future in running:
+            if future.cancelled():  # dropped by a shutdown before it started
+                with _lock:
+                    _in_flight.discard(task.source.id)
+            elif future.done():
+                continue
+            elif task.started is not None and clock - task.started > deadline:
+                _give_up(task, interval)
+            else:
+                still.append((task, future))
+        running = still
+
+
+def pool() -> DrainablePool:
+    """For the shutdown drain (app/main.py)."""
+    return _pool
 
 
 def forget(source_id: int) -> None:
@@ -173,3 +328,4 @@ def forget_cache() -> None:
     """For tests."""
     with _lock:
         _last_written.clear()
+        _in_flight.clear()
