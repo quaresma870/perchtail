@@ -187,6 +187,34 @@ def _read_file(connector, source: Source, state: AlertFileState, matches, stats:
     return hits
 
 
+def _current_sizes(
+    connector, source: Source, rules: list[Rule], states: list[AlertFileState], started: float
+) -> tuple[dict[str, int], set[str]]:
+    """The size of each watched file now, from one listing per folder they
+    sit in. A file whose folder couldn't be listed (an error, or the time
+    budget ran out) is returned in the second set, to be read directly."""
+    folders: dict[str, list[str]] = {}
+    for state in states:
+        folder = state.file_path.rsplit("/", 1)[0] if "/" in state.file_path else ""
+        folders.setdefault(folder, []).append(state.file_path)
+    sizes: dict[str, int] = {}
+    unlisted: set[str] = set()
+    for folder, paths in folders.items():
+        if time.monotonic() - started > SOURCE_BUDGET_SECONDS:
+            unlisted.update(paths)
+            continue
+        try:
+            for entry in connector.list_directory(source, rules, folder):
+                if not entry.is_dir:
+                    sizes[entry.path] = entry.size
+        except Exception as exc:  # noqa: BLE001 - its files are read directly instead
+            logger.info(
+                "alert.folder_list_failed", source_id=source.id, path=folder, error=str(exc)
+            )
+            unlisted.update(paths)
+    return sizes, unlisted
+
+
 def check_alert(session: Session, alert: Alert, stats: PassStats | None = None) -> list[Hit]:
     """One alert's pass: the new matching lines in its files. Updates the
     per-file positions (the caller commits)."""
@@ -243,11 +271,23 @@ def check_alert(session: Session, alert: Alert, stats: PassStats | None = None) 
                 )
             else:
                 known.append(state)
-        known.sort(key=lambda s: s.checked_at or now - timedelta(days=3650))
         started = time.monotonic()
-        for index, state in enumerate(known):
+        # Current sizes come from listing each folder once (one connection
+        # per folder), so only files whose size changed are read -- a read
+        # is a connection of its own on SSH, SMB and WinRM.
+        sizes, unlisted = _current_sizes(connector, source, rules, known, started)
+        changed = [
+            s for s in known if s.file_path in unlisted or sizes.get(s.file_path) != s.offset
+        ]
+        changed_paths = {s.file_path for s in changed}
+        for state in known:
+            if state.file_path not in changed_paths:
+                state.checked_at = now
+                session.add(state)
+        changed.sort(key=lambda s: s.checked_at or now - timedelta(days=3650))
+        for index, state in enumerate(changed):
             if index >= FILES_PER_SOURCE or time.monotonic() - started > SOURCE_BUDGET_SECONDS:
-                stats.files_waiting += len(known) - index
+                stats.files_waiting += len(changed) - index
                 break
             try:
                 hits.extend(_read_file(connector, source, state, matches, stats))

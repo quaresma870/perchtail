@@ -402,3 +402,27 @@ def test_a_pass_reads_sends_and_records(tmp_path, monkeypatch):
         assert session.get(Alert, disabled_id).last_checked_at is None
     # Not due again until the interval has gone by.
     assert run_alert_pass(engine) is None
+
+
+def test_only_files_that_changed_size_are_read(session, tmp_path, monkeypatch):
+    from app.collectors import local
+
+    user = _user(session)
+    source = _source(session, tmp_path)
+    for name in ("quiet.log", "busy.log"):
+        _write(tmp_path, name, "")
+    _index(session, source, tmp_path, "quiet.log", "busy.log")
+    alert = _alert(session, user)
+    check_alert(session, alert)
+    session.commit()
+    _write(tmp_path, "busy.log", "refused\n", mode="a")
+
+    reads = []
+    original = local.read_range
+    monkeypatch.setattr(
+        local,
+        "read_range",
+        lambda src, path, *a, **k: reads.append(path) or original(src, path, *a, **k),
+    )
+    assert _lines(check_alert(session, alert)) == ["refused"]
+    assert reads == ["busy.log"]

@@ -108,10 +108,10 @@
     loading = true
     error = ''
     try {
-      ;[alerts, sources] = await Promise.all([
-        api.get<Alert[]>('/alerts'),
-        api.get<Source[]>('/sources'),
-      ])
+      let all: Source[]
+      ;[alerts, all] = await Promise.all([api.get<Alert[]>('/alerts'), api.get<Source[]>('/sources')])
+      // Alerts never read PerchTail's own logs or a disabled source.
+      sources = all.filter((s) => s.enabled && !s.is_system)
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load alerts'
     } finally {

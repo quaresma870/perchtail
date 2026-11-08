@@ -127,9 +127,12 @@ def _require_valid_query(query: str, regex: bool) -> None:
     try:
         compile_query(query, regex)
     except re2.error as exc:
+        reason = exc.args[0] if exc.args else exc
+        if isinstance(reason, bytes):
+            reason = reason.decode("utf-8", errors="replace")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"invalid regex (alerts use RE2: no backreferences or lookaround): {exc}",
+            detail=f"Invalid regex (alerts use RE2: no backreferences or lookaround): {reason}",
         ) from exc
 
 
@@ -140,8 +143,15 @@ def _require_scope_allowed(session: Session, user: User, alert: Alert) -> None:
     have no business watching."""
     visible = visible_source_ids(session, user, Capability.view)
     if alert.source_id is not None:
-        if session.get(Source, alert.source_id) is None:
+        source = session.get(Source, alert.source_id)
+        if source is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+        if source.is_system:
+            # Passes never read PerchTail's own logs (see app.alerts).
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Alerts can't watch PerchTail's own logs",
+            )
         if visible is not None and alert.source_id not in visible:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted for this source"
