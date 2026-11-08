@@ -13,7 +13,7 @@ from sqlalchemy import delete as sa_delete
 from sqlmodel import Session, select
 
 from app import source_roots, source_status, system_settings
-from app.agent_registry import get_agent_registry
+from app.agent_registry import disconnect_after_commit, get_agent_registry
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import AuditLog, Capability, GlobalCapability, ScopeType, User
@@ -659,6 +659,8 @@ def update_source(
         source.tls_ca_pem = new_ca
     if payload.enabled is not None:
         source.enabled = payload.enabled
+    if source.protocol == Protocol.agent and not source.enabled:
+        disconnect_after_commit(session, source.id, "source disabled")
     if payload.credential is not None:
         source.credential_ref = encrypt_credential(payload.credential)
     if payload.search_indexing_enabled is not None:
@@ -732,6 +734,8 @@ def delete_source(
     for model in (Alert, SeverityPattern):
         for row in session.exec(select(model).where(model.source_id == source_id)).all():
             session.delete(row)
+    if source.protocol == Protocol.agent:
+        disconnect_after_commit(session, source_id, "source deleted")
     session.delete(source)
     record_audit_event(
         session,
@@ -853,6 +857,9 @@ def regenerate_agent_token(
 
     token = secrets.token_urlsafe(32)
     source.agent_token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    # The agent connected with the old token checked it only then: close
+    # that connection, so it has to come back with the new one.
+    disconnect_after_commit(session, source.id, "agent token regenerated")
     session.add(source)
     record_audit_event(
         session,
