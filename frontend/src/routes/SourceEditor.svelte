@@ -67,6 +67,7 @@
   let winrmConfiguration = ''
   let enabled = true
   let searchIndexingEnabled = false
+  let nameIndexEnabled = true
   let username = ''
   let password = ''
   let privateKey = ''
@@ -208,6 +209,7 @@
           originalHostPort = `${source.host}:${source.port ?? ''}`
           enabled = source.enabled
           searchIndexingEnabled = source.search_indexing_enabled
+          nameIndexEnabled = source.name_index_enabled
         }
       }
     } catch (err) {
@@ -236,6 +238,7 @@
       winrmConfiguration,
       enabled,
       searchIndexingEnabled,
+      nameIndexEnabled,
       username,
       password,
       privateKey,
@@ -319,6 +322,7 @@
           ...winrmPayload(),
           enabled,
           search_indexing_enabled: searchIndexingEnabled,
+          name_index_enabled: nameIndexEnabled,
           ...(credential ? { credential } : {}),
         })
         // Land on the read-only overview, not back on this form (#157).
@@ -336,6 +340,7 @@
           ...winrmPayload(),
           enabled,
           search_indexing_enabled: searchIndexingEnabled,
+          name_index_enabled: nameIndexEnabled,
           ...(credential ? { credential } : {}),
         })
         savedState = formState()
@@ -667,6 +672,14 @@
         <input type="checkbox" bind:checked={enabled} />
         Enabled
       </label>
+
+      <label class="checkbox">
+        <input type="checkbox" bind:checked={nameIndexEnabled} />
+        Index file names
+      </label>
+      <p class="hint indent">
+        On by default: PerchTail lists this source's files in the background and keeps their names, sizes and times (never their content), so they can be found by name across sources. Turn it off to leave the source out; what was indexed is dropped.
+      </p>
 
       <label class="checkbox">
         <input type="checkbox" bind:checked={searchIndexingEnabled} />

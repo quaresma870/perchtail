@@ -81,8 +81,11 @@ def ensure_search_schema(target_engine=engine) -> None:
 
 
 def init_db() -> None:
+    from app.name_index_store import ensure_name_index_schema
+
     SQLModel.metadata.create_all(engine)
     ensure_search_schema(engine)
+    ensure_name_index_schema(engine)
 
 
 def get_session():

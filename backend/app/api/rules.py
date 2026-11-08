@@ -8,6 +8,7 @@ from app.auth.models import Capability, User
 from app.auth.rbac import require_capability
 from app.db import get_session
 from app.models import PatternKind, Rule, RuleType, Source
+from app.name_index import prune_hidden_names
 from app.rules import InvalidPatternError, parse_pattern
 
 router = APIRouter(prefix="/sources/{source_id}/rules", tags=["rules"])
@@ -107,6 +108,7 @@ def create_rule(
         target_id=rule.id,
         metadata={"source_id": source.id, "pattern": pattern},
     )
+    prune_hidden_names(session, source)
     session.commit()
     session.refresh(rule)
     return rule
@@ -141,6 +143,7 @@ def update_rule(
         target_id=rule.id,
         metadata={"source_id": source.id},
     )
+    prune_hidden_names(session, source)
     session.commit()
     session.refresh(rule)
     return rule
@@ -167,6 +170,7 @@ def delete_rule(
         target_id=rule_id,
         metadata={"source_id": source.id},
     )
+    prune_hidden_names(session, source)
     session.commit()
 
 
@@ -199,6 +203,7 @@ def reorder_rules(
         target_type="source",
         target_id=source.id,
     )
+    prune_hidden_names(session, source)
     session.commit()
     return _ordered_rules(session, source.id)
 
@@ -268,6 +273,7 @@ def replace_rules_raw(
         target_id=source.id,
         metadata={"rule_count": len(created)},
     )
+    prune_hidden_names(session, source)
     session.commit()
     for rule in created:
         session.refresh(rule)

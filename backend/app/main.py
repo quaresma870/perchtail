@@ -23,6 +23,7 @@ from app.api.config_transfer import router as config_transfer_router
 from app.api.customers import router as customers_router
 from app.api.errors import install as install_error_handlers
 from app.api.errors import path_outside_base as _path_outside_base
+from app.api.files import router as files_router
 from app.api.folders import router as folders_router
 from app.api.monitoring import router as monitoring_router
 from app.api.roles import router as roles_router
@@ -55,6 +56,7 @@ from app.data_layout import report as report_data_layout
 from app.db import engine, init_db
 from app.health import mark_started
 from app.logging_config import configure_logging, get_logger
+from app.name_index import run_name_index_sweep
 from app.scheduler import scheduler
 from app.scratch import get_scratch_store
 from app.search_index import run_indexing_sweep
@@ -277,6 +279,8 @@ async def lifespan(app: FastAPI):
     )
     scheduler.add_job(run_session_purge_sweep, "interval", hours=1)
     scheduler.add_job(run_update_check, "interval", hours=1)
+    # File-name index (#304): every minute it lists whatever sources are due.
+    scheduler.add_job(run_name_index_sweep, "interval", minutes=1, max_instances=1)
     # Background source check (#276): every minute it checks whatever is due.
     scheduler.add_job(run_source_checks, "interval", minutes=1, max_instances=1)
     scheduler.add_job(
@@ -296,6 +300,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.include_router(auth_router)
 app.include_router(alerts_router)
+app.include_router(files_router)
 app.include_router(archive_router)
 app.include_router(audit_router)
 app.include_router(config_transfer_router)

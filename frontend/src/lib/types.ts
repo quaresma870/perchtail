@@ -91,6 +91,12 @@ export interface Source {
   status_checked_at: string | null
   status_message: string | null
   search_indexing_enabled: boolean
+  // File-name index (#304): on/off, when it last listed the source, how many
+  // files it found, and why the last pass stopped short (null: it didn't).
+  name_index_enabled: boolean
+  name_indexed_at: string | null
+  name_index_files: number | null
+  name_index_message: string | null
   // What the current user may do on this source (#174); the backend still
   // enforces every action on its own.
   my_capabilities: Capability[]
@@ -241,6 +247,9 @@ export interface SystemSettings {
   tail_interval_seconds: number
   // Background source check (#276), minutes; 0 = off.
   source_check_minutes: number
+  // File-name index (#304).
+  name_index_enabled: boolean
+  name_index_minutes: number
 }
 
 export type ExplorerSort = 'name_asc' | 'name_desc' | 'mtime_desc' | 'mtime_asc' | 'size_desc'

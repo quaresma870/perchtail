@@ -75,6 +75,9 @@
       refreshInput = String(refreshSaved)
       checkSaved = settings.source_check_minutes
       checkInput = String(checkSaved)
+      nameIndexEnabled = settings.name_index_enabled
+      nameIndexSaved = settings.name_index_minutes
+      nameIndexInput = String(nameIndexSaved)
       savedPolicy = pickPolicy(settings)
       policyDraft = { ...savedPolicy }
     } catch (err) {
@@ -114,6 +117,28 @@
   let checkInput = '10'
   let checkSaved = 10
   let checkError = ''
+
+  // File-name index (#304).
+  let nameIndexEnabled = true
+  let nameIndexInput = '15'
+  let nameIndexSaved = 15
+  let nameIndexError = ''
+
+  async function patchNameIndex(patch: Partial<SystemSettings>) {
+    saving = true
+    nameIndexError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', patch)
+      nameIndexEnabled = settings.name_index_enabled
+      nameIndexSaved = settings.name_index_minutes
+      nameIndexInput = String(nameIndexSaved)
+      systemSettings.set(settings)
+    } catch (err) {
+      nameIndexError = err instanceof ApiError ? err.detail : 'Failed to update the file-name index'
+    } finally {
+      saving = false
+    }
+  }
 
   async function saveCheckInterval() {
     saving = true
@@ -465,6 +490,56 @@
             class="btn btn-ghost"
             on:click={saveCheckInterval}
             disabled={saving || Number(checkInput) === checkSaved}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Index file names</div>
+          <p class="hint">
+            Lists every source's files in the background and keeps their names, sizes and times, never their content, so file names can be searched across sources without listing every server on each search. Each source can be left out in its own settings. Turning it off stops the listings; what was indexed stays until a source is changed.
+          </p>
+        </div>
+        <label class="switch">
+          <input
+            type="checkbox"
+            aria-label="Index file names"
+            checked={nameIndexEnabled}
+            disabled={saving}
+            on:change={() => patchNameIndex({ name_index_enabled: !nameIndexEnabled })}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">List each source's files every</div>
+          <p class="hint">A source is listed again once its index is older than this, a few sources at a time. From 5 minutes to a day.</p>
+        </div>
+        {#if nameIndexError}
+          <p class="error">{nameIndexError}</p>
+        {/if}
+        <div class="interval-row">
+          <input
+            class="input interval-input"
+            type="number"
+            min="5"
+            max="1440"
+            step="1"
+            aria-label="File-name index interval in minutes"
+            disabled={!nameIndexEnabled}
+            bind:value={nameIndexInput}
+          />
+          <span class="hint">minutes</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={() => patchNameIndex({ name_index_minutes: Number(nameIndexInput) })}
+            disabled={saving || !nameIndexEnabled || Number(nameIndexInput) === nameIndexSaved}
           >
             Save
           </button>

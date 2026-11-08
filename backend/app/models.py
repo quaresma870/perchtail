@@ -146,6 +146,14 @@ class Source(SQLModel, table=True):
     # since indexing stores short line-level snippets at rest, which some
     # customers' logs may be too sensitive for even in that reduced form.
     search_indexing_enabled: bool = False
+    # File-name index (#304, app/name_index.py): names, sizes and times of the
+    # source's rule-visible files, never content. On by default; off here
+    # leaves the source out (and drops what was indexed).
+    name_index_enabled: bool = True
+    name_indexed_at: datetime | None = None
+    name_index_files: int | None = None
+    # Why the last pass failed or stopped short; None when it went to the end.
+    name_index_message: str | None = None
 
     customer: Customer | None = Relationship(back_populates="sources")
     folder: Folder | None = Relationship(back_populates="sources")
@@ -199,6 +207,23 @@ class SeverityPattern(SQLModel, table=True):
     # versa -- deliberately not reusing `enabled` for both meanings (see
     # ROADMAP.md's open-decision note on this).
     include_in_navigation: bool = True
+
+
+class FileNameEntry(SQLModel, table=True):
+    """One rule-visible file of a source, in the file-name index (#304): its
+    path, size and modification time as the last listing saw them. Never any
+    content. The `file_name_fts` FTS5 table (trigram tokenizer, see
+    app/name_index_store.py) indexes `path` for substring search."""
+
+    __tablename__ = "file_name_entry"
+    __table_args__ = (UniqueConstraint("source_id", "path", name="uq_file_name_entry_source_path"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_id: int = Field(foreign_key="source.id", index=True)
+    path: str
+    size: int
+    mtime: float | None = None
+    seen_at: datetime
 
 
 class SearchIndexState(SQLModel, table=True):

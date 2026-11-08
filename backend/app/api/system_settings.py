@@ -47,6 +47,9 @@ class SystemSettingsPublic(BaseModel):
     tail_interval_seconds: int
     # Background source check (#276), minutes; 0 = off.
     source_check_minutes: int
+    # File-name index (#304).
+    name_index_enabled: bool
+    name_index_minutes: int
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -81,6 +84,9 @@ class SystemSettingsUpdate(BaseModel):
     explorer_refresh_seconds: int | None = Field(default=None, ge=0, le=3600)
     tail_interval_seconds: TailIntervalSeconds | None = None
     source_check_minutes: int | None = Field(default=None, ge=0, le=1440)
+    name_index_enabled: bool | None = None
+    # At least 5 minutes, so listings can't hammer the sources; at most a day.
+    name_index_minutes: int | None = Field(default=None, ge=5, le=1440)
 
 
 _PASSWORD_INTS = (
@@ -102,6 +108,7 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         explorer_refresh_seconds=system_settings.get_int(session, "explorer_refresh_seconds"),
         tail_interval_seconds=system_settings.get_int(session, "tail_interval_seconds"),
         source_check_minutes=system_settings.get_int(session, "source_check_minutes"),
+        name_index_minutes=system_settings.get_int(session, "name_index_minutes"),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
     )
 
