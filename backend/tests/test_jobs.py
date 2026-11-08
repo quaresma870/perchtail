@@ -190,3 +190,15 @@ def test_shutdown_is_bounded_when_a_job_hangs():
         assert time.monotonic() - begun < 2
     finally:
         release.set()
+
+
+def test_error_text_hides_bearer_tokens_and_sql_parameters():
+    text = jobs.error_text(
+        RuntimeError(
+            "upstream said no: Authorization: Bearer abc.def.ghi; "
+            "(sqlite3.OperationalError) locked [SQL: UPDATE alert SET last_error=?] "
+            "[parameters: ('https://hooks.example/s3cret', 7)]"
+        )
+    )
+    assert "abc.def.ghi" not in text and "s3cret" not in text
+    assert "[parameters: <hidden>]" in text

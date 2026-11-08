@@ -263,7 +263,15 @@ async def lifespan(app: FastAPI):
     # crash or a killed container (#329).
     db_file = settings.database_url.removeprefix("sqlite:///")
     store.clear_leftovers(
-        protected=[Path(settings.data_dir), Path(settings.log_dir), Path(db_file).parent]
+        # Also the salt and known_hosts, which may live outside DATA_DIR:
+        # losing the salt makes every stored credential unreadable.
+        protected=[
+            Path(settings.data_dir),
+            Path(settings.log_dir),
+            Path(db_file).parent,
+            Path(settings.credential_salt_path),
+            Path(settings.ssh_known_hosts_path),
+        ]
     )
     sweep = timedelta(seconds=settings.scratch_sweep_interval_seconds)
     register_job(

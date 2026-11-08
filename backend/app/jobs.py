@@ -30,6 +30,11 @@ CATCH_UP_DELAY = timedelta(seconds=30)
 
 _URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
 _SECRET = re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key|key)\s*[=:]\s*\S+")
+# The token after an auth scheme, then whatever follows an Authorization label.
+_BEARER = re.compile(r"(?i)\b(bearer|basic)\s+\S+")
+_AUTHORIZATION = re.compile(r"(?i)\b(authorization)\s*[=:]\s*\S+")
+# SQLAlchemy errors echo the statement's parameters, which can hold row values.
+_SQL_PARAMETERS = re.compile(r"\[parameters:.*?\]", re.DOTALL)
 
 # job id -> display name, for the records of jobs registered in this process.
 _names: dict[str, str] = {}
@@ -39,6 +44,9 @@ def error_text(exc: BaseException) -> str:
     text = f"{type(exc).__name__}: {exc}"
     text = _URL.sub("<url>", text)
     text = _SECRET.sub(lambda m: f"{m.group(1)}=<hidden>", text)
+    text = _BEARER.sub(lambda m: f"{m.group(1)} <hidden>", text)
+    text = _AUTHORIZATION.sub(lambda m: f"{m.group(1)}: <hidden>", text)
+    text = _SQL_PARAMETERS.sub("[parameters: <hidden>]", text)
     return text[:MAX_ERROR]
 
 
