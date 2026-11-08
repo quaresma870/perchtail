@@ -57,6 +57,7 @@ def _exclusive(func):
 
     return wrapper
 
+
 KNOWN_BREAKS_ACTION = "audit.chain.known_breaks_recorded"
 
 
