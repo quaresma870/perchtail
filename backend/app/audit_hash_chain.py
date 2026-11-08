@@ -165,8 +165,12 @@ def resign_chain(key: bytes, session: Session) -> int:
     the number of rows re-signed."""
     state = session.exec(select(AuditChainState)).first()
     prev_hash = state.anchor_hash if state else None
+    from app.audit_integrity import KNOWN_BREAKS_ACTION  # deferred: it imports this module
+
     count = 0
     last_id = 0
+    # Row id -> its new hash, for the known-break entries below.
+    new_hashes: dict[int, str] = {}
     while True:
         # In blocks, not one cursor held open while rows are updated.
         rows = session.exec(
@@ -175,6 +179,11 @@ def resign_chain(key: bytes, session: Session) -> int:
         if not rows:
             return count
         for row in rows:
+            if row.action == KNOWN_BREAKS_ACTION and isinstance(row.event_metadata, dict):
+                # A recorded known break names rows by their hash; those
+                # rows were all re-signed above it, so it names the new
+                # hashes (a new dict, so the JSON column is saved).
+                row.event_metadata = _with_new_hashes(row.event_metadata, new_hashes)
             row.prev_hash = prev_hash
             row.row_hash = compute_row_hash(
                 key,
@@ -188,5 +197,22 @@ def resign_chain(key: bytes, session: Session) -> int:
             )
             session.add(row)
             prev_hash = row.row_hash
+            new_hashes[row.id] = row.row_hash
             count += 1
         last_id = rows[-1].id
+
+
+def _with_new_hashes(metadata: dict, new_hashes: dict[int, str]) -> dict:
+    updated = dict(metadata)
+    for key in ("breaks", "leaves"):
+        items = metadata.get(key)
+        if isinstance(items, list):
+            updated[key] = [
+                (
+                    {**item, "row_hash": new_hashes.get(item.get("id"), item.get("row_hash"))}
+                    if isinstance(item, dict)
+                    else item
+                )
+                for item in items
+            ]
+    return updated

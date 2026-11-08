@@ -75,6 +75,11 @@
   ) {
     push('/change-password')
   }
+  // The bare address has no page of its own: it opens the Viewer, as
+  // signing in does.
+  $: if ($authChecked && $currentUser && ($currentHash === '/' || $currentHash === '')) {
+    push('/viewer')
+  }
   // Settings -> Security and Sessions moved to My profile (#243); old links
   // still land there for a release.
   $: if ($currentHash === '/settings/security' || $currentHash === '/settings/sessions') {

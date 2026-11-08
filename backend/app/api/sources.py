@@ -1128,6 +1128,9 @@ def update_credentials(
             trial = source_roots.with_base_path(source, source.base_path)
             trial.roots = source.roots
             trial.credential_ref = encrypted
+            # Not the real source: a wrong new credential mustn't mark the
+            # source failing (connectors record status by id).
+            trial.id = None
             connector = _CONNECTORS.get(source.protocol)
             failures = source_status.check(trial, connector) if connector else []
             reaching = [exc for _root, exc in failures if source_status.is_connectivity_error(exc)]

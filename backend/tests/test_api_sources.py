@@ -1001,3 +1001,28 @@ def test_bulk_update_needs_a_secret_and_the_manage_capability(session, admin_cli
         json={"source_ids": [source_id], "credential": {"username": "svc", "password": "x"}},
     )
     assert forbidden.status_code == 403
+
+
+def test_testing_a_new_credential_never_records_status_on_the_real_source(
+    session, admin_client, monkeypatch
+):
+    customer = _make_customer(session)
+    source = _ssh_source(admin_client, customer, "d01")
+    recorded = []
+    monkeypatch.setattr(
+        "app.source_status.record", lambda source_id, ok, message=None: recorded.append(source_id)
+    )
+
+    def fake_check(trial, connector):
+        assert trial.id is None
+        from app import source_status
+
+        source_status.record(trial.id, False, "denied")
+        return []
+
+    monkeypatch.setattr("app.api.sources.source_status.check", fake_check)
+    admin_client.post(
+        "/sources/credentials",
+        json={"source_ids": [source["id"]], "credential": {"username": "svc", "password": "x"}},
+    )
+    assert source["id"] not in recorded

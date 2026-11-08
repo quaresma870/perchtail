@@ -8,7 +8,7 @@ from app.models import Protocol, Source
 from app.rotate_credential_key import rotate
 from cryptography.fernet import InvalidToken
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 
 def _configure_salt(monkeypatch, tmp_path):
@@ -239,3 +239,51 @@ def test_dry_run_checks_the_chain_without_writing(rotation_engine):
 
     with Session(rotation_engine) as session:
         assert session.exec(select(AuditLog.row_hash)).all() == before
+
+
+def test_a_chain_with_recorded_known_breaks_can_still_be_rotated(rotation_engine, monkeypatch):
+    from app.audit_hash_chain import compute_row_hash
+    from app.audit_integrity import record_known_breaks, verify_chain
+    from app.auth.models import AuditChainState, AuditLog
+    from app.crypto import build_audit_chain_key
+    from app.timeutils import utcnow
+
+    old_chain = build_audit_chain_key("old-key")
+    # The known-break entry is chained with the configured key, as it would
+    # be; app.audit calls the cached key function, so it's replaced there.
+    monkeypatch.setattr("app.audit.audit_chain_key", lambda: old_chain)
+    with Session(rotation_engine) as session:
+        _audit(session, old_chain, "before")
+        tip_id = _audit(session, old_chain, "tip")
+        _audit(session, old_chain, "first")
+        tip = session.get(AuditLog, tip_id)
+        forked = []
+        for action in ("second", "third"):
+            # The #213 race: valid rows chained from the tip, not the newest row.
+            entry = AuditLog(user_id=None, action=action, timestamp=utcnow())
+            entry.prev_hash = tip.row_hash
+            entry.row_hash = compute_row_hash(
+                old_chain,
+                tip.row_hash,
+                user_id=None,
+                action=action,
+                target_type=None,
+                target_id=None,
+                timestamp=entry.timestamp,
+                metadata=None,
+            )
+            session.add(entry)
+            session.commit()
+            forked.append(entry.id)
+        _audit(session, old_chain, "after")
+        state = session.exec(select(AuditChainState)).first() or AuditChainState()
+        state.known_break_cutoff_row_id = forked[-1]
+        session.add(state)
+        session.commit()
+        recorded = record_known_breaks(old_chain, session, user_id=None)
+        assert recorded.ok, recorded
+        session.commit()
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 0
+    with Session(rotation_engine) as session:
+        assert verify_chain(build_audit_chain_key("new-key"), session).ok
