@@ -78,6 +78,8 @@
       nameIndexInput = String(nameIndexSaved)
       alertsIntervalSaved = settings.alerts_interval_seconds
       alertsIntervalInput = String(alertsIntervalSaved)
+      credentialAgeSaved = settings.credential_max_age_days
+      credentialAgeInput = String(credentialAgeSaved)
       savedPolicy = pickPolicy(settings)
       policyDraft = { ...savedPolicy }
     } catch (err) {
@@ -162,6 +164,34 @@
       systemSettings.set(settings)
     } catch (err) {
       alertsIntervalError = err instanceof ApiError ? err.detail : 'Failed to update the alert interval'
+    } finally {
+      saving = false
+    }
+  }
+
+  // Credential age warning (#248), days; 0 = off.
+  let credentialAgeInput = '90'
+  let credentialAgeSaved = 90
+  let credentialAgeError = ''
+
+  async function saveCredentialAge() {
+    const parsed = Number(credentialAgeInput)
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 3650) {
+      credentialAgeError = 'Enter a whole number of days from 0 to 3650 (0 = off).'
+      return
+    }
+    saving = true
+    credentialAgeError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        credential_max_age_days: parsed,
+      })
+      credentialAgeSaved = settings.credential_max_age_days
+      credentialAgeInput = String(credentialAgeSaved)
+      systemSettings.set(settings)
+    } catch (err) {
+      credentialAgeError =
+        err instanceof ApiError ? err.detail : 'Failed to update the credential age warning'
     } finally {
       saving = false
     }
@@ -546,6 +576,39 @@
             class="btn btn-ghost"
             on:click={() => patchNameIndex({ name_index_minutes: Number(nameIndexInput) })}
             disabled={saving || !nameIndexEnabled || Number(nameIndexInput) === nameIndexSaved}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Warn when a credential is older than</div>
+          <p class="hint">
+            Settings → Sources marks the sources whose credential was set longer ago than this, so
+            passwords and keys due for rotation stand out. 0 turns the warning off.
+          </p>
+        </div>
+        {#if credentialAgeError}
+          <p class="error">{credentialAgeError}</p>
+        {/if}
+        <div class="interval-row">
+          <input
+            class="input interval-input"
+            type="number"
+            min="0"
+            max="3650"
+            step="1"
+            aria-label="Credential age warning in days"
+            bind:value={credentialAgeInput}
+          />
+          <span class="hint">days</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={saveCredentialAge}
+            disabled={saving || Number(credentialAgeInput) === credentialAgeSaved}
           >
             Save
           </button>
