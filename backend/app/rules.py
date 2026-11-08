@@ -108,6 +108,12 @@ def _compile_regex(pattern: str, ignore_case: bool = False):
         return None
 
 
+def glob_matches(pattern: str, path: str, *, ignore_case: bool = False) -> bool:
+    """Whether `path` matches an rsync/gitignore-style glob, with the same
+    semantics as rules (`**/` any number of folders, `*` within one)."""
+    return _compile_glob(pattern, ignore_case).match(path) is not None
+
+
 def _rule_matches(path: str, rule: Rule, ignore_case: bool) -> bool:
     if rule.pattern_kind == PatternKind.regex:
         compiled = _compile_regex(rule.pattern, ignore_case)

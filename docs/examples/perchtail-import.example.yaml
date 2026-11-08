@@ -39,7 +39,6 @@ customers:
             path: 'D:\inetpub\logs\LogFiles'
           - label: App
             path: 'E:\MyApp\logs'
-        search_indexing_enabled: true
         rules:
           - include **/*.log
       - name: fileserver01

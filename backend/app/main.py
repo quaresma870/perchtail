@@ -14,6 +14,7 @@ from sqlmodel import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.agent_registry import get_agent_registry
+from app.alerts import run_alert_pass
 from app.api.agent_ws import router as agent_ws_router
 from app.api.alerts import router as alerts_router
 from app.api.archive import router as archive_router
@@ -28,7 +29,6 @@ from app.api.folders import router as folders_router
 from app.api.monitoring import router as monitoring_router
 from app.api.roles import router as roles_router
 from app.api.rules import router as rules_router
-from app.api.search import router as search_router
 from app.api.severity_patterns import global_router as severity_patterns_global_router
 from app.api.severity_patterns import source_router as severity_patterns_source_router
 from app.api.sources import router as sources_router
@@ -59,7 +59,6 @@ from app.logging_config import configure_logging, get_logger
 from app.name_index import run_name_index_sweep
 from app.scheduler import scheduler
 from app.scratch import get_scratch_store
-from app.search_index import run_indexing_sweep
 from app.source_status import run_source_checks
 from app.update_check import run_update_check
 from app.version import APP_VERSION
@@ -267,11 +266,9 @@ async def lifespan(app: FastAPI):
         "interval",
         seconds=settings.scratch_sweep_interval_seconds,
     )
-    scheduler.add_job(
-        run_indexing_sweep,
-        "interval",
-        seconds=settings.search_index_interval_seconds,
-    )
+    # Live alerts (#305): ticks every 15 s and runs a pass once the interval
+    # set in Settings -> System has gone by.
+    scheduler.add_job(run_alert_pass, "interval", seconds=15, max_instances=1)
     scheduler.add_job(
         run_audit_purge_sweep,
         "interval",
@@ -312,7 +309,6 @@ app.include_router(roles_router)
 app.include_router(users_router)
 app.include_router(sso_router)
 app.include_router(agent_ws_router)
-app.include_router(search_router)
 app.include_router(system_settings_router)
 app.include_router(updates_router)
 app.include_router(severity_patterns_global_router)

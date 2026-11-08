@@ -244,7 +244,7 @@ def test_delete_alert_drops_its_per_file_progress(session, client_for):
             alert_id=created["id"],
             source_id=source.id,
             file_path="app.log",
-            reported_through_line=10,
+            offset=10,
         )
     )
     session.commit()
@@ -256,7 +256,7 @@ def test_delete_alert_drops_its_per_file_progress(session, client_for):
 def test_test_endpoint_sends_a_synthetic_webhook(session, client_for, monkeypatch):
     posted = {}
     monkeypatch.setattr(
-        "app.api.alerts.send_webhook", lambda alert, hits: posted.update(hits=hits) or True
+        "app.api.alerts.post_webhook", lambda url, payload: posted.update(payload) or None
     )
 
     user = _make_user(session)
@@ -268,8 +268,8 @@ def test_test_endpoint_sends_a_synthetic_webhook(session, client_for, monkeypatc
     response = client.post(f"/alerts/{created['id']}/test")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert len(posted["hits"]) == 1
+    assert response.json() == {"ok": True, "error": None}
+    assert len(posted["hits"]) == 1 and posted["test"] is True
 
 
 def test_creating_an_alert_requires_manage_alerts(session, client_for):
@@ -315,3 +315,42 @@ def test_alert_changes_are_audited_without_the_full_webhook_url(session, client_
     assert [e.action for e in events] == ["alert.create", "alert.update", "alert.delete"]
     assert events[0].event_metadata["webhook_host"] == "example.com"
     assert "SECRET" not in str([e.event_metadata for e in events])
+
+
+def test_a_folder_scope_counts_sources_in_its_subfolders(session, client_for):
+    from app.models import Folder
+
+    customer = Customer(name=f"c-{uuid.uuid4().hex[:6]}")
+    session.add(customer)
+    session.commit()
+    parent = Folder(name="eu", customer_id=customer.id)
+    session.add(parent)
+    session.commit()
+    child = Folder(name="prod", customer_id=customer.id, parent_folder_id=parent.id)
+    session.add(child)
+    session.commit()
+    source = _make_source(session)
+    source.customer_id, source.folder_id = customer.id, child.id
+    session.add(source)
+    session.commit()
+    user = _make_user(session)
+    create_role_grant(
+        session,
+        actor_user_id=None,
+        role_id=user.role_id,
+        scope_type=ScopeType.source,
+        scope_id=source.id,
+        capabilities=[Capability.view],
+    )
+    session.commit()
+
+    response = client_for(user).post(
+        "/alerts",
+        json={
+            "name": "a",
+            "query": "q",
+            "folder_id": parent.id,
+            "webhook_url": "https://example.com/hook",
+        },
+    )
+    assert response.status_code == 201, response.text

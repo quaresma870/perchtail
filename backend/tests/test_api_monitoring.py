@@ -181,7 +181,8 @@ def test_health_reports_ok_shape_with_valid_token(session, admin_client):
     assert body["sources_by_protocol"]["ssh"] == 1
     assert body["agent"] == {"configured": 0, "connected": 0}
     assert body["scheduler"]["running"] is True
-    assert body["search_index"]["last_sweep_at"] is None
+    assert body["alerts"]["pending_deliveries"] == 0
+    assert body["alerts"]["failed_deliveries"] == 0
 
 
 def test_health_reports_degraded_when_scheduler_not_running(admin_client, monkeypatch):

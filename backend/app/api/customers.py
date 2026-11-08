@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
+from app.alerts import drop_scoped_alerts
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import GlobalCapability, ScopeType, User
@@ -108,6 +109,7 @@ def delete_customer(
         )
 
     delete_scope_grants(session, ScopeType.customer, customer_id)
+    drop_scoped_alerts(session, customer_id=customer_id)
     session.delete(customer)
     record_audit_event(
         session,

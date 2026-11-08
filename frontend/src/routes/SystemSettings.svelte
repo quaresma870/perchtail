@@ -18,7 +18,6 @@
   let saving = false
   let error = ''
 
-  let searchViewEnabled = true
   let auditViewEnabled = true
   let auditRetentionDays = 365
   let retentionInput = '365'
@@ -61,7 +60,6 @@
   onMount(async () => {
     try {
       const settings = await api.get<SystemSettings>('/system-settings')
-      searchViewEnabled = settings.search_view_enabled
       auditViewEnabled = settings.audit_view_enabled
       auditRetentionDays = settings.audit_retention_days
       retentionInput = String(settings.audit_retention_days)
@@ -78,6 +76,8 @@
       nameIndexEnabled = settings.name_index_enabled
       nameIndexSaved = settings.name_index_minutes
       nameIndexInput = String(nameIndexSaved)
+      alertsIntervalSaved = settings.alerts_interval_seconds
+      alertsIntervalInput = String(alertsIntervalSaved)
       savedPolicy = pickPolicy(settings)
       policyDraft = { ...savedPolicy }
     } catch (err) {
@@ -140,6 +140,33 @@
     }
   }
 
+  // Live alerts (#305).
+  let alertsIntervalInput = '60'
+  let alertsIntervalSaved = 60
+  let alertsIntervalError = ''
+
+  async function saveAlertsInterval() {
+    const parsed = Number(alertsIntervalInput)
+    if (!Number.isInteger(parsed) || parsed < 15 || parsed > 3600) {
+      alertsIntervalError = 'Enter a whole number of seconds from 15 to 3600.'
+      return
+    }
+    saving = true
+    alertsIntervalError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        alerts_interval_seconds: parsed,
+      })
+      alertsIntervalSaved = settings.alerts_interval_seconds
+      alertsIntervalInput = String(alertsIntervalSaved)
+      systemSettings.set(settings)
+    } catch (err) {
+      alertsIntervalError = err instanceof ApiError ? err.detail : 'Failed to update the alert interval'
+    } finally {
+      saving = false
+    }
+  }
+
   async function saveCheckInterval() {
     saving = true
     checkError = ''
@@ -184,23 +211,6 @@
       const settings = await api.patch<SystemSettings>('/system-settings', patch)
       connectionsViewDefault = settings.connections_view_default
       connectionsViewSwitchable = settings.connections_view_switchable
-      systemSettings.set(settings)
-    } catch (err) {
-      error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
-    } finally {
-      saving = false
-    }
-  }
-
-  async function toggleSearchView() {
-    const next = !searchViewEnabled
-    saving = true
-    error = ''
-    try {
-      const settings = await api.patch<SystemSettings>('/system-settings', {
-        search_view_enabled: next,
-      })
-      searchViewEnabled = settings.search_view_enabled
       systemSettings.set(settings)
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
@@ -576,32 +586,45 @@
       </div>
     </section>
 
+    <section class="card">
+      <h2 class="section-title">Alerts</h2>
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Check alerts every</div>
+          <p class="hint">How often each alert reads the lines added to its files since the last check. From 15 seconds to an hour.</p>
+        </div>
+        {#if alertsIntervalError}
+          <p class="error">{alertsIntervalError}</p>
+        {/if}
+        <div class="interval-row">
+          <input
+            class="input interval-input"
+            type="number"
+            min="15"
+            max="3600"
+            step="1"
+            aria-label="Alert check interval in seconds"
+            bind:value={alertsIntervalInput}
+          />
+          <span class="hint">seconds</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={saveAlertsInterval}
+            disabled={saving || Number(alertsIntervalInput) === alertsIntervalSaved}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </section>
+
     {#if $currentUser?.is_super_admin}
       <UpdatesCard />
     {/if}
 
     <section class="card">
-      <h2 class="section-title">Search and audit log</h2>
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">Search</div>
-          <p class="hint">
-            Full-text search across indexed sources. Turning this off hides the Search nav entry
-            and page for everyone — it doesn't stop or clear background indexing on its own, so
-            re-enabling it later picks back up where the index already is.
-          </p>
-        </div>
-        <label class="switch">
-          <input
-            type="checkbox"
-            checked={searchViewEnabled}
-            disabled={saving}
-            on:change={toggleSearchView}
-          />
-          <span class="switch-track"></span>
-        </label>
-      </div>
-
+      <h2 class="section-title">Audit log</h2>
       <div class="setting-row">
         <div>
           <div class="setting-name">Audit log</div>

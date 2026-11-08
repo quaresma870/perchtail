@@ -1,30 +1,29 @@
 import { expect, test } from '@playwright/test'
 
-test('system settings: search toggle affects nav, monitoring token generation', async ({
-  page,
-}) => {
+test('system settings: alert interval, monitoring token generation', async ({ page }) => {
   await page.goto('/#/settings/system')
 
-  const searchRow = page.locator('.setting-row').filter({
-    has: page.locator('.setting-name', { hasText: /^Search$/ }),
-  })
-  const searchCheckbox = searchRow.locator('input[type=checkbox]')
-  // search_view_enabled defaults to true (app/system_settings.py) -- other
-  // specs (search.spec.ts, alerts.spec.ts) depend on that default, so this
-  // restores it before finishing regardless of how the toggle assertions go.
-  await expect(searchCheckbox).toBeChecked()
-
-  // Clicking the wrapping <label class="switch"> (not the <input> directly,
-  // which the sibling track span visually covers) -- see roles.spec.ts.
-  await searchRow.locator('label.switch').click()
-  await expect(searchCheckbox).not.toBeChecked()
+  // Alerts no longer hang off a Search toggle (#303): the nav link is always there.
   await expect(page.locator('nav').getByRole('link', { name: 'Search' })).toHaveCount(0)
-  await expect(page.locator('nav').getByRole('link', { name: 'Alerts' })).toHaveCount(0)
-
-  await searchRow.locator('label.switch').click()
-  await expect(searchCheckbox).toBeChecked()
-  await expect(page.locator('nav').getByRole('link', { name: 'Search' })).toBeVisible()
   await expect(page.locator('nav').getByRole('link', { name: 'Alerts' })).toBeVisible()
+
+  const interval = page.getByLabel('Alert check interval in seconds')
+  const intervalRow = page.locator('.setting-row', { has: interval })
+  // alerts_interval_seconds defaults to 60 (app/system_settings.py); out of
+  // range is refused before saving, and the default is restored at the end.
+  await expect(interval).toHaveValue('60')
+  await interval.fill('5')
+  await intervalRow.getByRole('button', { name: 'Save' }).click()
+  await expect(intervalRow.locator('.error')).toContainText('15 to 3600')
+
+  await interval.fill('30')
+  await intervalRow.getByRole('button', { name: 'Save' }).click()
+  await expect(intervalRow.getByRole('button', { name: 'Save' })).toBeDisabled()
+  await page.reload()
+  await expect(interval).toHaveValue('30')
+  await interval.fill('60')
+  await intervalRow.getByRole('button', { name: 'Save' }).click()
+  await expect(intervalRow.getByRole('button', { name: 'Save' })).toBeDisabled()
 
   // Monitoring token: shown once, right after generation.
   await page.getByRole('button', { name: /Generate token|Regenerate token/ }).click()
@@ -40,8 +39,7 @@ test('system settings: audit log toggle hides the nav link and redirects the rou
   const auditRow = page.locator('.setting-row', { hasText: 'Audit log' }).first()
   const auditCheckbox = auditRow.locator('input[type=checkbox]')
   // audit_view_enabled defaults to true (app/system_settings.py) -- restore
-  // it before finishing regardless of how the assertions below go, same as
-  // the search toggle test above does for search_view_enabled.
+  // it before finishing regardless of how the assertions below go.
   await expect(auditCheckbox).toBeChecked()
 
   await auditRow.locator('label.switch').click()

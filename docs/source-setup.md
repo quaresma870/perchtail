@@ -457,7 +457,7 @@ again.
 
 Rules are relative to the base path. Changing the base path (or the host or
 port) means the same rules now apply to whatever is at the new location, so
-check they still match; the source's search index and alert positions are
+check they still match; the source's file-name index and alert positions are
 cleared, and the audit log records the old and new values.
 
 ### Several folders in one source

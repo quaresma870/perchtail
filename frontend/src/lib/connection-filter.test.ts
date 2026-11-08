@@ -28,7 +28,6 @@ function makeSource(overrides: Partial<Source>): Source {
     status: 'unknown',
     status_checked_at: null,
     status_message: null,
-    search_indexing_enabled: false,
     name_index_enabled: true,
     name_indexed_at: null,
     name_index_files: null,

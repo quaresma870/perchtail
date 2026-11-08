@@ -191,7 +191,7 @@ def test_concurrent_writers_never_chain_from_the_same_tip(tmp_path):
     import time
 
     from app.audit_integrity import verify_chain
-    from app.db import configure_sqlite_connection, ensure_search_schema
+    from app.db import configure_sqlite_connection
     from sqlalchemy import event
     from sqlmodel import Session, SQLModel, create_engine
 
@@ -201,7 +201,6 @@ def test_concurrent_writers_never_chain_from_the_same_tip(tmp_path):
     )
     event.listen(engine, "connect", configure_sqlite_connection)
     SQLModel.metadata.create_all(engine)
-    ensure_search_schema(engine)
 
     def entry(action):
         return AuditLog(user_id=None, action=action, timestamp=utcnow())

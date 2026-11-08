@@ -38,7 +38,6 @@ def client_for(session):
 
 
 _DEFAULTS = {
-    "search_view_enabled": True,
     "audit_view_enabled": True,
     "audit_retention_days": 365,
     "source_max_roots": 20,
@@ -58,6 +57,7 @@ _DEFAULTS = {
     "source_check_minutes": 10,
     "name_index_enabled": True,
     "name_index_minutes": 15,
+    "alerts_interval_seconds": 60,
 }
 
 
@@ -74,30 +74,30 @@ def test_plain_user_cannot_update_settings(session, client_for):
     user = _make_user(session)
     client = client_for(user)
 
-    response = client.patch("/system-settings", json={"search_view_enabled": False})
+    response = client.patch("/system-settings", json={"audit_view_enabled": False})
     assert response.status_code == 403
 
 
-def test_admin_capability_can_toggle_search_view(session, client_for):
+def test_admin_capability_can_toggle_audit_view(session, client_for):
     user = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
     client = client_for(user)
 
-    response = client.patch("/system-settings", json={"search_view_enabled": False})
+    response = client.patch("/system-settings", json={"audit_view_enabled": False})
     assert response.status_code == 200
-    assert response.json() == {**_DEFAULTS, "search_view_enabled": False}
+    assert response.json() == {**_DEFAULTS, "audit_view_enabled": False}
 
     # Persists for a fresh read, not just echoed back from the PATCH response.
     response = client.get("/system-settings")
-    assert response.json() == {**_DEFAULTS, "search_view_enabled": False}
+    assert response.json() == {**_DEFAULTS, "audit_view_enabled": False}
 
 
 def test_super_admin_can_toggle_without_the_explicit_capability(session, client_for):
     user = _make_user(session, is_super_admin=True)
     client = client_for(user)
 
-    response = client.patch("/system-settings", json={"search_view_enabled": False})
+    response = client.patch("/system-settings", json={"audit_view_enabled": False})
     assert response.status_code == 200
-    assert response.json()["search_view_enabled"] is False
+    assert response.json()["audit_view_enabled"] is False
 
 
 def test_partial_update_leaves_other_settings_unchanged(session, client_for):

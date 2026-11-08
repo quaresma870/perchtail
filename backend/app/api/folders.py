@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
+from app.alerts import drop_scoped_alerts
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import GlobalCapability, ScopeType, User
@@ -166,6 +167,7 @@ def delete_folder(
         )
 
     delete_scope_grants(session, ScopeType.folder, folder_id)
+    drop_scoped_alerts(session, folder_id=folder_id)
     session.delete(folder)
     record_audit_event(
         session,

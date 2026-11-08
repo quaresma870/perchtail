@@ -26,7 +26,6 @@ TailIntervalSeconds = Literal[1, 2, 5, 10]
 
 
 class SystemSettingsPublic(BaseModel):
-    search_view_enabled: bool
     audit_view_enabled: bool
     audit_retention_days: int
     source_max_roots: int
@@ -50,10 +49,11 @@ class SystemSettingsPublic(BaseModel):
     # File-name index (#304).
     name_index_enabled: bool
     name_index_minutes: int
+    # Live alerts (#305).
+    alerts_interval_seconds: int
 
 
 class SystemSettingsUpdate(BaseModel):
-    search_view_enabled: bool | None = None
     audit_view_enabled: bool | None = None
     # 0 means "keep forever" -- see system_settings.INT_DEFAULTS's docstring.
     audit_retention_days: int | None = Field(default=None, ge=0)
@@ -87,6 +87,8 @@ class SystemSettingsUpdate(BaseModel):
     name_index_enabled: bool | None = None
     # At least 5 minutes, so listings can't hammer the sources; at most a day.
     name_index_minutes: int | None = Field(default=None, ge=5, le=1440)
+    # At least 15 s (the scheduler's tick), at most an hour.
+    alerts_interval_seconds: int | None = Field(default=None, ge=15, le=3600)
 
 
 _PASSWORD_INTS = (
@@ -109,6 +111,7 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         tail_interval_seconds=system_settings.get_int(session, "tail_interval_seconds"),
         source_check_minutes=system_settings.get_int(session, "source_check_minutes"),
         name_index_minutes=system_settings.get_int(session, "name_index_minutes"),
+        alerts_interval_seconds=system_settings.get_int(session, "alerts_interval_seconds"),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
     )
 

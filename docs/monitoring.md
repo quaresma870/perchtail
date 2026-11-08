@@ -45,7 +45,13 @@ curl -H "Authorization: Bearer <token>" https://your-perchtail-host/monitoring/h
   "scratch": { "used_bytes": 0, "max_bytes": 5368709120, "used_fraction": 0.0 },
   "sources_by_protocol": { "ssh": 2, "smb": 1, "winrm": 0, "local": 1, "agent": 3 },
   "agent": { "configured": 3, "connected": 2 },
-  "search_index": { "last_sweep_at": "2026-08-17T17:10:00.123456", "overdue": false },
+  "alerts": {
+    "last_pass_at": "2026-08-17T17:10:00.123456",
+    "overdue": false,
+    "files_waiting": 0,
+    "pending_deliveries": 0,
+    "failed_deliveries": 0
+  },
   "scheduler": {
     "running": true,
     "jobs": [
@@ -69,18 +75,13 @@ usually because `LOG_LEVEL=DEBUG` was left on. It doesn't change `status`,
 but it means you have less log history than configured; lower the log
 level, set `LOG_QUIET_THIRD_PARTY=true`, or give the logs more space.
 
+`alerts` covers live alerts: `files_waiting` counts files that didn't fit in the last pass (each source gets at most 20 files and 15 seconds per alert per pass) and will be read in the next ones; `pending_deliveries` are webhook calls that failed and are being retried with backoff for up to an hour; `failed_deliveries` adds up the calls given up on after that, across all alerts (each alert shows its own count and last error on the Alerts page).
+
 `status` is `"ok"`, `"degraded"`, or `"error"` — a single field to alert on if
 you don't want to reason about every sub-metric yourself:
 
 - `error` — the database is unreachable.
-- `degraded` — scratch usage is at or above 90% of `scratch_max_gb`, an
-  APScheduler job isn't running or has no next-run time, the search-indexing
-  sweep is overdue (hasn't completed in over twice
-  `search_index_interval_seconds`; each source gets at most
-  `search_index_source_budget_seconds` of reading per sweep, so with many
-  large sources being indexed for the first time, raise the interval or
-  lower the budget), or at least one `agent`-protocol source
-  is configured but none are currently connected.
+- `degraded` — scratch usage is at or above 90% of `scratch_max_gb`, an APScheduler job isn't running or has no next-run time, the live alert pass is overdue (none finished in twice the interval set in Settings → System, plus 30 seconds), or at least one `agent`-protocol source is configured but none are currently connected.
 - `ok` — none of the above.
 
 ## Zabbix
@@ -98,7 +99,10 @@ preprocessing, e.g.:
 | DB reachable | `$.database.reachable` |
 | DB latency (ms) | `$.database.latency_ms` |
 | Scratch used fraction | `$.scratch.used_fraction` |
-| Search sweep overdue | `$.search_index.overdue` |
+| Alert pass overdue | `$.alerts.overdue` |
+| Alert files waiting for a pass | `$.alerts.files_waiting` |
+| Webhook calls waiting to be retried | `$.alerts.pending_deliveries` |
+| Webhook calls given up on | `$.alerts.failed_deliveries` |
 | Scheduler running | `$.scheduler.running` |
 | Connected agents | `$.agent.connected` |
 | Logs lost to the size limit | `$.logs.size_limit_deleted_early` |

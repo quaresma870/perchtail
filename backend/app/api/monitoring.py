@@ -1,25 +1,27 @@
 import hashlib
 import secrets
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import text
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from app.agent_registry import get_agent_registry
+from app.alerts import interval as alerts_interval
+from app.alerts import last_pass as alerts_last_pass
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import GlobalCapability, User
 from app.auth.rbac import require_global_capability
 from app.config import get_settings
 from app.db import get_session
-from app.health import last_search_sweep_at, uptime_seconds
+from app.health import uptime_seconds
 from app.log_rotation import retention_pressure
 from app.logging_config import get_logger
-from app.models import MonitoringToken, Protocol, Source
+from app.models import Alert, AlertDelivery, MonitoringToken, Protocol, Source
 from app.scheduler import scheduler
 from app.scratch import get_scratch_store
 from app.timeutils import utcnow
@@ -136,9 +138,16 @@ class SchedulerHealth(BaseModel):
     jobs: list[SchedulerJobHealth]
 
 
-class SearchIndexHealth(BaseModel):
-    last_sweep_at: str | None
+class AlertsHealth(BaseModel):
+    """Live alerts (#305): the last pass, whether the next one is late,
+    files that didn't fit in it and wait for the next ones, webhook calls
+    waiting to be retried, and deliveries given up on (#328)."""
+
+    last_pass_at: str | None
     overdue: bool
+    files_waiting: int
+    pending_deliveries: int
+    failed_deliveries: int
 
 
 class LogsHealth(BaseModel):
@@ -161,7 +170,7 @@ class DetailedHealth(BaseModel):
     scratch: ScratchHealth
     sources_by_protocol: dict[str, int]
     agent: AgentHealth
-    search_index: SearchIndexHealth
+    alerts: AlertsHealth
     scheduler: SchedulerHealth
     logs: LogsHealth
 
@@ -203,14 +212,21 @@ def detailed_health(session: Session = Depends(get_session)):
     agent_configured = sources_by_protocol.get(Protocol.agent.value, 0)
     agent_connected = get_agent_registry().connected_count()
 
-    last_sweep_iso = last_search_sweep_at()
-    sweep_overdue_threshold = timedelta(seconds=settings.search_index_interval_seconds * 2)
-    if last_sweep_iso is not None:
-        sweep_overdue = utcnow() - datetime.fromisoformat(last_sweep_iso) > sweep_overdue_threshold
+    last = alerts_last_pass()
+    alerts_threshold = alerts_interval(session) * 2 + timedelta(seconds=30)
+    if last["at"] is not None:
+        sweep_overdue = utcnow() - last["at"] > alerts_threshold
     else:
-        # Grace period since startup before the first sweep has had a
+        # Grace period since startup before the first pass has had a
         # chance to run at all.
-        sweep_overdue = uptime_seconds() > sweep_overdue_threshold.total_seconds()
+        sweep_overdue = uptime_seconds() > alerts_threshold.total_seconds()
+    alerts_health = AlertsHealth(
+        last_pass_at=last["at"].isoformat() if last["at"] else None,
+        overdue=sweep_overdue,
+        files_waiting=last["stats"].files_waiting if last["stats"] else 0,
+        pending_deliveries=session.exec(select(func.count()).select_from(AlertDelivery)).one(),
+        failed_deliveries=session.exec(select(func.sum(Alert.failed_deliveries))).one() or 0,
+    )
 
     jobs = [
         SchedulerJobHealth(
@@ -239,7 +255,7 @@ def detailed_health(session: Session = Depends(get_session)):
         ),
         sources_by_protocol=sources_by_protocol,
         agent=AgentHealth(configured=agent_configured, connected=agent_connected),
-        search_index=SearchIndexHealth(last_sweep_at=last_sweep_iso, overdue=sweep_overdue),
+        alerts=alerts_health,
         scheduler=SchedulerHealth(running=scheduler.running, jobs=jobs),
         logs=_logs_health(settings),
     )

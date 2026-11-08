@@ -1,7 +1,7 @@
 # High availability & horizontal scaling
 
 **Where PerchTail stands today: single-instance by design, not by oversight.**
-SQLite (with a raw FTS5 virtual table for full-text search), an in-process
+SQLite (with a raw FTS5 virtual table for the file-name index), an in-process
 APScheduler running five background jobs, and in-memory state for
 login-throttle lockouts and live push-agent WebSocket connections are all
 deliberate choices for a self-hosted, single-deployment tool (see CLAUDE.md's
@@ -24,7 +24,7 @@ to put in front of PerchTail, not whether Kubernetes itself is involved.
 | 0 — Single replica, self-healing | None (one pod; a proxy just routes to it) | Nothing in the app | None — works today |
 | 1 — Active-passive (warm standby) | Failover only, never simultaneous | Continuous DB replication (e.g. Litestream) + a promotion mechanism | Small–medium |
 | 2 — Sticky-session active-active | Client/session affinity | Nothing in the app, but doesn't fix the real problem (see below) | Low, but don't stop here |
-| 3 — True active-active | Standard round-robin / least-connections | Postgres instead of SQLite, full-text search reimplemented, throttle/agent state centralized, scheduler split into its own tier | Large |
+| 3 — True active-active | Standard round-robin / least-connections | Postgres instead of SQLite (#306), file-name search on `pg_trgm`, throttle/agent state centralized, scheduler split into its own tier | Large |
 
 ## Solution 0 (works today): single replica, orchestrator-level self-healing
 
@@ -205,13 +205,7 @@ stickiness required for anything backed by shared state.** This is the
 actual fix, and a real engineering investment, not a configuration change.
 Four independent pieces of work:
 
-1. **Replace SQLite with Postgres.** Also means reimplementing full-text
-   search: the existing engine is built directly on SQLite's FTS5 virtual
-   table (`app/search_index.py`, schema created by `app/db.py`'s
-   `ensure_search_schema`) — raw FTS5 SQL that doesn't run against Postgres
-   at all. Postgres's own `tsvector`/`tsquery` full-text search is the
-   natural replacement, but it's a real reimplementation, not a
-   connection-string swap.
+1. **Replace SQLite with Postgres (#306).** The file-name index's search is built on an SQLite FTS5 trigram table (`app/name_index_store.py`), so PostgreSQL brings its own store on `pg_trgm`; the full-text content index that also depended on FTS5 was removed in 0.7.
 2. **Move login-throttle state out of process memory.** `app/login_throttle.py`
    is explicitly in-memory today ("an accepted trade-off for a
    single-container SQLite deployment," per its own docstring) — move
@@ -219,7 +213,7 @@ Four independent pieces of work:
    state.
 3. **Split into a stateless web tier and a dedicated single-replica worker
    tier.** The five APScheduler jobs wired up in `app/main.py`'s lifespan
-   (scratch idle-sweep, scratch size-guard, search indexing, audit purge,
+   (scratch idle-sweep, scratch size-guard, live alerts, audit purge,
    audit integrity check) currently run in-process, once per pod — with
    `replicas: N`, that's N independent, uncoordinated copies of each job
    racing against the same database. The standard fix: `replicas: N` web
