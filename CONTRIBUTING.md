@@ -60,7 +60,7 @@ openssh-server samba`) so the ssh/smb source specs run against a real
 protocol implementation — the first run may prompt for `sudo` if those
 aren't already installed. Set `SKIP_E2E_TEST_SERVERS=1` to skip that step
 for a quick run of everything else without needing `sudo`/those packages
-locally (`sources-ssh.spec.ts`, `sources-smb.spec.ts`, and `search.spec.ts`
+locally (`sources-ssh.spec.ts` and `sources-smb.spec.ts`
 will fail with nothing listening on those ports, everything else is
 unaffected). See `frontend/e2e/` and ROADMAP.md's "Frontend E2E testing
 (Playwright)" section for how it's wired together.
