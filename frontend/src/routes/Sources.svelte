@@ -210,7 +210,9 @@
                 <span class="badge protocol-{source.protocol}">{PROTOCOL_LABEL[source.protocol]}</span>
               </td>
               <td>
-                {#if source.protocol === 'agent'}
+                {#if !source.enabled}
+                  <span class="status status-pending" title="Turned off: nothing is read from it">disabled</span>
+                {:else if source.protocol === 'agent'}
                   {#if source.agent_connected}
                     <span class="status status-ok">✓ connected</span>
                   {:else if formatLastSeen(source.agent_last_seen_at)}
@@ -251,7 +253,8 @@
               <td class="actions">
                 <button
                   class="icon-btn"
-                  title="Browse"
+                  title={source.enabled ? 'Browse' : 'Disabled: turn it on in its settings to browse it'}
+                  disabled={!source.enabled}
                   on:click={() => push(`/viewer/${source.id}`)}
                 >
                   ▶

@@ -51,6 +51,24 @@ from app.rules import (
 from app.scratch import get_scratch_store
 
 router = APIRouter(prefix="/sources/{source_id}", tags=["archive"])
+
+
+def readable_source(capability: Capability):
+    """The source, when the user has `capability` on it and it's enabled.
+    A disabled source keeps its configuration but is off: nothing is listed,
+    opened, followed or downloaded from it (409), whatever the user's
+    grants. Closing a tab still works, so its scratch is released."""
+    allowed = require_capability(capability, get_current_active_user)
+
+    def dependency(source: Source = Depends(allowed)) -> Source:
+        if not source.enabled:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=SOURCE_DISABLED)
+        return source
+
+    return dependency
+
+
+SOURCE_DISABLED = "This source is disabled. An admin can turn it back on in its settings."
 logger = get_logger(__name__)
 
 _CONNECTORS = CONNECTORS
@@ -226,7 +244,7 @@ def _materialize(
 
 @router.get("/browse", response_model=list[BrowseEntry])
 def browse(
-    source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
+    source: Source = Depends(readable_source(Capability.view)),
     path: str = "",
     # Set by the explorer's refresh (#272): re-listing a source the user
     # already has open isn't opening it again, so it isn't audited.
@@ -346,7 +364,7 @@ def _resolve_content(
 def open_file(
     path: str,
     member: str | None = None,
-    source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
+    source: Source = Depends(readable_source(Capability.view)),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> FileResponse:
@@ -415,7 +433,7 @@ def follow_file(
     offset: int = Query(ge=0, lt=2**62),
     head: str | None = None,
     start: bool = False,
-    source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
+    source: Source = Depends(readable_source(Capability.view)),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> Response:
@@ -510,7 +528,7 @@ def close_file(
 def download_file(
     path: str,
     member: str | None = None,
-    source: Source = Depends(require_capability(Capability.download, get_current_active_user)),
+    source: Source = Depends(readable_source(Capability.download)),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> FileResponse:
@@ -589,7 +607,7 @@ def _zip_directory(
 @router.get("/download-zip")
 def download_folder_zip(
     path: str = "",
-    source: Source = Depends(require_capability(Capability.download, get_current_active_user)),
+    source: Source = Depends(readable_source(Capability.download)),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> FileResponse:
