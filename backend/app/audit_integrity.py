@@ -30,18 +30,32 @@ must still exist with the same hash (unless retention purged it). Any
 other break is reported as tampering, as before.
 """
 
+import functools
 import hmac
 from dataclasses import dataclass, field
 
 from sqlmodel import Session, select
 
-from app.audit_hash_chain import compute_row_hash
+from app.audit_hash_chain import chain_maintenance_lock, compute_row_hash
 from app.auth.models import AuditChainState, AuditLog
 from app.json_values import as_int
 from app.logging_config import get_logger
 from app.timeutils import utcnow
 
 logger = get_logger(__name__)
+
+
+def _exclusive(func):
+    """Runs `func` holding chain_maintenance_lock, from reading the chain
+    state to the end of the walk, so no purge chunk lands in between (see
+    app/audit_hash_chain.py)."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with chain_maintenance_lock:
+            return func(*args, **kwargs)
+
+    return wrapper
 
 KNOWN_BREAKS_ACTION = "audit.chain.known_breaks_recorded"
 
@@ -274,6 +288,7 @@ def _get_or_create_state(session: Session) -> AuditChainState:
     return state
 
 
+@_exclusive
 def verify_chain(key: bytes, session: Session) -> ChainVerificationResult:
     """Verifies the whole chain (see _walk) and persists the result onto
     the singleton AuditChainState row (does not commit -- same "caller's
@@ -339,6 +354,7 @@ def _leaf_rows(session: Session, up_to: int, exclude: set[int]) -> list[tuple[in
     ]
 
 
+@_exclusive
 def record_known_breaks(
     key: bytes, session: Session, user_id: int | None
 ) -> ChainVerificationResult:

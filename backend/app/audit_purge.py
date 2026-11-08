@@ -3,6 +3,7 @@ from datetime import timedelta
 from sqlmodel import Session, delete, func, select
 
 from app import system_settings
+from app.audit_hash_chain import chain_maintenance_lock
 from app.auth.models import AuditChainState, AuditLog
 from app.logging_config import get_logger
 from app.timeutils import utcnow
@@ -61,7 +62,10 @@ def run_audit_purge_sweep() -> None:
     deleted = 0
     if last_id is not None:
         while True:
-            count = _purge_chunk(engine, last_id)
+            # Per chunk, so a verification waits for one chunk at most,
+            # never for the whole purge.
+            with chain_maintenance_lock:
+                count = _purge_chunk(engine, last_id)
             if count == 0:
                 break
             deleted += count

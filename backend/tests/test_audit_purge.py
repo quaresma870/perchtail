@@ -285,3 +285,48 @@ def test_rows_written_after_the_purge_started_are_kept(monkeypatch):
 
     with Session(engine) as session:
         assert [r.action for r in session.exec(select(AuditLog)).all()] == ["late"]
+
+
+def test_a_purge_never_lands_in_the_middle_of_a_verification(monkeypatch, tmp_path):
+    # The walk reads the log in blocks: a chunk deleted between two blocks,
+    # with the anchor moved, would look like a break that isn't there.
+    import threading
+
+    import app.audit_integrity as integrity
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'audit.db'}", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr("app.db.engine", engine)
+    monkeypatch.setattr("app.audit_purge.CHUNK_SIZE", 1)
+    monkeypatch.setattr("app.audit_integrity.WALK_BLOCK", 1)
+    with Session(engine) as session:
+        for days in (400, 400, 400, 0, 0):
+            entry = AuditLog(user_id=None, action="source.create")
+            entry.timestamp = utcnow() - timedelta(days=days)
+            session.add(entry)
+            session.commit()
+        backfill_chain_if_needed(KEY, session)
+        session.commit()
+
+    purge = threading.Thread(target=run_audit_purge_sweep)
+    original = integrity._chain_rows
+
+    def rows_with_a_purge_started_midway(session):
+        for index, row in enumerate(original(session)):
+            if index == 1:
+                purge.start()
+                purge.join(timeout=0.5)
+            yield row
+
+    monkeypatch.setattr(integrity, "_chain_rows", rows_with_a_purge_started_midway)
+    with Session(engine) as session:
+        assert verify_chain(KEY, session).ok
+        session.rollback()
+    purge.join(timeout=10)
+    monkeypatch.setattr(integrity, "_chain_rows", original)
+
+    with Session(engine) as session:
+        assert len(session.exec(select(AuditLog)).all()) == 2
+        assert verify_chain(KEY, session).ok

@@ -39,7 +39,7 @@ release ships (0.x releases may include breaking changes between minors).
 - A disabled source is off: it keeps its configuration in Settings → Sources, but it no longer appears in the Viewer, open tabs from it close, and nothing can be listed, opened, followed, downloaded or checked on it (the API answers 409), whatever the user's grants. Before, only background work skipped it and it could still be browsed.
 - `/monitoring/health` turns `degraded` when a background job's last run failed, when the data, scratch or log filesystem has less than 5% free, or when the audit hash chain is broken (#330).
 - The audit log purge deletes in chunks of 5000 rows, each in its own short transaction, instead of one large delete holding the database's write lock (#346).
-- Audit integrity verification reads the log in blocks of 2000 rows and keeps only the hashes it can still need, instead of loading the whole table (#346).
+- Audit integrity verification reads the log in blocks of 2000 rows and keeps only the hashes it can still need, instead of loading the whole table; a purge running at the same time waits for it, so it never reports a break that isn't there (#346).
 
 ### Removed
 - The full-text content index, the Search page, `GET /search`, the per-source "indexed for search" option and the Search setting (#303). Searching file names across sources is the file-name index (#304); watching for lines is live alerts (#305).
