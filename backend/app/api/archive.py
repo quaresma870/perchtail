@@ -48,7 +48,7 @@ from app.rules import (
     is_visible,
     rules_case_insensitive,
 )
-from app.scratch import get_scratch_store
+from app.scratch import get_scratch_store, make_scratch_dir
 
 router = APIRouter(prefix="/sources/{source_id}", tags=["archive"])
 
@@ -629,7 +629,7 @@ def download_folder_zip(
             folder=True,
         )
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="perchtail-zip-"))
+    tmp_dir = make_scratch_dir("perchtail-zip-")
     zip_path = tmp_dir / "download.zip"
     budget = _ZipBudget(remaining=limit)
     try:

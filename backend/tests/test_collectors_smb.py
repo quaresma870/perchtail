@@ -50,7 +50,9 @@ class FakeSMBClient:
         port=None,
         auth_protocol=None,
         connection_cache=None,
+        connection_timeout=None,
     ):
+        self.connection_timeout = connection_timeout
         self.sessions.append((host, username, password, port, auth_protocol))
         self.caches.append(connection_cache)
 
@@ -292,3 +294,15 @@ def test_read_range_reads_from_the_offset_with_full_share_access(fake_smbclient)
     assert smb_module.read_range(_source(), "app.log", 9, 1000, 4) == (18, b"line", b"line two\n")
     assert smb_module.read_range(_source(), "app.log", 30, 1000) == (18, b"", b"")
     assert fake_smbclient.open_file_kwargs[0]["share_access"] == "rwd"
+
+
+def test_connections_have_a_connect_and_receive_timeout(fake_smbclient):
+    """#343: a stalled server fails the request instead of holding it."""
+    import os
+
+    from app.config import get_settings
+
+    smb_module.list_directory(_source(), [_rule(0, RuleType.include, "**/*.log")])
+    timeout = get_settings().remote_read_timeout_seconds
+    assert fake_smbclient.connection_timeout == timeout
+    assert os.environ["SMB_EXPERIMENTAL_TRANSPORT_RECEIVE_TIMEOUT"] == str(timeout)

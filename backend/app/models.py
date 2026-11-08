@@ -140,6 +140,10 @@ class Source(SQLModel, table=True):
     status: str | None = None
     status_checked_at: datetime | None = None
     status_message: str | None = None
+    # Background-check backoff (#343): consecutive failed background checks,
+    # and until when they're skipped. Reset by any success.
+    check_failures: int = 0
+    check_backoff_until: datetime | None = None
     # File-name index (#304, app/name_index.py): names, sizes and times of the
     # source's rule-visible files, never content. On by default; off here
     # leaves the source out (and drops what was indexed).
@@ -311,6 +315,22 @@ class UpdateCheckState(SQLModel, table=True):
     # The newest version already logged as update_check.available, so it's
     # logged once per release, not once a day.
     notified_version: str | None = None
+
+
+class JobRun(SQLModel, table=True):
+    """The last run of each scheduled job (#327, app/jobs.py), so a job that
+    fails or never runs shows, and one overdue after a restart runs soon
+    instead of waiting a full interval. last_error never holds a URL."""
+
+    __tablename__ = "job_run"
+
+    job_id: str = Field(primary_key=True)
+    last_started_at: datetime | None = None
+    last_finished_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_ok: bool | None = None
+    last_error: str | None = None
+    last_duration_ms: int | None = None
 
 
 class SystemSetting(SQLModel, table=True):
