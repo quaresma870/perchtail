@@ -140,12 +140,6 @@ class Source(SQLModel, table=True):
     status: str | None = None
     status_checked_at: datetime | None = None
     status_message: str | None = None
-    # Phase 3 full-text search (see app/search_index.py and ROADMAP.md):
-    # opt-in, off by default — same "explicit opt-in, not on-by-default"
-    # conservatism as the rule engine's zero-rules-matches-nothing default,
-    # since indexing stores short line-level snippets at rest, which some
-    # customers' logs may be too sensitive for even in that reduced form.
-    search_indexing_enabled: bool = False
     # File-name index (#304, app/name_index.py): names, sizes and times of the
     # source's rule-visible files, never content. On by default; off here
     # leaves the source out (and drops what was indexed).
@@ -226,59 +220,25 @@ class FileNameEntry(SQLModel, table=True):
     seen_at: datetime
 
 
-class SearchIndexState(SQLModel, table=True):
-    """Per-file bookkeeping for the Phase 3 full-text search indexer (see
-    app/search_index.py) — tracks what's already indexed for a source so a
-    sweep only re-reads files that changed. Deliberately separate from the
-    actual searchable content, which lives in the `search_index_fts` SQLite
-    FTS5 virtual table (raw SQL, not an ORM model — see
-    app.db.ensure_search_schema) rather than here, since FTS5 tables aren't
-    representable as a SQLModel/SQLAlchemy table class.
-
-    Staleness is tracked by file size alone, not size+mtime: none of the
-    connector protocols (ssh/smb/winrm/local/agent) report a file's
-    modification time today, only name/path/is_dir/size (see
-    collectors/base.py's DirEntry) — so size is the only signal available
-    across all of them uniformly. This under-detects the rare case of a
-    same-size content change, which is an accepted tradeoff for a lagging,
-    approximate secondary index over log files that are typically
-    append-only (grow) or rotated (renamed), not edited in place."""
-
-    __tablename__ = "search_index_state"
-    __table_args__ = (
-        UniqueConstraint("source_id", "file_path", name="uq_search_index_state_source_path"),
-    )
-
-    id: int | None = Field(default=None, primary_key=True)
-    source_id: int = Field(foreign_key="source.id")
-    file_path: str
-    size: int
-    indexed_at: datetime
-
-
 class Alert(SQLModel, table=True):
-    """Phase 3 alerting (see ROADMAP.md) — notifies a webhook when new
-    content matching `query` appears in a source's full-text search index.
-    Rides entirely on the existing FTS5 index (app/search_index.py) and its
-    indexer, no parallel structure: an alert can only ever fire on sources
-    with `search_indexing_enabled` already on, evaluated by
-    `app.alerts.evaluate_alerts()` right after each indexing sweep so it
-    always sees fresh `SearchIndexState.indexed_at` timestamps.
+    """Live alerts (#305, app/alerts.py): a webhook is called when lines
+    matching `query` are written to files the alert watches. Each pass reads
+    only what was appended to those files since the last pass, the way Tail
+    does, so nothing of their content is kept.
 
-    `source_id` null means "every source the owner can currently view",
-    resolved dynamically at each evaluation via `auth.rbac.
-    visible_source_ids` rather than frozen at creation time — same "checked
-    live, not a snapshot" RBAC spirit as everywhere else in this project.
-    A consequence: revoking the owner's access to a scoped source silently
-    stops that alert from firing again, without needing to also edit or
-    delete it.
+    Scope: `source_id`, `folder_id` (and every folder below it) or
+    `customer_id`, at most one of them; none means every source the owner
+    can view. It's resolved at each pass against the owner's current access,
+    so revoking it stops the alert without editing it. Within the scope,
+    `file_glob` (default `**/*.log`) picks the files, among those the
+    file-name index lists; compressed files and archives are never read.
 
-    `last_checked_at` drives "new since last time" — only files whose
-    `SearchIndexState.indexed_at` has advanced past it are re-checked, not
-    the whole index every sweep. Webhook-only notification channel for v1
-    (no SMTP sending exists anywhere in this project); enabling an alert is
-    a deliberate "content leaves the system" export choice, same category
-    of decision as opting a source into indexing at all."""
+    `query` is plain text matched anywhere in a line, ignoring case, or a
+    regular expression (RE2, linear time) when `regex` is set.
+
+    Delivery (#328): a failed webhook is retried with backoff for up to an
+    hour (AlertDelivery); after that it's counted in `failed_deliveries`
+    with `last_error`, and the alert moves on."""
 
     __tablename__ = "alert"
 
@@ -286,26 +246,49 @@ class Alert(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id")
     name: str
     query: str
+    regex: bool = False
     source_id: int | None = Field(default=None, foreign_key="source.id")
+    folder_id: int | None = Field(default=None, foreign_key="folder.id")
+    customer_id: int | None = Field(default=None, foreign_key="customer.id")
+    file_glob: str = "**/*.log"
     webhook_url: str
     enabled: bool = True
     last_checked_at: datetime | None = None
+    last_fired_at: datetime | None = None
+    failed_deliveries: int = 0
+    last_error: str | None = None
     created_at: datetime
 
 
 class AlertFileState(SQLModel, table=True):
-    """How far into each file an alert has already reported -- so a
-    re-indexed file (the indexer re-reads a changed file in full) only fires
-    for lines past this point, not every old match again. If the file now
-    ends before this line, it was rotated or rewritten, and every line in
-    it counts as new."""
+    """Where an alert has read each file up to: the byte `offset` of the
+    next unread line, and a hash of the file's first bytes (`head`) to tell
+    a rotated or rewritten file (same path, new content) from one that
+    only grew. A file first seen starts at its end."""
 
     __tablename__ = "alert_file_state"
 
     alert_id: int = Field(foreign_key="alert.id", primary_key=True)
     source_id: int = Field(foreign_key="source.id", primary_key=True)
     file_path: str = Field(primary_key=True)
-    reported_through_line: int
+    offset: int = 0
+    head: str | None = None
+    checked_at: datetime | None = None
+
+
+class AlertDelivery(SQLModel, table=True):
+    """A webhook call waiting to be sent or retried (#328). Sent right away;
+    when that fails, retried with backoff until it succeeds or is an hour
+    old, then dropped and counted on the alert."""
+
+    __tablename__ = "alert_delivery"
+
+    id: int | None = Field(default=None, primary_key=True)
+    alert_id: int = Field(foreign_key="alert.id", index=True)
+    payload: dict = Field(sa_column=Column("payload", JSON, nullable=False))
+    created_at: datetime
+    attempts: int = 0
+    next_attempt_at: datetime
 
 
 class UpdateCheckState(SQLModel, table=True):

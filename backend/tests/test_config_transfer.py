@@ -12,16 +12,15 @@ from app.auth.models import AuditLog, Role, User
 from app.crypto import decrypt_credential
 from app.db import get_session
 from app.models import (
+    AlertFileState,
     Customer,
     Folder,
     PatternKind,
     Protocol,
     Rule,
     RuleType,
-    SearchIndexState,
     Source,
 )
-from app.timeutils import utcnow
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -55,7 +54,6 @@ TEMPLATE = textwrap.dedent(r"""
             roots:
               - {label: IIS, path: 'D:\Logs\IIS'}
               - {label: App, path: 'E:\App\logs'}
-            search_indexing_enabled: true
             rules: [include **/*.log]
           - name: fs01
             protocol: smb
@@ -156,12 +154,10 @@ def test_export_round_trips_without_secrets(session, client):
     assert decrypt_credential(web01.credential_ref)["password"] == "s3cret"
 
 
-def test_changes_are_updates_that_clear_the_index_on_a_move(session, client):
+def test_changes_are_updates_that_clear_alert_positions_on_a_move(session, client):
     _import(client)
     web01 = session.exec(select(Source).where(Source.name == "web01")).one()
-    session.add(
-        SearchIndexState(source_id=web01.id, file_path="a.log", size=1, indexed_at=utcnow())
-    )
+    session.add(AlertFileState(alert_id=1, source_id=web01.id, file_path="a.log", offset=10))
     session.commit()
 
     changed = re.sub(
@@ -179,7 +175,7 @@ def test_changes_are_updates_that_clear_the_index_on_a_move(session, client):
     _import(client, text=changed)
     session.refresh(web01)
     assert web01.base_path == "/srv/app"
-    assert session.exec(select(SearchIndexState)).all() == []
+    assert session.exec(select(AlertFileState)).all() == []
     assert len(session.exec(select(Rule).where(Rule.source_id == web01.id)).all()) == 2
 
 

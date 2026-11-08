@@ -31,6 +31,13 @@ target_metadata = SQLModel.metadata
 # ... etc.
 
 
+def _include_object(obj, name, type_, reflected, compare_to):
+    """FTS5 tables (file_name_fts, see app/name_index_store.py) and their
+    shadow tables are created in raw SQL, not from the models, so autogenerate
+    and `alembic check` leave them alone."""
+    return not (type_ == "table" and name is not None and name.startswith("file_name_fts"))
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -47,6 +54,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=_include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -69,7 +77,11 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=_include_object,
+        )
 
         with context.begin_transaction():
             context.run_migrations()

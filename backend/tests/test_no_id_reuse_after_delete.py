@@ -10,15 +10,14 @@ from app.auth.models import Role, RoleGrant, ScopeType, SSOGroupRoleMapping, Use
 from app.db import get_session
 from app.models import (
     Alert,
+    AlertFileState,
     Customer,
     Folder,
     Protocol,
-    SearchIndexState,
     SeverityLevel,
     SeverityPattern,
     Source,
 )
-from app.search_index import _insert_fts_rows, search
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -82,9 +81,7 @@ def test_deleting_a_source_removes_everything_pointing_at_it(session, client):
     customer = _customer(session)
     source = _source(session, customer)
     _grant(session, ScopeType.source, source.id)
-    session.add(
-        SearchIndexState(source_id=source.id, file_path="a.log", size=1, indexed_at=datetime.now())
-    )
+    session.add(AlertFileState(alert_id=1, source_id=source.id, file_path="a.log", offset=5))
     session.add(
         Alert(
             user_id=1,
@@ -96,19 +93,17 @@ def test_deleting_a_source_removes_everything_pointing_at_it(session, client):
         )
     )
     session.add(SeverityPattern(source_id=source.id, level=SeverityLevel.error, pattern="ERROR"))
-    _insert_fts_rows(session, source.id, "a.log", "secret token here")
     session.commit()
 
     assert client.delete(f"/sources/{source.id}").status_code == 204
 
     for model, column in (
         (RoleGrant, RoleGrant.scope_id),
-        (SearchIndexState, SearchIndexState.source_id),
+        (AlertFileState, AlertFileState.source_id),
         (Alert, Alert.source_id),
         (SeverityPattern, SeverityPattern.source_id),
     ):
         assert session.exec(select(model).where(column == source.id)).all() == []
-    assert search(session, "secret", None) == []
 
 
 def test_deleting_a_folder_or_customer_removes_its_grants(session, client):

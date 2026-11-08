@@ -344,26 +344,6 @@ def test_rule_count_reflects_existing_rules(session, admin_client):
     assert response.json()[0]["rule_count"] == 1
 
 
-def test_search_indexing_enabled_defaults_false_and_can_be_toggled(session, admin_client):
-    customer = _make_customer(session)
-    created = admin_client.post(
-        "/sources",
-        json={
-            "name": "app01",
-            "customer_id": customer.id,
-            "protocol": "ssh",
-            "host": "app01.example.com",
-            "base_path": "/var/log",
-        },
-    ).json()
-    assert created["search_indexing_enabled"] is False
-
-    updated = admin_client.patch(
-        f"/sources/{created['id']}", json={"search_indexing_enabled": True}
-    ).json()
-    assert updated["search_indexing_enabled"] is True
-
-
 def test_agent_connected_defaults_false_for_non_agent_source(session, admin_client):
     customer = _make_customer(session)
     created = admin_client.post(
@@ -836,37 +816,6 @@ def test_recent_sources_excludes_source_no_longer_visible(session, client_for):
     response = client.get("/sources/recent")
     assert response.status_code == 200
     assert response.json() == []
-
-
-@pytest.mark.parametrize("patch", [{"search_indexing_enabled": False}, {"enabled": False}])
-def test_opting_out_or_disabling_a_source_deletes_its_search_snippets(session, admin_client, patch):
-    from app.models import SearchIndexState
-    from app.search_index import _insert_fts_rows, search
-    from app.timeutils import utcnow
-    from sqlmodel import select
-
-    customer = _make_customer(session)
-    created = admin_client.post(
-        "/sources",
-        json={
-            "name": "app01",
-            "customer_id": customer.id,
-            "protocol": "ssh",
-            "host": "app01.example.com",
-            "base_path": "/var/log",
-            "search_indexing_enabled": True,
-        },
-    ).json()
-    _insert_fts_rows(session, created["id"], "app.log", "secret token here")
-    session.add(
-        SearchIndexState(source_id=created["id"], file_path="app.log", size=1, indexed_at=utcnow())
-    )
-    session.commit()
-
-    assert admin_client.patch(f"/sources/{created['id']}", json=patch).status_code == 200
-
-    assert search(session, "secret", None) == []
-    assert session.exec(select(SearchIndexState)).all() == []
 
 
 def test_deleting_a_source_leaves_an_audit_entry_that_names_it(session, admin_client):

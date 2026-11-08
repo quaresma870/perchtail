@@ -244,7 +244,7 @@ def test_delete_alert_drops_its_per_file_progress(session, client_for):
             alert_id=created["id"],
             source_id=source.id,
             file_path="app.log",
-            reported_through_line=10,
+            offset=10,
         )
     )
     session.commit()
@@ -256,7 +256,7 @@ def test_delete_alert_drops_its_per_file_progress(session, client_for):
 def test_test_endpoint_sends_a_synthetic_webhook(session, client_for, monkeypatch):
     posted = {}
     monkeypatch.setattr(
-        "app.api.alerts.send_webhook", lambda alert, hits: posted.update(hits=hits) or True
+        "app.api.alerts.post_webhook", lambda url, payload: posted.update(payload) or None
     )
 
     user = _make_user(session)
@@ -268,8 +268,8 @@ def test_test_endpoint_sends_a_synthetic_webhook(session, client_for, monkeypatc
     response = client.post(f"/alerts/{created['id']}/test")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert len(posted["hits"]) == 1
+    assert response.json() == {"ok": True, "error": None}
+    assert len(posted["hits"]) == 1 and posted["test"] is True
 
 
 def test_creating_an_alert_requires_manage_alerts(session, client_for):

@@ -1,223 +1,301 @@
+"""Live alerts (#305) and their webhook delivery (#328)."""
+
 import uuid
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
-from app.alerts import check_alert, evaluate_alerts, send_webhook
+from app import alerts
+from app.alerts import check_alert, deliver_due, post_webhook, queue_delivery, run_alert_pass
 from app.auth.models import Capability, Role, ScopeType, User
 from app.auth.rbac import create_role_grant
-from app.db import ensure_search_schema
-from app.models import Alert, PatternKind, Protocol, Rule, RuleType, Source
-from app.search_index import SearchHit, index_source
+from app.models import (
+    Alert,
+    AlertDelivery,
+    AlertFileState,
+    Customer,
+    FileNameEntry,
+    Folder,
+    PatternKind,
+    Protocol,
+    Rule,
+    RuleType,
+    Source,
+)
 from app.timeutils import utcnow
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 
-def _user(session, *, is_super_admin=False, active=True) -> User:
-    # Alert owners hold manage_alerts; without it an alert never fires (see
-    # test_alerts_only_fire_while_the_owner_has_manage_alerts).
+def _user(session, *, is_super_admin=True, active=True, manage_alerts=True) -> User:
     role = Role(
         name=f"role-{uuid.uuid4().hex}",
         is_super_admin=is_super_admin,
-        global_capabilities=["manage_alerts"],
+        global_capabilities=["manage_alerts"] if manage_alerts else [],
     )
     session.add(role)
     session.commit()
-    session.refresh(role)
-    user = User(username=f"user-{uuid.uuid4().hex}@example.com", role_id=role.id, active=active)
+    user = User(username=f"user-{uuid.uuid4().hex[:8]}", role_id=role.id, active=active)
     session.add(user)
     session.commit()
     session.refresh(user)
     return user
 
 
-def _source(session, tmp_path, *, name="app01", search_indexing_enabled=True) -> Source:
+def _source(session, base, *, name=None, **kw) -> Source:
     source = Source(
-        name=name,
+        name=name or f"src-{uuid.uuid4().hex[:6]}",
         protocol=Protocol.local,
         host="localhost",
-        base_path=str(tmp_path),
-        search_indexing_enabled=search_indexing_enabled,
+        base_path=str(base),
+        **kw,
     )
     session.add(source)
     session.commit()
     session.refresh(source)
+    session.add(
+        Rule(
+            source_id=source.id,
+            order=0,
+            type=RuleType.include,
+            pattern="**",
+            pattern_kind=PatternKind.glob,
+        )
+    )
+    session.commit()
     return source
 
 
-def _rule(session, source_id, pattern="**/*.log"):
-    rule = Rule(
-        source_id=source_id,
-        order=0,
-        type=RuleType.include,
-        pattern=pattern,
-        pattern_kind=PatternKind.glob,
-    )
-    session.add(rule)
+def _write(base, rel, text, mode="w"):
+    path = base / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, mode, newline="") as f:
+        f.write(text)
+    return path
+
+
+def _index(session, source, base, *rels):
+    """What the file-name index would list (its sizes as of now)."""
+    for rel in rels:
+        session.add(
+            FileNameEntry(
+                source_id=source.id,
+                path=rel,
+                size=(base / rel).stat().st_size,
+                seen_at=utcnow(),
+            )
+        )
     session.commit()
-    return rule
 
 
 def _alert(session, user, **overrides) -> Alert:
-    defaults = dict(
+    values = dict(
         user_id=user.id,
         name="my alert",
         query="refused",
-        source_id=None,
         webhook_url="https://example.com/hook",
-        enabled=True,
         created_at=utcnow(),
     )
-    defaults.update(overrides)
-    alert = Alert(**defaults)
+    values.update(overrides)
+    alert = Alert(**values)
     session.add(alert)
     session.commit()
     session.refresh(alert)
     return alert
 
 
-def test_check_alert_finds_hits_on_first_evaluation(session, tmp_path):
-    user = _user(session, is_super_admin=True)
+def _lines(hits):
+    return [h.line for h in hits]
+
+
+# --- reading only what was appended -------------------------------------------
+
+
+def test_a_new_alert_starts_at_the_end_and_then_sees_only_new_lines(session, tmp_path):
+    user = _user(session)
     source = _source(session, tmp_path)
-    _rule(session, source.id)
-    (tmp_path / "app.log").write_text("connection refused by upstream\n")
-    index_source(session, source)
+    _write(tmp_path, "app.log", "connection refused (old)\n")
+    _index(session, source, tmp_path, "app.log")
+    alert = _alert(session, user)
 
-    alert = _alert(session, user, query="refused")
-
+    assert check_alert(session, alert) == []  # first pass: positions start at the end
+    session.commit()
+    _write(tmp_path, "app.log", "ok\nconnection REFUSED again\n", mode="a")
     hits = check_alert(session, alert)
+    session.commit()
+    assert _lines(hits) == ["connection REFUSED again"]
+    assert hits[0].file_path == "app.log" and hits[0].source_name == source.name
+    assert check_alert(session, alert) == []  # caught up
 
-    assert len(hits) == 1
-    assert hits[0].file_path == "app.log"
 
-
-def test_check_alert_returns_nothing_once_caught_up(session, tmp_path):
-    user = _user(session, is_super_admin=True)
+def test_a_line_still_being_written_waits_for_its_newline(session, tmp_path):
+    user = _user(session)
     source = _source(session, tmp_path)
-    _rule(session, source.id)
-    (tmp_path / "app.log").write_text("connection refused by upstream\n")
-    index_source(session, source)
+    _write(tmp_path, "app.log", "")
+    _index(session, source, tmp_path, "app.log")
+    alert = _alert(session, user)
+    check_alert(session, alert)
+    session.commit()
 
-    alert = _alert(session, user, query="refused", last_checked_at=utcnow())
-
+    _write(tmp_path, "app.log", "half a refused li", mode="a")
     assert check_alert(session, alert) == []
+    session.commit()
+    _write(tmp_path, "app.log", "ne\n", mode="a")
+    assert _lines(check_alert(session, alert)) == ["half a refused line"]
 
 
-def test_check_alert_finds_only_content_added_after_last_check(session, tmp_path):
-    user = _user(session, is_super_admin=True)
+def test_a_rotated_file_is_read_from_the_top(session, tmp_path):
+    user = _user(session)
     source = _source(session, tmp_path)
-    _rule(session, source.id)
-    log_path = tmp_path / "app.log"
-    log_path.write_text("nothing interesting yet\n")
-    index_source(session, source)
+    _write(tmp_path, "app.log", "x" * 200 + "\n")
+    _index(session, source, tmp_path, "app.log")
+    alert = _alert(session, user)
+    check_alert(session, alert)
+    session.commit()
 
-    alert = _alert(session, user, query="refused", last_checked_at=utcnow())
-    assert check_alert(session, alert) == []
-
-    log_path.write_text("nothing interesting yet\nconnection refused by upstream\n")
-    index_source(session, source)
-
-    hits = check_alert(session, alert)
-    assert len(hits) == 1
-    assert "refused" in hits[0].snippet_html
+    _write(tmp_path, "app.log", "refused after rotation\n")  # shorter: truncated
+    assert _lines(check_alert(session, alert)) == ["refused after rotation"]
 
 
-def test_check_alert_ignores_sources_not_opted_into_indexing(session, tmp_path):
-    user = _user(session, is_super_admin=True)
-    source = _source(session, tmp_path, search_indexing_enabled=False)
-    _rule(session, source.id)
-    (tmp_path / "app.log").write_text("connection refused by upstream\n")
-    # Not indexed at all since the source never opted in.
-
-    alert = _alert(session, user, query="refused")
-
-    assert check_alert(session, alert) == []
-
-
-def test_check_alert_respects_explicit_source_scope(session, tmp_path):
-    user = _user(session, is_super_admin=True)
-    dir_a = tmp_path / "a"
-    dir_a.mkdir()
-    dir_b = tmp_path / "b"
-    dir_b.mkdir()
-    source_a = _source(session, dir_a, name="source-a")
-    source_b = _source(session, dir_b, name="source-b")
-    _rule(session, source_a.id)
-    _rule(session, source_b.id)
-    (dir_a / "app.log").write_text("connection refused by upstream\n")
-    (dir_b / "app.log").write_text("connection refused by upstream\n")
-    index_source(session, source_a)
-    index_source(session, source_b)
-
-    alert = _alert(session, user, query="refused", source_id=source_a.id)
-
-    hits = check_alert(session, alert)
-    assert {h.source_id for h in hits} == {source_a.id}
-
-
-def test_check_alert_returns_nothing_when_owner_lacks_grant(session, tmp_path):
-    owner = _user(session, is_super_admin=False)
+def test_a_rewritten_file_of_the_same_length_is_noticed_by_its_start(session, tmp_path):
+    user = _user(session)
     source = _source(session, tmp_path)
-    _rule(session, source.id)
-    (tmp_path / "app.log").write_text("connection refused by upstream\n")
-    index_source(session, source)
+    _write(tmp_path, "app.log", "aaaa\n")
+    _index(session, source, tmp_path, "app.log")
+    alert = _alert(session, user)
+    check_alert(session, alert)
+    session.commit()
+    _write(tmp_path, "app.log", "more\n", mode="a")
+    check_alert(session, alert)  # records the head of the file
+    session.commit()
 
-    # No RoleGrant at all for owner's role -> resolve_capability denies.
-    alert = _alert(session, owner, query="refused")
-
-    assert check_alert(session, alert) == []
+    _write(tmp_path, "app.log", "refused! new file with other bytes\n")
+    assert _lines(check_alert(session, alert)) == ["refused! new file with other bytes"]
 
 
-def test_check_alert_finds_hits_once_owner_is_granted_access(session, tmp_path):
-    owner = _user(session, is_super_admin=False)
+def test_regex_queries_use_re2_and_text_ignores_case(session, tmp_path):
+    user = _user(session)
     source = _source(session, tmp_path)
-    _rule(session, source.id)
-    (tmp_path / "app.log").write_text("connection refused by upstream\n")
-    index_source(session, source)
-    from app.models import Customer
+    _write(tmp_path, "app.log", "")
+    _index(session, source, tmp_path, "app.log")
+    alert = _alert(session, user, query=r"code=5\d\d", regex=True)
+    check_alert(session, alert)
+    session.commit()
+    _write(tmp_path, "app.log", "code=404\ncode=503 upstream\n", mode="a")
+    assert _lines(check_alert(session, alert)) == ["code=503 upstream"]
 
-    customer = Customer(name="Acme")
+
+# --- which files an alert watches ---------------------------------------------
+
+
+def test_the_glob_picks_files_and_archives_are_never_read(session, tmp_path):
+    user = _user(session)
+    source = _source(session, tmp_path)
+    for rel in ("app.log", "nested/db.log", "notes.txt", "old.log.gz"):
+        _write(tmp_path, rel, "")
+    _index(session, source, tmp_path, "app.log", "nested/db.log", "notes.txt", "old.log.gz")
+    alert = _alert(session, user)
+    check_alert(session, alert)
+    session.commit()
+    watched = {
+        s.file_path
+        for s in session.exec(
+            select(AlertFileState).where(AlertFileState.alert_id == alert.id)
+        ).all()
+    }
+    assert watched == {"app.log", "nested/db.log"}
+
+
+def test_scope_by_folder_covers_its_subfolders_and_by_customer(session, tmp_path):
+    user = _user(session)
+    customer = Customer(name=f"c-{uuid.uuid4().hex[:6]}")
     session.add(customer)
     session.commit()
-    session.refresh(customer)
-    source.customer_id = customer.id
-    session.add(source)
+    parent = Folder(name="eu", customer_id=customer.id)
+    session.add(parent)
     session.commit()
+    child = Folder(name="prod", customer_id=customer.id, parent_folder_id=parent.id)
+    session.add(child)
+    session.commit()
+    inside = _source(session, tmp_path / "a", customer_id=customer.id, folder_id=child.id)
+    outside = _source(session, tmp_path / "b")
 
+    by_folder = _alert(session, user, folder_id=parent.id)
+    assert alerts.scope_source_ids(session, user, by_folder) == {inside.id}
+    by_customer = _alert(session, user, customer_id=customer.id)
+    assert alerts.scope_source_ids(session, user, by_customer) == {inside.id}
+    everywhere = _alert(session, user)
+    assert {inside.id, outside.id} <= alerts.scope_source_ids(session, user, everywhere)
+
+
+def test_disabled_sources_and_lost_access_are_left_out(session, tmp_path):
+    user = _user(session, is_super_admin=False)
+    granted = _source(session, tmp_path / "a")
+    hidden = _source(session, tmp_path / "b")
+    off = _source(session, tmp_path / "c", enabled=False)
+    for source in (granted, off):
+        create_role_grant(
+            session,
+            actor_user_id=None,
+            role_id=user.role_id,
+            scope_type=ScopeType.source,
+            scope_id=source.id,
+            capabilities=[Capability.view],
+        )
+    session.commit()
+    alert = _alert(session, user)
+    assert alerts.scope_source_ids(session, user, alert) == {granted.id}
+    assert hidden.id not in alerts.scope_source_ids(session, user, alert)
+
+
+@pytest.mark.parametrize("active,manage", [(False, True), (True, False)])
+def test_an_owner_who_may_not_alert_reads_nothing(session, tmp_path, active, manage):
+    user = _user(session, active=active, manage_alerts=manage, is_super_admin=False)
+    source = _source(session, tmp_path)
     create_role_grant(
         session,
         actor_user_id=None,
-        role_id=owner.role_id,
-        scope_type=ScopeType.customer,
-        scope_id=customer.id,
+        role_id=user.role_id,
+        scope_type=ScopeType.source,
+        scope_id=source.id,
         capabilities=[Capability.view],
     )
-
-    alert = _alert(session, owner, query="refused")
-
-    hits = check_alert(session, alert)
-    assert len(hits) == 1
-
-
-def test_check_alert_returns_nothing_for_inactive_owner(session, tmp_path):
-    owner = _user(session, is_super_admin=True, active=False)
-    source = _source(session, tmp_path)
-    _rule(session, source.id)
-    (tmp_path / "app.log").write_text("connection refused by upstream\n")
-    index_source(session, source)
-
-    alert = _alert(session, owner, query="refused")
-
+    session.commit()
+    _write(tmp_path, "app.log", "refused\n")
+    _index(session, source, tmp_path, "app.log")
+    alert = _alert(session, user)
     assert check_alert(session, alert) == []
+    assert session.exec(select(AlertFileState)).all() == []
+
+
+def test_files_that_dont_fit_wait_for_the_next_pass(session, tmp_path, monkeypatch):
+    monkeypatch.setattr(alerts, "FILES_PER_SOURCE", 2)
+    user = _user(session)
+    source = _source(session, tmp_path)
+    names = [f"f{i}.log" for i in range(5)]
+    for name in names:
+        _write(tmp_path, name, "")
+    _index(session, source, tmp_path, *names)
+    alert = _alert(session, user)
+    check_alert(session, alert)
+    session.commit()
+    for name in names:
+        _write(tmp_path, name, f"refused in {name}\n", mode="a")
+
+    stats = alerts.PassStats()
+    seen = set()
+    for _ in range(3):
+        seen.update(h.file_path for h in check_alert(session, alert, stats))
+        session.commit()
+    assert seen == set(names)
+    assert stats.files_waiting > 0
+
+
+# --- delivery and retries (#328) ----------------------------------------------
 
 
 class _FakeHttpxClient:
-    """Stands in for `httpx.Client(timeout=...)` used as a context manager
-    (see app.alerts.send_webhook) -- `fake_post` is called with the same
-    kwargs send_webhook actually passes (json, headers, extensions), on the
-    already-pinned (IP-literal) URL, not the original hostname URL."""
-
-    def __init__(self, fake_post, **_client_kwargs):
+    def __init__(self, fake_post, **_kwargs):
         self._fake_post = fake_post
 
     def __enter__(self):
@@ -230,319 +308,97 @@ class _FakeHttpxClient:
         return self._fake_post(url, json=json, headers=headers, extensions=extensions)
 
 
-def test_send_webhook_posts_payload_and_returns_true_on_success(monkeypatch):
-    posted = {}
-
-    def fake_post(url, json, headers, extensions):
-        posted["url"] = url
-        posted["json"] = json
-        posted["headers"] = headers
-        posted["extensions"] = extensions
-        return SimpleNamespace(raise_for_status=lambda: None)
-
-    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
-
-    alert = Alert(
-        id=1,
-        user_id=1,
-        name="my alert",
-        query="refused",
-        webhook_url="https://example.com/hook",
-        created_at=utcnow(),
-    )
-    hit = SearchHit(
-        source_id=1, file_path="app.log", line_number=1, snippet_html="<mark>refused</mark>"
-    )
-
-    ok = send_webhook(alert, [hit])
-
-    assert ok is True
-    # The connection target is pinned to the already-validated IP (see
-    # webhook_safety.resolve_pinned_webhook_target) -- conftest.py's
-    # autouse DNS stub resolves any non-literal hostname to a fixed fake
-    # public IP, so this is deterministic, not a real network lookup.
-    assert posted["url"] == "https://93.184.216.34:443/hook"
-    assert posted["headers"] == {"Host": "example.com"}
-    assert posted["extensions"] == {"sni_hostname": "example.com"}
-    assert posted["json"]["alert_id"] == 1
-    assert posted["json"]["matched_count"] == 1
-    assert posted["json"]["hits"][0]["file_path"] == "app.log"
-
-
-def test_send_webhook_blocks_a_url_that_now_resolves_privately(monkeypatch):
-    # Simulates DNS rebinding: the URL passed validation when the alert was
-    # created, but resolves to a private address by the time send_webhook
-    # actually dispatches it -- the pre-send check in app.alerts must catch
-    # this even though app.api.alerts already validated it once.
-    import socket
-
-    posted = []
-
-    def fake_getaddrinfo(host, *args, **kwargs):
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
-
-    def fake_post(url, json, headers, extensions):
-        posted.append(url)
-        return SimpleNamespace(raise_for_status=lambda: None)
-
-    monkeypatch.setattr("app.webhook_safety.socket.getaddrinfo", fake_getaddrinfo)
-    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
-
-    alert = Alert(
-        id=1,
-        user_id=1,
-        name="my alert",
-        query="refused",
-        webhook_url="https://rebinds-to-internal.example/hook",
-        created_at=utcnow(),
-    )
-
-    ok = send_webhook(alert, [])
-
-    assert ok is False
-    assert posted == []
-
-
-def test_send_webhook_returns_false_on_http_error(monkeypatch):
+def _posts(monkeypatch, *, fail=False):
     import httpx
 
-    def fake_post(url, json, headers, extensions):
-        raise httpx.ConnectError("connection refused", request=None)
-
-    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
-
-    alert = Alert(
-        id=1,
-        user_id=1,
-        name="my alert",
-        query="refused",
-        webhook_url="https://example.com/hook",
-        created_at=utcnow(),
-    )
-
-    assert send_webhook(alert, []) is False
-
-
-def _throwaway_engine(monkeypatch):
-    # evaluate_alerts() opens its own session against app.db.engine
-    # (deferred import, same reason app.search_index.run_indexing_sweep
-    # does) rather than accepting one as a parameter, so it needs
-    # app.db.engine itself patched -- not just a local variable -- to see
-    # data set up via a plain Session(engine) here. Same StaticPool/
-    # in-memory setup conftest.py's `session` fixture uses.
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
-    SQLModel.metadata.create_all(engine)
-    ensure_search_schema(engine)
-    monkeypatch.setattr("app.db.engine", engine)
-    return engine
-
-
-def test_evaluate_alerts_sends_webhook_and_advances_last_checked_at(tmp_path, monkeypatch):
-    engine = _throwaway_engine(monkeypatch)
-
     posted = []
 
     def fake_post(url, json, headers, extensions):
-        posted.append(json)
-        return SimpleNamespace(raise_for_status=lambda: None)
-
-    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
-
-    with Session(engine) as session:
-        user = _user(session, is_super_admin=True)
-        source = _source(session, tmp_path)
-        _rule(session, source.id)
-        (tmp_path / "app.log").write_text("connection refused by upstream\n")
-        index_source(session, source)
-
-        alert = _alert(session, user, query="refused")
-        assert alert.last_checked_at is None
-        alert_id = alert.id
-
-    evaluate_alerts()
-
-    assert len(posted) == 1
-    assert posted[0]["matched_count"] == 1
-    with Session(engine) as session:
-        assert session.get(Alert, alert_id).last_checked_at is not None
-
-
-def test_evaluate_alerts_does_not_advance_watermark_when_fully_blocked(tmp_path, monkeypatch):
-    engine = _throwaway_engine(monkeypatch)
-    posted = []
-    monkeypatch.setattr(
-        "app.alerts.httpx.Client",
-        lambda **kw: _FakeHttpxClient(
-            lambda url, json, headers, extensions: posted.append(json), **kw
-        ),
-    )
-
-    with Session(engine) as session:
-        owner = _user(session, is_super_admin=False)
-        source = _source(session, tmp_path)
-        _rule(session, source.id)
-        (tmp_path / "app.log").write_text("connection refused by upstream\n")
-        index_source(session, source)
-
-        alert = _alert(session, owner, query="refused")
-        alert_id = alert.id
-
-    evaluate_alerts()
-
-    assert posted == []
-    with Session(engine) as session:
-        assert session.get(Alert, alert_id).last_checked_at is None
-
-
-def test_evaluate_alerts_skips_disabled_alerts(tmp_path, monkeypatch):
-    engine = _throwaway_engine(monkeypatch)
-    posted = []
-    monkeypatch.setattr(
-        "app.alerts.httpx.Client",
-        lambda **kw: _FakeHttpxClient(
-            lambda url, json, headers, extensions: posted.append(json), **kw
-        ),
-    )
-
-    with Session(engine) as session:
-        user = _user(session, is_super_admin=True)
-        source = _source(session, tmp_path)
-        _rule(session, source.id)
-        (tmp_path / "app.log").write_text("connection refused by upstream\n")
-        index_source(session, source)
-
-        _alert(session, user, query="refused", enabled=False)
-
-    evaluate_alerts()
-
-    assert posted == []
-
-
-def _capture_posts(monkeypatch) -> list[dict]:
-    posted: list[dict] = []
-
-    def fake_post(url, json, headers, extensions):
-        posted.append(json)
+        if fail:
+            raise httpx.ConnectError("connection refused", request=None)
+        posted.append({"url": url, "json": json, "headers": headers})
         return SimpleNamespace(raise_for_status=lambda: None)
 
     monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
     return posted
 
 
-def _reindex(engine, source_id):
-    with Session(engine) as session:
-        index_source(session, session.get(Source, source_id))
+def test_post_webhook_pins_the_validated_address(monkeypatch):
+    posted = _posts(monkeypatch)
+    assert post_webhook("https://example.com/hook", {"x": 1}) is None
+    assert posted[0]["url"] == "https://93.184.216.34:443/hook"
+    assert posted[0]["headers"] == {"Host": "example.com"}
 
 
-def test_evaluate_alerts_does_not_repeat_lines_already_reported(tmp_path, monkeypatch):
-    engine = _throwaway_engine(monkeypatch)
-    posted = _capture_posts(monkeypatch)
-    log_path = tmp_path / "app.log"
+def test_post_webhook_blocks_a_url_that_now_resolves_privately(monkeypatch):
+    import socket
 
-    with Session(engine) as session:
-        user = _user(session, is_super_admin=True)
-        source = _source(session, tmp_path)
-        _rule(session, source.id)
-        log_path.write_text("connection refused by upstream\n")
-        index_source(session, source)
-        _alert(session, user, query="refused")
-        source_id = source.id
-
-    evaluate_alerts()
-    assert posted[-1]["matched_count"] == 1
-
-    log_path.write_text("connection refused by upstream\nrefused again\n")
-    _reindex(engine, source_id)
-    evaluate_alerts()
-
-    assert len(posted) == 2
-    assert posted[-1]["matched_count"] == 1
-    assert [hit["line_number"] for hit in posted[-1]["hits"]] == [2]
-
-
-def test_new_match_is_found_behind_many_better_ranked_old_ones(tmp_path, monkeypatch):
-    engine = _throwaway_engine(monkeypatch)
-    posted = _capture_posts(monkeypatch)
-
-    with Session(engine) as session:
-        user = _user(session, is_super_admin=True)
-        source = _source(session, tmp_path)
-        _rule(session, source.id)
-        (tmp_path / "old.log").write_text("refused refused refused\n" * 250)
-        index_source(session, source)
-        _alert(session, user, query="refused")
-        source_id = source.id
-
-    evaluate_alerts()
-    assert len(posted) == 1
-
-    (tmp_path / "new.log").write_text(
-        "after a long and otherwise unremarkable line the upstream refused it\n"
+    posted = _posts(monkeypatch)
+    monkeypatch.setattr(
+        "app.webhook_safety.socket.getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))],
     )
-    _reindex(engine, source_id)
-    evaluate_alerts()
-
-    assert len(posted) == 2
-    assert {hit["file_path"] for hit in posted[-1]["hits"]} == {"new.log"}
+    assert post_webhook("https://rebinds.example/hook", {}).startswith("blocked")
+    assert posted == []
 
 
-def test_a_rotated_file_reports_its_new_content_from_the_top(tmp_path, monkeypatch):
-    engine = _throwaway_engine(monkeypatch)
-    posted = _capture_posts(monkeypatch)
-    log_path = tmp_path / "app.log"
+def test_a_failed_delivery_is_retried_then_given_up_after_an_hour(session, monkeypatch, tmp_path):
+    user = _user(session)
+    alert = _alert(session, user)
+    hit = alerts.Hit(1, "src", "app.log", 0, "refused")
+    _posts(monkeypatch, fail=True)
+    queue_delivery(session, alert, [hit])
+    session.commit()
 
+    deliver_due(session)
+    delivery = session.exec(select(AlertDelivery)).one()
+    assert delivery.attempts == 1 and delivery.next_attempt_at > utcnow()
+    assert alert.failed_deliveries == 0 and "refused" in alert.last_error
+
+    delivery.created_at = utcnow() - timedelta(hours=2)
+    delivery.next_attempt_at = utcnow()
+    session.add(delivery)
+    session.commit()
+    deliver_due(session)
+    session.refresh(alert)
+    assert session.exec(select(AlertDelivery)).all() == []
+    assert alert.failed_deliveries == 1
+
+
+def test_a_retry_that_works_clears_the_error(session, monkeypatch):
+    user = _user(session)
+    alert = _alert(session, user, last_error="earlier failure")
+    posted = _posts(monkeypatch)
+    queue_delivery(session, alert, [alerts.Hit(1, "src", "app.log", 0, "refused")])
+    session.commit()
+    deliver_due(session)
+    session.refresh(alert)
+    assert len(posted) == 1 and posted[0]["json"]["hits"][0]["line"] == "refused"
+    assert alert.last_error is None and alert.last_fired_at is not None
+
+
+def test_a_pass_reads_sends_and_records(tmp_path, monkeypatch):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    SQLModel.metadata.create_all(engine)
+    posted = _posts(monkeypatch)
     with Session(engine) as session:
-        user = _user(session, is_super_admin=True)
+        user = _user(session)
         source = _source(session, tmp_path)
-        _rule(session, source.id)
-        log_path.write_text("refused one\nok\nok\nok\n")
-        index_source(session, source)
-        _alert(session, user, query="refused")
-        source_id = source.id
+        _write(tmp_path, "app.log", "")
+        _index(session, source, tmp_path, "app.log")
+        alert = _alert(session, user)
+        disabled = _alert(session, user, enabled=False)
+        alert_id, disabled_id = alert.id, disabled.id
 
-    evaluate_alerts()
-
-    log_path.write_text("refused after rotation\n")
-    _reindex(engine, source_id)
-    evaluate_alerts()
-
-    assert len(posted) == 2
-    assert [hit["line_number"] for hit in posted[-1]["hits"]] == [1]
-
-
-@pytest.mark.parametrize("has_capability,expected_posts", [(True, 1), (False, 0)])
-def test_alerts_only_fire_while_the_owner_has_manage_alerts(
-    tmp_path, monkeypatch, has_capability, expected_posts
-):
-    engine = _throwaway_engine(monkeypatch)
-    posted = _capture_posts(monkeypatch)
-
+    run_alert_pass(engine, force=True)
+    _write(tmp_path, "app.log", "connection refused\n", mode="a")
+    stats = run_alert_pass(engine, force=True)
+    assert stats.hits == 1 and stats.alerts == 1
+    assert [p["json"]["alert_id"] for p in posted] == [alert_id]
     with Session(engine) as session:
-        role = Role(
-            name=f"role-{uuid.uuid4().hex}",
-            global_capabilities=["manage_alerts"] if has_capability else [],
-        )
-        session.add(role)
-        session.commit()
-        owner = User(username="o@example.com", role_id=role.id)
-        session.add(owner)
-        session.commit()
-        source = _source(session, tmp_path)
-        _rule(session, source.id)
-        create_role_grant(
-            session,
-            actor_user_id=None,
-            role_id=role.id,
-            scope_type=ScopeType.source,
-            scope_id=source.id,
-            capabilities=[Capability.view],
-        )
-        (tmp_path / "app.log").write_text("connection refused by upstream\n")
-        index_source(session, source)
-        _alert(session, owner, query="refused")
-
-    evaluate_alerts()
-
-    assert len(posted) == expected_posts
+        assert session.get(Alert, alert_id).last_fired_at is not None
+        assert session.get(Alert, disabled_id).last_checked_at is None
+    # Not due again until the interval has gone by.
+    assert run_alert_pass(engine) is None

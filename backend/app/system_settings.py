@@ -6,7 +6,6 @@ from app.models import SystemSetting
 # every existing deployment's DB row-by-row -- see SystemSetting's
 # docstring in app/models.py for why.
 BOOL_DEFAULTS: dict[str, str] = {
-    "search_view_enabled": "true",
     "audit_view_enabled": "true",
     # Whether users may switch the viewer's connections between list and
     # tree; when false, everyone sees connections_view_default only (#156).
@@ -69,6 +68,9 @@ INT_DEFAULTS: dict[str, str] = {
     # How old a source's file-name index may get (#304), in minutes: each
     # source is listed again once its index is older than this.
     "name_index_minutes": "15",
+    # Live alerts (#305, app/alerts.py): how often a pass reads what was
+    # appended to the files alerts watch.
+    "alerts_interval_seconds": "60",
 }
 
 

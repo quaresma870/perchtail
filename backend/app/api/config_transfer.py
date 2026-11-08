@@ -47,6 +47,8 @@ class ImportResult(BaseModel):
     applied: bool
     items: list[PlanItemPublic]
     problems: list[ProblemPublic]
+    # Not blocking: the file still applies, but should be changed.
+    warnings: list[ProblemPublic] = []
 
 
 @router.post("/import", response_model=ImportResult)
@@ -96,6 +98,7 @@ def import_config(
         applied=apply and not problems,
         items=[PlanItemPublic(**asdict(i)) for i in items],
         problems=[ProblemPublic(**asdict(p)) for p in problems],
+        warnings=[ProblemPublic(**asdict(w)) for w in parsed.warnings],
     )
 
 

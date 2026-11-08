@@ -16,8 +16,7 @@ from app.collectors.base import DirEntry
 from app.collectors.smb_shares import Share
 from app.config import get_settings
 from app.db import get_session
-from app.models import PatternKind, Protocol, Rule, RuleType, SearchIndexState, Source
-from app.timeutils import utcnow
+from app.models import AlertFileState, PatternKind, Protocol, Rule, RuleType, Source
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -122,28 +121,23 @@ def test_unchanged_base_path_is_not_revalidated(session, client):
 # --- location change -----------------------------------------------------
 
 
-def _index_something(session, source_id):
-    from app.search_index import _insert_fts_rows
-
-    _insert_fts_rows(session, source_id, "app.log", "secret token here")
-    session.add(
-        SearchIndexState(source_id=source_id, file_path="app.log", size=1, indexed_at=utcnow())
-    )
+def _alert_position(session, source_id):
+    session.add(AlertFileState(alert_id=1, source_id=source_id, file_path="app.log", offset=5))
     session.commit()
 
 
 @pytest.mark.parametrize(
     "patch", [{"base_path": "/srv/other"}, {"host": "other.example.com"}, {"port": 2222}]
 )
-def test_moving_a_source_clears_its_index_and_audits_old_and_new(session, client, patch):
-    created = _create(client, search_indexing_enabled=True).json()
-    _index_something(session, created["id"])
+def test_moving_a_source_clears_alert_positions_and_audits_old_and_new(session, client, patch):
+    created = _create(client).json()
+    _alert_position(session, created["id"])
 
     if "host" in patch or "port" in patch:
         patch = {**patch, "credential": {"username": "u", "password": "p"}}
     assert client.patch(f"/sources/{created['id']}", json=patch).status_code == 200
 
-    assert session.exec(select(SearchIndexState)).all() == []
+    assert session.exec(select(AlertFileState)).all() == []
     event = session.exec(select(AuditLog).where(AuditLog.action == "source.update")).one()
     field = next(k for k in patch if k != "credential")
     change = event.event_metadata["changes"][field]
@@ -151,16 +145,16 @@ def test_moving_a_source_clears_its_index_and_audits_old_and_new(session, client
     assert change["from"] != patch[field]
 
 
-def test_renaming_keeps_the_index_and_never_audits_credential_values(session, client):
-    created = _create(client, search_indexing_enabled=True).json()
-    _index_something(session, created["id"])
+def test_renaming_keeps_alert_positions_and_never_audits_credential_values(session, client):
+    created = _create(client).json()
+    _alert_position(session, created["id"])
 
     client.patch(
         f"/sources/{created['id']}",
         json={"name": "renamed", "credential": {"username": "u", "password": "n3w-s3cret"}},
     )
 
-    assert len(session.exec(select(SearchIndexState)).all()) == 1
+    assert len(session.exec(select(AlertFileState)).all()) == 1
     event = session.exec(select(AuditLog).where(AuditLog.action == "source.update")).one()
     assert event.event_metadata["changes"]["credential"] == "replaced"
     assert "n3w-s3cret" not in json.dumps(event.event_metadata)

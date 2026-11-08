@@ -99,18 +99,8 @@ class Settings(BaseSettings):
     # the scratch disk or (for WinRM/agent) memory.
     max_fetch_mb: float = 2048.0
 
-    # Phase 3 full-text search (app/search_index.py) — how often the
-    # background indexer sweeps opted-in sources, and the largest single
-    # file it will read into memory to index (skips anything bigger, same
-    # spirit as the scratch size-guard: a safety valve, not a design goal).
-    search_index_interval_seconds: int = 300
-    search_index_max_file_size_mb: float = 20.0
-    # Most time one source may spend reading files in a sweep (#218). A
-    # first index of a large source can take many minutes; without a limit
-    # it held the whole sweep, so every other source's index (and the
-    # alerts that ride on it) went stale. A source that runs out of time
-    # carries on where it left off on the next sweep. 0 = no limit.
-    search_index_source_budget_seconds: int = 120
+    # SEARCH_INDEX_* settings went with the content index (#303); extra="ignore"
+    # above keeps an old .env that still sets them starting.
 
     # Release check (#215): at most once a day, ask GitHub for the latest
     # release and show it to super admins under Settings -> System. On by

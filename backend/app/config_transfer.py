@@ -27,13 +27,13 @@ from sqlmodel import Session, select
 
 from app import source_roots
 from app.agent_registry import disconnect_after_commit
+from app.alerts import forget_source
 from app.audit import record_audit_event
 from app.crypto import decrypt_credential, encrypt_credential
 from app.logging_config import get_logger
 from app.models import Customer, Folder, PatternKind, Protocol, Rule, RuleType, Source
 from app.name_index import drop_source_names, prune_hidden_names
 from app.rules import InvalidPatternError, parse_pattern
-from app.search_index import delete_source_index
 
 logger = get_logger(__name__)
 
@@ -50,7 +50,7 @@ _SOURCE_KEYS = {
     "base_path",
     "roots",
     "enabled",
-    "search_indexing_enabled",
+    "search_indexing_enabled",  # ignored with a warning (#303), refused from 1.0
     "name_index_enabled",
     "credential",
     "rules",
@@ -100,7 +100,6 @@ class _SourceSpec:
     base_path: str
     roots: list[dict] | None
     enabled: bool
-    search_indexing_enabled: bool
     name_index_enabled: bool
     credential: dict | None
     rules: list[_RuleSpec] | None
@@ -114,6 +113,9 @@ class Parsed:
     folders: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     sources: list[_SourceSpec] = field(default_factory=list)
     problems: list[Problem] = field(default_factory=list)
+    # Things the import goes ahead with but the file should change: they
+    # don't stop it.
+    warnings: list[Problem] = field(default_factory=list)
 
 
 def source_key(customer: str | None, folders: tuple[str, ...], name: str) -> str:
@@ -259,10 +261,17 @@ def _parse_source(
     ):
         problems.append(Problem(f"{where}.port", "port must be a number from 1 to 65535"))
         return
+    if "search_indexing_enabled" in node:
+        parsed.warnings.append(
+            Problem(
+                f"{where}.search_indexing_enabled",
+                "Ignored: the full-text search index was removed in 0.7. "
+                "Remove this key; from 1.0 it's refused.",
+            )
+        )
     flags = {}
     for flag, default in (
         ("enabled", True),
-        ("search_indexing_enabled", False),
         ("name_index_enabled", True),
     ):
         value = node.get(flag, default)
@@ -594,7 +603,6 @@ def _create_source(session, spec, customer_id, folder_id, credential, apply, use
         base_path=spec.base_path,
         roots=spec.roots,
         enabled=spec.enabled,
-        search_indexing_enabled=spec.search_indexing_enabled,
         name_index_enabled=spec.name_index_enabled,
         credential_ref=encrypt_credential(credential) if credential else None,
         winrm_scheme=spec.winrm_scheme,
@@ -643,7 +651,6 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         "base_path": spec.base_path,
         "roots": spec.roots,
         "enabled": spec.enabled,
-        "search_indexing_enabled": spec.search_indexing_enabled,
         "name_index_enabled": spec.name_index_enabled,
         "winrm_scheme": spec.winrm_scheme,
         "tls_ca_pem": spec.tls_ca_pem,
@@ -705,8 +712,8 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
     if rules_change:
         _replace_rules(session, source, spec.rules)
         prune_hidden_names(session, source)
-    if location_changed or not (source.enabled and source.search_indexing_enabled):
-        delete_source_index(session, source.id)
+    if location_changed:
+        forget_source(session, source.id)
     if location_changed or not (source.enabled and source.name_index_enabled):
         drop_source_names(session, source.id)
     if source.protocol == Protocol.agent and not source.enabled:
@@ -784,8 +791,6 @@ def _source_out(source: Source) -> dict:
         out["tls_ca_pem"] = source.tls_ca_pem
     if not source.enabled:
         out["enabled"] = False
-    if source.search_indexing_enabled:
-        out["search_indexing_enabled"] = True
     if not source.name_index_enabled:
         out["name_index_enabled"] = False
     out["rules"] = [_rule_out(r) for r in sorted(source.rules, key=lambda r: r.order)]
