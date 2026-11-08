@@ -98,6 +98,13 @@ class Settings(BaseSettings):
     # largest total a folder ZIP may collect -- keeps one request from filling
     # the scratch disk or (for WinRM/agent) memory.
     max_fetch_mb: float = 2048.0
+    # Longest a remote source may go without answering once connected (SFTP
+    # channel reads, SMB requests) before the call fails (#343), so a server
+    # that stalls after login can't hold a worker thread forever.
+    remote_read_timeout_seconds: int = 60
+    # How long shutdown waits for running background jobs and the worker
+    # pools to finish (#335). Keep the container's stop grace period above it.
+    shutdown_timeout_seconds: int = 20
 
     # SEARCH_INDEX_* settings went with the content index (#303); extra="ignore"
     # above keeps an old .env that still sets them starting.

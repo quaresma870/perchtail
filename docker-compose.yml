@@ -2,6 +2,9 @@ services:
   perchtail:
     build: .
     restart: unless-stopped
+    # Longer than SHUTDOWN_TIMEOUT_SECONDS (20 s), so running background jobs
+    # can finish on a stop (docs/high-availability.md).
+    stop_grace_period: 30s
     ports:
       - "8080:8000"
     env_file:

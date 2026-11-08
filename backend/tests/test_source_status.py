@@ -13,6 +13,7 @@ from app.collectors.base import (
 from app.collectors.errors import tracked
 from app.models import Protocol, Source
 from app.timeutils import utcnow
+from app.worker_pool import DrainablePool
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -120,6 +121,8 @@ def test_the_background_check_checks_what_is_due(db, monkeypatch):
 
     connector = _Connector({"down": SourceUnreachableError("timed out")})
     monkeypatch.setattr("app.collectors.registry.CONNECTORS", {Protocol.ssh: connector})
+    # One worker, so the order they're handed out in is the order they run.
+    monkeypatch.setattr(source_status, "_pool", DrainablePool(1, "test-check"))
     source_status.run_source_checks()
 
     # Never-checked first, then the stalest; not the fresh, disabled or agent ones.

@@ -16,7 +16,6 @@ Storage and search are in app/name_index_store.py."""
 
 import threading
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -30,6 +29,7 @@ from app.models import FileNameEntry, Rule, Source
 from app.rules import is_visible, rules_case_insensitive
 from app.source_status import failure_message
 from app.timeutils import utcnow
+from app.worker_pool import DrainablePool
 
 logger = get_logger(__name__)
 
@@ -45,7 +45,13 @@ COMMIT_EVERY = 2000
 # Sources waiting for a worker or being listed, so none is queued twice.
 _pending: set[int] = set()
 _pending_lock = threading.Lock()
-_pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="name-index")
+# Drained at shutdown (app/jobs.py).
+_pool = DrainablePool(WORKERS, "name-index")
+
+
+def pool() -> DrainablePool:
+    """For the shutdown drain (app/main.py)."""
+    return _pool
 
 
 @dataclass
@@ -234,13 +240,17 @@ def due_source_ids(session: Session) -> list[int]:
     every = interval(session)
     if every is None:
         return []
-    cutoff = utcnow() - every
+    now = utcnow()
+    cutoff = now - every
     return list(
         session.exec(
             select(Source.id)
             .where(
                 Source.enabled.is_(True),
                 Source.name_index_enabled.is_(True),
+                # A source whose background check is backing off (#343)
+                # would only hold a worker until it times out.
+                (col(Source.check_backoff_until).is_(None)) | (Source.check_backoff_until <= now),
                 (col(Source.name_indexed_at).is_(None)) | (Source.name_indexed_at < cutoff),
             )
             .order_by(col(Source.name_indexed_at).is_(None).desc(), Source.name_indexed_at)
@@ -263,7 +273,10 @@ def _enqueue(source_id: int, engine) -> bool:
             with _pending_lock:
                 _pending.discard(source_id)
 
-    _pool.submit(run)
+    if _pool.submit(run) is None:  # shutting down
+        with _pending_lock:
+            _pending.discard(source_id)
+        return False
     return True
 
 

@@ -19,6 +19,7 @@ from app.auth.rbac import require_global_capability
 from app.config import get_settings
 from app.db import get_session
 from app.health import uptime_seconds
+from app.jobs import job_name, job_records
 from app.log_rotation import retention_pressure
 from app.logging_config import get_logger
 from app.models import Alert, AlertDelivery, MonitoringToken, Protocol, Source
@@ -131,6 +132,14 @@ class AgentHealth(BaseModel):
 class SchedulerJobHealth(BaseModel):
     id: str
     next_run_at: str | None
+    # The job's stored record (#327); None until it has run once.
+    name: str | None = None
+    last_started_at: str | None = None
+    last_finished_at: str | None = None
+    last_success_at: str | None = None
+    last_ok: bool | None = None
+    last_error: str | None = None
+    last_duration_ms: int | None = None
 
 
 class SchedulerHealth(BaseModel):
@@ -228,13 +237,27 @@ def detailed_health(session: Session = Depends(get_session)):
         failed_deliveries=session.exec(select(func.sum(Alert.failed_deliveries))).one() or 0,
     )
 
-    jobs = [
-        SchedulerJobHealth(
-            id=job.id,
-            next_run_at=job.next_run_time.isoformat() if job.next_run_time else None,
+    records = job_records(session)
+
+    def _iso(value):
+        return value.isoformat() if value else None
+
+    jobs = []
+    for job in scheduler.get_jobs():
+        record = records.get(job.id)
+        jobs.append(
+            SchedulerJobHealth(
+                id=job.id,
+                next_run_at=_iso(job.next_run_time),
+                name=job_name(job.id),
+                last_started_at=_iso(record.last_started_at) if record else None,
+                last_finished_at=_iso(record.last_finished_at) if record else None,
+                last_success_at=_iso(record.last_success_at) if record else None,
+                last_ok=record.last_ok if record else None,
+                last_error=record.last_error if record else None,
+                last_duration_ms=record.last_duration_ms if record else None,
+            )
         )
-        for job in scheduler.get_jobs()
-    ]
     scheduler_healthy = scheduler.running and all(job.next_run_at is not None for job in jobs)
 
     overall = "ok"

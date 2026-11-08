@@ -1,6 +1,11 @@
+import os
+import shutil
+import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -92,12 +97,38 @@ class ScratchStore:
         return len(stale)
 
     def total_bytes(self) -> int:
-        """Current total scratch usage -- exposed for the detailed health
-        endpoint (app/api/monitoring.py) to report usage against
-        max_bytes, same computation enforce_size_guard already does
-        internally."""
+        """Current total scratch usage, for the detailed health endpoint
+        (app/api/monitoring.py): what's on disk under the scratch
+        directory, so folder ZIPs and copies being worked on count too, not
+        only the entries tracked here (#329)."""
+        return disk_bytes(self.root)
+
+    def clear_leftovers(self, protected: Iterable[Path] = ()) -> int:
+        """Deletes everything in the scratch directory. Only for startup,
+        when nothing in it can be in use: whatever is there was left by a
+        crash or a killed container (#329). Refused when the directory is a
+        filesystem root or holds one of `protected` (the database, the
+        logs), in case SCRATCH_DIR points somewhere it shouldn't."""
+        root = self.root.resolve()
+        if root == Path(root.anchor) or any(
+            root == p or root in p.parents for p in (Path(p).resolve() for p in protected)
+        ):
+            logger.error("scratch.leftovers_not_cleared", scratch_dir=str(root))
+            return 0
+        removed = 0
         with self._lock:
-            return sum(e.size() for e in self._entries.values())
+            for child in root.iterdir():
+                try:
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+                    removed += 1
+                except OSError as exc:
+                    logger.warning("scratch.leftover_not_deleted", path=child.name, error=str(exc))
+        if removed:
+            logger.warning("scratch.leftovers_cleared", removed=removed)
+        return removed
 
     def enforce_size_guard(self) -> int:
         """A safety valve for load, not a caching strategy: evicts the
@@ -105,7 +136,9 @@ class ScratchStore:
         max_bytes. Never touches an entry with refcount > 0, so a file a
         viewer currently has open is never pulled out from under them."""
         with self._lock:
-            total = sum(e.size() for e in self._entries.values())
+            # Disk usage counts what isn't tracked here (a folder ZIP being
+            # built), but only tracked, unreferenced entries can be evicted.
+            total = max(sum(e.size() for e in self._entries.values()), disk_bytes(self.root))
             if total <= self.max_bytes:
                 return 0
 
@@ -124,6 +157,36 @@ class ScratchStore:
         if evicted:
             logger.warning("scratch.size_guard_eviction", evicted=evicted)
         return evicted
+
+
+def disk_bytes(root: Path) -> int:
+    """Bytes of every file under `root`, without following links."""
+    total = 0
+    for directory, _dirs, files in os.walk(root):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_size
+            except OSError:  # deleted while walking
+                continue
+    return total
+
+
+@contextmanager
+def scratch_temp_dir(prefix: str = "perchtail-") -> Iterator[Path]:
+    """A temporary directory under SCRATCH_DIR, deleted on exit, for remote
+    copies (local_copy) and the like: it counts in scratch usage and a
+    leftover is cleared at the next startup (#329)."""
+    root = Path(get_settings().scratch_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=root) as tmp:
+        yield Path(tmp)
+
+
+def make_scratch_dir(prefix: str) -> Path:
+    """Like scratch_temp_dir, for a caller that deletes it itself."""
+    root = Path(get_settings().scratch_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
 
 
 @lru_cache

@@ -1,5 +1,4 @@
 import base64
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -8,6 +7,7 @@ from app.collectors import base as collector_base
 from app.collectors.base import DirEntry
 from app.models import Rule, Source
 from app.rules import is_entry_visible, rules_case_insensitive
+from app.scratch import scratch_temp_dir
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy", "read_range"]
 
@@ -89,7 +89,7 @@ def local_copy(source: Source, relative_path: str):
     """Yields a local filesystem path with `relative_path`'s content, for
     callers that need to run zipfile/tarfile/gzip against it — same pattern
     as the other remote connectors (ssh.py, smb.py, winrm.py)."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with scratch_temp_dir() as tmp:
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path

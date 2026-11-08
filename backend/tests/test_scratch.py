@@ -139,3 +139,69 @@ def test_size_accounting_counts_every_fetch_of_a_key(tmp_path):
     store.acquire("key1").write_bytes(b"x" * 10)
     store.acquire("key1").write_bytes(b"x" * 20)
     assert store.total_bytes() == 30
+
+
+# --- #329: leftovers and usage on disk ----------------------------------------
+
+
+def test_clear_leftovers_deletes_everything_in_the_scratch_directory(tmp_path):
+    store = _store(tmp_path)
+    (store.root / "abc-123").write_bytes(b"x" * 10)
+    leftover_dir = store.root / "perchtail-zip-1"
+    leftover_dir.mkdir()
+    (leftover_dir / "download.zip").write_bytes(b"y")
+
+    assert store.clear_leftovers(protected=[tmp_path / "db"]) == 2
+    assert list(store.root.iterdir()) == []
+
+
+def test_clear_leftovers_refuses_a_directory_holding_the_database(tmp_path):
+    store = ScratchStore(root=tmp_path, max_bytes=1)
+    database = tmp_path / "db"
+    database.mkdir()
+    (database / "perchtail.db").write_bytes(b"data")
+
+    assert store.clear_leftovers(protected=[database]) == 0
+    assert (database / "perchtail.db").exists()
+
+
+def test_usage_counts_files_on_disk_not_only_tracked_ones(tmp_path):
+    store = _store(tmp_path)
+    store.acquire("key1").write_bytes(b"a" * 100)
+    untracked = store.root / "perchtail-zip-1"
+    untracked.mkdir()
+    (untracked / "download.zip").write_bytes(b"b" * 50)
+
+    assert store.total_bytes() == 150
+
+
+def test_the_size_guard_counts_untracked_files_too(tmp_path):
+    store = _store(tmp_path, max_bytes=120)
+    path = store.acquire("key1")
+    path.write_bytes(b"a" * 100)
+    store._entries["key1"].refcount = 0  # as in the eviction tests above
+    store._entries["key1"].last_accessed = time.monotonic() - 100
+    other = store.acquire("key2")
+    other.write_bytes(b"c" * 10)
+    store._entries["key2"].refcount = 0
+    # Tracked entries alone (110 bytes) are under the cap; a ZIP being built
+    # (not tracked by the store, still on its disk) takes it over.
+    (store.root / "perchtail-zip-1").mkdir()
+    (store.root / "perchtail-zip-1" / "download.zip").write_bytes(b"b" * 50)
+
+    assert store.enforce_size_guard() == 1
+    assert not path.exists()
+    assert other.exists()
+
+
+def test_remote_copies_live_under_the_scratch_directory(tmp_path, monkeypatch):
+    from app.config import get_settings
+    from app.scratch import make_scratch_dir, scratch_temp_dir
+
+    monkeypatch.setattr(get_settings(), "scratch_dir", str(tmp_path / "scratch"))
+    with scratch_temp_dir() as tmp:
+        assert tmp.parent == tmp_path / "scratch"
+        (tmp / "fetched").write_bytes(b"x")
+    assert not tmp.exists()
+    made = make_scratch_dir("perchtail-zip-")
+    assert made.parent == tmp_path / "scratch"

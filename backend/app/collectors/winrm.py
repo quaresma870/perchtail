@@ -2,7 +2,6 @@ import base64
 import hashlib
 import json
 import os
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -16,6 +15,7 @@ from app.crypto import decrypt_credential
 from app.logging_config import get_logger
 from app.models import Rule, Source
 from app.rules import is_entry_visible
+from app.scratch import scratch_temp_dir
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "list_drives", "local_copy"]
 
@@ -274,7 +274,7 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
 
 @contextmanager
 def local_copy(source: Source, relative_path: str):
-    with tempfile.TemporaryDirectory() as tmp:
+    with scratch_temp_dir() as tmp:
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path

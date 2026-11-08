@@ -1,4 +1,4 @@
-import tempfile
+import os
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -6,14 +6,25 @@ import smbclient
 
 from app.collectors import base as collector_base
 from app.collectors.base import DirEntry, PathOutsideBaseError
+from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
 from app.models import Rule, Source
 from app.rules import is_entry_visible
+from app.scratch import scratch_temp_dir
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 
 logger = get_logger(__name__)
+
+# smbprotocol reads this as each connection is made: after this long without
+# a word from the server it sends an echo, and when that goes unanswered as
+# long again it fails every pending request (#343). Its default (600 s) kept
+# a stalled server's request waiting for 20 minutes; requests themselves
+# have no timeout in smbclient. An operator's own value wins.
+os.environ.setdefault(
+    "SMB_EXPERIMENTAL_TRANSPORT_RECEIVE_TIMEOUT", str(get_settings().remote_read_timeout_seconds)
+)
 
 
 def _connect_kwargs(source: Source) -> dict:
@@ -79,7 +90,9 @@ def _connection(source: Source):
     cache: dict = {}
     kwargs = {**_connect_kwargs(source), "connection_cache": cache}
     try:
-        smbclient.register_session(source.host, **kwargs)
+        smbclient.register_session(
+            source.host, connection_timeout=get_settings().remote_read_timeout_seconds, **kwargs
+        )
         yield kwargs
     finally:
         smbclient.reset_connection_cache(fail_on_error=False, connection_cache=cache)
@@ -171,7 +184,7 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
 
 @contextmanager
 def local_copy(source: Source, relative_path: str):
-    with tempfile.TemporaryDirectory() as tmp:
+    with scratch_temp_dir() as tmp:
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path

@@ -697,6 +697,8 @@ def update_source(
         # How the source is reached changed: the old status says nothing
         # about the new settings (#276).
         source.status = source.status_checked_at = source.status_message = None
+        source.check_failures = 0
+        source.check_backoff_until = None
         source_status.forget(source.id)
     session.add(source)
     record_audit_event(

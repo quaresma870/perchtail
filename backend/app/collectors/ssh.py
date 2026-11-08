@@ -4,7 +4,6 @@ import io
 import os
 import posixpath
 import stat as stat_module
-import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +17,7 @@ from app.crypto import decrypt_credential
 from app.logging_config import get_logger
 from app.models import Rule, Source
 from app.rules import is_entry_visible
+from app.scratch import scratch_temp_dir
 
 __all__ = [
     "DirEntry",
@@ -38,6 +38,8 @@ logger = get_logger(__name__)
 # thread-safe) -- see _connect()'s docstring for why this file exists at
 # all.
 _host_keys_lock = threading.Lock()
+# Keeps NAT and firewalls from dropping a connection during a long transfer.
+KEEPALIVE_SECONDS = 30
 
 
 def fingerprint(key: paramiko.PKey) -> str:
@@ -120,7 +122,15 @@ def _connect(source: Source) -> paramiko.SSHClient:
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(_missing_host_key_policy())
 
-    connect_kwargs: dict = {"username": creds["username"], "timeout": 10}
+    read_timeout = get_settings().remote_read_timeout_seconds
+    connect_kwargs: dict = {
+        "username": creds["username"],
+        "timeout": 10,
+        # A server that accepts TCP and then goes quiet (#343).
+        "banner_timeout": read_timeout,
+        "auth_timeout": read_timeout,
+        "channel_timeout": read_timeout,
+    }
     if "private_key" in creds:
         connect_kwargs["pkey"] = load_private_key(creds["private_key"])
     elif "password" in creds:
@@ -149,6 +159,9 @@ def _connect(source: Source) -> paramiko.SSHClient:
     # MITM-detection outcome, so it's left uncaught and propagates to the
     # caller like any other connection failure.
     client.connect(source.host, port=source.port or 22, **connect_kwargs)
+    transport = client.get_transport()
+    if transport is not None:
+        transport.set_keepalive(KEEPALIVE_SECONDS)
 
     with _host_keys_lock:
         client.save_host_keys(str(known_hosts_path))
@@ -156,6 +169,14 @@ def _connect(source: Source) -> paramiko.SSHClient:
             os.chmod(known_hosts_path, 0o600)  # #193: which hosts are trusted
 
     return client
+
+
+def _open_sftp(client: paramiko.SSHClient) -> paramiko.SFTPClient:
+    """An SFTP session whose reads fail after REMOTE_READ_TIMEOUT_SECONDS of
+    silence, instead of blocking the thread forever (#343)."""
+    sftp = client.open_sftp()
+    sftp.get_channel().settimeout(get_settings().remote_read_timeout_seconds)
+    return sftp
 
 
 def _is_within(path: str, root: str) -> bool:
@@ -199,7 +220,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     is shown as whatever it points to (file or directory)."""
     client = _connect(source)
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
             root = sftp.normalize(source.base_path)
             remote_path = _resolve_contained(sftp, source, relative_path)
@@ -245,7 +266,7 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     limit = collector_base.max_fetch_bytes()
     client = _connect(source)
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
             remote_path = _resolve_contained(sftp, source, relative_path)
             size = sftp.stat(remote_path).st_size or 0
@@ -267,7 +288,7 @@ def local_copy(source: Source, relative_path: str):
     """Yields a local filesystem path with `relative_path`'s content, for
     callers (api/archive.py) that need to run zipfile/tarfile/gzip against
     it — remote protocols have no choice but to fetch a copy first."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with scratch_temp_dir() as tmp:
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path
@@ -281,7 +302,7 @@ def read_range(
     transferred."""
     client = _connect(source)
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
             remote_path = _resolve_contained(sftp, source, relative_path)
             with sftp.open(remote_path, "rb") as f:

@@ -384,8 +384,8 @@ def test_short_text_matches_any_letter_case(session, tmp_path):
 def test_a_source_is_queued_once(monkeypatch):
     calls = []
     monkeypatch.setattr(name_index, "index_source_names", lambda sid, engine: calls.append(sid))
-    blocker = __import__("threading").Event()
-    monkeypatch.setattr(name_index._pool, "submit", lambda fn: blocker.wait(0) or None)
+    # Accepted but never run, so the source stays pending.
+    monkeypatch.setattr(name_index._pool, "submit", lambda fn: object())
     assert name_index._enqueue(4242, None) is True
     assert name_index._enqueue(4242, None) is False
     name_index._pending.discard(4242)
