@@ -83,6 +83,12 @@ def audit_chain_key() -> bytes:
     return _derive_audit_chain_key(get_settings().credential_encryption_key)
 
 
+def build_audit_chain_key(secret: str) -> bytes:
+    """The audit chain key for a given CREDENTIAL_ENCRYPTION_KEY, for
+    app/rotate_credential_key.py, which needs the old and the new one."""
+    return _derive_audit_chain_key(secret)
+
+
 def build_fernet(secret: str) -> Fernet:
     """Exposed (not just the cached singleton below) for
     app/rotate_credential_key.py, which needs two independent Fernet

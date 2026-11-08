@@ -3,6 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser, hasCapability } from '../lib/auth'
+  import Modal from '../lib/components/Modal.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import SortableHeader from '../lib/components/SortableHeader.svelte'
   import {
@@ -15,6 +16,14 @@
   } from '../lib/table-view'
   import { sourceStatusView } from '../lib/source-status'
   import { confirmAction } from '../lib/confirm'
+  import {
+    credentialAgeDays,
+    credentialAgeLabel,
+    credentialSortKey,
+    isCredentialStale,
+    parseUtc,
+  } from '../lib/credential-age'
+  import { systemSettings } from '../lib/settings'
   import type { Customer, Protocol, Source } from '../lib/types'
 
   let sources: Source[] = []
@@ -45,8 +54,9 @@
     return result && result !== 'checking' ? result.detail : ''
   }
 
-  async function load() {
-    loading = true
+  // quiet: refresh the rows without swapping the table for "Loading…".
+  async function load(quiet = false) {
+    if (!quiet) loading = true
     error = ''
     try {
       sources = await api.get<Source[]>('/sources')
@@ -85,7 +95,7 @@
     if (!ok) return
     try {
       await api.delete(`/sources/${source.id}`)
-      await load()
+      await load(true)
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to delete source'
     }
@@ -98,6 +108,7 @@
     text: '',
     protocol: '',
     status: '',
+    credential: '',
   })
   $: saveViewState(VIEW_KEY, view)
 
@@ -112,16 +123,31 @@
     protocol: (s) => PROTOCOL_LABEL[s.protocol],
     status: statusRank,
     rules: (s) => s.rule_count,
+    credential: (s) => credentialSortKey(s),
+  }
+
+  // Credential age (#248): 0 in Settings -> System turns the warning off.
+  $: maxCredentialAge = $systemSettings.credential_max_age_days
+  function credentialTitle(source: Source, maxAge: number): string {
+    if (!source.has_credential) return ''
+    if (!source.credential_updated_at) {
+      return "Set before PerchTail kept the date: unknown until it's next changed"
+    }
+    const when = `Set on ${parseUtc(source.credential_updated_at).toLocaleDateString()}`
+    return isCredentialStale(source, maxAge)
+      ? `${when}, ${credentialAgeDays(source)} days ago: older than the ${maxAge}-day limit in Settings → System`
+      : when
   }
 
   $: filtered = sources.filter(
     (s) =>
       matchesText([s.name, s.host, placeOf(s)], view.text) &&
       (!view.protocol || s.protocol === view.protocol) &&
-      (!view.status || (view.status === 'enabled') === s.enabled),
+      (!view.status || (view.status === 'enabled') === s.enabled) &&
+      (!view.credential || isCredentialStale(s, maxCredentialAge)),
   )
   $: visible = sortRows(filtered, view.sort, accessors)
-  $: filtering = Boolean(view.text || view.protocol || view.status)
+  $: filtering = Boolean(view.text || view.protocol || view.status || view.credential)
   $: presentProtocols = [...new Set(sources.map((s) => s.protocol))]
   // A protocol filter kept from earlier in the session can name a protocol
   // no source uses any more: the select would show "All protocols" while
@@ -129,11 +155,111 @@
   $: if (!loading && view.protocol && !presentProtocols.includes(view.protocol as Protocol)) {
     view = { ...view, protocol: '' }
   }
+  // Likewise when the warning was turned off since.
+  $: if (view.credential && maxCredentialAge <= 0) view = { ...view, credential: '' }
 
   const sortBy = (key: string) => (view = { ...view, sort: nextSort(view.sort, key) })
-  const clearFilters = () => (view = { ...view, text: '', protocol: '', status: '' })
+  const clearFilters = () =>
+    (view = { ...view, text: '', protocol: '', status: '', credential: '' })
 
-  onMount(load)
+  // Bulk credential update (#248), for whoever may edit sources. Only the
+  // visible rows count, so a filter never hides what is about to change.
+  const MAX_BULK = 200
+  $: canManage = hasCapability($currentUser, 'create_source')
+  const usesCredential = (s: Source) =>
+    !s.is_system && (s.protocol === 'ssh' || s.protocol === 'smb' || s.protocol === 'winrm')
+  let selected = new Set<number>()
+  $: selectable = visible.filter(usesCredential)
+  $: selectedSources = selectable.filter((s) => selected.has(s.id))
+  $: allSelected = selectable.length > 0 && selectedSources.length === selectable.length
+
+  function toggleRow(id: number, on: boolean) {
+    const next = new Set(selected)
+    if (on) next.add(id)
+    else next.delete(id)
+    selected = next
+  }
+  function toggleAll(on: boolean) {
+    const next = new Set(selected)
+    for (const s of selectable) {
+      if (on) next.add(s.id)
+      else next.delete(s.id)
+    }
+    selected = next
+  }
+
+  interface BulkResult {
+    source_id: number
+    name: string | null
+    status: 'updated' | 'failed' | 'skipped'
+    detail: string | null
+  }
+
+  let bulkOpen = false
+  let bulkTargets: Source[] = []
+  let bulkUsername = ''
+  let bulkMode: 'password' | 'key' = 'password'
+  let bulkPassword = ''
+  let bulkKey = ''
+  let bulkTestFirst = true
+  let bulkRunning = false
+  let bulkError = ''
+  let bulkResults: BulkResult[] | null = null
+
+  // A private key only signs in over SSH.
+  $: bulkAllSsh = bulkTargets.every((s) => s.protocol === 'ssh')
+  $: if (!bulkAllSsh && bulkMode === 'key') bulkMode = 'password'
+  $: bulkSecret = bulkMode === 'key' ? bulkKey : bulkPassword
+  $: bulkCount = (status: BulkResult['status']) =>
+    (bulkResults ?? []).filter((r) => r.status === status).length
+  $: bulkProblems = (bulkResults ?? []).filter((r) => r.status !== 'updated')
+
+  function openBulk() {
+    bulkTargets = selectedSources
+    bulkUsername = ''
+    bulkMode = 'password'
+    bulkPassword = ''
+    bulkKey = ''
+    bulkTestFirst = true
+    bulkError = ''
+    bulkResults = null
+    bulkOpen = true
+  }
+
+  function closeBulk() {
+    // The request carries on either way; keep the popup until it answers.
+    if (bulkRunning) return
+    bulkPassword = ''
+    bulkKey = ''
+    bulkOpen = false
+  }
+
+  async function runBulk() {
+    bulkError = ''
+    bulkRunning = true
+    try {
+      const credential =
+        bulkMode === 'key'
+          ? { username: bulkUsername, private_key: bulkKey }
+          : { username: bulkUsername, password: bulkPassword }
+      bulkResults = await api.post<BulkResult[]>('/sources/credentials', {
+        source_ids: bulkTargets.map((s) => s.id),
+        credential,
+        test_first: bulkTestFirst,
+      })
+      bulkPassword = ''
+      bulkKey = ''
+      const updated = new Set(bulkResults.filter((r) => r.status === 'updated').map((r) => r.source_id))
+      selected = new Set([...selected].filter((id) => !updated.has(id)))
+      await load(true)
+    } catch (err) {
+      bulkError = err instanceof ApiError ? err.detail : 'Failed to update the credentials'
+    } finally {
+      bulkRunning = false
+    }
+  }
+
+  onMount(() => load())
 </script>
 
 <SettingsNav />
@@ -141,10 +267,20 @@
 <div class="page">
   <div class="header">
     <h1>Sources</h1>
-    {#if hasCapability($currentUser, 'create_source')}
-      <button class="btn btn-primary" on:click={() => push('/settings/sources/new')}
-        >+ Add source</button
-      >
+    {#if canManage}
+      <div class="header-actions">
+        <button
+          class="btn btn-ghost"
+          disabled={selectedSources.length === 0}
+          title={selectedSources.length === 0
+            ? 'Select SSH, SMB or WinRM sources in the list first'
+            : 'Set one new credential on the selected sources'}
+          on:click={openBulk}>Update credentials ({selectedSources.length})</button
+        >
+        <button class="btn btn-primary" on:click={() => push('/settings/sources/new')}
+          >+ Add source</button
+        >
+      </div>
     {/if}
   </div>
 
@@ -172,6 +308,12 @@
         <option value="enabled">Enabled</option>
         <option value="disabled">Disabled</option>
       </select>
+      {#if maxCredentialAge > 0}
+        <select class="input" aria-label="Credential age" bind:value={view.credential}>
+          <option value="">Any credential age</option>
+          <option value="stale">Credentials older than {maxCredentialAge} days</option>
+        </select>
+      {/if}
       {#if filtering}
         <span class="filter-count">{visible.length} of {sources.length}</span>
         <button class="link" on:click={clearFilters}>Clear filters</button>
@@ -182,10 +324,22 @@
       <table>
         <thead>
           <tr>
+            {#if canManage}
+              <th class="select-cell">
+                <input
+                  type="checkbox"
+                  aria-label="Select all visible sources"
+                  checked={allSelected}
+                  disabled={selectable.length === 0}
+                  on:change={(e) => toggleAll(e.currentTarget.checked)}
+                />
+              </th>
+            {/if}
             <SortableHeader label="Source" key="name" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
             <SortableHeader label="Customer" key="customer" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
             <SortableHeader label="Protocol" key="protocol" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
             <SortableHeader label="Status" key="status" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Credential" key="credential" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
             <SortableHeader label="Rules" key="rules" sort={view.sort} on:sort={(e) => sortBy(e.detail)} />
             <th></th>
           </tr>
@@ -193,6 +347,18 @@
         <tbody>
           {#each visible as source (source.id)}
             <tr>
+              {#if canManage}
+                <td class="select-cell">
+                  {#if usesCredential(source)}
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${source.name}`}
+                      checked={selected.has(source.id)}
+                      on:change={(e) => toggleRow(source.id, e.currentTarget.checked)}
+                    />
+                  {/if}
+                </td>
+              {/if}
               <td>
                 <div class="source-name">
                   <a class="name-link" href={`#/settings/sources/${source.id}`}>{source.name}</a>
@@ -249,6 +415,15 @@
                   </button>
                 {/if}
               </td>
+              <td class="credential-age">
+                {#if isCredentialStale(source, maxCredentialAge)}
+                  <span class="credential-stale" title={credentialTitle(source, maxCredentialAge)}
+                    >⚠ {credentialAgeLabel(source)}</span
+                  >
+                {:else}
+                  <span title={credentialTitle(source, maxCredentialAge) || undefined}>{credentialAgeLabel(source)}</span>
+                {/if}
+              </td>
               <td class="rules-count">{source.rule_count} rule{source.rule_count === 1 ? '' : 's'}</td>
               <td class="actions">
                 <button
@@ -271,11 +446,11 @@
           {/each}
           {#if sources.length === 0}
             <tr>
-              <td colspan="6" class="empty">No sources visible to your account.</td>
+              <td colspan={canManage ? 8 : 7} class="empty">No sources visible to your account.</td>
             </tr>
           {:else if visible.length === 0}
             <tr>
-              <td colspan="6" class="empty">
+              <td colspan={canManage ? 8 : 7} class="empty">
                 No sources match. <button class="link" on:click={clearFilters}>Clear filters</button>
               </td>
             </tr>
@@ -286,6 +461,114 @@
   {/if}
 </div>
 
+{#if bulkOpen}
+  <Modal title="Update credentials" on:close={closeBulk}>
+    {#if bulkResults}
+      <p class="bulk-summary" role="status">
+        {bulkCount('updated')} updated, {bulkCount('failed')} failed, {bulkCount('skipped')} skipped
+      </p>
+      {#if bulkProblems.length > 0}
+        <ul class="bulk-problems">
+          {#each bulkProblems as result (result.source_id)}
+            <li>
+              <span class="bulk-status bulk-{result.status}">{result.status}</span>
+              <strong>{result.name ?? `#${result.source_id}`}</strong>{result.detail
+                ? `: ${result.detail}`
+                : ''}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    {:else}
+      <p class="hint">
+        Sets the same credential on the {bulkTargets.length} selected source{bulkTargets.length === 1
+          ? ''
+          : 's'}. Each one keeps its own encrypted copy.
+      </p>
+      <label class="field">
+        Username
+        <input class="input" bind:value={bulkUsername} autocomplete="off" disabled={bulkRunning} />
+      </label>
+      {#if bulkAllSsh}
+        <div class="auth-choice" role="radiogroup" aria-label="Sign in with">
+          <label
+            ><input type="radio" bind:group={bulkMode} value="password" disabled={bulkRunning} /> Password</label
+          >
+          <label
+            ><input type="radio" bind:group={bulkMode} value="key" disabled={bulkRunning} /> Private key</label
+          >
+        </div>
+      {/if}
+      {#if bulkMode === 'key'}
+        <label class="field">
+          New private key: ed25519, ECDSA or RSA, without a passphrase
+          <textarea
+            class="input mono"
+            rows="4"
+            wrap="off"
+            bind:value={bulkKey}
+            disabled={bulkRunning}
+            spellcheck="false"
+            autocomplete="off"
+            autocapitalize="off"
+            data-gramm="false"
+            data-gramm_editor="false"
+            data-enable-grammarly="false"
+          ></textarea>
+        </label>
+      {:else}
+        <label class="field">
+          New password
+          <input
+            class="input"
+            type="password"
+            bind:value={bulkPassword}
+            disabled={bulkRunning}
+            autocomplete="new-password"
+            spellcheck="false"
+            data-gramm="false"
+            data-enable-grammarly="false"
+          />
+        </label>
+      {/if}
+      <label class="check-field">
+        <input type="checkbox" bind:checked={bulkTestFirst} disabled={bulkRunning} />
+        Test the new credential on each source first and update only where it works
+      </label>
+      {#if bulkTargets.length > MAX_BULK}
+        <p class="error">Select at most {MAX_BULK} sources at a time.</p>
+      {/if}
+      {#if bulkRunning}
+        <p class="hint" role="status">
+          Updating {bulkTargets.length} source{bulkTargets.length === 1 ? '' : 's'}…
+        </p>
+      {/if}
+      {#if bulkError}
+        <p class="error" role="alert">{bulkError}</p>
+      {/if}
+    {/if}
+    <svelte:fragment slot="footer">
+      {#if bulkResults}
+        <button class="btn btn-primary" type="button" on:click={closeBulk}>Done</button>
+      {:else}
+        <button class="btn btn-ghost" type="button" disabled={bulkRunning} on:click={closeBulk}
+          >Cancel</button
+        >
+        <button
+          class="btn btn-primary"
+          type="button"
+          disabled={bulkRunning ||
+            !bulkUsername ||
+            !bulkSecret ||
+            bulkTargets.length === 0 ||
+            bulkTargets.length > MAX_BULK}
+          on:click={runBulk}>{bulkRunning ? 'Updating…' : 'Update'}</button
+        >
+      {/if}
+    </svelte:fragment>
+  </Modal>
+{/if}
+
 <style>
   .page {
     padding: 1.75rem 2rem;
@@ -295,6 +578,10 @@
     align-items: center;
     justify-content: space-between;
     margin-bottom: 1.25rem;
+  }
+  .header-actions {
+    display: flex;
+    gap: 0.5rem;
   }
   h1 {
     font-size: 1.4rem;
@@ -409,6 +696,58 @@
   }
   .rules-count {
     color: var(--text-muted);
+  }
+  .select-cell {
+    width: 1px;
+    padding-right: 0;
+  }
+  .credential-age {
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .credential-stale {
+    color: var(--warning);
+    font-weight: 600;
+    cursor: help;
+  }
+  .auth-choice {
+    display: flex;
+    gap: 1rem;
+  }
+  .auth-choice label,
+  .check-field {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
+  .bulk-summary {
+    margin: 0;
+    font-weight: 600;
+  }
+  .bulk-problems {
+    margin: 0;
+    padding-left: 1.1rem;
+    font-size: 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .bulk-status {
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    margin-right: 0.4rem;
+  }
+  .bulk-failed {
+    color: var(--danger);
+  }
+  .bulk-skipped {
+    color: var(--text-faint);
   }
   .actions {
     white-space: nowrap;

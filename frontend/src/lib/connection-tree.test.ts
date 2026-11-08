@@ -17,6 +17,7 @@ function source(overrides: Partial<Source> & { id: number; name: string }): Sour
     is_system: false,
     rule_count: 0,
     has_credential: true,
+    credential_updated_at: null,
     has_agent_token: false,
     agent_connected: false,
     agent_last_seen_at: null,

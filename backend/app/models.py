@@ -93,6 +93,9 @@ class Source(SQLModel, table=True):
     # Encrypted at rest via app.crypto (SSH key, SMB/WinRM password, etc.);
     # null for the local protocol, which needs no credential.
     credential_ref: str | None = None
+    # When the credential was last set (#248), for its age; None when it
+    # was set before 0.7 or there is none.
+    credential_updated_at: datetime | None = None
     base_path: str
     # Two or more {"label", "path"} entries when the source reads several
     # folders (#161; see app/source_roots.py), else null. base_path then

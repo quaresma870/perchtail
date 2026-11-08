@@ -20,6 +20,10 @@ import sqlalchemy as sa
 import sqlmodel
 from alembic import op
 
+# The rebuild keeps AUTOINCREMENT (see 47c9d392f28f): ids of deleted sources
+# are never handed out again.
+NO_ID_REUSE = {"sqlite_autoincrement": True}
+
 revision: str = "a3f5c8e17b42"
 down_revision: str | Sequence[str] | None = "e4b7c2d91a05"
 branch_labels: str | Sequence[str] | None = None
@@ -29,7 +33,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.execute("DROP TABLE IF EXISTS search_index_fts")
     op.drop_table("search_index_state")
-    with op.batch_alter_table("source") as batch_op:
+    with op.batch_alter_table("source", table_kwargs=NO_ID_REUSE) as batch_op:
         batch_op.drop_column("search_indexing_enabled")
     op.execute("DELETE FROM system_setting WHERE key = 'search_view_enabled'")
 
@@ -114,7 +118,7 @@ def downgrade() -> None:
             "regex",
         ):
             batch_op.drop_column(column)
-    with op.batch_alter_table("source") as batch_op:
+    with op.batch_alter_table("source", table_kwargs=NO_ID_REUSE) as batch_op:
         batch_op.add_column(
             sa.Column(
                 "search_indexing_enabled", sa.Boolean(), nullable=False, server_default=sa.false()

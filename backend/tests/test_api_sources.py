@@ -893,3 +893,136 @@ def test_sources_carry_their_status(session, admin_client):
     # An agent source's status is its live connection.
     body = admin_client.get(f"/sources/{agent.id}").json()
     assert (body["status"], body["status_message"]) == ("failing", "The agent isn't connected")
+
+
+# --- bulk credential update and credential age (#248) -------------------------
+
+
+def _ssh_source(admin_client, customer, name):
+    return admin_client.post(
+        "/sources",
+        json={
+            "name": name,
+            "customer_id": customer.id,
+            "protocol": "ssh",
+            "host": f"{name}.example.com",
+            "base_path": "/var/log",
+            "credential": {"username": "svc", "password": "old-pass"},
+        },
+    ).json()
+
+
+def test_creating_with_a_credential_records_when_it_was_set(session, admin_client):
+    created = _ssh_source(admin_client, _make_customer(session), "app01")
+    assert created["credential_updated_at"] is not None
+
+
+def test_bulk_update_tests_each_source_and_applies_only_where_it_works(
+    session, admin_client, monkeypatch, tmp_path
+):
+    from app.auth.models import AuditLog
+    from app.collectors.base import SourceAuthError
+    from app.crypto import decrypt_credential
+    from sqlmodel import select
+
+    customer = _make_customer(session)
+    good = _ssh_source(admin_client, customer, "good01")
+    bad = _ssh_source(admin_client, customer, "bad01")
+    local = admin_client.post(
+        "/sources",
+        json={
+            "name": "loc",
+            "customer_id": customer.id,
+            "protocol": "local",
+            "host": "localhost",
+            "base_path": str(tmp_path),
+        },
+    ).json()
+
+    def fake_check(source, connector):
+        assert decrypt_credential(source.credential_ref)["password"] == "new-pass"
+        if source.host.startswith("bad01"):
+            return [({"label": None}, SourceAuthError("denied"))]
+        return []
+
+    monkeypatch.setattr("app.api.sources.source_status.check", fake_check)
+    response = admin_client.post(
+        "/sources/credentials",
+        json={
+            "source_ids": [good["id"], bad["id"], local["id"], 999999],
+            "credential": {"username": "svc", "password": "new-pass"},
+        },
+    )
+    assert response.status_code == 200
+    by_id = {r["source_id"]: r for r in response.json()}
+    assert by_id[good["id"]]["status"] == "updated"
+    assert by_id[bad["id"]]["status"] == "failed" and by_id[bad["id"]]["detail"]
+    assert by_id[local["id"]]["status"] == "skipped"
+    assert by_id[999999]["status"] == "skipped"
+
+    session.expire_all()
+    stored = {s.id: s for s in session.exec(select(Source)).all()}
+    assert decrypt_credential(stored[good["id"]].credential_ref)["password"] == "new-pass"
+    assert decrypt_credential(stored[bad["id"]].credential_ref)["password"] == "old-pass"
+    # Each source keeps its own encrypted copy.
+    assert stored[good["id"]].credential_ref != stored[bad["id"]].credential_ref
+    events = session.exec(
+        select(AuditLog).where(AuditLog.action == "source.credential_update")
+    ).all()
+    assert [e.target_id for e in events] == [good["id"]]
+    assert "new-pass" not in str(events[0].event_metadata)
+
+
+def test_bulk_update_without_testing_applies_to_every_credential_source(session, admin_client):
+    customer = _make_customer(session)
+    ids = [_ssh_source(admin_client, customer, n)["id"] for n in ("a01", "b01")]
+    response = admin_client.post(
+        "/sources/credentials",
+        json={
+            "source_ids": ids,
+            "credential": {"username": "svc", "private_key": "KEY"},
+            "test_first": False,
+        },
+    )
+    assert [r["status"] for r in response.json()] == ["updated", "updated"]
+
+
+def test_bulk_update_needs_a_secret_and_the_manage_capability(session, admin_client, client_for):
+    customer = _make_customer(session)
+    source_id = _ssh_source(admin_client, customer, "c01")["id"]
+    no_secret = admin_client.post(
+        "/sources/credentials",
+        json={"source_ids": [source_id], "credential": {"username": "svc"}},
+    )
+    assert no_secret.status_code == 400
+    viewer = client_for(_make_user(session, is_super_admin=False))
+    forbidden = viewer.post(
+        "/sources/credentials",
+        json={"source_ids": [source_id], "credential": {"username": "svc", "password": "x"}},
+    )
+    assert forbidden.status_code == 403
+
+
+def test_testing_a_new_credential_never_records_status_on_the_real_source(
+    session, admin_client, monkeypatch
+):
+    customer = _make_customer(session)
+    source = _ssh_source(admin_client, customer, "d01")
+    recorded = []
+    monkeypatch.setattr(
+        "app.source_status.record", lambda source_id, ok, message=None: recorded.append(source_id)
+    )
+
+    def fake_check(trial, connector):
+        assert trial.id is None
+        from app import source_status
+
+        source_status.record(trial.id, False, "denied")
+        return []
+
+    monkeypatch.setattr("app.api.sources.source_status.check", fake_check)
+    admin_client.post(
+        "/sources/credentials",
+        json={"source_ids": [source["id"]], "credential": {"username": "svc", "password": "x"}},
+    )
+    assert source["id"] not in recorded
