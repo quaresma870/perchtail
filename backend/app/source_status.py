@@ -171,7 +171,8 @@ def backoff_delay(failures: int, interval: timedelta) -> timedelta:
     failed together don't come back together."""
     steps = max(failures - FAILURES_BEFORE_BACKOFF, 0)
     delay = min(interval * 2 ** (steps + 1), BACKOFF_CAP)
-    return delay * random.uniform(0.75, 1.0)
+    # Spreading retries out, not a secret: the plain generator is fine.
+    return delay * random.uniform(0.75, 1.0)  # nosec B311
 
 
 def _note_failure(source_id: int, interval: timedelta) -> None:
