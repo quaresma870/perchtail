@@ -58,6 +58,7 @@ _DEFAULTS = {
     "name_index_enabled": True,
     "name_index_minutes": 15,
     "alerts_interval_seconds": 60,
+    "credential_max_age_days": 90,
 }
 
 

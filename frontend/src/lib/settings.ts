@@ -27,6 +27,7 @@ export const systemSettings = writable<SystemSettings>({
   name_index_enabled: true,
   name_index_minutes: 15,
   alerts_interval_seconds: 60,
+  credential_max_age_days: 90,
 })
 
 let loadedAt = 0

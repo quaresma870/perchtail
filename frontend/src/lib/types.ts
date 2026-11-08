@@ -78,6 +78,8 @@ export interface Source {
   is_system: boolean
   rule_count: number
   has_credential: boolean
+  // When the credential was last set (#248); null if unknown or none.
+  credential_updated_at: string | null
   has_agent_token: boolean
   agent_connected: boolean
   agent_last_seen_at: string | null
@@ -240,6 +242,8 @@ export interface SystemSettings {
   name_index_minutes: number
   // Live alerts (#305): seconds between checks, 15..3600.
   alerts_interval_seconds: number
+  // Warn about credentials older than this (#248), days; 0 = off.
+  credential_max_age_days: number
 }
 
 export type ExplorerSort = 'name_asc' | 'name_desc' | 'mtime_desc' | 'mtime_asc' | 'size_desc'

@@ -16,6 +16,10 @@ import sqlalchemy as sa
 import sqlmodel
 from alembic import op
 
+# The rebuild keeps AUTOINCREMENT (see 47c9d392f28f): ids of deleted sources
+# are never handed out again.
+NO_ID_REUSE = {"sqlite_autoincrement": True}
+
 revision: str = "e4b7c2d91a05"
 down_revision: str | Sequence[str] | None = "d9a4b2e61f08"
 branch_labels: str | Sequence[str] | None = None
@@ -23,7 +27,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("source") as batch_op:
+    with op.batch_alter_table("source", table_kwargs=NO_ID_REUSE) as batch_op:
         batch_op.add_column(
             sa.Column("name_index_enabled", sa.Boolean(), nullable=False, server_default=sa.true())
         )
@@ -75,7 +79,7 @@ def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS file_name_fts")
     op.drop_index("ix_file_name_entry_source_id", table_name="file_name_entry")
     op.drop_table("file_name_entry")
-    with op.batch_alter_table("source") as batch_op:
+    with op.batch_alter_table("source", table_kwargs=NO_ID_REUSE) as batch_op:
         batch_op.drop_column("name_index_message")
         batch_op.drop_column("name_index_files")
         batch_op.drop_column("name_indexed_at")

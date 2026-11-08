@@ -34,6 +34,7 @@ from app.logging_config import get_logger
 from app.models import Customer, Folder, PatternKind, Protocol, Rule, RuleType, Source
 from app.name_index import drop_source_names, prune_hidden_names
 from app.rules import InvalidPatternError, parse_pattern
+from app.timeutils import utcnow
 
 logger = get_logger(__name__)
 
@@ -605,6 +606,7 @@ def _create_source(session, spec, customer_id, folder_id, credential, apply, use
         enabled=spec.enabled,
         name_index_enabled=spec.name_index_enabled,
         credential_ref=encrypt_credential(credential) if credential else None,
+        credential_updated_at=utcnow() if credential else None,
         winrm_scheme=spec.winrm_scheme,
         tls_ca_pem=spec.tls_ca_pem,
     )
@@ -709,6 +711,7 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         setattr(source, key, change["to"])
     if credential_change:
         source.credential_ref = encrypt_credential(credential)
+        source.credential_updated_at = utcnow()
     if rules_change:
         _replace_rules(session, source, spec.rules)
         prune_hidden_names(session, source)
