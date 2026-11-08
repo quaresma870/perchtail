@@ -96,8 +96,16 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
             previous=source.agent_version,
         )
         source.agent_version = agent_version
+    source_id = source.id
     session.add(source)
     session.commit()
+    # The socket stays open for as long as the agent runs, and so does this
+    # request's session. The commit handed its database connection back to
+    # the pool; reading `source` again would expire-reload it and keep a
+    # connection checked out until the agent disconnects, so a few dozen
+    # agents would hold the whole pool and every other request would wait.
+    # Only source_id is used from here on.
+    del source
 
     try:
         while True:
@@ -105,10 +113,10 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
             if message.get("type") == "fetch_chunk":
                 # Awaited before reading on, so the file is written as it
                 # arrives and a slow disk slows the agent down (#205).
-                await registry.receive_chunk(source.id, message, websocket)
+                await registry.receive_chunk(source_id, message, websocket)
             else:
-                registry.resolve_response(source.id, message, websocket)
+                registry.resolve_response(source_id, message, websocket)
     except WebSocketDisconnect:
         pass
     finally:
-        registry.unregister(source.id, websocket)
+        registry.unregister(source_id, websocket)
