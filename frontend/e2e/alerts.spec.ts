@@ -22,7 +22,7 @@ test('alerts: create, edit, test webhook, toggle enabled, delete', async ({ page
   await expect(page.getByLabel('Files')).toHaveValue('**/*.log')
   await page.getByLabel('Webhook URL').fill('https://example.com/e2e-webhook-test')
   await page.getByRole('button', { name: 'Create alert' }).click()
-  await expect(page.locator('.alert-form .error')).toContainText('invalid regex')
+  await expect(page.locator('.alert-form .error')).toContainText(/invalid regex/i)
 
   await page.getByLabel('Regular expression').uncheck()
   await page.getByLabel('Query').fill('connection refused')
