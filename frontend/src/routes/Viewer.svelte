@@ -201,7 +201,7 @@
   // names everywhere (SearchResults); with sources or folders ticked, their
   // files live, as before. `$advancedFilter` now means "Select" is on (the
   // checkboxes show).
-  $: showScoped = fileQuery.trim().length > 0 && $scopes.length > 0 && !pickingScopes
+  $: showScoped = $scopes.length > 0 && !pickingScopes
   $: showSearch = fileQuery.trim().length > 0 && $scopes.length === 0 && !$advancedFilter
   $: if ($scopes.length === 0) pickingScopes = true
   const scopeLabel = (scope: Scope) =>
