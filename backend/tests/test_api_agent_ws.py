@@ -343,3 +343,41 @@ def test_the_close_waits_for_the_commit(session):
         assert closed == [(source.id, "source disabled")]
     finally:
         registry.disconnect = original
+
+
+def test_a_token_regenerated_during_the_handshake_still_closes_the_connection(session, monkeypatch):
+    # The admin's change lands after the token was checked but before the
+    # socket registered, so its disconnect found nothing to close; the
+    # check after registering has to catch it.
+    from sqlalchemy import update
+
+    source = _agent_source(session, "s3cret")
+    source_id = source.id
+    registry = get_agent_registry()
+    original_register = registry.register
+    registered = []
+
+    def register_after_a_regeneration(sid, websocket):
+        session.execute(
+            update(Source).where(Source.id == sid).values(agent_token_hash=_hash_token("new"))
+        )
+        session.commit()
+        registry.disconnect(sid, "agent token regenerated")  # finds nothing yet
+        replaced = original_register(sid, websocket)
+        registered.append(sid)
+        return replaced
+
+    monkeypatch.setattr(registry, "register", register_after_a_regeneration)
+    client = _client(session)
+    with client.websocket_connect(
+        "/agent/connect", headers={"authorization": "Bearer s3cret"}
+    ) as ws:
+        assert _wait_until(lambda: registered)
+        # Without the check it stays registered (and open) for good.
+        assert _wait_until(lambda: not registry.is_connected(source_id))
+        try:
+            ws.receive_json()
+            code = None
+        except WebSocketDisconnect as exc:
+            code = exc.code
+    assert code == 1008
