@@ -220,3 +220,23 @@ def test_connect_records_the_version_the_agent_reports(session):
             session.refresh(source)
             assert source.agent_version is None
         assert _wait_until(lambda: not registry.is_connected(source.id))
+
+
+def test_a_connected_agent_does_not_hold_a_database_connection(session):
+    # The socket lives as long as the agent runs. Once the handshake is
+    # committed, messages from the agent must not start a new transaction on
+    # the request's session, or each agent keeps a pooled connection and a
+    # few dozen of them exhaust the pool for everyone else.
+    source = _agent_source(session, "s3cret")
+    source_id = source.id
+    registry = get_agent_registry()
+    client = _client(session)
+    with client.websocket_connect(
+        "/agent/connect", headers={"authorization": "Bearer s3cret"}
+    ) as ws:
+        assert _wait_until(lambda: registry.is_connected(source_id))
+        for n in range(3):
+            ws.send_json({"type": "list_result", "id": f"stray-{n}", "entries": []})
+        time.sleep(0.2)
+        assert not session.in_transaction()
+    assert _wait_until(lambda: not registry.is_connected(source_id))
