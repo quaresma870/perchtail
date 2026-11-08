@@ -6,7 +6,7 @@
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import { confirmAction } from '../lib/confirm'
   import { nestFoldersFlat, nestFoldersTree } from '../lib/folder-tree'
-  import type { Customer, Folder } from '../lib/types'
+  import type { Customer, Folder, Source } from '../lib/types'
 
   let customers: Customer[] = []
   let selectedCustomerId: number | null = null
@@ -14,6 +14,29 @@
   let loading = true
   let error = ''
   let errorsById: Record<number, string> = {}
+  let sources: Source[] = []
+
+  // Drag and drop (#355): a folder or a source dragged onto a folder, or
+  // onto the customer's top level.
+  type Item = { kind: 'folder' | 'source'; id: number }
+  let dragged: Item | null = null
+  let topOver = false
+  let moveError = ''
+
+  $: customerSources = sources
+    .filter((s) => s.customer_id === selectedCustomerId)
+    .sort((a, b) => a.name.localeCompare(b.name))
+  $: sourcesByFolder = groupSources(customerSources)
+  $: looseSources = sourcesByFolder.get(null) ?? []
+
+  function groupSources(list: Source[]): Map<number | null, Source[]> {
+    const map = new Map<number | null, Source[]>()
+    for (const source of list) {
+      const key = source.folder_id ?? null
+      map.set(key, [...(map.get(key) ?? []), source])
+    }
+    return map
+  }
 
   // New folder, rename and move open in a popup (#301).
   type Editing =
@@ -50,7 +73,10 @@
     loading = true
     error = ''
     try {
-      customers = await api.get<Customer[]>('/customers')
+      ;[customers, sources] = await Promise.all([
+        api.get<Customer[]>('/customers'),
+        api.get<Source[]>('/sources'),
+      ])
       if (customers.length > 0) {
         selectedCustomerId = customers[0].id
         await loadFolders()
@@ -85,6 +111,38 @@
     }
     return ids
   }
+  // Where the item being dragged may go: not where it already is, and a
+  // folder never into itself or below itself.
+  $: canDropOn = (folderId: number | null): boolean => {
+    if (!dragged) return false
+    if (dragged.kind === 'source') {
+      const source = sources.find((s) => s.id === dragged?.id)
+      return source !== undefined && (source.folder_id ?? null) !== folderId
+    }
+    const folder = folderById(dragged.id)
+    if (!folder || folder.parent_folder_id === folderId) return false
+    return folderId === null || !subtreeIds(folder.id).has(folderId)
+  }
+
+  async function dropOn(folderId: number | null) {
+    const item = dragged
+    dragged = null
+    topOver = false
+    if (!item) return
+    moveError = ''
+    try {
+      if (item.kind === 'folder') {
+        const updated = await api.patch<Folder>(`/folders/${item.id}`, { parent_folder_id: folderId })
+        folders = folders.map((f) => (f.id === item.id ? updated : f))
+      } else {
+        const updated = await api.patch<Source>(`/sources/${item.id}`, { folder_id: folderId })
+        sources = sources.map((s) => (s.id === item.id ? { ...s, folder_id: updated.folder_id } : s))
+      }
+    } catch (err) {
+      moveError = err instanceof ApiError ? err.detail : 'The move failed'
+    }
+  }
+
   $: moveOptions =
     editing?.kind === 'move'
       ? flatOptions.filter((opt) => !subtreeIds((editing as { id: number }).id).has(opt.folder.id))
@@ -184,15 +242,44 @@
       </select>
     </div>
 
+    <p class="hint drag-hint">Drag a folder or a source onto a folder to move it there, or onto the top bar to take it out of its folder.</p>
+    {#if moveError}
+      <p class="error" role="alert">{moveError}</p>
+    {/if}
+
     <div class="card">
-      {#if tree.length === 0}
-        <p class="empty">No folders yet for this customer.</p>
+      <div
+        class="top-level"
+        class:active={dragged !== null && canDropOn(null)}
+        class:over={topOver}
+        role="group"
+        aria-label="Top level of the customer"
+        on:dragover={(e) => {
+          if (!canDropOn(null)) return
+          e.preventDefault()
+          topOver = true
+        }}
+        on:dragleave={() => (topOver = false)}
+        on:drop|preventDefault={() => canDropOn(null) && dropOn(null)}
+      >
+        Top level of {customers.find((c) => c.id === selectedCustomerId)?.name ?? 'this customer'}
+      </div>
+      {#if tree.length === 0 && looseSources.length === 0}
+        <p class="empty">No folders or sources yet for this customer.</p>
       {:else}
-        <div class="tree">
+        <div class="tree" role="tree">
           {#each tree as node (node.folder.id)}
             <FolderManagerRow
               {node}
               {errorsById}
+              {sourcesByFolder}
+              {canDropOn}
+              on:dragItem={(e) => (dragged = e.detail)}
+              on:dragEnd={() => {
+                dragged = null
+                topOver = false
+              }}
+              on:dropOn={(e) => dropOn(e.detail.folderId)}
               on:rename={(e) => open({ kind: 'rename', id: e.detail.id, name: folderById(e.detail.id)?.name ?? '' })}
               on:move={(e) => {
                 const folder = folderById(e.detail.id)
@@ -201,6 +288,30 @@
               on:addChild={(e) => open({ kind: 'create', name: '', parentId: e.detail.parentId })}
               on:delete={(e) => deleteFolder(e.detail.id)}
             />
+          {/each}
+          {#each looseSources as source (source.id)}
+            <div
+              class="loose-source"
+              class:off={!source.enabled}
+              draggable="true"
+              role="treeitem"
+              aria-selected="false"
+              tabindex="-1"
+              on:dragstart={(e) => {
+                e.dataTransfer?.setData('text/plain', `source:${source.id}`)
+                dragged = { kind: 'source', id: source.id }
+              }}
+              on:dragend={() => {
+                dragged = null
+                topOver = false
+              }}
+            >
+              <span class="grip">⋮⋮</span>
+              <span class="loose-name">{source.name}</span>
+              <span class="loose-host">{source.host}</span>
+              {#if !source.enabled}<span class="badge">disabled</span>{/if}
+              <span class="loose-note">not in a folder</span>
+            </div>
           {/each}
         </div>
       {/if}
@@ -272,6 +383,55 @@
     display: flex;
     flex-direction: column;
     gap: 0.7rem;
+  }
+  .drag-hint {
+    font-size: 0.82rem;
+    margin: -0.4rem 0 0.8rem;
+  }
+  .top-level {
+    padding: 0.45rem 0.6rem;
+    margin-bottom: 0.5rem;
+    border: 1px dashed var(--border-soft);
+    border-radius: 6px;
+    color: var(--text-faint);
+    font-size: 0.82rem;
+  }
+  .top-level.active {
+    border-color: var(--accent);
+    color: var(--text-muted);
+  }
+  .top-level.over {
+    background: var(--accent-soft, rgba(99, 102, 241, 0.15));
+  }
+  .loose-source {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.4rem;
+    border-bottom: 1px solid var(--border-soft);
+    cursor: grab;
+    font-size: 0.85rem;
+  }
+  .loose-source .grip {
+    color: var(--text-faint);
+    font-size: 0.75rem;
+    letter-spacing: -2px;
+  }
+  .loose-name {
+    color: var(--text);
+  }
+  .loose-source.off .loose-name {
+    color: var(--text-faint);
+  }
+  .loose-host {
+    color: var(--text-faint);
+    font-size: 0.78rem;
+    margin-right: auto;
+  }
+  .loose-note {
+    color: var(--text-faint);
+    font-size: 0.75rem;
+    font-style: italic;
   }
   .empty {
     text-align: center;

@@ -10,8 +10,12 @@ release ships (0.x releases may include breaking changes between minors).
 
 ### Added
 - **File-name index** (#304), on by default. PerchTail lists each source's rule-visible files in the background (a few sources at a time, each again once its index is older than 15 minutes) and keeps their names, sizes and modification times, never their content. `GET /files` searches them across every source the user can view, as text, glob or regex, with no cap on results (paged); the explorer's single search builds on it (#300). Settings → System turns it on or off and sets the interval (5 minutes to a day); each source can be left out, and its page shows how many files were found, when, why a pass stopped short, and an **Index now** button. Folders that can't be listed, or that are deeper than 32 levels, are skipped without dropping what was indexed below them. Search checks each source's current rules, and a rule change drops the names it now hides straight away.
+- Settings → Folders shows each customer's sources inside their folders, and folders and sources move by **drag and drop**: onto a folder, or onto the customer's top level. A folder can't be dropped into itself or below itself; the Move button still does the same from the keyboard (#355).
+- Settings → Users has an **Edit** popup per user (click the username or Edit): display name and email for local accounts, role and active, with the username read-only (#356).
 
 ### Changed
+- Settings → System groups its settings into cards (Explorer, Sources, Search and audit log, Password policy, Monitoring, Updates) laid out in columns across the page width, one column on narrow screens (#357).
+- The audit log uses the full width of the browser. Its filters are dropdowns with a search box on top: Action, and one per target type (customer, folder, role, source, user...) to pick single targets by name or every target of the type, including ones deleted since. Clicking the Time, User, Action or Target header sorts it; the server sorts, so the order covers every matching entry and not only the page on screen (#358).
 - A disabled source is off: it keeps its configuration in Settings → Sources, but it no longer appears in the Viewer, open tabs from it close, and nothing can be listed, opened, followed, downloaded or checked on it (the API answers 409), whatever the user's grants. Before, only background work skipped it and it could still be browsed.
 
 ### Security
