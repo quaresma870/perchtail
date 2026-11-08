@@ -91,12 +91,16 @@ spec:
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 15
+          # /readyz: a database write works, DATA_DIR is writable and the
+          # scheduler runs. /healthz stays the liveness probe, so a locked
+          # database takes the pod out of the Service without restarting it.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: 8000
             initialDelaySeconds: 5
-            periodSeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
       volumes:
         - name: data
           persistentVolumeClaim:

@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+import pytest
 from app.audit_hash_chain import backfill_chain_if_needed
 from app.audit_integrity import verify_chain
 from app.audit_purge import run_audit_purge_sweep
@@ -200,3 +201,87 @@ def test_a_sweep_with_nothing_to_purge_leaves_the_anchor_untouched(monkeypatch):
         state = session.exec(select(AuditChainState)).first()
         assert state.anchor_row_id == 1
         assert state.anchor_hash == "untouched"
+
+
+@pytest.fixture(params=[None, 1, 2], ids=["default-chunk", "chunk-1", "chunk-2"], autouse=True)
+def _chunk_size(request, monkeypatch):
+    """#346: every test above runs with the default chunk and with chunks
+    small enough that the purge takes several transactions, and must give
+    the same result."""
+    if request.param is not None:
+        monkeypatch.setattr("app.audit_purge.CHUNK_SIZE", request.param)
+
+
+def test_the_purge_deletes_in_chunks_each_in_its_own_transaction(monkeypatch):
+    engine = _engine()
+    monkeypatch.setattr("app.db.engine", engine)
+    monkeypatch.setattr("app.audit_purge.CHUNK_SIZE", 2)
+
+    with Session(engine) as session:
+        for n in range(5):
+            row = AuditLog(user_id=None, action=f"old.{n}")
+            row.timestamp = utcnow() - timedelta(days=400)
+            session.add(row)
+            session.commit()
+        session.add(AuditLog(user_id=None, action="recent"))
+        session.commit()
+        backfill_chain_if_needed(KEY, session)
+        session.commit()
+        newest_old_hash = session.get(AuditLog, 5).row_hash
+
+    from app import audit_purge
+
+    chunks = []
+    real_chunk = audit_purge._purge_chunk
+
+    def counting_chunk(engine, last_id):
+        deleted = real_chunk(engine, last_id)
+        chunks.append(deleted)
+        return deleted
+
+    monkeypatch.setattr(audit_purge, "_purge_chunk", counting_chunk)
+    run_audit_purge_sweep()
+
+    assert chunks == [2, 2, 1, 0]
+    with Session(engine) as session:
+        assert [r.action for r in session.exec(select(AuditLog)).all()] == ["recent"]
+        state = session.exec(select(AuditChainState)).first()
+        assert (state.anchor_row_id, state.anchor_hash) == (5, newest_old_hash)
+        assert verify_chain(KEY, session).ok is True
+
+
+def test_rows_written_after_the_purge_started_are_kept(monkeypatch):
+    """With every row old, the purge stops at the newest id it saw when it
+    started, even if a newer row arrives between chunks."""
+    engine = _engine()
+    monkeypatch.setattr("app.db.engine", engine)
+    monkeypatch.setattr("app.audit_purge.CHUNK_SIZE", 1)
+
+    with Session(engine) as session:
+        for n in range(2):
+            row = AuditLog(user_id=None, action=f"old.{n}")
+            row.timestamp = utcnow() - timedelta(days=400)
+            session.add(row)
+        session.commit()
+
+    from app import audit_purge
+
+    real_chunk = audit_purge._purge_chunk
+    written = []
+
+    def chunk_then_write(engine, last_id):
+        deleted = real_chunk(engine, last_id)
+        if not written:
+            with Session(engine) as session:
+                late = AuditLog(user_id=None, action="late")
+                late.timestamp = utcnow() - timedelta(days=400)
+                session.add(late)
+                session.commit()
+            written.append(True)
+        return deleted
+
+    monkeypatch.setattr(audit_purge, "_purge_chunk", chunk_then_write)
+    run_audit_purge_sweep()
+
+    with Session(engine) as session:
+        assert [r.action for r in session.exec(select(AuditLog)).all()] == ["late"]

@@ -1,34 +1,43 @@
 import hashlib
+import os
 import secrets
+import socket
 from collections import Counter
 from datetime import timedelta
 from pathlib import Path
+from shutil import disk_usage
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import text
-from sqlmodel import Session, func, select
+from sqlmodel import Session, col, func, select
 
 from app.agent_registry import get_agent_registry
 from app.alerts import interval as alerts_interval
 from app.alerts import last_pass as alerts_last_pass
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
-from app.auth.models import GlobalCapability, User
+from app.auth.models import AuditChainState, GlobalCapability, User
 from app.auth.rbac import require_global_capability
 from app.config import get_settings
-from app.db import get_session
+from app.db import get_session, sqlite_file
 from app.health import uptime_seconds
 from app.jobs import job_name, job_records
 from app.log_rotation import retention_pressure
 from app.logging_config import get_logger
+from app.metrics import PROMETHEUS_CONTENT_TYPE, render_metrics
 from app.models import Alert, AlertDelivery, MonitoringToken, Protocol, Source
+from app.name_index import interval as name_index_interval
 from app.scheduler import scheduler
 from app.scratch import get_scratch_store
+from app.source_status import FAILING
 from app.timeutils import utcnow
 from app.version import APP_VERSION
 
 router = APIRouter(prefix="/monitoring", tags=["monitoring"])
+# GET /metrics sits at the root, where Prometheus looks by default.
+metrics_router = APIRouter(tags=["monitoring"])
 logger = get_logger(__name__)
 
 require_manage = require_global_capability(
@@ -116,6 +125,10 @@ def _require_monitoring_bearer_token(
 class DatabaseHealth(BaseModel):
     reachable: bool
     latency_ms: float | None
+    # The SQLite file and its write-ahead log (#346); None for another
+    # database, or when the file can't be read.
+    size_bytes: int | None = None
+    wal_bytes: int | None = None
 
 
 class ScratchHealth(BaseModel):
@@ -124,9 +137,54 @@ class ScratchHealth(BaseModel):
     used_fraction: float
 
 
+class DiskHealth(BaseModel):
+    """Free and total space of the filesystem holding a directory; None
+    when it can't be read (the directory doesn't exist)."""
+
+    free_bytes: int | None
+    total_bytes: int | None
+    free_fraction: float | None
+
+
+class InstanceHealth(BaseModel):
+    """Which process answered, for a setup with more than one."""
+
+    hostname: str
+    pid: int
+
+
 class AgentHealth(BaseModel):
     configured: int
     connected: int
+
+
+class NameIndexHealth(BaseModel):
+    """The file-name index (#304) over enabled sources that take part in
+    it. oldest_* is the source whose last pass (whatever its outcome) is
+    the oldest; sources_with_message counts the ones whose last pass failed
+    or stopped short."""
+
+    enabled: bool
+    sources: int
+    never_indexed: int
+    oldest_indexed_at: str | None
+    oldest_age_seconds: float | None
+    sources_with_message: int
+
+
+class SourceChecksHealth(BaseModel):
+    """Background source checks (#276, #343) over enabled sources."""
+
+    failing: int
+    backing_off: int
+
+
+class AuditIntegrityHealth(BaseModel):
+    """The last audit hash-chain verification (AuditChainState)."""
+
+    status: str
+    last_checked_at: str | None
+    broken_row_id: int | None
 
 
 class SchedulerJobHealth(BaseModel):
@@ -137,6 +195,7 @@ class SchedulerJobHealth(BaseModel):
     last_started_at: str | None = None
     last_finished_at: str | None = None
     last_success_at: str | None = None
+    last_success_age_seconds: float | None = None
     last_ok: bool | None = None
     last_error: str | None = None
     last_duration_ms: int | None = None
@@ -144,6 +203,8 @@ class SchedulerJobHealth(BaseModel):
 
 class SchedulerHealth(BaseModel):
     running: bool
+    # Jobs whose last run failed (#330).
+    failed_jobs: int
     jobs: list[SchedulerJobHealth]
 
 
@@ -153,6 +214,7 @@ class AlertsHealth(BaseModel):
     waiting to be retried, and deliveries given up on (#328)."""
 
     last_pass_at: str | None
+    last_pass_age_seconds: float | None
     overdue: bool
     files_waiting: int
     pending_deliveries: int
@@ -175,13 +237,25 @@ class DetailedHealth(BaseModel):
     status: str
     version: str
     uptime_seconds: float
+    instance: InstanceHealth
     database: DatabaseHealth
     scratch: ScratchHealth
+    disks: dict[str, DiskHealth]
     sources_by_protocol: dict[str, int]
     agent: AgentHealth
+    name_index: NameIndexHealth
+    source_checks: SourceChecksHealth
     alerts: AlertsHealth
     scheduler: SchedulerHealth
+    audit_integrity: AuditIntegrityHealth
     logs: LogsHealth
+
+
+# Scratch use at or above this share of SCRATCH_MAX_GB makes the status
+# degraded, and so does free space below DISK_FREE_MIN_FRACTION on the data,
+# scratch or log filesystem.
+SCRATCH_MAX_FRACTION = 0.9
+DISK_FREE_MIN_FRACTION = 0.05
 
 
 @router.get(
@@ -196,7 +270,33 @@ def detailed_health(session: Session = Depends(get_session)):
     unauthenticated liveness check for the Docker healthcheck/
     orchestrator -- this one is slower (a real DB round-trip) and carries
     the structured data worth alerting on."""
+    return compute_health(session)
+
+
+@metrics_router.get(
+    "/metrics",
+    response_class=PlainTextResponse,
+    dependencies=[Depends(_require_monitoring_bearer_token)],
+)
+def prometheus_metrics(session: Session = Depends(get_session)):
+    """The same report in the Prometheus text format (#331)."""
+    return PlainTextResponse(
+        render_metrics(compute_health(session)), media_type=PROMETHEUS_CONTENT_TYPE
+    )
+
+
+def _iso(value):
+    return value.isoformat() if value else None
+
+
+def _age_seconds(value, now) -> float | None:
+    return (now - value).total_seconds() if value else None
+
+
+def compute_health(session: Session) -> DetailedHealth:
+    """The one health computation behind /monitoring/health and /metrics."""
     settings = get_settings()
+    now = utcnow()
 
     db_reachable = True
     db_latency_ms: float | None = None
@@ -212,6 +312,16 @@ def detailed_health(session: Session = Depends(get_session)):
     scratch_used = store.total_bytes()
     scratch_fraction = scratch_used / store.max_bytes if store.max_bytes else 0.0
 
+    disks = {
+        "data": _disk(settings.data_dir),
+        "scratch": _disk(settings.scratch_dir),
+        "logs": _disk(settings.log_dir),
+    }
+    disk_low = any(
+        disk.free_fraction is not None and disk.free_fraction < DISK_FREE_MIN_FRACTION
+        for disk in disks.values()
+    )
+
     enabled_protocols = session.exec(select(Source.protocol).where(Source.enabled.is_(True))).all()
     protocol_counts = Counter(enabled_protocols)
     sources_by_protocol = {
@@ -224,13 +334,14 @@ def detailed_health(session: Session = Depends(get_session)):
     last = alerts_last_pass()
     alerts_threshold = alerts_interval(session) * 2 + timedelta(seconds=30)
     if last["at"] is not None:
-        sweep_overdue = utcnow() - last["at"] > alerts_threshold
+        sweep_overdue = now - last["at"] > alerts_threshold
     else:
         # Grace period since startup before the first pass has had a
         # chance to run at all.
         sweep_overdue = uptime_seconds() > alerts_threshold.total_seconds()
     alerts_health = AlertsHealth(
-        last_pass_at=last["at"].isoformat() if last["at"] else None,
+        last_pass_at=_iso(last["at"]),
+        last_pass_age_seconds=_age_seconds(last["at"], now),
         overdue=sweep_overdue,
         files_waiting=last["stats"].files_waiting if last["stats"] else 0,
         pending_deliveries=session.exec(select(func.count()).select_from(AlertDelivery)).one(),
@@ -238,10 +349,6 @@ def detailed_health(session: Session = Depends(get_session)):
     )
 
     records = job_records(session)
-
-    def _iso(value):
-        return value.isoformat() if value else None
-
     jobs = []
     for job in scheduler.get_jobs():
         record = records.get(job.id)
@@ -253,34 +360,130 @@ def detailed_health(session: Session = Depends(get_session)):
                 last_started_at=_iso(record.last_started_at) if record else None,
                 last_finished_at=_iso(record.last_finished_at) if record else None,
                 last_success_at=_iso(record.last_success_at) if record else None,
+                last_success_age_seconds=(
+                    _age_seconds(record.last_success_at, now) if record else None
+                ),
                 last_ok=record.last_ok if record else None,
                 last_error=record.last_error if record else None,
                 last_duration_ms=record.last_duration_ms if record else None,
             )
         )
     scheduler_healthy = scheduler.running and all(job.next_run_at is not None for job in jobs)
+    failed_jobs = sum(1 for job in jobs if job.last_ok is False)
+
+    audit_integrity = _audit_integrity(session)
 
     overall = "ok"
     if not db_reachable:
         overall = "error"
-    elif scratch_fraction >= 0.9 or not scheduler_healthy or sweep_overdue:
+    elif (
+        scratch_fraction >= SCRATCH_MAX_FRACTION
+        or not scheduler_healthy
+        or sweep_overdue
+        or failed_jobs > 0
+        or disk_low
+        or audit_integrity.status == "broken"
+    ):
         overall = "degraded"
     elif agent_configured > 0 and agent_connected == 0:
         overall = "degraded"
 
+    size_bytes, wal_bytes = _database_size()
     return DetailedHealth(
         status=overall,
         version=APP_VERSION,
         uptime_seconds=uptime_seconds(),
-        database=DatabaseHealth(reachable=db_reachable, latency_ms=db_latency_ms),
+        instance=InstanceHealth(hostname=socket.gethostname(), pid=os.getpid()),
+        database=DatabaseHealth(
+            reachable=db_reachable,
+            latency_ms=db_latency_ms,
+            size_bytes=size_bytes,
+            wal_bytes=wal_bytes,
+        ),
         scratch=ScratchHealth(
             used_bytes=scratch_used, max_bytes=store.max_bytes, used_fraction=scratch_fraction
         ),
+        disks=disks,
         sources_by_protocol=sources_by_protocol,
         agent=AgentHealth(configured=agent_configured, connected=agent_connected),
+        name_index=_name_index_health(session, now),
+        source_checks=_source_checks_health(session, now),
         alerts=alerts_health,
-        scheduler=SchedulerHealth(running=scheduler.running, jobs=jobs),
+        scheduler=SchedulerHealth(running=scheduler.running, failed_jobs=failed_jobs, jobs=jobs),
+        audit_integrity=audit_integrity,
         logs=_logs_health(settings),
+    )
+
+
+def _disk(path: str) -> DiskHealth:
+    try:
+        usage = disk_usage(path)
+    except OSError:
+        return DiskHealth(free_bytes=None, total_bytes=None, free_fraction=None)
+    return DiskHealth(
+        free_bytes=usage.free,
+        total_bytes=usage.total,
+        free_fraction=usage.free / usage.total if usage.total else None,
+    )
+
+
+def _file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _database_size() -> tuple[int | None, int | None]:
+    path = sqlite_file()
+    if path is None:
+        return None, None
+    size = _file_size(path)
+    if size is None:
+        return None, None
+    # No WAL file at all counts as an empty one (after a clean shutdown).
+    return size, _file_size(path.with_name(path.name + "-wal")) or 0
+
+
+def _name_index_health(session: Session, now) -> NameIndexHealth:
+    taking_part = (Source.enabled.is_(True), Source.name_index_enabled.is_(True))
+
+    def count(*conditions) -> int:
+        return session.exec(
+            select(func.count()).select_from(Source).where(*taking_part, *conditions)
+        ).one()
+
+    oldest = session.exec(select(func.min(Source.name_indexed_at)).where(*taking_part)).one()
+    return NameIndexHealth(
+        enabled=name_index_interval(session) is not None,
+        sources=count(),
+        never_indexed=count(col(Source.name_indexed_at).is_(None)),
+        oldest_indexed_at=_iso(oldest),
+        oldest_age_seconds=_age_seconds(oldest, now),
+        sources_with_message=count(col(Source.name_index_message).is_not(None)),
+    )
+
+
+def _source_checks_health(session: Session, now) -> SourceChecksHealth:
+    def count(condition) -> int:
+        return session.exec(
+            select(func.count()).select_from(Source).where(Source.enabled.is_(True), condition)
+        ).one()
+
+    return SourceChecksHealth(
+        failing=count(Source.status == FAILING),
+        backing_off=count(Source.check_backoff_until > now),
+    )
+
+
+def _audit_integrity(session: Session) -> AuditIntegrityHealth:
+    state = session.exec(select(AuditChainState)).first()
+    if state is None:
+        return AuditIntegrityHealth(status="unknown", last_checked_at=None, broken_row_id=None)
+    return AuditIntegrityHealth(
+        status=state.status,
+        last_checked_at=_iso(state.last_checked_at),
+        broken_row_id=state.broken_row_id,
     )
 
 
