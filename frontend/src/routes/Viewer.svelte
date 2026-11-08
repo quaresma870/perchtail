@@ -6,12 +6,13 @@
   import ConnectionsTree from '../lib/components/ConnectionsTree.svelte'
   import SourceNode from '../lib/components/SourceNode.svelte'
   import ScopeResults from '../lib/components/ScopeResults.svelte'
+  import SearchResults from '../lib/components/SearchResults.svelte'
   import {
     advancedFilter,
     clearScopes,
     compileMatcher,
     contextFromTree,
-    filterOptions,
+    parseQuery,
     isGroupScope,
     isMatcherError,
     removeScope,
@@ -30,7 +31,6 @@
   import { countAppended, countMatches, matchIndexAt, type MatchCount } from '../lib/find-count'
   import ToolbarIcon from '../lib/components/ToolbarIcon.svelte'
   import { buildConnectionTree } from '../lib/connection-tree'
-  import { filterConnections } from '../lib/connection-filter'
   import { readFetchFailure, type FetchProblem } from '../lib/fetch-errors'
   import { trackedFetch } from '../lib/server-status'
   import { parentPath, refreshFolder, startAutoRefresh, stopAutoRefresh } from '../lib/explorer-refresh'
@@ -61,7 +61,6 @@
 
   let recentSources: Source[] = []
   let allSources: Source[] = []
-  let connectionsQuery = ''
   let loading = true
   let loadError = ''
   // Per-source severity patterns, fetched on first use for that source.
@@ -198,17 +197,34 @@
   // While ticking, the tree stays; the files show on "Show the files" or as
   // soon as something is typed in the filter.
   let pickingScopes = true
-  $: showScoped = $advancedFilter && $scopes.length > 0 && !pickingScopes
+  // One search (#300): with nothing ticked it searches sources and file
+  // names everywhere (SearchResults); with sources or folders ticked, their
+  // files live, as before. `$advancedFilter` now means "Select" is on (the
+  // checkboxes show).
+  $: showScoped = $scopes.length > 0 && !pickingScopes
+  $: showSearch = fileQuery.trim().length > 0 && $scopes.length === 0 && !$advancedFilter
   $: if ($scopes.length === 0) pickingScopes = true
   const scopeLabel = (scope: Scope) =>
     isGroupScope(scope) ? scope.name : `${sourceLabel(scope.sourceId)}${scope.path ? ` › ${scope.path}` : ''}`
   // Which sources sit under each customer and folder (#284), from every
   // source the user can see, not only the ones the search box shows.
   $: scopeContext.set(contextFromTree(buildConnectionTree(allSources)))
-  $: compiledFilter = compileMatcher(fileQuery, $filterOptions)
+  $: parsedQuery = parseQuery(fileQuery)
+  $: compiledFilter = compileMatcher(parsedQuery.text, { regex: parsedQuery.regex, matchCase: false })
   $: fileMatcher = isMatcherError(compiledFilter) ? null : compiledFilter
 
-  $: filteredAllSources = filterConnections(allSources, $advancedFilter ? '' : connectionsQuery)
+  $: filteredAllSources = allSources
+
+  function revealSource(source: Source) {
+    fileQuery = ''
+    revealInTree(source)
+    setExpanded(`source:${source.id}`, true)
+  }
+
+  function startSelecting() {
+    advancedFilter.set(true)
+    pickingScopes = true
+  }
 
   // List or tree: the admin's default (Settings -> System), and -- when
   // switching is allowed -- each user's own choice, kept on the server so
@@ -777,66 +793,51 @@
 <div class="viewer">
   <aside class="explorer">
     <div class="explorer-header">
-      {#if $advancedFilter}
-        <input
-          class="input search-box"
-          type="search"
-          aria-label="Filter files"
-          placeholder="Filter files in the ticked sources and folders (text, glob like app-*.log, or regex)"
-          bind:value={fileQuery}
-          on:input={() => { if (fileQuery.trim() && $scopes.length > 0) pickingScopes = false }}
-        />
-      {:else}
-        <input
-          class="input search-box"
-          type="search"
-          placeholder="Search by folder, customer, or host…"
-          bind:value={connectionsQuery}
-        />
-      {/if}
-      <button
-        class="view-toggle-btn advanced-toggle"
-        class:active={$advancedFilter}
-        aria-pressed={$advancedFilter}
-        title="Advanced filter: tick sources and folders, then filter their files by name"
-        on:click={() => advancedFilter.update((on) => !on)}
-      >
-        Advanced filter
-      </button>
-      {#if switchable}
-        <div class="view-toggle" role="group" aria-label="View">
-          <button
-            class="view-toggle-btn"
-            class:active={connectionsView === 'list'}
-            on:click={() => chooseView('list')}
-          >
-            List
-          </button>
-          <button
-            class="view-toggle-btn"
-            class:active={connectionsView === 'tree'}
-            on:click={() => chooseView('tree')}
-          >
-            Tree
-          </button>
-        </div>
-      {/if}
-    </div>
-    {#if $advancedFilter}
-      <div class="scope-bar">
-        <label class="filter-option">
-          <input type="checkbox" bind:checked={$filterOptions.regex} />
-          Regex
-        </label>
-        <label class="filter-option">
-          <input type="checkbox" bind:checked={$filterOptions.matchCase} />
-          Match case
-        </label>
-        {#if isMatcherError(compiledFilter)}
-          <span class="filter-error" role="status">{compiledFilter.error}</span>
+      <input
+        class="input search-box"
+        type="search"
+        aria-label="Search sources and files"
+        placeholder="Search sources and files: text, app-*.log, or /regex/"
+        bind:value={fileQuery}
+        on:input={() => { if (fileQuery.trim() && $scopes.length > 0) pickingScopes = false }}
+      />
+      <div class="header-row">
+        {#if switchable}
+          <div class="view-toggle" role="group" aria-label="View">
+            <button
+              class="view-toggle-btn"
+              class:active={connectionsView === 'list'}
+              on:click={() => chooseView('list')}
+            >
+              List
+            </button>
+            <button
+              class="view-toggle-btn"
+              class:active={connectionsView === 'tree'}
+              on:click={() => chooseView('tree')}
+            >
+              Tree
+            </button>
+          </div>
         {/if}
+        <button
+          class="view-toggle-btn advanced-toggle"
+          class:active={$advancedFilter}
+          aria-pressed={$advancedFilter}
+          title="Tick sources and folders to search their files live"
+          on:click={() => advancedFilter.update((on) => !on)}
+        >
+          Filter sources
+        </button>
+      </div>
+    </div>
+    {#if isMatcherError(compiledFilter)}
+      <p class="filter-error search-error" role="status">{compiledFilter.error}</p>
+    {/if}
+    {#if $advancedFilter || $scopes.length > 0}
+    <div class="scope-bar">
         {#if $scopes.length === 0}
-          <span class="hint">Tick the sources and folders to filter files in.</span>
+          <span class="hint">Tick the sources and folders to search their files live.</span>
         {:else}
           {#each $scopes as scope (scopeKey(scope))}
             <span class="scope-chip">
@@ -858,7 +859,7 @@
             </button>
           {/if}
         {/if}
-      </div>
+    </div>
     {/if}
     <div class="explorer-body">
       {#if loading}
@@ -900,17 +901,24 @@
             {/if}
           {/each}
         </div>
+      {:else if showSearch}
+        <SearchResults
+          query={parsedQuery.text}
+          regex={parsedQuery.regex}
+          sources={allSources}
+          on:open={handleOpen}
+          on:reveal={(e) => revealSource(e.detail.source)}
+          on:select={startSelecting}
+        />
       {:else if filteredAllSources.length === 0}
-        <p class="hint">
-          {connectionsQuery.trim() ? 'No connections match that search.' : 'No sources visible to your account.'}
-        </p>
+        <p class="hint">No sources visible to your account.</p>
       {:else if connectionsView === 'tree'}
         <div class="connections-tree-body">
           {#each connectionTree as node (node.id)}
             <ConnectionsTree
               {node}
               expandedIds={expandedTreeIds}
-              forceExpand={connectionsQuery.trim().length > 0}
+              forceExpand={false}
               {activeKey}
               {focusSourceId}
               on:toggle={(e) => toggleTreeNode(e.detail.id)}
@@ -1278,6 +1286,11 @@
     padding: 0.75rem;
     border-bottom: 1px solid var(--border-soft);
   }
+  .header-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
   .advanced-toggle {
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -1292,15 +1305,12 @@
     border-bottom: 1px solid var(--border-soft);
     font-size: 0.78rem;
   }
-  .filter-option {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    color: var(--text-muted);
-    cursor: pointer;
-  }
   .filter-error {
     color: var(--danger);
+  }
+  .search-error {
+    margin: 0 0.75rem 0.4rem;
+    font-size: 0.8rem;
   }
   .group-scope {
     border-bottom: 1px solid var(--border-soft);
