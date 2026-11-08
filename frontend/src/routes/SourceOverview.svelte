@@ -146,7 +146,6 @@
           <span class="badge">{source.protocol}</span>
           {#if source.is_system}<span class="badge badge-accent">system</span>{/if}
           {#if !source.enabled}<span class="badge">disabled</span>{/if}
-          {#if source.search_indexing_enabled}<span class="badge">indexed for search</span>{/if}
         </div>
       </div>
       <div class="header-actions">

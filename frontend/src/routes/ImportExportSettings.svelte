@@ -22,6 +22,8 @@
     applied: boolean
     items: PlanItem[]
     problems: Problem[]
+    // Non-blocking: e.g. a key PerchTail no longer uses, ignored.
+    warnings: Problem[]
   }
 
   let text = ''
@@ -180,6 +182,17 @@
         <ul class="problems">
           {#each result.problems as problem, i (i)}
             <li><code>{problem.where}</code> {problem.message}</li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
+
+    {#if result.warnings.length > 0}
+      <div class="card">
+        <h2>Warnings</h2>
+        <ul class="warnings">
+          {#each result.warnings as warning, i (i)}
+            <li><code>{warning.where}</code> {warning.message}</li>
           {/each}
         </ul>
       </div>
@@ -353,6 +366,7 @@
     color: var(--warning, #b58105);
   }
   .problems,
+  .warnings,
   .unchanged {
     margin: 0;
     padding-left: 1.1rem;
@@ -361,6 +375,9 @@
   }
   .problems li {
     color: var(--danger);
+  }
+  .warnings li {
+    color: var(--warning, #b58105);
   }
   .cred-row {
     display: grid;

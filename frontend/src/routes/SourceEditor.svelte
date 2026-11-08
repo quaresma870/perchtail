@@ -66,7 +66,6 @@
   // the WinRS shell.
   let winrmConfiguration = ''
   let enabled = true
-  let searchIndexingEnabled = false
   let nameIndexEnabled = true
   let username = ''
   let password = ''
@@ -208,7 +207,6 @@
           originalPaths = JSON.stringify(roots.map((r) => r.path))
           originalHostPort = `${source.host}:${source.port ?? ''}`
           enabled = source.enabled
-          searchIndexingEnabled = source.search_indexing_enabled
           nameIndexEnabled = source.name_index_enabled
         }
       }
@@ -237,7 +235,6 @@
       tlsCaPem,
       winrmConfiguration,
       enabled,
-      searchIndexingEnabled,
       nameIndexEnabled,
       username,
       password,
@@ -321,7 +318,6 @@
           ...locationPayload(),
           ...winrmPayload(),
           enabled,
-          search_indexing_enabled: searchIndexingEnabled,
           name_index_enabled: nameIndexEnabled,
           ...(credential ? { credential } : {}),
         })
@@ -339,7 +335,6 @@
           ...locationPayload(),
           ...winrmPayload(),
           enabled,
-          search_indexing_enabled: searchIndexingEnabled,
           name_index_enabled: nameIndexEnabled,
           ...(credential ? { credential } : {}),
         })
@@ -663,7 +658,7 @@
         {#if pathsChanged}
           <p class="warning small">
             Rules are relative to the base path, so after saving they apply to what's at the new
-            location — check they still match. The source's search index is cleared and rebuilt.
+            location — check they still match.
           </p>
         {/if}
       </div>
@@ -679,15 +674,6 @@
       </label>
       <p class="hint indent">
         On by default: PerchTail lists this source's files in the background and keeps their names, sizes and times (never their content), so they can be found by name across sources. Turn it off to leave the source out; what was indexed is dropped.
-      </p>
-
-      <label class="checkbox">
-        <input type="checkbox" bind:checked={searchIndexingEnabled} />
-        Include in full-text search
-      </label>
-      <p class="hint indent">
-        Off by default — stores short per-line snippets of this source's rule-visible content in a
-        local search index so it shows up under Search, refreshed periodically in the background.
       </p>
 
       {#if protocol === 'agent'}

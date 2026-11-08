@@ -90,7 +90,6 @@ export interface Source {
   status: 'ok' | 'failing' | 'unknown'
   status_checked_at: string | null
   status_message: string | null
-  search_indexing_enabled: boolean
   // File-name index (#304): on/off, when it last listed the source, how many
   // files it found, and why the last pass stopped short (null: it didn't).
   name_index_enabled: boolean
@@ -213,18 +212,7 @@ export interface GroupRoleMapping {
   role_name: string
 }
 
-export type SearchMatchedField = 'content' | 'path'
-
-export interface SearchHit {
-  source_id: number
-  file_path: string
-  line_number: number
-  snippet_html: string
-  matched_field: SearchMatchedField
-}
-
 export interface SystemSettings {
-  search_view_enabled: boolean
   audit_view_enabled: boolean
   audit_retention_days: number
   // Folders one source may read (#161): 1 = feature off, 100 at most.
@@ -250,6 +238,8 @@ export interface SystemSettings {
   // File-name index (#304).
   name_index_enabled: boolean
   name_index_minutes: number
+  // Live alerts (#305): seconds between checks, 15..3600.
+  alerts_interval_seconds: number
 }
 
 export type ExplorerSort = 'name_asc' | 'name_desc' | 'mtime_desc' | 'mtime_asc' | 'size_desc'
@@ -339,30 +329,43 @@ export interface MfaBackupCodesResponse {
   backup_codes: string[]
 }
 
+// Live alerts (#305): at most one of source_id/folder_id/customer_id is set;
+// none means every source the owner can view.
 export interface Alert {
   id: number
   name: string
   query: string
+  regex: boolean
   source_id: number | null
+  folder_id: number | null
+  customer_id: number | null
+  file_glob: string
   webhook_url: string
   enabled: boolean
   last_checked_at: string | null
+  last_fired_at: string | null
+  failed_deliveries: number
+  last_error: string | null
 }
 
 export interface AlertCreate {
   name: string
   query: string
+  regex?: boolean
   source_id?: number | null
+  folder_id?: number | null
+  customer_id?: number | null
+  file_glob?: string
   webhook_url: string
   enabled?: boolean
 }
 
-export interface AlertUpdate {
-  name?: string
-  query?: string
-  source_id?: number | null
-  webhook_url?: string
-  enabled?: boolean
+// Sending any of the scope fields replaces the whole scope.
+export type AlertUpdate = Partial<AlertCreate>
+
+export interface AlertTestResult {
+  ok: boolean
+  error: string | null
 }
 
 export interface MonitoringTokenResult {

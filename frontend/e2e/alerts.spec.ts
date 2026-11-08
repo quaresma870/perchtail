@@ -8,20 +8,36 @@ import { confirmPopup } from './popups'
 // anything to click "Test" on.
 const alertName = `E2E Alert ${Date.now()}`
 
-test('alerts: create, test webhook, toggle enabled, delete', async ({ page }) => {
+test('alerts: create, edit, test webhook, toggle enabled, delete', async ({ page }) => {
   await page.goto('/#/alerts')
   await page.getByRole('button', { name: '+ New alert' }).click()
 
   await page.getByLabel('Name').fill(alertName)
-  await page.getByLabel('Query').fill('connection refused')
-  // Leave Source as "All sources you can view" -- doesn't depend on any
+  // An invalid RE2 regex is refused with the backend's reason.
+  await page.getByLabel('Query').fill('(unclosed')
+  await page.getByLabel('Regular expression').check()
+  // Leave Watch as "Every source I can view" -- doesn't depend on any
   // other spec's transient sources existing.
+  await expect(page.getByLabel('Watch')).toHaveValue('')
+  await expect(page.getByLabel('Files')).toHaveValue('**/*.log')
   await page.getByLabel('Webhook URL').fill('https://example.com/e2e-webhook-test')
+  await page.getByRole('button', { name: 'Create alert' }).click()
+  await expect(page.locator('.alert-form .error')).toContainText('invalid regex')
+
+  await page.getByLabel('Regular expression').uncheck()
+  await page.getByLabel('Query').fill('connection refused')
   await page.getByRole('button', { name: 'Create alert' }).click()
 
   const row = page.locator('.alert-row', { hasText: alertName })
   await expect(row).toBeVisible()
   await expect(row.locator('.query')).toHaveText('connection refused')
+  await expect(row).toContainText('Every source you can view')
+  await expect(row).toContainText('**/*.log')
+
+  await row.getByRole('button', { name: 'Edit' }).click()
+  await page.getByLabel('Files').fill('**/*.txt')
+  await page.getByRole('button', { name: 'Save changes' }).click()
+  await expect(page.locator('.alert-row', { hasText: alertName })).toContainText('**/*.txt')
 
   await row.getByRole('button', { name: 'Test' }).click()
   await expect(row.getByText(/Sent ✓|Failed/)).toBeVisible({ timeout: 15_000 })

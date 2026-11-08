@@ -315,3 +315,42 @@ def test_alert_changes_are_audited_without_the_full_webhook_url(session, client_
     assert [e.action for e in events] == ["alert.create", "alert.update", "alert.delete"]
     assert events[0].event_metadata["webhook_host"] == "example.com"
     assert "SECRET" not in str([e.event_metadata for e in events])
+
+
+def test_a_folder_scope_counts_sources_in_its_subfolders(session, client_for):
+    from app.models import Folder
+
+    customer = Customer(name=f"c-{uuid.uuid4().hex[:6]}")
+    session.add(customer)
+    session.commit()
+    parent = Folder(name="eu", customer_id=customer.id)
+    session.add(parent)
+    session.commit()
+    child = Folder(name="prod", customer_id=customer.id, parent_folder_id=parent.id)
+    session.add(child)
+    session.commit()
+    source = _make_source(session)
+    source.customer_id, source.folder_id = customer.id, child.id
+    session.add(source)
+    session.commit()
+    user = _make_user(session)
+    create_role_grant(
+        session,
+        actor_user_id=None,
+        role_id=user.role_id,
+        scope_type=ScopeType.source,
+        scope_id=source.id,
+        capabilities=[Capability.view],
+    )
+    session.commit()
+
+    response = client_for(user).post(
+        "/alerts",
+        json={
+            "name": "a",
+            "query": "q",
+            "folder_id": parent.id,
+            "webhook_url": "https://example.com/hook",
+        },
+    )
+    assert response.status_code == 201, response.text

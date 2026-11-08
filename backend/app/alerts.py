@@ -113,7 +113,7 @@ def owner_may_alert(owner: User | None) -> bool:
     )
 
 
-def _folder_subtree(session: Session, folder_id: int) -> set[int]:
+def folder_subtree(session: Session, folder_id: int) -> set[int]:
     ids = {folder_id}
     pending = [folder_id]
     while pending:
@@ -132,7 +132,7 @@ def scope_source_ids(session: Session, owner: User, alert: Alert) -> set[int]:
     if alert.source_id is not None:
         query = query.where(Source.id == alert.source_id)
     elif alert.folder_id is not None:
-        query = query.where(col(Source.folder_id).in_(_folder_subtree(session, alert.folder_id)))
+        query = query.where(col(Source.folder_id).in_(folder_subtree(session, alert.folder_id)))
     elif alert.customer_id is not None:
         query = query.where(Source.customer_id == alert.customer_id)
     ids = set(session.exec(query).all())

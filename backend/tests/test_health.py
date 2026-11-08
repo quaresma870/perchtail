@@ -11,4 +11,3 @@ def test_uptime_increases_after_mark_started(monkeypatch):
     first = health.uptime_seconds()
     second = health.uptime_seconds()
     assert second >= first >= 0.0
-

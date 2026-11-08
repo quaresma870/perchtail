@@ -15,7 +15,6 @@ const apiPrefixes = [
   '/sources',
   '/roles',
   '/users',
-  '/search',
   '/files',
   '/alerts',
   '/audit',

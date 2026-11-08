@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator, model_validator
 from sqlmodel import Session, select
 
-from app.alerts import compile_query, forget_alert, post_webhook
+from app.alerts import compile_query, folder_subtree, forget_alert, post_webhook
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, User
@@ -156,9 +156,14 @@ def _require_scope_allowed(session: Session, user: User, alert: Alert) -> None:
         if session.get(model, scope_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{label} not found")
         if visible is not None:
-            column = Source.folder_id if key == "folder_id" else Source.customer_id
+            # A folder covers its subfolders too, like the scope at each pass.
+            in_scope = (
+                Source.folder_id.in_(folder_subtree(session, scope_id))
+                if key == "folder_id"
+                else Source.customer_id == scope_id
+            )
             reachable = session.exec(
-                select(Source.id).where(column == scope_id, Source.id.in_(visible))
+                select(Source.id).where(in_scope, Source.id.in_(visible))
             ).first()
             if reachable is None:
                 raise HTTPException(
