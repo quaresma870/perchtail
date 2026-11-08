@@ -216,8 +216,8 @@ def _current_sizes(
 
 
 def check_alert(session: Session, alert: Alert, stats: PassStats | None = None) -> list[Hit]:
-    """One alert's pass: the new matching lines in its files. Updates the
-    per-file positions (the caller commits)."""
+    """One alert's pass: the new matching lines in its files. Updates and
+    commits the per-file positions as it goes, source by source."""
     from app.collectors.registry import CONNECTORS
 
     stats = stats or PassStats()
@@ -271,6 +271,10 @@ def check_alert(session: Session, alert: Alert, stats: PassStats | None = None) 
                 )
             else:
                 known.append(state)
+        # Never hold SQLite's write lock across remote reads: a connector
+        # records the source's status from this same thread, and would wait
+        # on this session's lock until the busy timeout.
+        session.commit()
         started = time.monotonic()
         # Current sizes come from listing each folder once (one connection
         # per folder), so only files whose size changed are read -- a read
@@ -301,6 +305,7 @@ def check_alert(session: Session, alert: Alert, stats: PassStats | None = None) 
                 )
             state.checked_at = now
             session.add(state)
+        session.commit()
     return hits
 
 
