@@ -142,3 +142,100 @@ def test_rotate_aborts_and_writes_nothing_on_wrong_old_key(rotation_engine):
     with Session(rotation_engine) as session:
         refreshed = session.get(Source, source_id)
         assert refreshed.credential_ref == original_ciphertext
+
+
+# --- MFA secrets and the audit chain (#326) -----------------------------------
+
+
+def _audit(session, key, action):
+    from app.audit_hash_chain import chain_new_entry
+    from app.auth.models import AuditLog
+    from app.timeutils import utcnow
+
+    entry = AuditLog(user_id=None, action=action, timestamp=utcnow(), event_metadata={"n": 1})
+    chain_new_entry(key, session, entry)
+    session.add(entry)
+    session.commit()
+    return entry.id
+
+
+def _mfa_user(session, old_fernet):
+    from app.auth.models import Role, User
+
+    role = Role(name="r", is_super_admin=False)
+    session.add(role)
+    session.commit()
+    user = User(
+        username="mfa-user",
+        role_id=role.id,
+        mfa_enabled=True,
+        mfa_secret_encrypted=old_fernet.encrypt(b"JBSWY3DPEHPK3PXP").decode("utf-8"),
+    )
+    session.add(user)
+    session.commit()
+    return user.id
+
+
+def test_rotate_re_encrypts_mfa_secrets_and_re_signs_the_audit_chain(rotation_engine):
+    from app.audit_integrity import verify_chain
+    from app.auth.models import AuditLog, User
+    from app.crypto import build_audit_chain_key
+    from sqlmodel import select
+
+    old_fernet = build_fernet("old-key")
+    old_chain = build_audit_chain_key("old-key")
+    with Session(rotation_engine) as session:
+        user_id = _mfa_user(session, old_fernet)
+        for n in range(3):
+            _audit(session, old_chain, f"test.event{n}")
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 0
+
+    with Session(rotation_engine) as session:
+        secret = session.get(User, user_id).mfa_secret_encrypted
+        assert build_fernet("new-key").decrypt(secret.encode("utf-8")) == b"JBSWY3DPEHPK3PXP"
+        assert verify_chain(build_audit_chain_key("new-key"), session).ok
+        assert not verify_chain(old_chain, session).ok
+        last = session.exec(select(AuditLog).order_by(AuditLog.id.desc())).first()
+        assert last.action == "credential_key.rotate"
+        assert last.event_metadata["mfa_secrets"] == 1
+        assert last.event_metadata["audit_rows_resigned"] == 3
+
+
+def test_a_broken_audit_chain_stops_the_rotation_with_nothing_written(rotation_engine):
+    from app.auth.models import AuditLog
+    from app.crypto import build_audit_chain_key
+
+    old_fernet = build_fernet("old-key")
+    old_chain = build_audit_chain_key("old-key")
+    with Session(rotation_engine) as session:
+        source = _make_source(session, old_fernet, credential={"username": "u", "password": "p"})
+        source_id, before = source.id, source.credential_ref
+        _audit(session, old_chain, "test.one")
+        tampered_id = _audit(session, old_chain, "test.two")
+        _audit(session, old_chain, "test.three")
+        row = session.get(AuditLog, tampered_id)
+        row.action = "test.edited"  # tampering: the row no longer matches its hash
+        session.add(row)
+        session.commit()
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 1
+
+    with Session(rotation_engine) as session:
+        assert session.get(Source, source_id).credential_ref == before
+
+
+def test_dry_run_checks_the_chain_without_writing(rotation_engine):
+    from app.auth.models import AuditLog
+    from app.crypto import build_audit_chain_key
+    from sqlmodel import select
+
+    old_chain = build_audit_chain_key("old-key")
+    with Session(rotation_engine) as session:
+        _audit(session, old_chain, "test.one")
+        before = session.exec(select(AuditLog.row_hash)).all()
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=True) == 0
+
+    with Session(rotation_engine) as session:
+        assert session.exec(select(AuditLog.row_hash)).all() == before

@@ -154,3 +154,39 @@ def backfill_chain_if_needed(key: bytes, session: Session) -> int:
         session.add(row)
         prev_hash = row.row_hash
     return len(rows)
+
+
+def resign_chain(key: bytes, session: Session) -> int:
+    """Recomputes every row's hash under `key`, in id order from the purge
+    anchor (whose stored hash is kept as it is): the credential key the
+    chain is keyed from was rotated (app/rotate_credential_key.py). The
+    caller verifies the chain under the old key first -- re-signing a
+    tampered chain would vouch for the tampering. Doesn't commit. Returns
+    the number of rows re-signed."""
+    state = session.exec(select(AuditChainState)).first()
+    prev_hash = state.anchor_hash if state else None
+    count = 0
+    last_id = 0
+    while True:
+        # In blocks, not one cursor held open while rows are updated.
+        rows = session.exec(
+            select(AuditLog).where(AuditLog.id > last_id).order_by(AuditLog.id.asc()).limit(1000)
+        ).all()
+        if not rows:
+            return count
+        for row in rows:
+            row.prev_hash = prev_hash
+            row.row_hash = compute_row_hash(
+                key,
+                prev_hash,
+                user_id=row.user_id,
+                action=row.action,
+                target_type=row.target_type,
+                target_id=row.target_id,
+                timestamp=row.timestamp,
+                metadata=row.event_metadata,
+            )
+            session.add(row)
+            prev_hash = row.row_hash
+            count += 1
+        last_id = rows[-1].id

@@ -1,11 +1,15 @@
 # Rotating CREDENTIAL_ENCRYPTION_KEY
 
-`CREDENTIAL_ENCRYPTION_KEY` (see [`.env.example`](../.env.example)) is used to
-derive the key that encrypts every stored credential at rest: source
-SSH/SMB/WinRM secrets (`Source.credential_ref`) and SSO client secrets
-(`SSOProviderConfig.config`). This guide covers changing that key — after a
-suspected exposure, as routine hygiene, or whenever you have a reason to —
-without losing access to what's already encrypted under the old one.
+`CREDENTIAL_ENCRYPTION_KEY` (see [`.env.example`](../.env.example)) is the root secret for everything PerchTail protects at rest. The rotation covers all of it in one transaction:
+
+- source SSH/SMB/WinRM credentials (`Source.credential_ref`);
+- SSO provider settings, including client secrets (`SSOProviderConfig.config`);
+- users' MFA secrets (`User.mfa_secret_encrypted`), so MFA keeps working after the rotation;
+- the audit log's hash chain, whose HMAC key is derived from the same secret: every row is re-signed under the new key.
+
+The audit chain is verified under the old key first. If it doesn't verify (a row was changed or removed), the rotation stops and nothing is written, because re-signing a broken chain would vouch for whatever broke it: check the audit log's integrity banner and resolve that first. After a successful rotation the audit log has a `credential_key.rotate` entry with the counts.
+
+This guide covers changing that key — after a suspected exposure, as routine hygiene, or whenever you have a reason to — without losing access to what's already encrypted under the old one.
 
 Simply changing the value in `.env` and restarting does **not** work: every
 already-encrypted row still needs the *old* key to decrypt, and the app now
