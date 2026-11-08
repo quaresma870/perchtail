@@ -1,7 +1,7 @@
 """source credential updated at
 
 Revision ID: c8e3f1a62d07
-Revises: a3f5c8e17b42
+Revises: d7e3b9a4c162
 Create Date: 2026-11-08 18:30:00.000000
 
 When each source's credential was last set (#248), for its age in the
@@ -19,7 +19,7 @@ from alembic import op
 NO_ID_REUSE = {"sqlite_autoincrement": True}
 
 revision: str = "c8e3f1a62d07"
-down_revision: str | Sequence[str] | None = "a3f5c8e17b42"
+down_revision: str | Sequence[str] | None = "d7e3b9a4c162"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
