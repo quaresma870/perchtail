@@ -38,6 +38,13 @@ from app.auth.models import AuditChainState, AuditLog
 
 _chain_write_lock = threading.Lock()
 
+# Held by a verification for its whole walk (app/audit_integrity.py) and by
+# the audit purge for each chunk it deletes (app/audit_purge.py): the walk
+# reads the log in blocks, so a chunk deleted between two blocks, with the
+# anchor moved, would look like a break that isn't there. Reentrant, since
+# recording known breaks verifies again.
+chain_maintenance_lock = threading.RLock()
+
 
 def compute_row_hash(
     key: bytes,

@@ -1,3 +1,4 @@
+import pytest
 from app.audit import record_audit_event
 from app.audit_hash_chain import chain_new_entry
 from app.audit_integrity import run_audit_integrity_check, verify_chain
@@ -385,3 +386,39 @@ def test_recorded_breaks_survive_a_retention_purge_of_their_parent(session):
     session.commit()
 
     assert _verify(session).ok is True
+
+
+@pytest.fixture(params=[None, 1, 2], ids=["default-block", "block-1", "block-2"], autouse=True)
+def _walk_block(request, monkeypatch):
+    """#346: every test above verifies with the default block and with
+    blocks small enough that the walk reads the chain in many queries, and
+    must give the same result."""
+    if request.param is not None:
+        monkeypatch.setattr("app.audit_integrity.WALK_BLOCK", request.param)
+
+
+def test_the_walk_reads_the_chain_in_blocks(session, monkeypatch):
+    for action in "abcde":
+        record_audit_event(session, user_id=None, action=action)
+    session.commit()
+    monkeypatch.setattr("app.audit_integrity.WALK_BLOCK", 2)
+
+    statements = []
+
+    from sqlalchemy import event
+
+    def before(conn, cursor, statement, *args):
+        table = AuditLog.__tablename__
+        if f"FROM {table}" in statement and f"ORDER BY {table}.id" in statement:
+            statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", before)
+    try:
+        result = verify_chain(KEY, session)
+    finally:
+        event.remove(engine, "before_cursor_execute", before)
+    assert result.ok is True
+    assert result.checked_count == 5
+    # Blocks of 2, 2 and 1 rows.
+    assert len(statements) == 3

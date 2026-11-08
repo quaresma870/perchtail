@@ -57,6 +57,8 @@ ENV DATA_DIR=/data/db \
 
 EXPOSE 8000
 
+# Liveness only: /readyz (database, DATA_DIR, scheduler) is for an orchestrator's
+# readiness probe, see docs/high-availability.md.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')" || exit 1
 

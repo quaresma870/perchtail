@@ -1,0 +1,1005 @@
+zabbix_export:
+  version: '8.0'
+  template_groups:
+    - uuid: a571c0d144b14fd4a87a9d9b2aa9fcd6
+      name: Templates/Applications
+  templates:
+    - uuid: 3cd9bd53761b4664a31d55e784dc8b68
+      template: 'PerchTail by HTTP'
+      name: 'PerchTail by HTTP'
+      description: |
+        Monitors PerchTail through GET /monitoring/health: one HTTP agent item reads the whole report, dependent items pick the fields with JSONPath, and low-level discovery creates items and a trigger for each background job.
+
+        Setup: generate a monitoring token in PerchTail (Settings -> System -> Monitoring), link this template to a host, and set {$PERCHTAIL.URL} (no trailing slash) and {$PERCHTAIL.TOKEN} on the host.
+
+        See docs/monitoring.md in the PerchTail repository for every field and when the status degrades.
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: a608ab5784d8494b87f0e5e71b9120da
+          name: 'PerchTail: Get health report'
+          type: HTTP_AGENT
+          key: perchtail.health.get
+          delay: '{$PERCHTAIL.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          timeout: 10s
+          url: '{$PERCHTAIL.URL}/monitoring/health'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$PERCHTAIL.TOKEN}'
+          description: 'The whole /monitoring/health report. Not stored: the dependent items keep what matters.'
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 3a844ea2ce2744118624df53b2d019f8
+          name: 'PerchTail: Status'
+          type: DEPENDENT
+          key: perchtail.status
+          delay: '0'
+          description: 'Overall status: ok, degraded (something needs a look) or error (the database is unreachable).'
+          valuemap:
+            name: 'PerchTail status'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.status
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var codes = {ok: 0, degraded: 1, error: 2};
+                  return codes.hasOwnProperty(value) ? codes[value] : 3;
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: health
+          triggers:
+            - uuid: 75f4027a38aa43c9b2a07fe948ff4432
+              expression: 'last(/PerchTail by HTTP/perchtail.status)=2'
+              name: 'PerchTail: Status is error'
+              priority: HIGH
+              description: 'The database is unreachable.'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: 18adee2a4ec74444a0f1e088067f3668
+              expression: 'last(/PerchTail by HTTP/perchtail.status)=1'
+              name: 'PerchTail: Status is degraded'
+              priority: WARNING
+              description: 'See docs/monitoring.md for what makes the status degraded; the other PerchTail triggers usually name the cause.'
+              tags:
+                - tag: scope
+                  value: performance
+        - uuid: f29f5d16ea3748a2924cc95055458876
+          name: 'PerchTail: Version'
+          type: DEPENDENT
+          key: perchtail.version
+          delay: '0'
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.version
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: application
+          triggers:
+            - uuid: 5d23fd2c91634216bb68da7b2c208950
+              expression: 'last(/PerchTail by HTTP/perchtail.version,#1)<>last(/PerchTail by HTTP/perchtail.version,#2) and length(last(/PerchTail by HTTP/perchtail.version))>0'
+              name: 'PerchTail: Version has changed'
+              priority: INFO
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: 32a5a0616f6c4ed29beecc83f2ac846c
+          name: 'PerchTail: Instance'
+          type: DEPENDENT
+          key: perchtail.instance.hostname
+          delay: '0'
+          trends: '0'
+          value_type: CHAR
+          description: 'Hostname of the process that answered.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.instance.hostname
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: application
+        - uuid: 18b2e25508694f4b909a4a5ba0299e12
+          name: 'PerchTail: Uptime'
+          type: DEPENDENT
+          key: perchtail.uptime
+          delay: '0'
+          value_type: FLOAT
+          units: uptime
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.uptime_seconds
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: application
+          triggers:
+            - uuid: 2672a4ec6e884277b88c33e0cd84e222
+              expression: 'nodata(/PerchTail by HTTP/perchtail.uptime,{$PERCHTAIL.NODATA.TIMEOUT})=1'
+              name: 'PerchTail: Health endpoint is not answering'
+              priority: AVERAGE
+              description: 'No health report for {$PERCHTAIL.NODATA.TIMEOUT}: PerchTail is down, the URL or token is wrong (401 or 503), or something in between blocks it. The "Get health report" item shows the error.'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: c3a4ca1a9b90424182e90c3230b1a53c
+              expression: 'last(/PerchTail by HTTP/perchtail.uptime)<10m'
+              name: 'PerchTail: Has been restarted'
+              priority: INFO
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: f43c4686633444be9e91a01b2fcae170
+          name: 'PerchTail: Database reachable'
+          type: DEPENDENT
+          key: perchtail.db.reachable
+          delay: '0'
+          valuemap:
+            name: 'PerchTail yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.database.reachable
+            - type: JAVASCRIPT
+              parameters:
+                - 'return value === ''true'' ? 1 : 0;'
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: database
+          triggers:
+            - uuid: e78c2059bacd49a893168fc6f61ca940
+              expression: 'last(/PerchTail by HTTP/perchtail.db.reachable)=0'
+              name: 'PerchTail: Database is unreachable'
+              priority: HIGH
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 40f21ee1f38b480ba47bba6f3c8bbbb4
+          name: 'PerchTail: Database latency'
+          type: DEPENDENT
+          key: perchtail.db.latency
+          delay: '0'
+          value_type: FLOAT
+          units: s
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.database.latency_ms
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+            - type: MULTIPLIER
+              parameters:
+                - '0.001'
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: database
+        - uuid: 4f778c7afa704e67a3876bf6ca53e2d6
+          name: 'PerchTail: Database file size'
+          type: DEPENDENT
+          key: perchtail.db.size
+          delay: '0'
+          units: B
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.database.size_bytes
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: database
+        - uuid: 31bdf08b5ea94d3e95bf8d6f1da515e0
+          name: 'PerchTail: Database WAL size'
+          type: DEPENDENT
+          key: perchtail.db.wal_size
+          delay: '0'
+          units: B
+          description: 'Normally cut back by the hourly WAL checkpoint job.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.database.wal_bytes
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: database
+        - uuid: b48ff315768d43b2a6f738cfc3ed4213
+          name: 'PerchTail: Scratch used'
+          type: DEPENDENT
+          key: perchtail.scratch.used
+          delay: '0'
+          units: B
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.scratch.used_bytes
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: storage
+        - uuid: 2956b70348014929a3e734be325b18f7
+          name: 'PerchTail: Scratch used, in %'
+          type: DEPENDENT
+          key: perchtail.scratch.pused
+          delay: '0'
+          value_type: FLOAT
+          units: '%'
+          description: 'Share of SCRATCH_MAX_GB in use.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.scratch.used_fraction
+            - type: MULTIPLIER
+              parameters:
+                - '100'
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: storage
+          triggers:
+            - uuid: 04737d2707314d0bb1d07937187b6d47
+              expression: 'min(/PerchTail by HTTP/perchtail.scratch.pused,5m)>{$PERCHTAIL.SCRATCH.PUSED.MAX.WARN}'
+              name: 'PerchTail: Scratch space is filling up (over {$PERCHTAIL.SCRATCH.PUSED.MAX.WARN}%)'
+              priority: WARNING
+              tags:
+                - tag: scope
+                  value: capacity
+        - uuid: 0640cedb8b4349e093d4c69475339c58
+          name: 'PerchTail: Free space on DATA_DIR'
+          type: DEPENDENT
+          key: 'perchtail.disk.free[data]'
+          delay: '0'
+          units: B
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.disks.data.free_bytes
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: dir
+              value: data
+        - uuid: c74d86f58664474f8e3b25d7eddd5f54
+          name: 'PerchTail: Free space on DATA_DIR, in %'
+          type: DEPENDENT
+          key: 'perchtail.disk.pfree[data]'
+          delay: '0'
+          value_type: FLOAT
+          units: '%'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.disks.data.free_fraction
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+            - type: MULTIPLIER
+              parameters:
+                - '100'
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: dir
+              value: data
+          triggers:
+            - uuid: 01f9b16fc1144f7bba8a2c5d01888ea9
+              expression: 'last(/PerchTail by HTTP/perchtail.disk.pfree[data])<{$PERCHTAIL.DISK.PFREE.MIN.CRIT}'
+              name: 'PerchTail: Very little free space on DATA_DIR (under {$PERCHTAIL.DISK.PFREE.MIN.CRIT}%)'
+              priority: HIGH
+              tags:
+                - tag: scope
+                  value: capacity
+            - uuid: e591607250404573a24e353c2023ec48
+              expression: 'last(/PerchTail by HTTP/perchtail.disk.pfree[data])<{$PERCHTAIL.DISK.PFREE.MIN.WARN}'
+              name: 'PerchTail: Little free space on DATA_DIR (under {$PERCHTAIL.DISK.PFREE.MIN.WARN}%)'
+              priority: WARNING
+              dependencies:
+                - name: 'PerchTail: Very little free space on DATA_DIR (under {$PERCHTAIL.DISK.PFREE.MIN.CRIT}%)'
+                  expression: 'last(/PerchTail by HTTP/perchtail.disk.pfree[data])<{$PERCHTAIL.DISK.PFREE.MIN.CRIT}'
+              tags:
+                - tag: scope
+                  value: capacity
+        - uuid: f8d59fe51624448f80566d01c4f2f3ff
+          name: 'PerchTail: Free space on SCRATCH_DIR'
+          type: DEPENDENT
+          key: 'perchtail.disk.free[scratch]'
+          delay: '0'
+          units: B
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.disks.scratch.free_bytes
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: dir
+              value: scratch
+        - uuid: 09a8d22b131641d5b411bcc3304fb2a3
+          name: 'PerchTail: Free space on SCRATCH_DIR, in %'
+          type: DEPENDENT
+          key: 'perchtail.disk.pfree[scratch]'
+          delay: '0'
+          value_type: FLOAT
+          units: '%'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.disks.scratch.free_fraction
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+            - type: MULTIPLIER
+              parameters:
+                - '100'
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: dir
+              value: scratch
+          triggers:
+            - uuid: 20f525d1bc8c47cf803999dcf91e0d24
+              expression: 'last(/PerchTail by HTTP/perchtail.disk.pfree[scratch])<{$PERCHTAIL.DISK.PFREE.MIN.CRIT}'
+              name: 'PerchTail: Very little free space on SCRATCH_DIR (under {$PERCHTAIL.DISK.PFREE.MIN.CRIT}%)'
+              priority: HIGH
+              tags:
+                - tag: scope
+                  value: capacity
+            - uuid: d08aeff6efec4896b987b5600c46c9b3
+              expression: 'last(/PerchTail by HTTP/perchtail.disk.pfree[scratch])<{$PERCHTAIL.DISK.PFREE.MIN.WARN}'
+              name: 'PerchTail: Little free space on SCRATCH_DIR (under {$PERCHTAIL.DISK.PFREE.MIN.WARN}%)'
+              priority: WARNING
+              dependencies:
+                - name: 'PerchTail: Very little free space on SCRATCH_DIR (under {$PERCHTAIL.DISK.PFREE.MIN.CRIT}%)'
+                  expression: 'last(/PerchTail by HTTP/perchtail.disk.pfree[scratch])<{$PERCHTAIL.DISK.PFREE.MIN.CRIT}'
+              tags:
+                - tag: scope
+                  value: capacity
+        - uuid: 9d5e6d583a5a448aadd5aa223d64420c
+          name: 'PerchTail: Free space on LOG_DIR'
+          type: DEPENDENT
+          key: 'perchtail.disk.free[logs]'
+          delay: '0'
+          units: B
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.disks.logs.free_bytes
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: dir
+              value: logs
+        - uuid: 3828b664c6a54309855aa2b60d6a1fee
+          name: 'PerchTail: Free space on LOG_DIR, in %'
+          type: DEPENDENT
+          key: 'perchtail.disk.pfree[logs]'
+          delay: '0'
+          value_type: FLOAT
+          units: '%'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.disks.logs.free_fraction
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+            - type: MULTIPLIER
+              parameters:
+                - '100'
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: dir
+              value: logs
+          triggers:
+            - uuid: e5bfa7bca6424cac9d5ad52ce7ca1b49
+              expression: 'last(/PerchTail by HTTP/perchtail.disk.pfree[logs])<{$PERCHTAIL.DISK.PFREE.MIN.CRIT}'
+              name: 'PerchTail: Very little free space on LOG_DIR (under {$PERCHTAIL.DISK.PFREE.MIN.CRIT}%)'
+              priority: HIGH
+              tags:
+                - tag: scope
+                  value: capacity
+            - uuid: a3e2b400a53d4aea93632d72e6568b51
+              expression: 'last(/PerchTail by HTTP/perchtail.disk.pfree[logs])<{$PERCHTAIL.DISK.PFREE.MIN.WARN}'
+              name: 'PerchTail: Little free space on LOG_DIR (under {$PERCHTAIL.DISK.PFREE.MIN.WARN}%)'
+              priority: WARNING
+              dependencies:
+                - name: 'PerchTail: Very little free space on LOG_DIR (under {$PERCHTAIL.DISK.PFREE.MIN.CRIT}%)'
+                  expression: 'last(/PerchTail by HTTP/perchtail.disk.pfree[logs])<{$PERCHTAIL.DISK.PFREE.MIN.CRIT}'
+              tags:
+                - tag: scope
+                  value: capacity
+        - uuid: 1cc2b8cd49b64036afdceaada06f7b9e
+          name: 'PerchTail: Agents configured'
+          type: DEPENDENT
+          key: perchtail.agents.configured
+          delay: '0'
+          description: 'Enabled sources that use a push agent.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.agent.configured
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: agents
+        - uuid: 792947d86e7e41c6937a552337b1baf2
+          name: 'PerchTail: Agents connected'
+          type: DEPENDENT
+          key: perchtail.agents.connected
+          delay: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.agent.connected
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: agents
+        - uuid: 889016104d46441db8af54aa758c234d
+          name: 'PerchTail: File-name index, oldest pass age'
+          type: DEPENDENT
+          key: perchtail.name_index.age
+          delay: '0'
+          value_type: FLOAT
+          units: s
+          description: 'Age of the oldest file-name index pass among the sources that take part.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.name_index.oldest_age_seconds
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: name-index
+          triggers:
+            - uuid: 7c33d2cafb654629b5c0485d5ac20333
+              expression: 'min(/PerchTail by HTTP/perchtail.name_index.age,15m)>{$PERCHTAIL.NAME_INDEX.AGE.MAX}'
+              name: 'PerchTail: File-name index is stale'
+              priority: WARNING
+              description: 'A source has not been listed by the file-name index for longer than {$PERCHTAIL.NAME_INDEX.AGE.MAX} seconds. A source backing off is skipped by the index, so check the failing sources too.'
+              tags:
+                - tag: scope
+                  value: performance
+        - uuid: 89f02b80bafc4458aae3189192517140
+          name: 'PerchTail: File-name index, sources with a problem'
+          type: DEPENDENT
+          key: perchtail.name_index.with_message
+          delay: '0'
+          description: 'Sources whose last file-name index pass failed or stopped short; the source page says why.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.name_index.sources_with_message
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: name-index
+          triggers:
+            - uuid: b2a5b5e181c14cd2aacd8764d2767820
+              expression: 'min(/PerchTail by HTTP/perchtail.name_index.with_message,30m)>0'
+              name: 'PerchTail: File-name index passes fail or stop short'
+              priority: INFO
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: c22d3f6b38164845a4492523d24d510d
+          name: 'PerchTail: Sources failing'
+          type: DEPENDENT
+          key: perchtail.sources.failing
+          delay: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.source_checks.failing
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: sources
+          triggers:
+            - uuid: 105cfeb1af2940749cac3e54d7599dfb
+              expression: 'min(/PerchTail by HTTP/perchtail.sources.failing,10m)>{$PERCHTAIL.SOURCES.FAILING.MAX}'
+              name: 'PerchTail: Sources cannot be reached'
+              priority: WARNING
+              description: 'More than {$PERCHTAIL.SOURCES.FAILING.MAX} enabled sources fail their check. Settings -> Sources shows which and why.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 0f038b9644a043b88e4b88fdb962c21d
+          name: 'PerchTail: Sources backing off'
+          type: DEPENDENT
+          key: perchtail.sources.backing_off
+          delay: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.source_checks.backing_off
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: sources
+        - uuid: cf517a436f094dc88514a69ec06f106b
+          name: 'PerchTail: Live alert pass overdue'
+          type: DEPENDENT
+          key: perchtail.alerts.overdue
+          delay: '0'
+          valuemap:
+            name: 'PerchTail yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.alerts.overdue
+            - type: JAVASCRIPT
+              parameters:
+                - 'return value === ''true'' ? 1 : 0;'
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: alerts
+          triggers:
+            - uuid: 25119d3a98f54a189c15c956d243a716
+              expression: 'last(/PerchTail by HTTP/perchtail.alerts.overdue)=1'
+              name: 'PerchTail: Live alert pass is overdue'
+              priority: WARNING
+              description: 'No live alert pass finished in twice the interval set in Settings -> System, plus 30 seconds.'
+              tags:
+                - tag: scope
+                  value: performance
+        - uuid: 7953758eb1d94bdeb51e524da179c06f
+          name: 'PerchTail: Live alert pass age'
+          type: DEPENDENT
+          key: perchtail.alerts.pass_age
+          delay: '0'
+          value_type: FLOAT
+          units: s
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.alerts.last_pass_age_seconds
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^null$
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: alerts
+        - uuid: e9943349b6864d89b987fbda3fc14365
+          name: 'PerchTail: Alert files waiting'
+          type: DEPENDENT
+          key: perchtail.alerts.files_waiting
+          delay: '0'
+          description: 'Files that did not fit in the last live alert pass and wait for the next ones.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.alerts.files_waiting
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: alerts
+        - uuid: 030c07dc3d73457586cc4181f563b3e5
+          name: 'PerchTail: Webhook calls pending'
+          type: DEPENDENT
+          key: perchtail.alerts.pending
+          delay: '0'
+          description: 'Webhook calls that failed and are being retried.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.alerts.pending_deliveries
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: alerts
+          triggers:
+            - uuid: 9fe23335238d401996edd91eeabde21d
+              expression: 'min(/PerchTail by HTTP/perchtail.alerts.pending,15m)>0'
+              name: 'PerchTail: Webhook calls keep failing'
+              priority: WARNING
+              description: 'Some alert webhook calls have been waiting to be retried for 15 minutes.'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: c7d5631607c74d63854b248d4cbfb158
+          name: 'PerchTail: Webhook calls given up'
+          type: DEPENDENT
+          key: perchtail.alerts.failed
+          delay: '0'
+          description: 'Webhook calls given up on after an hour of retries, across all alerts.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.alerts.failed_deliveries
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: alerts
+          triggers:
+            - uuid: f75e055c445f4ed4897039e2598bf48c
+              expression: 'change(/PerchTail by HTTP/perchtail.alerts.failed)>0'
+              name: 'PerchTail: Webhook calls were given up on'
+              priority: WARNING
+              manual_close: 'YES'
+              description: 'The Alerts page shows which alert and its last error.'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: e00f00e6dff24351883da37a17163bcf
+          name: 'PerchTail: Scheduler running'
+          type: DEPENDENT
+          key: perchtail.scheduler.running
+          delay: '0'
+          valuemap:
+            name: 'PerchTail yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.scheduler.running
+            - type: JAVASCRIPT
+              parameters:
+                - 'return value === ''true'' ? 1 : 0;'
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: jobs
+          triggers:
+            - uuid: 680628544bc944a994dfc61c050ff872
+              expression: 'last(/PerchTail by HTTP/perchtail.scheduler.running)=0'
+              name: 'PerchTail: Background job scheduler is not running'
+              priority: HIGH
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 9834cbb5324540c4aee8a0bf8c271753
+          name: 'PerchTail: Jobs failed'
+          type: DEPENDENT
+          key: perchtail.jobs.failed
+          delay: '0'
+          description: 'Background jobs whose last run failed. Each job has its own trigger (discovery).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.scheduler.failed_jobs
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: jobs
+        - uuid: 2372be1d0de3416c8de6b4d385669210
+          name: 'PerchTail: Audit log integrity'
+          type: DEPENDENT
+          key: perchtail.audit.integrity
+          delay: '0'
+          description: 'Result of the last audit hash-chain check.'
+          valuemap:
+            name: 'PerchTail audit integrity'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.audit_integrity.status
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var codes = {ok: 0, broken: 1, race_breaks: 2, unknown: 3};
+                  return codes.hasOwnProperty(value) ? codes[value] : 3;
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: security
+          triggers:
+            - uuid: 6fb2b96bb17e48d5aabcc162a16c7c84
+              expression: 'last(/PerchTail by HTTP/perchtail.audit.integrity)=1'
+              name: 'PerchTail: Audit log hash chain is broken'
+              priority: HIGH
+              description: 'The audit log was changed outside PerchTail. The Audit Log page shows the first broken row.'
+              tags:
+                - tag: scope
+                  value: security
+            - uuid: d453bc08098f45f7bf9289efb30010b3
+              expression: 'last(/PerchTail by HTTP/perchtail.audit.integrity)=2'
+              name: 'PerchTail: Audit log has unrecorded race breaks'
+              priority: INFO
+              description: 'Breaks left by the 0.5.x race, waiting for a super admin to record them on the Audit Log page.'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: a7ee5ba4601348ecb023dd40553474de
+          name: 'PerchTail: Logs deleted early by the size limit'
+          type: DEPENDENT
+          key: perchtail.logs.deleted_early
+          delay: '0'
+          valuemap:
+            name: 'PerchTail yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.logs.size_limit_deleted_early
+            - type: JAVASCRIPT
+              parameters:
+                - 'return value === ''true'' ? 1 : 0;'
+          master_item:
+            key: perchtail.health.get
+          tags:
+            - tag: component
+              value: storage
+          triggers:
+            - uuid: 15175b13557e490181b9b5e7762f79c7
+              expression: 'last(/PerchTail by HTTP/perchtail.logs.deleted_early)=1'
+              name: 'PerchTail: Own logs are deleted before their retention'
+              priority: INFO
+              description: 'LOG_MAX_TOTAL_MB deleted logs that LOG_RETENTION_DAYS would still have kept: lower the log level or give the logs more space.'
+              tags:
+                - tag: scope
+                  value: capacity
+      discovery_rules:
+        - uuid: 8c3735cc98014e338ca84b5d8adce024
+          name: 'Background jobs discovery'
+          type: DEPENDENT
+          key: perchtail.jobs.discovery
+          delay: '0'
+          description: 'One set of items per background job in the health report.'
+          item_prototypes:
+            - uuid: 080d895b66e047d4a3ef1d7d66a8b353
+              name: 'PerchTail job {#JOB.NAME}: Last run OK'
+              type: DEPENDENT
+              key: 'perchtail.job.last_ok[{#JOB.ID}]'
+              delay: '0'
+              valuemap:
+                name: 'PerchTail yes/no'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - "$.scheduler.jobs[?(@.id=='{#JOB.ID}')].last_ok.first()"
+                  error_handler: DISCARD_VALUE
+                - type: NOT_MATCHES_REGEX
+                  parameters:
+                    - ^null$
+                  error_handler: DISCARD_VALUE
+                - type: JAVASCRIPT
+                  parameters:
+                    - 'return value === ''true'' ? 1 : 0;'
+              master_item:
+                key: perchtail.health.get
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: job
+                  value: '{#JOB.ID}'
+              trigger_prototypes:
+                - uuid: 02cb64b88cf24e70bf348dc0a751b2c6
+                  expression: 'last(/PerchTail by HTTP/perchtail.job.last_ok[{#JOB.ID}])=0'
+                  name: 'PerchTail: Job "{#JOB.NAME}" failed its last run'
+                  priority: WARNING
+                  description: 'The last_error of the job in /monitoring/health says why. The trigger clears when a run works again.'
+                  tags:
+                    - tag: scope
+                      value: availability
+            - uuid: 1428002c84fc487d9c5b41129cf87a36
+              name: 'PerchTail job {#JOB.NAME}: Time since last success'
+              type: DEPENDENT
+              key: 'perchtail.job.last_success_age[{#JOB.ID}]'
+              delay: '0'
+              value_type: FLOAT
+              units: s
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - "$.scheduler.jobs[?(@.id=='{#JOB.ID}')].last_success_age_seconds.first()"
+                  error_handler: DISCARD_VALUE
+                - type: NOT_MATCHES_REGEX
+                  parameters:
+                    - ^null$
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: perchtail.health.get
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: job
+                  value: '{#JOB.ID}'
+            - uuid: f28daeb75e3c4c57aab257971c5daae4
+              name: 'PerchTail job {#JOB.NAME}: Last run duration'
+              type: DEPENDENT
+              key: 'perchtail.job.last_duration[{#JOB.ID}]'
+              delay: '0'
+              value_type: FLOAT
+              units: s
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - "$.scheduler.jobs[?(@.id=='{#JOB.ID}')].last_duration_ms.first()"
+                  error_handler: DISCARD_VALUE
+                - type: NOT_MATCHES_REGEX
+                  parameters:
+                    - ^null$
+                  error_handler: DISCARD_VALUE
+                - type: MULTIPLIER
+                  parameters:
+                    - '0.001'
+              master_item:
+                key: perchtail.health.get
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: job
+                  value: '{#JOB.ID}'
+          master_item:
+            key: perchtail.health.get
+          lld_macro_paths:
+            - lld_macro: '{#JOB.ID}'
+              path: $.id
+            - lld_macro: '{#JOB.NAME}'
+              path: $.name
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.scheduler.jobs
+      tags:
+        - tag: class
+          value: application
+        - tag: target
+          value: perchtail
+      macros:
+        - macro: '{$PERCHTAIL.URL}'
+          value: 'https://perchtail.example.com'
+          description: 'PerchTail base URL, without a trailing slash.'
+        - macro: '{$PERCHTAIL.TOKEN}'
+          type: SECRET_TEXT
+          description: 'Monitoring token from Settings -> System -> Monitoring in PerchTail.'
+        - macro: '{$PERCHTAIL.INTERVAL}'
+          value: 1m
+          description: 'How often the health report is read.'
+        - macro: '{$PERCHTAIL.NODATA.TIMEOUT}'
+          value: 5m
+          description: 'No report for this long fires "Health endpoint is not answering".'
+        - macro: '{$PERCHTAIL.DISK.PFREE.MIN.WARN}'
+          value: '15'
+          description: 'Free space, in %, below which the data, scratch or log filesystem warns.'
+        - macro: '{$PERCHTAIL.DISK.PFREE.MIN.CRIT}'
+          value: '5'
+          description: 'Free space, in %, below which the data, scratch or log filesystem is critical (PerchTail reports degraded from 5%).'
+        - macro: '{$PERCHTAIL.SCRATCH.PUSED.MAX.WARN}'
+          value: '85'
+          description: 'Scratch use, in % of SCRATCH_MAX_GB, above which it warns (PerchTail reports degraded from 90%).'
+        - macro: '{$PERCHTAIL.NAME_INDEX.AGE.MAX}'
+          value: '3600'
+          description: 'Seconds the oldest file-name index pass may reach. Keep it well above the index interval in Settings -> System (15 minutes by default).'
+        - macro: '{$PERCHTAIL.SOURCES.FAILING.MAX}'
+          value: '0'
+          description: 'Sources allowed to fail their check before the trigger fires.'
+      valuemaps:
+        - uuid: 68303e267fcd49768d1242e055ec62ca
+          name: 'PerchTail audit integrity'
+          mappings:
+            - value: '0'
+              newvalue: ok
+            - value: '1'
+              newvalue: broken
+            - value: '2'
+              newvalue: 'race breaks unrecorded'
+            - value: '3'
+              newvalue: unknown
+        - uuid: e5c9c92c831346939854784dd8a875ad
+          name: 'PerchTail status'
+          mappings:
+            - value: '0'
+              newvalue: ok
+            - value: '1'
+              newvalue: degraded
+            - value: '2'
+              newvalue: error
+            - value: '3'
+              newvalue: unknown
+        - uuid: e71362f8ec684d579a2176519292d773
+          name: 'PerchTail yes/no'
+          mappings:
+            - value: '0'
+              newvalue: 'No'
+            - value: '1'
+              newvalue: 'Yes'
+  triggers:
+    - uuid: c98286cff6ff416f84bbc9915672f978
+      expression: 'max(/PerchTail by HTTP/perchtail.agents.connected,5m)<last(/PerchTail by HTTP/perchtail.agents.configured)'
+      name: 'PerchTail: Push agents are disconnected'
+      priority: WARNING
+      description: 'Fewer agents have been connected for 5 minutes than there are enabled agent sources. Settings -> Sources shows which agent sources are offline.'
+      tags:
+        - tag: scope
+          value: availability

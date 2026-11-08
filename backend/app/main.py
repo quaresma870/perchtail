@@ -28,6 +28,7 @@ from app.api.errors import install as install_error_handlers
 from app.api.errors import path_outside_base as _path_outside_base
 from app.api.files import router as files_router
 from app.api.folders import router as folders_router
+from app.api.monitoring import metrics_router
 from app.api.monitoring import router as monitoring_router
 from app.api.roles import router as roles_router
 from app.api.rules import router as rules_router
@@ -56,7 +57,8 @@ from app.crypto import audit_chain_key
 from app.data_layout import leftover_legacy_database
 from app.data_layout import report as report_data_layout
 from app.db import engine, init_db
-from app.health import mark_started
+from app.db import register_upkeep_jobs as register_db_upkeep_jobs
+from app.health import mark_started, readiness_failures
 from app.jobs import register as register_job
 from app.jobs import shutdown as shutdown_background_work
 from app.logging_config import configure_logging, get_logger
@@ -331,6 +333,7 @@ async def lifespan(app: FastAPI):
         timedelta(days=settings.audit_integrity_check_interval_days),
         catch_up=True,
     )
+    register_db_upkeep_jobs(scheduler)
     scheduler.start()
     logger.info("startup.complete")
     yield
@@ -366,6 +369,7 @@ app.include_router(updates_router)
 app.include_router(severity_patterns_global_router)
 app.include_router(severity_patterns_source_router)
 app.include_router(monitoring_router)
+app.include_router(metrics_router)
 
 
 @app.exception_handler(LocalPathNotAllowedError)
@@ -380,7 +384,20 @@ path_outside_base = _path_outside_base
 
 @app.get("/healthz")
 async def healthz():
+    """Liveness: the process is up and answers HTTP. Touches nothing else,
+    so a busy database never gets the container restarted."""
     return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz():
+    """Readiness (#330): a database write works, DATA_DIR is writable and
+    the scheduler runs. 503, naming what failed, when any doesn't. A sync
+    endpoint, so the checks run in the thread pool."""
+    failures = readiness_failures(engine, get_settings().data_dir, scheduler)
+    if failures:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "failed": failures})
+    return {"status": "ready"}
 
 
 # Serves the built frontend SPA (see Dockerfile's node build stage) at "/".

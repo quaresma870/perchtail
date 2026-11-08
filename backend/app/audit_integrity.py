@@ -30,18 +30,33 @@ must still exist with the same hash (unless retention purged it). Any
 other break is reported as tampering, as before.
 """
 
+import functools
 import hmac
 from dataclasses import dataclass, field
 
 from sqlmodel import Session, select
 
-from app.audit_hash_chain import compute_row_hash
+from app.audit_hash_chain import chain_maintenance_lock, compute_row_hash
 from app.auth.models import AuditChainState, AuditLog
 from app.json_values import as_int
 from app.logging_config import get_logger
 from app.timeutils import utcnow
 
 logger = get_logger(__name__)
+
+
+def _exclusive(func):
+    """Runs `func` holding chain_maintenance_lock, from reading the chain
+    state to the end of the walk, so no purge chunk lands in between (see
+    app/audit_hash_chain.py)."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with chain_maintenance_lock:
+            return func(*args, **kwargs)
+
+    return wrapper
+
 
 KNOWN_BREAKS_ACTION = "audit.chain.known_breaks_recorded"
 
@@ -72,10 +87,17 @@ class _RaceBreak:
 
 @dataclass
 class _Walk:
-    rows_checked: list[int]
+    # How many rows were walked, and for each problem row (tampered or race
+    # break) how many rows have an id up to its own.
+    rows_checked: int
+    checked_up_to: dict[int, int]
     tampered_ids: list[int]
     race_breaks: list[_RaceBreak]
     known_break_count: int
+
+
+# Rows read per query while walking the chain (#346).
+WALK_BLOCK = 2000
 
 
 def _hashes_match(stored: str | None, expected: str | None) -> bool:
@@ -120,6 +142,31 @@ def _recorded_known_breaks(session: Session) -> tuple[dict[int, dict], dict[int,
     return breaks, leaves
 
 
+def _chain_rows(session: Session):
+    """Every AuditLog row in id order, read WALK_BLOCK rows at a time
+    (#346): the walk never holds the whole table in memory."""
+    after = None
+    while True:
+        query = select(
+            AuditLog.id,
+            AuditLog.prev_hash,
+            AuditLog.row_hash,
+            AuditLog.user_id,
+            AuditLog.action,
+            AuditLog.target_type,
+            AuditLog.target_id,
+            AuditLog.timestamp,
+            AuditLog.event_metadata,
+        )
+        if after is not None:
+            query = query.where(AuditLog.id > after)
+        block = session.exec(query.order_by(AuditLog.id.asc()).limit(WALK_BLOCK)).all()
+        yield from block
+        if len(block) < WALK_BLOCK:
+            return
+        after = block[-1].id
+
+
 def _walk(key: bytes, session: Session, state: AuditChainState | None) -> _Walk:
     """Walks every remaining AuditLog row in id order, recomputing each
     row's hash (keyed the same way chain_new_entry/backfill_chain_if_needed
@@ -128,26 +175,49 @@ def _walk(key: bytes, session: Session, state: AuditChainState | None) -> _Walk:
     first surviving row, see AuditChainState's docstring. Unlike a plain
     linear check it carries on past a break, from the row's own stored
     hash, so every break is found and classified (see the module
-    docstring)."""
+    docstring).
+
+    Rows are streamed (#346), and only what a later row can need is kept:
+    the hashes of rows up to the newest one a break can be (the race cutoff
+    or a recorded break), which is where a break's parent can be, and the
+    hashes of the recorded rows."""
     anchor_hash = state.anchor_hash if state else None
     anchor_row_id = state.anchor_row_id if state else None
     cutoff = state.known_break_cutoff_row_id if state else None
     recorded_breaks, recorded_leaves = _recorded_known_breaks(session)
 
+    # Every recorded row must still be there, unchanged: that's what makes a
+    # deleted fork leaf (or a deleted break row) show up.
+    purged_up_to = anchor_row_id or 0
+    expected_present = {row_id: entry["row_hash"] for row_id, entry in recorded_breaks.items()}
+    expected_present.update(recorded_leaves)
+    expected_present = {k: v for k, v in expected_present.items() if k > purged_up_to}
+    # Recorded ids in order, and how many rows have an id up to each.
+    expected_ids = sorted(expected_present)
+    expected_up_to: dict[int, int] = {}
+    next_expected = 0
+
+    # No break can be newer than this, so no parent lookup needs a newer hash.
+    parents_up_to = max([cutoff or 0, *recorded_breaks])
+
     expected_prev = anchor_hash
-    # Hash -> id of every row seen so far (and the anchor): where a break's
-    # prev_hash may legitimately point.
+    # Hash -> id of every row seen so far up to parents_up_to (and the
+    # anchor): where a break's prev_hash may legitimately point.
     earlier: dict[str, int | None] = {}
     if anchor_hash is not None:
         earlier[anchor_hash] = anchor_row_id
     present: dict[int, str | None] = {}
-    rows_checked: list[int] = []
+    count = 0
+    checked_up_to: dict[int, int] = {}
     tampered: list[int] = []
     race_breaks: list[_RaceBreak] = []
     known = 0
 
-    for row in session.exec(select(AuditLog).order_by(AuditLog.id.asc())).all():
-        rows_checked.append(row.id)
+    for row in _chain_rows(session):
+        while next_expected < len(expected_ids) and expected_ids[next_expected] < row.id:
+            expected_up_to[expected_ids[next_expected]] = count
+            next_expected += 1
+        count += 1
         recomputed = compute_row_hash(
             key,
             row.prev_hash,
@@ -182,26 +252,29 @@ def _walk(key: bytes, session: Session, state: AuditChainState | None) -> _Walk:
             known += 1
         elif valid and parent_known and cutoff is not None and row.id <= cutoff:
             race_breaks.append(_RaceBreak(row.id, row.row_hash, earlier[row.prev_hash]))
+            checked_up_to[row.id] = count
         else:
             tampered.append(row.id)
+            checked_up_to[row.id] = count
 
-        present[row.id] = row.row_hash
-        if row.row_hash is not None:
+        if row.id in expected_present:
+            present[row.id] = row.row_hash
+        if row.row_hash is not None and row.id <= parents_up_to:
             earlier.setdefault(row.row_hash, row.id)
         expected_prev = row.row_hash
 
-    # Every recorded row must still be there, unchanged: that's what makes a
-    # deleted fork leaf (or a deleted break row) show up.
-    purged_up_to = anchor_row_id or 0
-    expected_present = {row_id: entry["row_hash"] for row_id, entry in recorded_breaks.items()}
-    expected_present.update(recorded_leaves)
+    for row_id in expected_ids[next_expected:]:
+        expected_up_to[row_id] = count
+
     for row_id, row_hash in expected_present.items():
-        if row_id > purged_up_to and not _hashes_match(present.get(row_id), row_hash):
+        if not _hashes_match(present.get(row_id), row_hash):
             if row_id not in tampered:
                 tampered.append(row_id)
+                checked_up_to[row_id] = expected_up_to[row_id]
 
     return _Walk(
-        rows_checked=rows_checked,
+        rows_checked=count,
+        checked_up_to=checked_up_to,
         tampered_ids=sorted(tampered),
         race_breaks=race_breaks,
         known_break_count=known,
@@ -216,6 +289,7 @@ def _get_or_create_state(session: Session) -> AuditChainState:
     return state
 
 
+@_exclusive
 def verify_chain(key: bytes, session: Session) -> ChainVerificationResult:
     """Verifies the whole chain (see _walk) and persists the result onto
     the singleton AuditChainState row (does not commit -- same "caller's
@@ -240,9 +314,9 @@ def verify_chain(key: bytes, session: Session) -> ChainVerificationResult:
     # Rows up to and including the first problem, as before #217: what
     # comes after a break isn't vouched for by the rows before it.
     if broken_row_id is None:
-        checked = len(walk.rows_checked)
+        checked = walk.rows_checked
     else:
-        checked = sum(1 for row_id in walk.rows_checked if row_id <= broken_row_id)
+        checked = walk.checked_up_to[broken_row_id]
 
     if state is None:
         state = _get_or_create_state(session)
@@ -281,6 +355,7 @@ def _leaf_rows(session: Session, up_to: int, exclude: set[int]) -> list[tuple[in
     ]
 
 
+@_exclusive
 def record_known_breaks(
     key: bytes, session: Session, user_id: int | None
 ) -> ChainVerificationResult:
