@@ -5,7 +5,9 @@ test('system settings: search toggle affects nav, monitoring token generation', 
 }) => {
   await page.goto('/#/settings/system')
 
-  const searchRow = page.locator('.setting-row', { hasText: 'Search' })
+  const searchRow = page.locator('.setting-row').filter({
+    has: page.locator('.setting-name', { hasText: /^Search$/ }),
+  })
   const searchCheckbox = searchRow.locator('input[type=checkbox]')
   // search_view_enabled defaults to true (app/system_settings.py) -- other
   // specs (search.spec.ts, alerts.spec.ts) depend on that default, so this

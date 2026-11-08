@@ -26,8 +26,20 @@ from sqlmodel import Session
 from app.rules import compile_linear
 
 FTS_TABLE = "file_name_fts"
-_DELETE_ROW = (
-    f"INSERT INTO {FTS_TABLE}({FTS_TABLE}, rowid, path) VALUES ('delete', old.id, old.path); "
+# The DDL spells the table name out (no string building), like the migration.
+_SCHEMA = (
+    "CREATE VIRTUAL TABLE file_name_fts USING fts5("
+    "path, content='file_name_entry', content_rowid='id', tokenize='trigram')",
+    "CREATE TRIGGER file_name_entry_ai AFTER INSERT ON file_name_entry BEGIN "
+    "INSERT INTO file_name_fts(rowid, path) VALUES (new.id, new.path); END",
+    "CREATE TRIGGER file_name_entry_ad AFTER DELETE ON file_name_entry BEGIN "
+    "INSERT INTO file_name_fts(file_name_fts, rowid, path) "
+    "VALUES ('delete', old.id, old.path); END",
+    "CREATE TRIGGER file_name_entry_au AFTER UPDATE OF path ON file_name_entry BEGIN "
+    "INSERT INTO file_name_fts(file_name_fts, rowid, path) VALUES ('delete', old.id, old.path); "
+    "INSERT INTO file_name_fts(rowid, path) VALUES (new.id, new.path); END",
+    # Rows that were already there (an upgrade of a populated table).
+    "INSERT INTO file_name_fts(file_name_fts) VALUES ('rebuild')",
 )
 # Trigrams need three characters; shorter text is matched without the index
 # (reading every row: still quick, and right for any letter case).
@@ -45,33 +57,8 @@ def ensure_name_index_schema(target_engine) -> None:
         ).scalar()
         if exists:
             return
-        conn.execute(
-            text(
-                f"CREATE VIRTUAL TABLE {FTS_TABLE} USING fts5("
-                "path, content='file_name_entry', content_rowid='id', tokenize='trigram')"
-            )
-        )
-        conn.execute(
-            text(
-                "CREATE TRIGGER file_name_entry_ai AFTER INSERT ON file_name_entry BEGIN "
-                f"INSERT INTO {FTS_TABLE}(rowid, path) VALUES (new.id, new.path); END"
-            )
-        )
-        conn.execute(
-            text(
-                "CREATE TRIGGER file_name_entry_ad AFTER DELETE ON file_name_entry BEGIN "
-                f"{_DELETE_ROW}END"
-            )
-        )
-        conn.execute(
-            text(
-                "CREATE TRIGGER file_name_entry_au AFTER UPDATE OF path ON file_name_entry BEGIN "
-                f"{_DELETE_ROW}"
-                f"INSERT INTO {FTS_TABLE}(rowid, path) VALUES (new.id, new.path); END"
-            )
-        )
-        # Rows that were already there (an upgrade of a populated table).
-        conn.execute(text(f"INSERT INTO {FTS_TABLE}({FTS_TABLE}) VALUES ('rebuild')"))
+        for statement in _SCHEMA:
+            conn.execute(text(statement))
 
 
 class InvalidPattern(ValueError):
@@ -167,15 +154,16 @@ def search_entries(
         params["phrase"] = _fts_phrase(matcher.literal)
 
     batch = max(limit * 4, 500)
+    # Built from the fixed clauses above and an int; every value from the
+    # caller is a bound :parameter.
+    where = " AND ".join(clauses)
+    query = text(
+        "SELECT e.id, e.source_id, e.path, e.size, e.mtime "  # nosec B608
+        f"FROM file_name_entry e {join} WHERE {where} ORDER BY e.id LIMIT {batch}"
+    )
     found: list[tuple[int, int, str, int, float | None]] = []
     while True:
-        rows = session.execute(
-            text(
-                f"SELECT e.id, e.source_id, e.path, e.size, e.mtime FROM file_name_entry e {join} "
-                f"WHERE {' AND '.join(clauses)} ORDER BY e.id LIMIT {batch}"
-            ),
-            params,
-        ).all()
+        rows = session.execute(query, params).all()
         for row in rows:
             if (matcher is None or matcher.matches(row[2])) and (
                 visible is None or visible(row[1], row[2])
