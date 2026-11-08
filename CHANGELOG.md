@@ -14,6 +14,9 @@ release ships (0.x releases may include breaking changes between minors).
 ### Changed
 - A disabled source is off: it keeps its configuration in Settings → Sources, but it no longer appears in the Viewer, open tabs from it close, and nothing can be listed, opened, followed, downloaded or checked on it (the API answers 409), whatever the user's grants. Before, only background work skipped it and it could still be browsed.
 
+### Security
+- Regenerating a push agent's token, or disabling or deleting its source, now closes the agent's open connection. Before, an agent that had connected with the old token kept answering for the source until it disconnected on its own, so regenerating a leaked token didn't cut off whoever was using it.
+
 ### Fixed
 - Each connected push agent kept a database connection until it disconnected, so with about 15 agents that had answered a command every other request waited 30 seconds and failed (#341).
 - Escape on a new source or role popup, before its lists finished loading, asked to discard changes although nothing was typed (#315, a known issue in 0.6.0).

@@ -107,6 +107,20 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
     # Only source_id is used from here on.
     del source
 
+    # The token was checked before accept() and register(). A token
+    # regenerated, or the source disabled or deleted, in between closed
+    # whatever was registered then -- not this socket, which registered
+    # after. Check again now that it's registered: a change committed from
+    # here on finds it and closes it (registry.disconnect).
+    current = session.exec(
+        select(Source.agent_token_hash, Source.enabled).where(Source.id == source_id)
+    ).first()
+    session.rollback()  # end the read transaction; see above
+    if current is None or current[0] != _hash_token(token) or not current[1]:
+        registry.unregister(source_id, websocket)
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     try:
         while True:
             message = await websocket.receive_json()
