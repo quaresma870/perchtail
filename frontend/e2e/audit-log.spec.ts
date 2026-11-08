@@ -19,23 +19,9 @@ type Page = import('@playwright/test').Page
 // Each filter is a dropdown in its own group, named by the group's label
 // ("Action", "Source", "System settings"...), with a search box on top.
 function filterGroup(page: Page, label: string) {
-  return page.locator('.filter-group').filter({ has: page.locator('.filter-label', { hasText: new RegExp(`^${label}import { expect, test } from '@playwright/test'
-
-// Every other spec in this suite generates real AuditLog rows (source/rule/
-// role/user/SSO/severity-pattern CRUD) just by running, so by the time this
-// spec runs there's plenty of history to page/filter over -- no seeding
-// needed. This test instead creates one entry with a distinctive value of
-// its own (an unusual retention-days number), so it can find *that* row
-// specifically rather than asserting on the table being non-empty in
-// general, then restores the setting it changed. Derived from Date.now(),
-// not a fixed literal (same convention as severity-indicators.spec.ts's
-// patternText) -- a fixed value would collide with a leftover row from a
-// previous run of this same spec against a backend that wasn't restarted
-// in between, a real local workflow this suite's own webServer.
-// reuseExistingServer setting explicitly supports.
-const marker = Date.now()
-
-) }) })
+  return page
+    .locator('.filter-group')
+    .filter({ has: page.locator('.filter-label', { hasText: new RegExp(`^${label}$`) }) })
 }
 
 async function pick(page: Page, group: string, option: string) {
