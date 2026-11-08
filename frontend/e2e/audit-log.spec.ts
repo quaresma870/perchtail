@@ -14,11 +14,40 @@ import { expect, test } from '@playwright/test'
 // reuseExistingServer setting explicitly supports.
 const marker = Date.now()
 
-async function pickAction(page: import('@playwright/test').Page, action: string) {
-  await page.locator('.dropdown-toggle').click()
-  await page.locator('.dropdown-panel').getByLabel(action, { exact: true }).check()
+type Page = import('@playwright/test').Page
+
+// Each filter is a dropdown in its own group, named by the group's label
+// ("Action", "Source", "System settings"...), with a search box on top.
+function filterGroup(page: Page, label: string) {
+  return page.locator('.filter-group').filter({ has: page.locator('.filter-label', { hasText: new RegExp(`^${label}import { expect, test } from '@playwright/test'
+
+// Every other spec in this suite generates real AuditLog rows (source/rule/
+// role/user/SSO/severity-pattern CRUD) just by running, so by the time this
+// spec runs there's plenty of history to page/filter over -- no seeding
+// needed. This test instead creates one entry with a distinctive value of
+// its own (an unusual retention-days number), so it can find *that* row
+// specifically rather than asserting on the table being non-empty in
+// general, then restores the setting it changed. Derived from Date.now(),
+// not a fixed literal (same convention as severity-indicators.spec.ts's
+// patternText) -- a fixed value would collide with a leftover row from a
+// previous run of this same spec against a backend that wasn't restarted
+// in between, a real local workflow this suite's own webServer.
+// reuseExistingServer setting explicitly supports.
+const marker = Date.now()
+
+) }) })
+}
+
+async function pick(page: Page, group: string, option: string) {
+  const toggle = filterGroup(page, group).locator('.dropdown-toggle')
+  await toggle.click()
+  await filterGroup(page, group).locator('.dropdown-panel').getByLabel(option, { exact: true }).check()
   await page.keyboard.press('Escape')
-  await expect(page.locator('.dropdown-toggle')).toContainText(action)
+  await expect(toggle).toContainText(option)
+}
+
+async function pickAction(page: Page, action: string) {
+  await pick(page, 'Action', action)
 }
 
 test('audit log: retention control writes a system_settings.update entry, filter by type finds it', async ({
@@ -34,11 +63,10 @@ test('audit log: retention control writes a system_settings.update entry, filter
 
   await page.goto('/#/settings/audit-log')
 
-  // "Type" is a chip-style checkbox list built from whatever target_types
-  // are actually in the table (see backend/app/api/audit.py's GET
-  // /audit/filters) -- "system_settings" is guaranteed present since the
+  // One dropdown per target type in the table (see backend/app/api/audit.py's
+  // GET /audit/filters) -- "System settings" is guaranteed present since the
   // retention save above just wrote one.
-  await page.locator('.chip', { hasText: 'system_settings' }).click()
+  await pick(page, 'System settings', 'Every system settings')
 
   const row = page.locator('tbody tr', { hasText: String(marker) })
   await expect(row).toBeVisible()
