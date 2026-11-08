@@ -178,6 +178,17 @@ export function compileMatcher(query: string, options: FilterOptions): Matcher |
 export const isMatcherError = (m: Matcher | { error: string }): m is { error: string } =>
   typeof m !== 'function'
 
+/**
+ * What the explorer's search box holds (#300): a regex when written between
+ * slashes (`/app\.log\.\d/`), otherwise text or a glob, which
+ * compileMatcher tells apart by `*` and `?`. No separate Regex option.
+ */
+export function parseQuery(query: string): { text: string; regex: boolean } {
+  const q = query.trim()
+  const slashed = /^\/(.+)\/$/.exec(q)
+  return slashed ? { text: slashed[1], regex: true } : { text: q, regex: false }
+}
+
 /** Whether a file name matches the filter (text or glob, no options). */
 export function nameMatches(name: string, query: string): boolean {
   const matcher = compileMatcher(query, { regex: false, matchCase: false })

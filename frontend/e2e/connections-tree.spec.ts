@@ -71,19 +71,18 @@ test('connections-home tree: nests sources by customer/folder and search auto-ex
   await expect(page.locator('.connections-tree-body')).toHaveCount(0)
   await expect(page.getByRole('button', { name: rootSourceName })).toBeVisible()
 
-  // Search auto-expands the tree even when nothing was manually expanded.
-  // filterConnections matches folder/customer/host, not a source's own
-  // name (see connection-filter.ts), so search by the folder name here --
-  // it should surface the nested source (whose path includes "Prod") and
-  // filter out the root-level one (which has no folder at all).
+  // The search (#300) lists the sources whose name, host, customer or
+  // folder matches: the nested source (its folder is "Prod"), not the
+  // root-level one.
   await page.getByRole('button', { name: 'Tree', exact: true }).click()
-  await page.getByPlaceholder('Search by folder, customer, or host…').fill('Prod')
-  await expect(page.locator('.connections-tree-body').getByText(nestedSourceName, { exact: true })).toBeVisible()
-  await expect(page.locator('.connections-tree-body').getByText(rootSourceName, { exact: true })).toHaveCount(0)
+  await page.getByLabel('Search sources and files').fill('Prod')
+  const found = page.locator('.search-results .row.source')
+  await expect(found.filter({ hasText: nestedSourceName })).toBeVisible()
+  await expect(found.filter({ hasText: rootSourceName })).toHaveCount(0)
 
   // The list/tree choice is kept on the server now (#273): back to List,
   // the default, for the specs that run after this one.
-  await page.getByPlaceholder('Search by folder, customer, or host…').fill('')
+  await page.getByLabel('Search sources and files').fill('')
   const listSaved = page.waitForResponse((r) => r.url().includes('/auth/preferences') && r.ok())
   await page.getByRole('button', { name: 'List', exact: true }).click()
   await listSaved
