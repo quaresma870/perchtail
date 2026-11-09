@@ -37,6 +37,10 @@ type Command struct {
 	// Set on "list" by backends from 0.7 (#347): list at most this many
 	// entries (capped at MaxListEntries; 0 means MaxListEntries).
 	MaxEntries int `json:"max_entries,omitempty"`
+	// Set on "upgrade" (#319): the version to upgrade to, and nothing else.
+	// Where the binary comes from is fixed in the agent (upgrade.go), never
+	// taken from the server.
+	Version string `json:"version,omitempty"`
 }
 
 // DirEntryWire mirrors what collectors/agent.py's list_directory expects
@@ -111,4 +115,43 @@ type ErrorResult struct {
 	Error string `json:"error"`
 	Code  string `json:"code,omitempty"`
 	Size  int64  `json:"size,omitempty"`
+}
+
+// Pong answers the server's application-level "ping" (#333), which it
+// sends so it can tell a dead connection from an idle one. Older agents
+// answer "ping" with an unknown_error, which proves they're alive as well.
+type Pong struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// UpgradeAccepted answers an "upgrade" command (#319) the agent will carry
+// out: the host allows it, the build has a signing key and To is newer than
+// From. A refusal is an ErrorResult of type "upgrade_error" with Code
+// "refused". What follows is reported with UpgradeProgress messages and, if
+// it fails, an UpgradeFailed; a successful upgrade ends with the agent
+// reconnecting with the new version.
+type UpgradeAccepted struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// UpgradeProgress reports a stage of an accepted upgrade: "downloading",
+// "verifying", "installing" or "restarting".
+type UpgradeProgress struct {
+	Type   string `json:"type"`
+	ID     string `json:"id"`
+	Stage  string `json:"stage"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// UpgradeFailed ends an accepted upgrade that didn't happen; the agent
+// keeps running its current version. Not "_error": the command was
+// already answered by UpgradeAccepted.
+type UpgradeFailed struct {
+	Type  string `json:"type"`
+	ID    string `json:"id"`
+	Error string `json:"error"`
 }

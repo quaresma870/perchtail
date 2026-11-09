@@ -143,6 +143,13 @@ class Settings(BaseSettings):
     # Docker image sets PERCHTAIL_INSTALL=docker; anything else counts as an
     # install from source.
     perchtail_install: str = ""
+    # Push-agent upgrades from the portal (#319): the folder holding the
+    # signed agent binaries of this server's version (the release's
+    # perchtail-agent-*, SHA256SUMS and SHA256SUMS.sig), served to connected
+    # agents at /agent/binaries/. The Docker image sets /app/agent-binaries;
+    # empty, or a folder without them, means agents download the release
+    # from GitHub instead.
+    agent_binaries_dir: str = ""
 
     # Full audit log viewer (app/audit_purge.py) -- how often the purge
     # sweep runs. *What* it purges (retention in days, 0 = keep forever) is

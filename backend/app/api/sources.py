@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 from app import source_roots, source_status, system_settings
 from app.agent_registry import disconnect_after_commit, get_agent_registry
 from app.alerts import drop_scoped_alerts, forget_source
+from app.api.agent_upgrades import AgentUpgradePublic, upgrade_public
 from app.api.archive import SOURCE_DISABLED
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
@@ -111,6 +112,9 @@ class SourcePublic(BaseModel):
     # files, for example).
     agent_version: str | None
     agent_outdated: bool
+    # The latest upgrade from the portal (#319) since the server started:
+    # its progress, then how it ended.
+    agent_upgrade: AgentUpgradePublic | None = None
     # Reachability (#276): "ok", "failing" or "unknown"; for an agent source,
     # its live connection ("ok" connected, "failing" not). When it was last
     # known, and the public reason when failing.
@@ -258,6 +262,7 @@ def _to_public(
         agent_os=source.agent_os,
         agent_version=source.agent_version,
         agent_outdated=is_newer(APP_VERSION, source.agent_version),
+        agent_upgrade=upgrade_public(source.id) if source.protocol == Protocol.agent else None,
         **_status_fields(source),
         name_index_enabled=source.name_index_enabled,
         name_indexed_at=source.name_indexed_at,

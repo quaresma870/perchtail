@@ -17,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app import name_index, source_status
 from app.agent_registry import get_agent_registry
 from app.alerts import run_alert_pass
+from app.api.agent_upgrades import router as agent_upgrades_router
 from app.api.agent_ws import router as agent_ws_router
 from app.api.alerts import router as alerts_router
 from app.api.archive import router as archive_router
@@ -365,6 +366,7 @@ app.include_router(roles_router)
 app.include_router(users_router)
 app.include_router(sso_router)
 app.include_router(agent_ws_router)
+app.include_router(agent_upgrades_router)
 app.include_router(system_settings_router)
 app.include_router(updates_router)
 app.include_router(severity_patterns_global_router)

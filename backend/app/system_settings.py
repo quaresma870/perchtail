@@ -19,6 +19,10 @@ BOOL_DEFAULTS: dict[str, str] = {
     # The file-name index (#304, app/name_index.py): names, sizes and times
     # of every source's rule-visible files, never content. On by default.
     "name_index_enabled": "true",
+    # Upgrading push agents from the portal (#319). Off by default: it
+    # replaces a binary on every host that runs an agent. Each host can
+    # still refuse with PERCHTAIL_REMOTE_UPGRADE=false.
+    "agent_remote_upgrade_enabled": "false",
 }
 
 # Enumerated string settings: key -> (default, allowed values). A value

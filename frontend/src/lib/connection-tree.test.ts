@@ -24,6 +24,7 @@ function source(overrides: Partial<Source> & { id: number; name: string }): Sour
     agent_os: null,
     agent_version: null,
     agent_outdated: false,
+    agent_upgrade: null,
     status: 'unknown',
     status_checked_at: null,
     status_message: null,

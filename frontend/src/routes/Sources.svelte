@@ -24,7 +24,8 @@
     parseUtc,
   } from '../lib/credential-age'
   import { systemSettings } from '../lib/settings'
-  import type { Customer, Protocol, Source } from '../lib/types'
+  import { upgradableAgents, upgradeInProgress } from '../lib/agent-upgrade'
+  import type { BulkAgentUpgradeResult, Customer, Protocol, Source } from '../lib/types'
 
   let sources: Source[] = []
   let customers: Customer[] = []
@@ -259,6 +260,39 @@
     }
   }
 
+  // Upgrade every outdated push agent in view from the portal (#319).
+  $: upgradeEnabled = $systemSettings.agent_remote_upgrade_enabled
+  $: outdatedAgents = visible.filter((s) => s.protocol === 'agent' && s.agent_outdated)
+  $: upgradeTargets = upgradableAgents(visible, upgradeEnabled)
+  let upgradingAgents = false
+  let upgradeResults: BulkAgentUpgradeResult[] | null = null
+  let upgradeError = ''
+  $: upgradeProblems = (upgradeResults ?? []).filter((r) => r.result !== 'accepted')
+  $: upgradeAccepted = (upgradeResults ?? []).length - upgradeProblems.length
+
+  async function upgradeAgents() {
+    const targets = upgradeTargets
+    const ok = await confirmAction({
+      title: 'Upgrade agents',
+      message: `Upgrade the ${targets.length} connected outdated agent${targets.length === 1 ? '' : 's'} in this list to this server's version? Each one downloads the signed release, checks it, replaces its binary and restarts; if anything fails, it keeps running its current version.`,
+      confirmLabel: 'Upgrade',
+    })
+    if (!ok) return
+    upgradingAgents = true
+    upgradeError = ''
+    upgradeResults = null
+    try {
+      upgradeResults = await api.post<BulkAgentUpgradeResult[]>('/agent-upgrades', {
+        source_ids: targets.map((s) => s.id),
+      })
+      await load(true)
+    } catch (err) {
+      upgradeError = err instanceof ApiError ? err.detail : 'Failed to start the upgrades'
+    } finally {
+      upgradingAgents = false
+    }
+  }
+
   onMount(() => load())
 </script>
 
@@ -277,12 +311,44 @@
             : 'Set one new credential on the selected sources'}
           on:click={openBulk}>Update credentials ({selectedSources.length})</button
         >
+        {#if outdatedAgents.length > 0}
+          <button
+            class="btn btn-ghost"
+            disabled={upgradingAgents || upgradeTargets.length === 0}
+            title={!upgradeEnabled
+              ? 'Upgrading agents from the portal is off (Settings → System)'
+              : upgradeTargets.length === 0
+                ? 'None of the outdated agents in this list is connected'
+                : "Upgrade the connected outdated agents in this list to this server's version"}
+            on:click={upgradeAgents}
+            >{upgradingAgents ? 'Upgrading…' : `Upgrade outdated agents (${upgradeTargets.length})`}</button
+          >
+        {/if}
         <button class="btn btn-primary" on:click={() => push('/settings/sources/new')}
           >+ Add source</button
         >
       </div>
     {/if}
   </div>
+
+  {#if upgradeError}
+    <p class="error" role="status">{upgradeError}</p>
+  {/if}
+  {#if upgradeResults}
+    <div class="notice" role="status">
+      {upgradeAccepted} agent{upgradeAccepted === 1 ? '' : 's'} upgrading: each source's page shows its progress.
+      {#if upgradeProblems.length > 0}
+        <ul class="bulk-problems">
+          {#each upgradeProblems as result (result.source_id)}
+            <li>
+              <strong>{result.name ?? `#${result.source_id}`}</strong>{result.detail ? `: ${result.detail}` : ''}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      <button class="link" on:click={() => (upgradeResults = null)}>Dismiss</button>
+    </div>
+  {/if}
 
   {#if loading}
     <p class="hint">Loading…</p>
@@ -379,7 +445,11 @@
                 {#if !source.enabled}
                   <span class="status status-pending" title="Turned off: nothing is read from it">disabled</span>
                 {:else if source.protocol === 'agent'}
-                  {#if source.agent_connected}
+                  {#if upgradeInProgress(source.agent_upgrade)}
+                    <span class="status status-pending" title="Upgrading the agent to {source.agent_upgrade?.to_version}"
+                      >⟳ upgrading</span
+                    >
+                  {:else if source.agent_connected}
                     <span class="status status-ok">✓ connected</span>
                   {:else if formatLastSeen(source.agent_last_seen_at)}
                     <span class="status status-fail" title="Not connected right now"
@@ -728,6 +798,13 @@
   .bulk-summary {
     margin: 0;
     font-weight: 600;
+  }
+  .notice {
+    padding: 0.6rem 0.9rem;
+    margin-bottom: 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 0.86rem;
   }
   .bulk-problems {
     margin: 0;

@@ -88,3 +88,36 @@ func TestLoadConfigServerURLScheme(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfigRemoteUpgrade(t *testing.T) {
+	// #319: the host can always refuse upgrades from the portal.
+	cases := []struct {
+		value   string
+		want    bool
+		wantErr bool
+	}{
+		{"", true, false},
+		{"true", true, false},
+		{"1", true, false},
+		{"false", false, false},
+		{"FALSE", false, false},
+		{"0", false, false},
+		{"off", false, false},
+		{"flase", false, true},
+	}
+	for _, tc := range cases {
+		getenv := fakeGetenv(map[string]string{
+			"PERCHTAIL_SERVER_URL":     "wss://example.com/agent/connect",
+			"PERCHTAIL_AGENT_TOKEN":    "s3cret",
+			"PERCHTAIL_BASE_PATH":      "/var/log/app",
+			"PERCHTAIL_REMOTE_UPGRADE": tc.value,
+		})
+		cfg, err := LoadConfig(getenv)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("PERCHTAIL_REMOTE_UPGRADE=%q: error = %v, wantErr %v", tc.value, err, tc.wantErr)
+		}
+		if err == nil && cfg.RemoteUpgrade != tc.want {
+			t.Fatalf("PERCHTAIL_REMOTE_UPGRADE=%q: RemoteUpgrade = %v, want %v", tc.value, cfg.RemoteUpgrade, tc.want)
+		}
+	}
+}

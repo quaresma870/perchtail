@@ -201,7 +201,7 @@ func fakeBackend(t *testing.T, base string, script func(conn *websocket.Conn)) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cfg := Config{ServerURL: "ws" + strings.TrimPrefix(server.URL, "http"), Token: "t", BasePath: base}
-	go func() { _ = connectAndServe(ctx, cfg) }()
+	go func() { _, _ = connectAndServe(ctx, cfg, newUpgrader(cfg)) }()
 	select {
 	case <-finished:
 	case <-time.After(10 * time.Second):

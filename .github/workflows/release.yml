@@ -3,9 +3,14 @@ name: Release
 # Builds everything a release needs and leaves it as a DRAFT for the
 # maintainer to review and publish:
 #   - the push-agent binaries for Linux (amd64, arm64) and Windows (amd64),
-#     plus SHA256SUMS to verify them;
-#   - the Docker image, pushed to ghcr.io/<owner>/perchtail:<version>, and
-#     its SBOM (CycloneDX);
+#     plus SHA256SUMS to verify them and SHA256SUMS.sig, its Ed25519
+#     signature with the release key (#319): agents upgraded from the portal
+#     install a binary only if this signature verifies against the public
+#     key built into them. The private key is the AGENT_SIGNING_KEY
+#     repository secret (see CONTRIBUTING.md); without it the release fails;
+#   - the Docker image, pushed to ghcr.io/<owner>/perchtail:<version>, with
+#     those signed agent binaries in /app/agent-binaries, and its SBOM
+#     (CycloneDX);
 #   - release notes taken from the version's CHANGELOG.md section.
 # GitHub adds the source code archives itself when the release is published.
 #
@@ -170,6 +175,39 @@ jobs:
           sha256sum perchtail-agent-* > SHA256SUMS
           cat SHA256SUMS
 
+      # Every release is signed (#319). The key never reaches the log or the
+      # artifacts: it is written to a file only this user can read, used and
+      # removed. The signature is checked against the public key committed in
+      # the agent's source, so a release can't ship agents that would refuse
+      # their own upgrades.
+      - name: Sign SHA256SUMS
+        working-directory: dist
+        env:
+          AGENT_SIGNING_KEY: ${{ secrets.AGENT_SIGNING_KEY }}
+          PUBLIC_KEY: ../agent/internal/agent/upgrade_signing_key.pem
+        run: |
+          set -euo pipefail
+          if [ -z "${AGENT_SIGNING_KEY:-}" ]; then
+            echo "::error::The AGENT_SIGNING_KEY repository secret is missing: every release must sign SHA256SUMS for agent upgrades from the portal. See CONTRIBUTING.md, 'Agent release signing key'."
+            exit 1
+          fi
+          if ! grep -q "BEGIN PUBLIC KEY" "$PUBLIC_KEY"; then
+            echo "::error::agent/internal/agent/upgrade_signing_key.pem is empty: the agents of this release couldn't verify any upgrade. Commit the release key's public half first (CONTRIBUTING.md)."
+            exit 1
+          fi
+          umask 077
+          keyfile="$(mktemp)"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s\n' "$AGENT_SIGNING_KEY" > "$keyfile"
+          openssl pkeyutl -sign -inkey "$keyfile" -rawin -in SHA256SUMS -out SHA256SUMS.sig
+          rm -f "$keyfile"
+          if ! openssl pkeyutl -verify -pubin -inkey "$PUBLIC_KEY" -rawin \
+              -in SHA256SUMS -sigfile SHA256SUMS.sig; then
+            echo "::error::The AGENT_SIGNING_KEY secret doesn't match agent/internal/agent/upgrade_signing_key.pem."
+            exit 1
+          fi
+          ls -l SHA256SUMS SHA256SUMS.sig
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agent
@@ -177,7 +215,7 @@ jobs:
           if-no-files-found: error
 
   image:
-    needs: meta
+    needs: [meta, agent]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -187,6 +225,14 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.meta.outputs.sha }}
+
+      # The signed agent binaries go into the image (#319), so agents on
+      # hosts without internet access can upgrade from the server itself.
+      # The Dockerfile copies agent-dist/ to /app/agent-binaries.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agent
+          path: agent-dist
 
       - id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
@@ -285,7 +331,7 @@ jobs:
             echo
             echo "### Install"
             echo "- Docker: \`${IMAGE,,}:${VERSION}\` (amd64, arm64)"
-            echo "- Push agent: the binaries below; check them with \`sha256sum -c SHA256SUMS\`"
+            echo "- Push agent: the binaries below; check them with \`sha256sum -c SHA256SUMS\` (\`SHA256SUMS.sig\` is its Ed25519 signature with the release key)"
             echo "- From source: [docs/install-from-source.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/install-from-source.md)"
           } >> notes.md
           cat notes.md

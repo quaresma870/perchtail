@@ -124,10 +124,7 @@ version (amd64 and arm64), for example:
     image: ghcr.io/quaresma870/perchtail:0.6.0
 ```
 
-Each [GitHub release](https://github.com/quaresma870/perchtail/releases)
-also carries the push-agent binaries, their `SHA256SUMS`, and the image's
-SBOM, attached before the release is published. `latest` and `X.Y` tags
-only move when a full release is published, never with a pre-release.
+Each [GitHub release](https://github.com/quaresma870/perchtail/releases) also carries the push-agent binaries, their `SHA256SUMS`, `SHA256SUMS.sig` (its Ed25519 signature with the release key) and the image's SBOM, attached before the release is published. The image carries the same signed agent binaries, for upgrading agents from the portal. `latest` and `X.Y` tags only move when a full release is published, never with a pre-release.
 
 On first startup (only when the database has zero users), PerchTail creates a
 break-glass super-admin account with a randomly generated password and prints
@@ -184,6 +181,8 @@ how this instance was installed. Turn it off there, or set
 example on a network without internet access). `HTTPS_PROXY` is honoured.
 The source overview also shows each push agent's version, and flags agents
 older than the server.
+
+**Push-agent upgrades.** Once **Settings → System → Sources → Upgrade push agents from the portal** is on (it's off by default), users who can manage sources upgrade an outdated agent to the server's version from its source's page, or every connected outdated agent from Settings → Sources. The agent downloads the release from the server (the Docker image carries the signed agent binaries) or from GitHub, installs it only if the release signature and checksum verify and the version is newer than its own, and restarts into it; anything that fails leaves the current version running. Each host can refuse with `PERCHTAIL_REMOTE_UPGRADE=false`. Agents older than 0.7 are upgraded by hand once. See [agent/README.md](agent/README.md#upgrades-from-the-portal) for what the host needs (a writable binary folder, a service that restarts the agent).
 
 ## Deployment: reverse proxy (nginx) + TLS
 
