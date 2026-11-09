@@ -278,7 +278,7 @@ publish in `docker-compose.yml` entirely rather than binding it to loopback.
 - [docs/sso-setup.md](docs/sso-setup.md) — registering PerchTail as an OIDC
   client and setting up group-to-role mapping, with per-provider notes for
   Azure AD/Entra ID, Okta, Google Workspace, and Keycloak/Authentik
-- [docs/monitoring.md](docs/monitoring.md) — the liveness and readiness probes, the detailed health endpoint and its token, Prometheus `/metrics`, the Zabbix 7.0 and 8.0 templates, and the log events worth alerting on
+- [docs/monitoring.md](docs/monitoring.md) — the liveness and readiness probes and who may call them, the detailed health endpoint and its token, Prometheus `/metrics`, the Zabbix 7.0 and 8.0 templates, and the log events worth alerting on
 - [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — how to
   rotate `CREDENTIAL_ENCRYPTION_KEY` without losing access to already-
   encrypted credentials

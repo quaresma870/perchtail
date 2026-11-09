@@ -4,12 +4,23 @@ PerchTail has four health endpoints, for different consumers:
 
 | Endpoint | Auth | Consumer | What it's for |
 |---|---|---|---|
-| `GET /healthz` | none | Docker healthcheck, liveness probe | "Is the process up and answering HTTP?" Fast, touches nothing else, always `{"status": "ok"}`. |
-| `GET /readyz` | none | Readiness probe, load balancer | "Can this instance take traffic?" A database write, `DATA_DIR` writable, the scheduler running. |
-| `GET /monitoring/health` | bearer token | Zabbix and other JSON pollers | The full operational report, worth polling and alerting on. |
-| `GET /metrics` | bearer token | Prometheus | The same report in the Prometheus text format. |
+| `GET /healthz` | loopback, an allowed network, or bearer token | Docker healthcheck, liveness probe | "Is the process up and answering HTTP?" Fast, touches nothing else, always `{"status": "ok"}`. |
+| `GET /readyz` | loopback, an allowed network, or bearer token | Readiness probe, load balancer | "Can this instance take traffic?" A database write, `DATA_DIR` writable, the scheduler running. |
+| `GET /monitoring/health` | bearer token, and an allowed network if set | Zabbix and other JSON pollers | The full operational report, worth polling and alerting on. |
+| `GET /metrics` | bearer token, and an allowed network if set | Prometheus | The same report in the Prometheus text format. |
 
 Keep `/healthz` as the liveness probe and `/readyz` as the readiness probe: a locked database or a full disk should take the instance out of rotation, not get the container restarted in a loop. The Dockerfile's `HEALTHCHECK` uses `/healthz`; the Kubernetes example in [high-availability.md](high-availability.md) uses both.
+
+## Who may call them
+
+None of the four answers the world. The bearer token is the monitoring token generated under Settings → System → Monitoring, sent as `Authorization: Bearer <token>`.
+
+- **The probes** (`/healthz`, `/readyz`) answer a caller on the same machine (loopback) whose request carries no proxy header (`X-Forwarded-For`, `Forwarded`, `X-Real-IP`): that's the Docker `HEALTHCHECK`, which runs inside the container. A request from a reverse proxy on the same host carries those headers, so it's not treated as local. Anyone else needs the token, or an address in `PROBE_ALLOWED_NETWORKS` (comma-separated addresses or CIDR blocks, empty by default) for a load balancer or kubelet that can't send a header. A refused probe gets a bare `401` that says nothing about the instance's health.
+- **`/monitoring/health` and `/metrics`** always need the token. When `MONITORING_ALLOWED_NETWORKS` is set, the caller's address must be in it too; a valid token from anywhere else gets `403`.
+- **The caller's address** is the TCP peer. uvicorn replaces it with the address from a proxy header only when the request came from `FORWARDED_ALLOW_IPS` (127.0.0.1 by default), so a client can't pick it. Behind a reverse proxy on another machine or container, set `FORWARDED_ALLOW_IPS` to the proxy's address so the allowed networks see the real caller; never `*`, which lets any client name its own address.
+- **A reverse proxy on the same host** must send `X-Forwarded-For` (nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). One that sends no forwarding header connects from loopback like the Docker healthcheck, so everyone behind it would pass the probes.
+- **Allowed networks hold the callers, not the path:** don't list a range that includes a load balancer, ingress controller or proxy that forwards outside traffic, or everyone behind it passes too.
+- A malformed entry in either list stops PerchTail at startup, naming the entry.
 
 ## GET /readyz
 
@@ -341,4 +352,4 @@ groups:
 
 ## A note on network exposure
 
-Don't expose `/monitoring/health` or `/metrics` to the public internet without something in front of them. The bearer token is real auth, but allowing only the monitoring system's address at your reverse proxy (nginx `allow`/`deny`) is a reasonable additional layer, not a replacement for it. `/healthz` and `/readyz` need no token and say little, but they're meant for the orchestrator and load balancer only.
+Don't expose `/monitoring/health` or `/metrics` to the public internet without something in front of them. The bearer token is real auth; `MONITORING_ALLOWED_NETWORKS`, or allowing only the monitoring system's address at your reverse proxy (nginx `allow`/`deny`), is a reasonable additional layer, not a replacement for it. `/healthz` and `/readyz` answer only local callers, allowed networks and the token holder (see "Who may call them" above).

@@ -1,9 +1,27 @@
+import ipaddress
 import os
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+
+@lru_cache(maxsize=8)
+def parse_networks(raw: str) -> tuple[Network, ...]:
+    """A comma-separated list of addresses or CIDR blocks (#366). Raises
+    ValueError naming the entry that isn't one."""
+    networks = []
+    for entry in (part.strip() for part in raw.split(",")):
+        if not entry:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError as exc:
+            raise ValueError(f"{entry!r} is not an IP address or CIDR block") from exc
+    return tuple(networks)
 
 
 class Settings(BaseSettings):
@@ -145,6 +163,16 @@ class Settings(BaseSettings):
     # IntervalTrigger accepts a `days=` kwarg directly.
     audit_integrity_check_interval_days: int = 365
 
+    # Who may call the monitoring endpoints without the monitoring token
+    # (#366, app/monitoring_access.py): comma-separated addresses or CIDR
+    # blocks. PROBE_ALLOWED_NETWORKS opens /healthz and /readyz to a load
+    # balancer or kubelet that can't send a header; loopback without proxy
+    # headers is always allowed. MONITORING_ALLOWED_NETWORKS, when set,
+    # restricts /monitoring/health and /metrics to those callers on top of
+    # the token.
+    probe_allowed_networks: str = ""
+    monitoring_allowed_networks: str = ""
+
     # Which of the three DATA_DIR paths were left to default, so the legacy
     # layout move (app/data_layout.py) never touches an explicit setting.
     derived_from_data_dir: frozenset[str] = frozenset()
@@ -162,6 +190,17 @@ class Settings(BaseSettings):
             self.ssh_known_hosts_path = os.path.join(self.data_dir, "ssh_known_hosts")
             derived.add("ssh_known_hosts")
         self.derived_from_data_dir = frozenset(derived)
+        return self
+
+    @model_validator(mode="after")
+    def _check_networks(self) -> "Settings":
+        # Refuse to start on a typo rather than silently allow no one (or
+        # everyone) through.
+        for name in ("probe_allowed_networks", "monitoring_allowed_networks"):
+            try:
+                parse_networks(getattr(self, name))
+            except ValueError as exc:
+                raise ValueError(f"{name.upper()}: {exc}") from exc
         return self
 
 

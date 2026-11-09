@@ -5,22 +5,25 @@ from app.config import get_settings
 from app.main import app, lifespan
 from fastapi.testclient import TestClient
 
+# The Docker HEALTHCHECK calls from inside the container (#366).
+LOCAL = ("127.0.0.1", 50000)
+
 
 def test_healthz():
-    client = TestClient(app)
+    client = TestClient(app, client=LOCAL)
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
 def test_healthz_sets_request_id_header():
-    client = TestClient(app)
+    client = TestClient(app, client=LOCAL)
     response = client.get("/healthz")
     assert "x-request-id" in response.headers
 
 
 def test_responses_carry_security_headers():
-    client = TestClient(app)
+    client = TestClient(app, client=LOCAL)
     response = client.get("/healthz")
 
     assert response.headers["x-frame-options"] == "DENY"
