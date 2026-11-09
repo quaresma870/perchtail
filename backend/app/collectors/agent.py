@@ -4,7 +4,7 @@ from pathlib import Path
 
 from app.agent_registry import AgentCommandError, get_agent_registry
 from app.collectors import base as collector_base
-from app.collectors.base import DirEntry
+from app.collectors.base import DirEntry, DirListing
 from app.models import Rule, Source
 from app.rules import is_entry_visible, rules_case_insensitive
 from app.scratch import scratch_temp_dir
@@ -14,6 +14,12 @@ __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy", "read_range
 # Size of each fetch_chunk the agent sends (#205): about 1.4 MB once
 # base64-encoded, well under uvicorn's 16 MiB WebSocket message limit.
 FETCH_CHUNK_BYTES = 1024 * 1024
+# The most entries one agent listing may carry (#347). An agent from 0.7 on
+# stops there, or earlier once the message nears 8 MiB, and says the
+# listing is truncated, so a huge folder stays well under the 16 MiB
+# WebSocket message limit instead of failing every time. Rules are applied
+# here, after, so this is above the explorer's own cap.
+AGENT_LIST_MAX_ENTRIES = 50_000
 
 
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:
@@ -21,11 +27,18 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     app/agent_registry.py) and waits for its response — same live,
     fetch-on-browse semantics as every other connector, just relayed
     through a connection the agent dialed out to establish rather than one
-    this app dials directly."""
-    result = get_agent_registry().send_command_sync(source.id, "list", path=relative_path)
+    this app dials directly.
+
+    The listing is cut at AGENT_LIST_MAX_ENTRIES entries (#347), here too
+    in case an older agent sent more: a DirListing with `truncated` set."""
+    result = get_agent_registry().send_command_sync(
+        source.id, "list", path=relative_path, max_entries=AGENT_LIST_MAX_ENTRIES
+    )
     case_insensitive = rules_case_insensitive(source)
-    entries = []
-    for raw in result.get("entries", []):
+    raw_entries = result.get("entries") or []
+    entries = DirListing()
+    entries.truncated = bool(result.get("truncated")) or len(raw_entries) > AGENT_LIST_MAX_ENTRIES
+    for raw in raw_entries[:AGENT_LIST_MAX_ENTRIES]:
         child_path = f"{relative_path}/{raw['name']}" if relative_path else raw["name"]
         if not is_entry_visible(
             child_path, raw["is_dir"], rules, case_insensitive=case_insensitive

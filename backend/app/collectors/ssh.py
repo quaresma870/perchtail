@@ -230,6 +230,9 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                 mode = attr.st_mode or 0
                 size = attr.st_size or 0
                 mtime = getattr(attr, "st_mtime", None)
+                # The folder's real path, so a recursive walk can tell a
+                # link that loops back up (#347).
+                real_key = posixpath.join(remote_path, attr.filename)
                 if stat_module.S_ISLNK(mode):
                     try:
                         target = sftp.normalize(posixpath.join(remote_path, attr.filename))
@@ -241,6 +244,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                     mode = target_attr.st_mode or 0
                     size = target_attr.st_size or 0
                     mtime = getattr(target_attr, "st_mtime", None)
+                    real_key = target
                 is_dir = stat_module.S_ISDIR(mode)
                 if not is_entry_visible(child_path, is_dir, rules, case_insensitive=False):
                     continue
@@ -251,6 +255,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                         is_dir=is_dir,
                         size=size,
                         mtime=float(mtime) if mtime is not None else None,
+                        real_key=real_key if is_dir else None,
                     )
                 )
             return entries

@@ -244,6 +244,13 @@ export interface SystemSettings {
   alerts_interval_seconds: number
   // Warn about credentials older than this (#248), days; 0 = off.
   credential_max_age_days: number
+  // Server-side limits (#344): listings, opens, downloads and folder ZIPs
+  // at once in all and per source; downloads and ZIPs per user.
+  concurrency_global: number
+  concurrency_per_source: number
+  concurrency_user_transfers: number
+  // Most entries a folder or archive listing returns (#347).
+  listing_max_entries: number
 }
 
 export type ExplorerSort = 'name_asc' | 'name_desc' | 'mtime_desc' | 'mtime_asc' | 'size_desc'

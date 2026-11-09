@@ -95,6 +95,14 @@ sudo install -d -o perchtail -g perchtail -m 0700 /var/lib/perchtail /var/lib/pe
 sudo install -d -o perchtail -g perchtail -m 0750 /var/log/perchtail
 ```
 
+Put the three on separate filesystems where you can (at least `SCRATCH_DIR`
+apart from `DATA_DIR`): scratch holds every file being opened or zipped, and
+a full disk under it would also stop the database and the logs. PerchTail
+refuses a new fetch (HTTP 507) when scratch reaches `SCRATCH_MAX_GB`, or when
+its filesystem is down to `SCRATCH_MIN_FREE_GB` / `SCRATCH_MIN_FREE_PERCENT`
+free (1 GiB or 5% by default, whichever is larger), but that guard only
+covers scratch.
+
 Keep `DATA_DIR` on a local disk. The database runs in SQLite's WAL mode,
 which doesn't work over a network share. On every start, PerchTail sets
 `DATA_DIR` so that only its own user can read it (directory `0700`, files

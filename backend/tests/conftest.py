@@ -50,6 +50,23 @@ def _allow_local_sources_under_pytest_tmp(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _reset_limits_and_disk_floor(monkeypatch):
+    # app.limits keeps its slots in a module-level limiter; the scratch
+    # free-space floor (#345) would refuse fetches on a nearly full test
+    # disk. Tests that check either set them up themselves.
+    from app.config import get_settings
+    from app.limits import get_limiter
+
+    monkeypatch.setenv("SCRATCH_MIN_FREE_GB", "0")
+    monkeypatch.setenv("SCRATCH_MIN_FREE_PERCENT", "0")
+    monkeypatch.setattr(get_settings(), "scratch_min_free_gb", 0.0)
+    monkeypatch.setattr(get_settings(), "scratch_min_free_percent", 0.0)
+    get_limiter().reset()
+    yield
+    get_limiter().reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_login_throttle():
     # app.login_throttle keeps its state in a module-level dict (see its
     # docstring), so one test's failed-login attempts would otherwise bleed

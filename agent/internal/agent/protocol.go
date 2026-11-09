@@ -34,6 +34,9 @@ type Command struct {
 	Offset     int64 `json:"offset,omitempty"`
 	Length     int64 `json:"length,omitempty"`
 	HeadLength int64 `json:"head_length,omitempty"`
+	// Set on "list" by backends from 0.7 (#347): list at most this many
+	// entries (capped at MaxListEntries; 0 means MaxListEntries).
+	MaxEntries int `json:"max_entries,omitempty"`
 }
 
 // DirEntryWire mirrors what collectors/agent.py's list_directory expects
@@ -47,11 +50,14 @@ type DirEntryWire struct {
 	MTimeMs int64 `json:"mtime_ms"`
 }
 
-// ListResult answers a "list" command.
+// ListResult answers a "list" command. Truncated (#347) says the folder
+// has more entries than were sent: the listing stopped at the entry or
+// size cap (ListDirectory).
 type ListResult struct {
-	Type    string         `json:"type"`
-	ID      string         `json:"id"`
-	Entries []DirEntryWire `json:"entries"`
+	Type      string         `json:"type"`
+	ID        string         `json:"id"`
+	Entries   []DirEntryWire `json:"entries"`
+	Truncated bool           `json:"truncated,omitempty"`
 }
 
 // FetchResult answers a "fetch" command from a backend that doesn't ask

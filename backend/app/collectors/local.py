@@ -85,7 +85,13 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         size = 0 if is_dir else info.st_size
         entries.append(
             DirEntry(
-                name=child.name, path=child_path, is_dir=is_dir, size=size, mtime=info.st_mtime
+                name=child.name,
+                path=child_path,
+                is_dir=is_dir,
+                size=size,
+                mtime=info.st_mtime,
+                # Where a link leads, so a recursive walk can tell a loop (#347).
+                real_key=f"{info.st_dev}:{info.st_ino}" if is_dir else None,
             )
         )
     return entries

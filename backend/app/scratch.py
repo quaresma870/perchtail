@@ -130,16 +130,19 @@ class ScratchStore:
             logger.warning("scratch.leftovers_cleared", removed=removed)
         return removed
 
-    def enforce_size_guard(self) -> int:
+    def enforce_size_guard(self, reserve: int = 0) -> int:
         """A safety valve for load, not a caching strategy: evicts the
         oldest zero-reference entries first once total scratch usage passes
-        max_bytes. Never touches an entry with refcount > 0, so a file a
-        viewer currently has open is never pulled out from under them."""
+        max_bytes (less `reserve`, room wanted for a fetch about to start).
+        Never touches an entry with refcount > 0, so a file a viewer
+        currently has open is never pulled out from under them."""
+        target = self.max_bytes - max(reserve, 0)
         with self._lock:
-            # Disk usage counts what isn't tracked here (a folder ZIP being
-            # built), but only tracked, unreferenced entries can be evicted.
+            # Disk usage counts what isn't tracked here (a folder ZIP's
+            # member, a remote copy), but only tracked, unreferenced entries
+            # can be evicted.
             total = max(sum(e.size() for e in self._entries.values()), disk_bytes(self.root))
-            if total <= self.max_bytes:
+            if total <= target:
                 return 0
 
             candidates = sorted(
@@ -148,7 +151,7 @@ class ScratchStore:
             )
             evicted = 0
             for entry in candidates:
-                if total <= self.max_bytes:
+                if total <= target:
                     break
                 size = entry.size()
                 self._delete(entry)
@@ -157,6 +160,70 @@ class ScratchStore:
         if evicted:
             logger.warning("scratch.size_guard_eviction", evicted=evicted)
         return evicted
+
+    def ensure_room(self, expected_bytes: int = 0) -> None:
+        """Called before a fetch into scratch starts (#345): makes room by
+        evicting unreferenced entries, then refuses the fetch
+        (ScratchFullError) when scratch would still go over max_bytes, or
+        when free space on its filesystem is below the minimum
+        (min_free_bytes). `expected_bytes` is the fetch's size when known,
+        0 otherwise."""
+        expected = max(expected_bytes, 0)
+        self.enforce_size_guard(reserve=expected)
+        used = disk_bytes(self.root)
+        if used + expected > self.max_bytes:
+            logger.warning(
+                "scratch.full", used_bytes=used, expected_bytes=expected, max_bytes=self.max_bytes
+            )
+            raise ScratchFullError(
+                "The server's scratch space is full (SCRATCH_MAX_GB) with files other users "
+                "have open. Try again once some are closed.",
+                reason="scratch_full",
+            )
+        try:
+            usage = shutil.disk_usage(self.root)
+        except OSError:
+            return
+        minimum = min_free_bytes(usage.total)
+        if minimum and usage.free - expected < minimum:
+            logger.warning(
+                "scratch.disk_low",
+                free_bytes=usage.free,
+                expected_bytes=expected,
+                min_free_bytes=minimum,
+            )
+            raise ScratchFullError(
+                "The server's disk is almost full (less free space than SCRATCH_MIN_FREE_GB / "
+                "SCRATCH_MIN_FREE_PERCENT), so nothing more can be fetched right now. "
+                "An administrator needs to free some space.",
+                reason="disk_low",
+            )
+
+
+class ScratchFullError(Exception):
+    """A fetch refused before it started because scratch is full or the
+    disk under it is low on space (#345); answered 507."""
+
+    def __init__(self, message: str, *, reason: str):
+        super().__init__(message)
+        self.message = message
+        self.reason = reason
+
+
+def min_free_bytes(total_bytes: int) -> int:
+    """Free space to keep on the scratch filesystem: the larger of
+    SCRATCH_MIN_FREE_GB and SCRATCH_MIN_FREE_PERCENT of its size."""
+    settings = get_settings()
+    return max(
+        int(settings.scratch_min_free_gb * 1024**3),
+        int(total_bytes * settings.scratch_min_free_percent / 100),
+        0,
+    )
+
+
+def ensure_scratch_room(expected_bytes: int = 0) -> None:
+    """ScratchStore.ensure_room on the app's store."""
+    get_scratch_store().ensure_room(expected_bytes)
 
 
 def disk_bytes(root: Path) -> int:
@@ -175,9 +242,11 @@ def disk_bytes(root: Path) -> int:
 def scratch_temp_dir(prefix: str = "perchtail-") -> Iterator[Path]:
     """A temporary directory under SCRATCH_DIR, deleted on exit, for remote
     copies (local_copy) and the like: it counts in scratch usage and a
-    leftover is cleared at the next startup (#329)."""
+    leftover is cleared at the next startup (#329). Refused up front
+    (ScratchFullError) when scratch or its disk is full (#345)."""
     root = Path(get_settings().scratch_dir)
     root.mkdir(parents=True, exist_ok=True)
+    ensure_scratch_room()
     with tempfile.TemporaryDirectory(prefix=prefix, dir=root) as tmp:
         yield Path(tmp)
 
@@ -186,6 +255,7 @@ def make_scratch_dir(prefix: str) -> Path:
     """Like scratch_temp_dir, for a caller that deletes it itself."""
     root = Path(get_settings().scratch_dir)
     root.mkdir(parents=True, exist_ok=True)
+    ensure_scratch_room()
     return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
 
 

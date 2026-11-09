@@ -1,19 +1,21 @@
 import hashlib
+import io
 import shutil
-import tempfile
 import zipfile
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
-from starlette.background import BackgroundTask
+from starlette.types import Receive, Scope, Send
 
-from app import source_roots
+from app import source_roots, system_settings
 from app.api.auth import get_current_active_user
 from app.archives import (
+    ArchiveMember,
     DecompressionLimitError,
     decompress_gzip,
     extract_member,
@@ -33,13 +35,16 @@ from app.collectors.base import (
     DirEntry,
     FetchTooLargeError,
     RangeNotSupportedError,
+    is_truncated,
     max_fetch_bytes,
 )
 from app.collectors.registry import CONNECTORS
 from app.config import get_settings
 from app.db import get_session
+from app.limits import Limits, Slot, current_limits, get_limiter
 from app.logging_config import get_logger
 from app.models import Protocol, Rule, Source
+from app.name_index import MAX_DEPTH
 from app.rules import (
     is_dir_visible,
     is_entry_visible,
@@ -242,17 +247,119 @@ def _materialize(
     return filename
 
 
+# Listings are capped (#347): at most `listing_max_entries` (a System
+# setting) entries come back, folders first, then by name; these headers
+# say when there were more.
+TRUNCATED_HEADER = "X-Listing-Truncated"
+LIMIT_HEADER = "X-Listing-Limit"
+
+
+def _listing_max_entries(session: Session) -> int:
+    return system_settings.get_int(session, "listing_max_entries")
+
+
+def _capped(entries: list[BrowseEntry], limit: int, *, flat: bool = False):
+    """The first `limit` entries: folders first, then by name; for an
+    archive's flat member list (`flat`), by path, so a folder always comes
+    before what's in it. Returns (entries, truncated). A listing within the
+    limit keeps its order (the explorer sorts it)."""
+    if flat:
+        ordered = sorted(entries, key=lambda e: e.path)
+    elif len(entries) <= limit:
+        return entries, False
+    else:
+        ordered = sorted(entries, key=lambda e: (not e.is_dir, e.name.lower(), e.name))
+    return ordered[:limit], len(ordered) > limit
+
+
+def _set_listing_headers(response: Response, truncated: bool, limit: int) -> None:
+    response.headers[LIMIT_HEADER] = str(limit)
+    if truncated:
+        response.headers[TRUNCATED_HEADER] = "1"
+
+
+def _archive_flat_entries(
+    source: Source, archive_path: str, members: list[ArchiveMember], rules: list[Rule]
+) -> list[BrowseEntry]:
+    """Every rule-visible member of an archive, folders included (named or
+    implied by a deeper member), as one flat list (#347): the explorer
+    builds the tree from it and keeps it for the open tab instead of
+    fetching the archive again for every folder clicked inside it. Same
+    rule filtering as the folder-by-folder listing."""
+    folders: set[str] = set()
+    files: dict[str, ArchiveMember] = {}
+    for member in members:
+        name = normalize_member_name(member.name)
+        if not name:
+            continue
+        parts = name.split("/")
+        for i in range(1, len(parts)):
+            folders.add("/".join(parts[:i]))
+        if member.is_dir:
+            folders.add(name)
+        else:
+            files[name] = member
+    out = [
+        BrowseEntry(
+            name=folder.rsplit("/", 1)[-1],
+            path=f"{archive_path}/{folder}",
+            is_dir=True,
+            size=0,
+            is_archive=False,
+        )
+        for folder in folders
+        if _entry_visible(source, f"{archive_path}/{folder}", True, rules)
+    ]
+    out.extend(
+        BrowseEntry(
+            name=name.rsplit("/", 1)[-1],
+            path=f"{archive_path}/{name}",
+            is_dir=False,
+            size=member.size,
+            is_archive=False,
+            mtime=member.mtime,
+        )
+        for name, member in files.items()
+        if name not in folders and _entry_visible(source, f"{archive_path}/{name}", False, rules)
+    )
+    return out
+
+
 @router.get("/browse", response_model=list[BrowseEntry])
 def browse(
+    response: Response,
     source: Source = Depends(readable_source(Capability.view)),
     path: str = "",
     # Set by the explorer's refresh (#272): re-listing a source the user
     # already has open isn't opening it again, so it isn't audited.
     refresh: bool = False,
+    # For an archive (#347): every member at once, as a flat list, instead
+    # of one folder inside it.
+    all_members: bool = Query(default=False, alias="all"),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ) -> list[BrowseEntry]:
+    """A folder's entries, or an archive's members, live and through the
+    rules. Capped at the `listing_max_entries` System setting (#347): the
+    X-Listing-Truncated header says when there were more. Takes a
+    connector slot (#344): 503 with Retry-After when none is free."""
     _require_safe_path(source, path)
+    limit = _listing_max_entries(session)
+    with get_limiter().connector(current_limits(session), source.id):
+        entries, truncated = _browse(source, path, refresh, all_members, user, session, limit)
+    _set_listing_headers(response, truncated, limit)
+    return entries
+
+
+def _browse(
+    source: Source,
+    path: str,
+    refresh: bool,
+    all_members: bool,
+    user: User,
+    session: Session,
+    limit: int,
+) -> tuple[list[BrowseEntry], bool]:
     if path == "" and not refresh:
         # Root browse == "opened this source" -- the connections home page's
         # Recent column (GET /sources/recent) reads this back. Deliberately
@@ -280,45 +387,66 @@ def browse(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         with connector.local_copy(source, archive_path) as archive_local:
             members = list_members(archive_local, archive_name)
-        children = tree_children(members, member_dir)
-        return [
-            BrowseEntry(
-                name=child.name.rsplit("/", 1)[-1],
-                path=f"{archive_path}/{child.name}",
-                is_dir=child.is_dir,
-                size=child.size,
-                is_archive=False,
-                mtime=child.mtime,
+        if all_members:
+            if member_dir:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="all is for an archive itself, not a folder inside it",
+                )
+            return _capped(
+                _archive_flat_entries(source, archive_path, members, rules), limit, flat=True
             )
-            for child in children
-            # Same filter as regular listings: files through the rule chain,
-            # folders only when something below them could be visible. A
-            # rule scoped to show just the archive itself doesn't leak its
-            # members.
-            if _entry_visible(source, f"{archive_path}/{child.name}", child.is_dir, rules)
-        ]
+        children = tree_children(members, member_dir)
+        return _capped(
+            [
+                BrowseEntry(
+                    name=child.name.rsplit("/", 1)[-1],
+                    path=f"{archive_path}/{child.name}",
+                    is_dir=child.is_dir,
+                    size=child.size,
+                    is_archive=False,
+                    mtime=child.mtime,
+                )
+                for child in children
+                # Same filter as regular listings: files through the rule
+                # chain, folders only when something below them could be
+                # visible. A rule scoped to show just the archive itself
+                # doesn't leak its members.
+                if _entry_visible(source, f"{archive_path}/{child.name}", child.is_dir, rules)
+            ],
+            limit,
+        )
 
+    if all_members:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="all is only for an archive"
+        )
     if path and not _dir_visible(source, path, rules):
         # A folder the rules hide is not browsable at all -- otherwise its
         # sub-folder names could still be enumerated by calling the API.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
 
     entries = connector.list_directory(source, rules, path)
-    return [
-        BrowseEntry(
-            name=entry.name,
-            path=entry.path,
-            is_dir=entry.is_dir,
-            size=entry.size,
-            is_archive=(not entry.is_dir) and is_archive(entry.name),
-            mtime=entry.mtime,
-        )
-        for entry in entries
-    ]
+    listed, truncated = _capped(
+        [
+            BrowseEntry(
+                name=entry.name,
+                path=entry.path,
+                is_dir=entry.is_dir,
+                size=entry.size,
+                is_archive=(not entry.is_dir) and is_archive(entry.name),
+                mtime=entry.mtime,
+            )
+            for entry in entries
+        ],
+        limit,
+    )
+    # The source may have cut the listing itself (an agent, #347).
+    return listed, truncated or is_truncated(entries)
 
 
 def _resolve_content(
-    source: Source, path: str, member: str | None, rules: list[Rule]
+    source: Source, path: str, member: str | None, rules: list[Rule], limits: Limits
 ) -> tuple[Path, str, str | None]:
     """Returns (path_to_serve, filename, scratch_key). scratch_key is None
     when nothing was fetched/copied — currently only a local, plain file
@@ -327,7 +455,11 @@ def _resolve_content(
     in log viewer note: "a file already on the same machine ... is
     inherently zero-latency and always fresh"). Everything else (remote
     protocols always; local .gz/archive-member, since those produce derived
-    bytes that must live somewhere) goes through the scratch store."""
+    bytes that must live somewhere) goes through the scratch store.
+
+    A fetch takes a connector slot while it runs (#344, 503 when none is
+    free) and is refused up front (507) when scratch or its disk is full
+    (#345)."""
     if not path:
         # Browsing the root is "", but opening or downloading needs a file.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
@@ -347,17 +479,46 @@ def _resolve_content(
         return local_collector.resolve_path(source, path), filename, None
 
     store = get_scratch_store()
-    key = _scratch_key(source.id, path, member)
-    destination = store.acquire(key)
-    try:
-        served_filename = _materialize(source, path, member, rules, destination)
-    except FetchTooLargeError as exc:
-        store.release(key)
-        raise _fetch_too_large(exc) from exc
-    except Exception:
-        store.release(key)
-        raise
+    with get_limiter().connector(limits, source.id):
+        store.ensure_room()
+        key = _scratch_key(source.id, path, member)
+        destination = store.acquire(key)
+        try:
+            served_filename = _materialize(source, path, member, rules, destination)
+        except FetchTooLargeError as exc:
+            store.release(key)
+            raise _fetch_too_large(exc) from exc
+        except BaseException:
+            store.release(key)
+            raise
     return destination, served_filename, key
+
+
+class _FinishingMixin:
+    """Runs `on_finish` once the response is over, whichever way: sent in
+    full, cut short by a client that went away, or cancelled. A background
+    task isn't enough: it's skipped when the client disconnects, and a slot
+    (#344) or a scratch file held by then would never be released."""
+
+    _on_finish: Callable[[], None]
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)  # type: ignore[misc]
+        finally:
+            self._on_finish()
+
+
+class _FinishingFileResponse(_FinishingMixin, FileResponse):
+    def __init__(self, *args, on_finish: Callable[[], None], **kwargs):
+        super().__init__(*args, **kwargs)
+        self._on_finish = on_finish
+
+
+class _FinishingStreamingResponse(_FinishingMixin, StreamingResponse):
+    def __init__(self, *args, on_finish: Callable[[], None], **kwargs):
+        super().__init__(*args, **kwargs)
+        self._on_finish = on_finish
 
 
 @router.get("/open")
@@ -377,7 +538,9 @@ def open_file(
     ZIP). Every open is audited so reads are as traceable as downloads."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
-    served_path, filename, key = _resolve_content(source, path, member, rules)
+    served_path, filename, key = _resolve_content(
+        source, path, member, rules, current_limits(session)
+    )
     record_audit_event(
         session,
         user_id=user.id,
@@ -533,75 +696,179 @@ def download_file(
     session: Session = Depends(get_session),
 ) -> FileResponse:
     """One-shot: fetches, streams, and releases within the same request —
-    no persistent session, so no /close call is needed afterward."""
+    no persistent session, so no /close call is needed afterward.
+
+    Counts as one of the user's transfers (#344) until the client has the
+    whole file or goes away: 503 with Retry-After when the user already has
+    as many downloads and folder ZIPs in progress as allowed."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
-    served_path, filename, key = _resolve_content(source, path, member, rules)
-    # CLAUDE.md's Application logging section names file download as one of
-    # the minimum AuditLog-worthy actions -- this was the one gap where that
-    # never actually got wired up.
-    record_audit_event(
-        session,
-        user_id=user.id,
-        action="file.download",
-        target_type="source",
-        target_id=source.id,
-        metadata={"path": path, "member": member} if member else {"path": path},
-    )
-    session.commit()
-    background = BackgroundTask(get_scratch_store().release, key) if key else None
-    return FileResponse(served_path, filename=filename, background=background)
+    limits = current_limits(session)
+    transfer = get_limiter().transfer(limits, user.id)
+    try:
+        served_path, filename, key = _resolve_content(source, path, member, rules, limits)
+    except BaseException:
+        transfer.release()
+        raise
+    store = get_scratch_store()
+
+    def finish() -> None:
+        transfer.release()
+        if key:
+            store.release(key)
+
+    try:
+        # CLAUDE.md's Application logging section names file download as
+        # one of the minimum AuditLog-worthy actions.
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="file.download",
+            target_type="source",
+            target_id=source.id,
+            metadata={"path": path, "member": member} if member else {"path": path},
+        )
+        session.commit()
+    except BaseException:
+        finish()
+        raise
+    return _FinishingFileResponse(served_path, filename=filename, on_finish=finish)
 
 
-@dataclass
-class _ZipBudget:
-    """Bytes a folder ZIP may still collect -- the whole ZIP counts against
-    MAX_FETCH_MB, not just each file in it."""
-
-    remaining: int
-
-
-def _zip_entries(connector, source: Source, rules: list[Rule], current_dir: str) -> list[DirEntry]:
+def _zip_entries(
+    connector,
+    source: Source,
+    rules: list[Rule],
+    current_dir: str,
+    depth: int = 0,
+    visited: set[str] | None = None,
+) -> list[DirEntry]:
     """Every rule-visible file under `current_dir`, from listings alone --
     nothing is fetched yet, so the folder's listed total can be checked
     against MAX_FETCH_MB before the first download (#191). Nested
     .zip/.tar.gz files are included as raw files rather than expanded --
     expanding archives-within-a-bulk-zip isn't worth the complexity for
-    what CLAUDE.md asks for here (download a folder)."""
+    what CLAUDE.md asks for here (download a folder).
+
+    Like the file-name index, the walk stops MAX_DEPTH folders down and
+    lists a folder only once, by its identity on the source when the
+    connector knows it (#347): a symlink loop over SSH ends instead of
+    logging in again for every level."""
+    visited = set() if visited is None else visited
     out: list[DirEntry] = []
-    for entry in connector.list_directory(source, rules, current_dir):
+    entries = connector.list_directory(source, rules, current_dir)
+    if is_truncated(entries):
+        logger.warning("archive.zip_listing_truncated", source_id=source.id, path=current_dir)
+    for entry in entries:
         if entry.is_dir:
-            out.extend(_zip_entries(connector, source, rules, entry.path))
+            if entry.real_key is not None:
+                if entry.real_key in visited:
+                    logger.info("archive.zip_folder_seen", source_id=source.id, path=entry.path)
+                    continue
+                visited.add(entry.real_key)
+            if depth + 1 >= MAX_DEPTH:
+                logger.warning("archive.zip_too_deep", source_id=source.id, path=entry.path)
+                continue
+            out.extend(_zip_entries(connector, source, rules, entry.path, depth + 1, visited))
         elif _visible(source, entry.path, rules):
             out.append(entry)
     return out
 
 
-def _zip_directory(
+# How much compressed output a streamed folder ZIP gathers before handing
+# it to the client, and how much of a member it reads at a time.
+_ZIP_FLUSH_BYTES = 1024 * 1024
+_ZIP_READ_BYTES = 1024 * 1024
+
+
+class _ZipSink(io.RawIOBase):
+    """Where zipfile writes a streamed ZIP: an unseekable buffer that the
+    response drains as it fills, so zipfile uses data descriptors and the
+    ZIP is never held whole, on disk or in memory (#345)."""
+
+    def __init__(self):
+        super().__init__()
+        self._chunks: list[bytes] = []
+        self.pending = 0
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data) -> int:
+        chunk = bytes(data)
+        self._chunks.append(chunk)
+        self.pending += len(chunk)
+        return len(chunk)
+
+    def take(self) -> bytes:
+        data = b"".join(self._chunks)
+        self._chunks.clear()
+        self.pending = 0
+        return data
+
+
+def _stream_zip(
     connector,
     source: Source,
     entries: list[DirEntry],
     request_root: str,
-    zf: zipfile.ZipFile,
     tmp_dir: Path,
-    budget: "_ZipBudget",
-) -> None:
-    """Fetches each of `entries` fresh, straight into the zip -- same
-    always-fresh rule as every other read in this project, just batched into
-    one archive for convenience. Arcnames are relative to `request_root`.
-    The fetched size is what counts against the budget: a file may have
-    grown since it was listed."""
-    for entry in entries:
-        arcname = entry.path[len(request_root) + 1 :] if request_root else entry.path
-        with tempfile.NamedTemporaryFile(dir=tmp_dir, delete=False) as tmp_file:
-            destination = Path(tmp_file.name)
-        connector.fetch_file(source, entry.path, destination)
-        budget.remaining -= destination.stat().st_size
-        if budget.remaining < 0:
-            destination.unlink()
-            raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
-        zf.write(destination, arcname=arcname)
-        destination.unlink()
+    limit: int,
+) -> Iterator[bytes]:
+    """Fetches each of `entries` fresh, one at a time, into scratch, and
+    streams it into the ZIP the client is receiving -- same always-fresh
+    rule as every other read in this project, just batched into one
+    archive. Arcnames are relative to `request_root`. The fetched size is
+    what counts against the MAX_FETCH_MB budget: a file may have grown since
+    it was listed, and one that takes the ZIP over it ends the download.
+
+    Once the response has started, a failure can only cut the download
+    short (the client sees an incomplete download); it's logged."""
+    sink = _ZipSink()
+    remaining = limit
+    try:
+        with zipfile.ZipFile(sink, "w", zipfile.ZIP_DEFLATED) as zf:
+            for index, entry in enumerate(entries):
+                arcname = entry.path[len(request_root) + 1 :] if request_root else entry.path
+                destination = tmp_dir / f"member-{index}"
+                try:
+                    connector.fetch_file(source, entry.path, destination)
+                    remaining -= destination.stat().st_size
+                    if remaining < 0:
+                        raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
+                    info = zipfile.ZipInfo.from_file(destination, arcname=arcname)
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    with destination.open("rb") as src, zf.open(info, "w") as dst:
+                        while chunk := src.read(_ZIP_READ_BYTES):
+                            dst.write(chunk)
+                            if sink.pending >= _ZIP_FLUSH_BYTES:
+                                yield sink.take()
+                finally:
+                    destination.unlink(missing_ok=True)
+                if sink.pending:
+                    yield sink.take()
+        # Closing the ZipFile wrote the central directory.
+        yield sink.take()
+    except Exception as exc:
+        logger.warning(
+            "archive.zip_stream_failed",
+            source_id=source.id,
+            path=request_root,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _attachment(filename: str) -> str:
+    """A Content-Disposition for `filename`, written the way FileResponse
+    writes it."""
+    quoted = quote(filename)
+    if quoted != filename:
+        return f"attachment; filename*=utf-8''{quoted}"
+    return f'attachment; filename="{filename}"'
 
 
 @router.get("/download-zip")
@@ -610,48 +877,74 @@ def download_folder_zip(
     source: Source = Depends(readable_source(Capability.download)),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
-) -> FileResponse:
+) -> StreamingResponse:
     """Zips an entire folder for download (CLAUDE.md's Viewer section:
     download "single file or a zipped folder"), fetching each contained
-    file fresh — no different from any other read here, just batched."""
+    file fresh — no different from any other read here, just batched.
+
+    The ZIP is streamed as it's built (#345): each file is fetched into
+    scratch, written to the response and deleted before the next. The
+    folder's listed total is checked against MAX_FETCH_MB before anything
+    is fetched (413). Holds one of the user's transfers and a connector
+    slot until the client has it all or goes away (#344, 503 with
+    Retry-After when none is free)."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     if path and not _dir_visible(source, path, rules):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
     connector = _connector(source)
 
-    limit = max_fetch_bytes()
-    entries = _zip_entries(connector, source, rules, path)
-    listed = sum(entry.size for entry in entries)
-    if listed > limit:
-        raise _fetch_too_large(
-            FetchTooLargeError("folder is over the MAX_FETCH_MB limit", size=listed, limit=limit),
-            folder=True,
-        )
+    limits = current_limits(session)
+    slots: list[Slot] = [get_limiter().transfer(limits, user.id)]
 
-    tmp_dir = make_scratch_dir("perchtail-zip-")
-    zip_path = tmp_dir / "download.zip"
-    budget = _ZipBudget(remaining=limit)
+    def finish() -> None:
+        for slot in slots:
+            slot.release()
+
     try:
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            _zip_directory(connector, source, entries, path, zf, tmp_dir, budget)
-            file_count = len(zf.namelist())
-    except FetchTooLargeError as exc:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise _fetch_too_large(exc, folder=True) from exc
-    except Exception:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        slots.append(get_limiter().connector(limits, source.id))
+        limit = max_fetch_bytes()
+        entries = _zip_entries(connector, source, rules, path)
+        listed = sum(entry.size for entry in entries)
+        if listed > limit:
+            raise _fetch_too_large(
+                FetchTooLargeError(
+                    "folder is over the MAX_FETCH_MB limit", size=listed, limit=limit
+                ),
+                folder=True,
+            )
+        # One member sits in scratch at a time: room for the largest.
+        get_scratch_store().ensure_room(max((entry.size for entry in entries), default=0))
+        tmp_dir = make_scratch_dir("perchtail-zip-")
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="folder.download",
+            target_type="source",
+            target_id=source.id,
+            metadata={"path": path, "file_count": len(entries)},
+        )
+        session.commit()
+    except BaseException:
+        finish()
         raise
-    record_audit_event(
-        session,
-        user_id=user.id,
-        action="folder.download",
-        target_type="source",
-        target_id=source.id,
-        metadata={"path": path, "file_count": file_count},
-    )
-    session.commit()
+
+    stream = _stream_zip(connector, source, entries, path, tmp_dir, limit)
+
+    def finish_stream() -> None:
+        finish()
+        # Runs the generator's own cleanup now if the download was cut
+        # short; a generator still running in its thread cleans up itself.
+        try:
+            stream.close()
+        except ValueError:
+            pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     folder_name = path.rsplit("/", 1)[-1] if path else source.name
-    background = BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True)
-    return FileResponse(zip_path, filename=f"{folder_name}.zip", background=background)
+    return _FinishingStreamingResponse(
+        stream,
+        media_type="application/zip",
+        headers={"Content-Disposition": _attachment(f"{folder_name}.zip")},
+        on_finish=finish_stream,
+    )

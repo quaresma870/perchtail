@@ -45,7 +45,9 @@ def test_list_directory_sends_a_list_command_with_the_path(monkeypatch):
     source = _source()
     entries = agent_module.list_directory(source, [_rule(0, RuleType.include, "**/*.log")])
 
-    fake_registry.send_command_sync.assert_called_once_with(source.id, "list", path="")
+    fake_registry.send_command_sync.assert_called_once_with(
+        source.id, "list", path="", max_entries=agent_module.AGENT_LIST_MAX_ENTRIES
+    )
     by_name = {e.name: e for e in entries}
     assert by_name["app.log"].path == "app.log"
     assert by_name["nested"].is_dir is True
@@ -77,7 +79,9 @@ def test_list_directory_builds_relative_paths_for_nested_calls(monkeypatch):
     entries = agent_module.list_directory(
         source, [_rule(0, RuleType.include, "nested/*.log")], relative_path="nested"
     )
-    fake_registry.send_command_sync.assert_called_once_with(source.id, "list", path="nested")
+    fake_registry.send_command_sync.assert_called_once_with(
+        source.id, "list", path="nested", max_entries=agent_module.AGENT_LIST_MAX_ENTRIES
+    )
     assert entries[0].path == "nested/debug.log"
 
 

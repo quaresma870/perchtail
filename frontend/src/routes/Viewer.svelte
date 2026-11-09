@@ -44,6 +44,18 @@
   import { tabKey } from '../lib/tab-key'
   import type { SeverityPattern, Source } from '../lib/types'
   import { explorerExpanded, setExpanded, sourceHue, viewerState, type Tab } from '../lib/viewer-tabs'
+  import { formatSize } from '../lib/file-details'
+  import {
+    capTailBuffer,
+    countNewlines,
+    dropPartialFirstLine,
+    isLargeFile,
+    shiftBookmarks,
+    tabLimitMessage,
+    tabLimitReached,
+    TAIL_MAX_LINES,
+    tailStartOffset,
+  } from '../lib/viewer-limits'
 
   /** The viewer is one explorer across every source the user can see
    * (#162): machines expand in place in the sidebar, and tabs from
@@ -330,12 +342,26 @@
     path: string,
     member: string | null,
     name: string,
+    size?: number,
+    force = false,
   ): Promise<boolean> {
     const key = tabKey(sourceId, path, member)
     if (tabs.some((t) => t.key === key)) {
       setState({ activeKey: key })
       return true
     }
+    // Bounds on one browser tab (#347): so many files open at once, and a
+    // very large file only after a warning.
+    if (tabLimitReached(tabs.length)) {
+      notice = { message: tabLimitMessage(), retryable: false }
+      return false
+    }
+    if (!force && size !== undefined && isLargeFile(size)) {
+      largeFile = { sourceId, sourceName, path, member, name, size }
+      notice = null
+      return false
+    }
+    largeFile = null
     try {
       const response = await trackedFetch(openUrl(sourceId, path, member), { credentials: 'include' })
       if (!response.ok) {
@@ -346,7 +372,7 @@
         notice = {
           ...problem,
           retry: problem.retryable
-            ? () => openFile(sourceId, sourceName, path, member, name)
+            ? () => openFile(sourceId, sourceName, path, member, name, size, true)
             : undefined,
         }
         return false
@@ -387,21 +413,144 @@
       notice = {
         message: `${name}: the server could not be reached.`,
         retryable: true,
-        retry: () => openFile(sourceId, sourceName, path, member, name),
+        retry: () => openFile(sourceId, sourceName, path, member, name, size, true),
       }
       return false
     }
   }
 
+  // A file over LARGE_FILE_BYTES waiting for the reader's choice (#347):
+  // its end with Tail, a download, or the whole file anyway.
+  let largeFile: {
+    sourceId: number
+    sourceName: string
+    path: string
+    member: string | null
+    name: string
+    size: number
+  } | null = null
+  $: largeFileSource = largeFile ? (allSources.find((s) => s.id === largeFile?.sourceId) ?? null) : null
+  $: largeFileCanTail =
+    largeFile !== null && largeFile.member === null && !largeFile.name.toLowerCase().endsWith('.gz')
+  $: largeFileCanDownload = largeFileSource?.my_capabilities?.includes('download') ?? false
+  $: largeFileDownloadHref = largeFile
+    ? `/sources/${largeFile.sourceId}/download?${new URLSearchParams({ path: largeFile.path, ...(largeFile.member ? { member: largeFile.member } : {}) }).toString()}`
+    : ''
+
+  function openLargeFileAnyway() {
+    if (!largeFile) return
+    const { sourceId, sourceName, path, member, name, size } = largeFile
+    largeFile = null
+    openFile(sourceId, sourceName, path, member, name, size, true)
+  }
+
+  function tailLargeFile() {
+    if (!largeFile) return
+    const { sourceId, sourceName, path, name, size } = largeFile
+    largeFile = null
+    openEnd(sourceId, sourceName, path, name, size)
+  }
+
+  interface EndRead {
+    content: string
+    byteSize: number
+    followHead: string | null
+  }
+
+  /** Reads the end of a file (its last TAIL_START_BYTES) through Follow,
+   * from `size` as listed; once more from the size the server reports when
+   * the file shrank since it was listed. */
+  async function readEnd(
+    sourceId: number,
+    path: string,
+    name: string,
+    size: number,
+    retried = false,
+  ): Promise<EndRead | FetchProblem> {
+    const offset = tailStartOffset(size)
+    const response = await trackedFetch(followUrl(sourceId, path, offset, null, true), { credentials: 'include' })
+    if (response.status === 409) {
+      return {
+        message: `${name} can't be read from its end (an agent older than 0.6). Open it whole or download it.`,
+        retryable: false,
+      }
+    }
+    if (!response.ok) return await readFetchFailure(response, name)
+    const answer = readFollowHeaders(response.headers, offset)
+    if (answer.reset) {
+      const now = Number(response.headers.get('x-file-size'))
+      if (!retried && Number.isFinite(now)) return readEnd(sourceId, path, name, now, true)
+      return { message: `${name} changed while it was being read. Try again.`, retryable: true }
+    }
+    const bytes = await response.arrayBuffer()
+    const text = new TextDecoder().decode(bytes, { stream: true })
+    return { content: dropPartialFirstLine(text, offset), byteSize: answer.offset, followHead: answer.head }
+  }
+
+  /** Opens only the end of a large file, with Tail on (#347). */
+  async function openEnd(sourceId: number, sourceName: string, path: string, name: string, size: number) {
+    const key = tabKey(sourceId, path, null)
+    if (tabLimitReached(tabs.length)) {
+      notice = { message: tabLimitMessage(), retryable: false }
+      return
+    }
+    try {
+      const read = await readEnd(sourceId, path, name, size)
+      if ('message' in read) {
+        notice = read.retryable ? { ...read, retry: () => openEnd(sourceId, sourceName, path, name, size) } : read
+        return
+      }
+      followDecoders.set(key, new TextDecoder())
+      followStarted.add(key)
+      const tab: Tab = {
+        key,
+        sourceId,
+        sourceName,
+        path,
+        member: null,
+        name,
+        content: read.content,
+        scratchKey: null,
+        wrapEnabled: false,
+        showWhitespace: false,
+        bookmarks: [],
+        markPatterns: [],
+        format: 'none',
+        following: true,
+        byteSize: read.byteSize,
+        followHead: read.followHead,
+        followMode: 'incremental',
+        newLines: 0,
+        endOnly: true,
+      }
+      notice = null
+      ensureSeverityPatterns(sourceId)
+      setState({ tabs: [...tabs.filter((t) => t.key !== key), tab], activeKey: key })
+    } catch {
+      notice = {
+        message: `${name}: the server could not be reached.`,
+        retryable: true,
+        retry: () => openEnd(sourceId, sourceName, path, name, size),
+      }
+    }
+  }
+
   async function handleOpen(
-    event: CustomEvent<{ sourceId: number; sourceName: string; path: string; member: string | null; name: string }>,
+    event: CustomEvent<{
+      sourceId: number
+      sourceName: string
+      path: string
+      member: string | null
+      name: string
+      size?: number
+    }>,
   ) {
-    const { sourceId, sourceName, path, member, name } = event.detail
+    const { sourceId, sourceName, path, member, name, size } = event.detail
     if (compareArmed) {
       await pickCompareTarget(sourceId, path, member, name)
       return
     }
-    await openFile(sourceId, sourceName, path, member, name)
+    await openFile(sourceId, sourceName, path, member, name, size)
   }
 
   // "Compare": a one-shot snapshot of another file -- from any source, so
@@ -566,6 +715,10 @@
   }
 
   async function reloadTab(tab: Tab) {
+    if (tab.endOnly) {
+      await reloadEnd(tab)
+      return
+    }
     try {
       const response = await trackedFetch(openUrl(tab.sourceId, tab.path, tab.member), {
         credentials: 'include',
@@ -588,11 +741,50 @@
       setState({
         tabs: tabs.map((t) =>
           t.key === tab.key
-            ? { ...t, content, scratchKey, byteSize: bytes.byteLength, followHead, newLines: 0, missing: false }
+            ? {
+                ...t,
+                content,
+                scratchKey,
+                byteSize: bytes.byteLength,
+                followHead,
+                newLines: 0,
+                missing: false,
+                newlineCount: undefined,
+                droppedLines: 0,
+              }
             : t,
         ),
       })
       if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
+    } catch {
+      notice = { message: `${tab.name}: the server could not be reached.`, retryable: true, retry: reloadActiveTab }
+    }
+  }
+
+  /** Reload of a tab that holds only the end of its file: the end again,
+   * from the file's size now. */
+  async function reloadEnd(tab: Tab) {
+    try {
+      const probe = await trackedFetch(followUrl(tab.sourceId, tab.path, tab.byteSize, tab.followHead, false), {
+        credentials: 'include',
+      })
+      const size = Number(probe.headers.get('x-file-size'))
+      const read = await readEnd(tab.sourceId, tab.path, tab.name, Number.isFinite(size) ? size : tab.byteSize)
+      if ('message' in read) {
+        notice = read
+        return
+      }
+      followDecoders.set(tab.key, new TextDecoder())
+      updateTab(tab.key, {
+        content: read.content,
+        byteSize: read.byteSize,
+        followHead: read.followHead,
+        newLines: 0,
+        missing: false,
+        newlineCount: undefined,
+        droppedLines: 0,
+        bookmarks: [],
+      })
     } catch {
       notice = { message: `${tab.name}: the server could not be reached.`, retryable: true, retry: reloadActiveTab }
     }
@@ -673,8 +865,15 @@
     const current = tabs.find((t) => t.key === tab.key)
     if (!current || current.byteSize !== tab.byteSize) return
     const readingAbove = appended !== '' && tab.key === activeKey && !(paneRef?.isAtBottom() ?? true)
+    // Tail keeps at most TAIL_MAX_LINES lines (#347): older ones go from
+    // the top, and the toolbar says so.
+    const newlines = (current.newlineCount ?? countNewlines(current.content)) + countNewlines(appended)
+    const capped = capTailBuffer(current.content + appended, newlines)
     updateTab(tab.key, {
-      content: current.content + appended,
+      content: capped.content,
+      newlineCount: capped.newlines,
+      droppedLines: (current.droppedLines ?? 0) + capped.dropped,
+      bookmarks: shiftBookmarks(current.bookmarks, capped.dropped),
       byteSize,
       followHead,
       newLines: readingAbove ? current.newLines + countLines(appended) : current.newLines,
@@ -971,6 +1170,26 @@
         </span>
       </div>
     {/if}
+    {#if largeFile}
+      <div class="notice" role="alert">
+        <span>
+          {largeFile.name} is {formatSize(largeFile.size)}. Opening it loads the whole file into this browser tab,
+          which can be slow.
+        </span>
+        <span class="notice-actions">
+          {#if largeFileCanTail}
+            <button class="link" on:click={tailLargeFile}>Tail the end</button>
+          {/if}
+          {#if largeFileCanDownload}
+            <a class="link" href={largeFileDownloadHref} target="_blank" rel="noreferrer" on:click={() => (largeFile = null)}>
+              Download
+            </a>
+          {/if}
+          <button class="link" on:click={openLargeFileAnyway}>Open anyway</button>
+          <button class="link" aria-label="Cancel" on:click={() => (largeFile = null)}>✕</button>
+        </span>
+      </div>
+    {/if}
       {#if activeTab && compareWith}
         <div class="pane-toolbar">
           <div class="toolbar-left">
@@ -1117,6 +1336,16 @@
               <!-- Only while Tail is on (#283); set under Settings -> System. -->
               <span class="follow-interval" title="How often Tail checks for new lines (Settings → System)">
                 every {followIntervalMs / 1000} s
+              </span>
+            {/if}
+            {#if activeTab.endOnly}
+              <span class="hint" title="A large file: only its end was loaded. Reload reads the end again.">
+                End of the file only
+              </span>
+            {/if}
+            {#if activeTab.droppedLines}
+              <span class="hint" role="status" title="Reload to read the file again from the source">
+                Older lines dropped: Tail keeps the last {TAIL_MAX_LINES.toLocaleString('en')} lines
               </span>
             {/if}
           </div>

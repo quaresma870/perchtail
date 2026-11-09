@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -196,5 +199,74 @@ func TestHandleListReportsModificationTimes(t *testing.T) {
 	}
 	if entries[0].MTimeMs != when.UnixMilli() {
 		t.Fatalf("mtime = %d, want %d", entries[0].MTimeMs, when.UnixMilli())
+	}
+}
+
+func writeFiles(t *testing.T, dir string, count int) {
+	t.Helper()
+	for i := range count {
+		name := filepath.Join(dir, "file-"+strconv.Itoa(i)+".log")
+		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestListDirectoryStopsAtTheEntryCap(t *testing.T) {
+	base := t.TempDir()
+	writeFiles(t, base, 25)
+
+	entries, truncated, err := ListDirectory(base, "", 10)
+	if err != nil || !truncated || len(entries) != 10 {
+		t.Fatalf("entries %d, truncated %v, err %v", len(entries), truncated, err)
+	}
+	entries, truncated, err = ListDirectory(base, "", 25)
+	if err != nil || truncated || len(entries) != 25 {
+		t.Fatalf("entries %d, truncated %v, err %v", len(entries), truncated, err)
+	}
+}
+
+func TestListDirectoryNeverAsksForMoreThanItsOwnCap(t *testing.T) {
+	base := t.TempDir()
+	writeFiles(t, base, 3)
+	entries, truncated, err := ListDirectory(base, "", MaxListEntries*10)
+	if err != nil || truncated || len(entries) != 3 {
+		t.Fatalf("entries %d, truncated %v, err %v", len(entries), truncated, err)
+	}
+}
+
+func TestListDirectoryStopsBeforeTheMessageGetsTooBig(t *testing.T) {
+	base := t.TempDir()
+	writeFiles(t, base, 50)
+	saved := maxListBytes
+	maxListBytes = 1000
+	defer func() { maxListBytes = saved }()
+
+	entries, truncated, err := ListDirectory(base, "", 0)
+	if err != nil || !truncated || len(entries) == 0 || len(entries) >= 50 {
+		t.Fatalf("entries %d, truncated %v, err %v", len(entries), truncated, err)
+	}
+	encoded, _ := json.Marshal(entries)
+	if len(encoded) > maxListBytes {
+		t.Fatalf("%d bytes, over %d", len(encoded), maxListBytes)
+	}
+}
+
+func TestHandleCommandListPassesTheCapAndSaysWhenItCut(t *testing.T) {
+	base := t.TempDir()
+	writeFiles(t, base, 5)
+	result := handleCommand(Config{BasePath: base}, Command{Type: "list", ID: "l", MaxEntries: 2})
+	list, ok := result.(ListResult)
+	if !ok || len(list.Entries) != 2 || !list.Truncated {
+		t.Fatalf("result = %+v", result)
+	}
+	encoded, _ := json.Marshal(list)
+	if !strings.Contains(string(encoded), `"truncated":true`) {
+		t.Fatalf("wire = %s", encoded)
+	}
+	whole, _ := handleCommand(Config{BasePath: base}, Command{Type: "list", ID: "m"}).(ListResult)
+	encoded, _ = json.Marshal(whole)
+	if whole.Truncated || strings.Contains(string(encoded), "truncated") {
+		t.Fatalf("wire = %s", encoded)
 	}
 }

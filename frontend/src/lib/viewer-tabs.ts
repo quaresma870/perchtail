@@ -37,6 +37,13 @@ export interface Tab {
   followMode: 'incremental' | 'reload'
   // Lines appended while the reader was scrolled up, for "jump to end".
   newLines: number
+  // Tail's buffer cap (#347): newlines in `content` (counted once, then
+  // kept up to date as Tail appends) and lines dropped from the top so far.
+  newlineCount?: number
+  droppedLines?: number
+  // Opened at its end only (a large file, #347): Reload reads the end
+  // again rather than the whole file.
+  endOnly?: boolean
 }
 
 export interface ViewerState {

@@ -11,6 +11,16 @@ services:
       - .env
     volumes:
       - perchtail-data:/data
+      # Recommended in production: the database, the scratch space and the
+      # logs on separate volumes (ideally separate disks), so a burst of
+      # downloads filling scratch, or of DEBUG logging, can't fill the
+      # database's disk. Mount them over the default directories:
+      # - perchtail-db:/data/db
+      # - perchtail-scratch:/data/scratch
+      # - perchtail-logs:/data/logs
 
 volumes:
   perchtail-data:
+  # perchtail-db:
+  # perchtail-scratch:
+  # perchtail-logs:

@@ -66,15 +66,53 @@ def parse_pattern(raw: str, *, linear_time: bool = True) -> tuple[str, PatternKi
     return raw, PatternKind.glob
 
 
+def glob_literal(char: str) -> str:
+    """One literal character of a glob, written so RE2 reads it as itself:
+    letters, digits and non-ASCII as they are, any other ASCII character
+    by its code point. A lone surrogate (an undecodable byte in a local
+    file name) can't be UTF-8 encoded, so it stands for U+FFFD, as in the
+    names it's matched against (_utf8_safe)."""
+    code = ord(char)
+    if 0xD800 <= code <= 0xDFFF:
+        return r"\x{fffd}"
+    if char.isalnum() or char == "_" or code > 127:
+        return char
+    return rf"\x{{{code:x}}}"
+
+
+def _utf8_safe(text: str) -> str:
+    """`text` with lone surrogates as U+FFFD: RE2 matches UTF-8, and a name
+    with an undecodable byte (os.listdir's surrogateescape) can't be
+    encoded otherwise."""
+    return "".join("\ufffd" if 0xD800 <= ord(c) <= 0xDFFF else c for c in text)
+
+
+class _Glob:
+    """A compiled glob: RE2 underneath (#347), so matching is linear in
+    the path's length whatever the pattern (a glob with many `*` made
+    Python's backtracking engine slow down sharply)."""
+
+    __slots__ = ("_regex",)
+
+    def __init__(self, regex):
+        self._regex = regex
+
+    def match(self, text: str):
+        try:
+            return self._regex.match(text)
+        except UnicodeEncodeError:
+            return self._regex.match(_utf8_safe(text))
+
+
 @lru_cache(maxsize=2048)
-def _compile_glob(pattern: str, ignore_case: bool = False) -> re.Pattern[str]:
+def _compile_glob(pattern: str, ignore_case: bool = False) -> _Glob:
     """Translates an rsync/gitignore-style glob to a regex: `**/` matches
     zero or more whole path segments (so `**/*.log` matches both `app.log`
     and `var/log/app.log` — same as .gitignore), a standalone `**` matches
     anything including `/`, `*` matches within a single segment, and `?`
     matches one character within a segment. Unlike stdlib fnmatch, this is
     path-separator-aware, which is the whole point of distinguishing `*`
-    from `**`."""
+    from `**`. Compiled with RE2, like regex rules."""
     out = []
     i, n = 0, len(pattern)
     while i < n:
@@ -91,9 +129,9 @@ def _compile_glob(pattern: str, ignore_case: bool = False) -> re.Pattern[str]:
             out.append("[^/]")
             i += 1
         else:
-            out.append(re.escape(pattern[i]))
+            out.append(glob_literal(pattern[i]))
             i += 1
-    return re.compile(f"^{''.join(out)}$", re.IGNORECASE if ignore_case else 0)
+    return _Glob(re2.compile(f"^{''.join(out)}$", _re2_options(ignore_case)))
 
 
 @lru_cache(maxsize=2048)
@@ -134,7 +172,13 @@ def is_visible(path: str, rules: list[Rule], *, case_insensitive: bool = False) 
     `case_insensitive` must be set for sources whose filesystem is
     case-insensitive (see rules_case_insensitive): otherwise `SECRET/x`
     would slip past an exclude rule written as `secret/**` while still
-    opening the very same file."""
+    opening the very same file.
+
+    A path with a control character is never visible: it can't be opened
+    either (is_safe_relative_path), and a name ending in a newline could
+    otherwise slip past an exclude glob (RE2's `$` is end of text only)."""
+    if _has_control_character(path):
+        return False
     verdict = False
     for rule in sorted(rules, key=lambda r: r.order):
         if _rule_matches(path, rule, case_insensitive):
@@ -241,7 +285,10 @@ def is_entry_visible(
     path: str, is_dir: bool, rules: list[Rule], *, case_insensitive: bool = False
 ) -> bool:
     """Listing filter shared by every connector: files go through the rule
-    chain, directories through is_dir_visible."""
+    chain, directories through is_dir_visible. A path with a control
+    character is never listed (see is_visible)."""
+    if _has_control_character(path):
+        return False
     if is_dir:
         return is_dir_visible(path, rules, case_insensitive=case_insensitive)
     return is_visible(path, rules, case_insensitive=case_insensitive)
@@ -253,6 +300,10 @@ def rules_case_insensitive(source: Source) -> bool:
     if source.protocol in _WINDOWS_PROTOCOLS:
         return True
     return source.protocol == Protocol.agent and source.agent_os == "windows"
+
+
+def _has_control_character(path: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in path)
 
 
 def is_safe_relative_path(path: str) -> bool:
@@ -273,7 +324,7 @@ def is_safe_relative_path(path: str) -> bool:
         return True
     if "\\" in path or ":" in path:
         return False
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in path):
+    if _has_control_character(path):
         return False
     return all(segment not in ("", ".", "..") for segment in path.split("/"))
 

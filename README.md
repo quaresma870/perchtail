@@ -24,7 +24,7 @@
 - **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
 - **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks.
 - **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults) and optional TOTP; OIDC single sign-on with group-to-role mapping.
-- **Operations:** settings in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained and verified, bulk YAML import and export.
+- **Operations:** settings in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained and verified, bulk YAML import and export, and server-side limits on listings and downloads running at once (Settings → System).
 - **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
 
 **What's next.** 0.7 is the last feature release before 1.0. It removes the content index and the full-text Search page, so nothing from the logs is stored, and adds a file-name index with one search across sources, folders and files, live alerts, PostgreSQL support, push-agent upgrades from the portal, user groups and temporary access, notifications and API tokens. 1.0 adds no features: load tests and a sizing guide, OWASP ZAP, OpenSSF Scorecard and provenance in CI, and an external pentest. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
@@ -159,8 +159,12 @@ volume (`/data` in the container), one directory per kind of data:
 | `/data/logs` | `LOG_DIR` | the app's own logs, rotated by size and day | optional |
 | `/data/scratch` | `SCRATCH_DIR` | short-lived fetches, purged on close and emptied at startup | no |
 
-Each can be mounted as its own volume (for example logs on another disk),
-so a burst of DEBUG logging can't fill the database's disk. Keep `/data/db`
+Each can be mounted as its own volume, and in production they should be:
+`docker-compose.yml` has the three volumes ready to uncomment. Then a burst
+of downloads filling scratch, or of DEBUG logging, can't fill the
+database's disk. PerchTail also refuses a new fetch (HTTP 507) when scratch
+is full or its disk is down to `SCRATCH_MIN_FREE_GB` / `SCRATCH_MIN_FREE_PERCENT`
+free (1 GiB or 5%, whichever is larger). Keep `/data/db`
 on a local disk, not a network share: the database runs in SQLite's WAL
 mode, which needs one (it also leaves `perchtail.db-wal` and
 `perchtail.db-shm` next to the database; back up the whole directory, with

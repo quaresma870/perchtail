@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.collectors.base import PathOutsideBaseError, SourceError
 from app.logging_config import get_logger
+from app.scratch import ScratchFullError
 
 logger = get_logger(__name__)
 
@@ -30,6 +31,15 @@ async def path_outside_base(request: Request, exc: PathOutsideBaseError) -> JSON
     return JSONResponse(status_code=404, content={"detail": "not found"})
 
 
+async def scratch_full(request: Request, exc: ScratchFullError) -> JSONResponse:
+    # 507 Insufficient Storage (#345): refused before anything was fetched.
+    return JSONResponse(
+        status_code=507,
+        content={"detail": {"message": exc.message, "error_code": exc.reason}},
+    )
+
+
 def install(app: FastAPI) -> None:
     app.add_exception_handler(SourceError, source_error_handler)
     app.add_exception_handler(PathOutsideBaseError, path_outside_base)
+    app.add_exception_handler(ScratchFullError, scratch_full)

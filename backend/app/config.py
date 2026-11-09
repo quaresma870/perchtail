@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     # signal — deletes anything untouched past this, regardless of refcount.
     scratch_idle_seconds: int = 300
     scratch_sweep_interval_seconds: int = 60
+    # Free space to keep on the filesystem holding SCRATCH_DIR (#345): a new
+    # fetch is refused (507) once free space would drop below the larger of
+    # SCRATCH_MIN_FREE_GB and SCRATCH_MIN_FREE_PERCENT of the filesystem, so
+    # a full scratch can't stop the database and the logs sharing its disk.
+    # 0 for both turns the check off.
+    scratch_min_free_gb: float = 1.0
+    scratch_min_free_percent: float = 5.0
     # Largest output one .gz file or one .zip/.tar.gz member may decompress
     # to before the fetch is refused -- a tiny crafted archive could
     # otherwise expand to fill the scratch disk.

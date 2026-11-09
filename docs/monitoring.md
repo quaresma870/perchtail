@@ -46,7 +46,18 @@ curl -H "Authorization: Bearer <token>" https://your-perchtail-host/monitoring/h
   "uptime_seconds": 7704.2,
   "instance": { "hostname": "perchtail-7d9c", "pid": 1 },
   "database": { "reachable": true, "latency_ms": 0.35, "size_bytes": 52428800, "wal_bytes": 4120032 },
-  "scratch": { "used_bytes": 0, "max_bytes": 5368709120, "used_fraction": 0.0 },
+  "scratch": { "used_bytes": 0, "max_bytes": 5368709120, "used_fraction": 0.0, "min_free_bytes": 5254463078 },
+  "limits": {
+    "global_in_use": 3,
+    "global_max": 16,
+    "per_source_max": 4,
+    "busiest_source_in_use": 2,
+    "sources_in_use": { "4": 2, "9": 1 },
+    "per_user_transfers_max": 2,
+    "transfers_in_use": 1,
+    "busiest_user_transfers": 1,
+    "rejected": { "global": 0, "source": 4, "user": 1 }
+  },
   "disks": {
     "data": { "free_bytes": 41234567168, "total_bytes": 105089261568, "free_fraction": 0.39 },
     "scratch": { "free_bytes": 41234567168, "total_bytes": 105089261568, "free_fraction": 0.39 },
@@ -115,6 +126,11 @@ Timestamps are UTC, without a time zone (`next_run_at` has one). Fields that can
 | `database.latency_ms` | How long that `SELECT 1` took. |
 | `database.size_bytes`, `database.wal_bytes` | Size of the SQLite file and of its write-ahead log (`perchtail.db-wal`; 0 when there is none). `null` for another database. The WAL is checkpointed and cut back every hour and limited to 64 MiB after each checkpoint. |
 | `scratch.used_bytes`, `scratch.max_bytes`, `scratch.used_fraction` | What's on disk under `SCRATCH_DIR`, against `SCRATCH_MAX_GB`. |
+| `scratch.min_free_bytes` | Free space kept on the scratch filesystem: the larger of `SCRATCH_MIN_FREE_GB` and `SCRATCH_MIN_FREE_PERCENT` of its size. Below it, and when scratch is at `SCRATCH_MAX_GB`, new fetches are refused with HTTP 507. |
+| `limits.global_in_use`, `limits.global_max` | Folder listings, file opens, downloads, folder ZIPs and archive listings talking to sources right now, and how many may at once (Settings → System). |
+| `limits.per_source_max`, `limits.busiest_source_in_use`, `limits.sources_in_use` | The limit on one source, the most in use on any one source, and the slots in use per source id. |
+| `limits.per_user_transfers_max`, `limits.transfers_in_use`, `limits.busiest_user_transfers` | Downloads and folder ZIPs one user may have in progress, how many are in progress in all, and the most any one user has. |
+| `limits.rejected` | Requests answered 503 (busy, with `Retry-After`) since this process started, by the limit that was full: `global`, `source` or `user`. A count that keeps growing means the limits are too low for the load, or something is hammering the server. |
 | `disks.data`, `disks.scratch`, `disks.logs` | Free and total bytes, and the free share, of the filesystem holding `DATA_DIR`, `SCRATCH_DIR` and `LOG_DIR`. `null` values when the directory can't be read. On one disk the three are the same. |
 | `sources_by_protocol` | Enabled sources per protocol. |
 | `agent.configured`, `agent.connected` | Enabled `agent` sources, and push agents connected right now. |
@@ -176,6 +192,9 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `source.check.backing_off` | warning | A source failed its background check three times in a row and backs off. |
 | `source.check.timed_out` | warning | A background check went past its deadline. |
 | `scratch.size_guard_eviction` | warning | Scratch use passed `SCRATCH_MAX_GB` and files were evicted. |
+| `scratch.full`, `scratch.disk_low` | warning | A fetch was refused (507): scratch was at `SCRATCH_MAX_GB` with files people have open, or its filesystem was down to the free space it keeps. |
+| `limits.busy` | warning | A request was answered 503 because a limit in Settings → System was full (`scope` says which). |
+| `archive.zip_stream_failed` | warning | A folder ZIP failed after it had started streaming, so the client got an incomplete download. |
 | `scratch.leftovers_not_cleared` | error | `SCRATCH_DIR` is a filesystem root or holds the database or the logs, so leftovers weren't cleared at startup. Fix `SCRATCH_DIR`. |
 | `shutdown.jobs_still_running` | warning | A stop didn't wait for a running job within `SHUTDOWN_TIMEOUT_SECONDS`. |
 | `shutdown.pool_still_running` | warning | Same for the file-name index or source-check workers. |
@@ -233,7 +252,10 @@ To pick fields yourself instead, make one HTTP agent item on `/monitoring/health
 | `perchtail_uptime_seconds` | | Seconds since the process started. |
 | `perchtail_database_reachable`, `perchtail_database_latency_seconds` | | The database check. |
 | `perchtail_database_size_bytes`, `perchtail_database_wal_size_bytes` | | SQLite file and WAL sizes. |
-| `perchtail_scratch_used_bytes`, `perchtail_scratch_max_bytes` | | Scratch use and limit. |
+| `perchtail_scratch_used_bytes`, `perchtail_scratch_max_bytes`, `perchtail_scratch_min_free_bytes` | | Scratch use and limit, and the free space kept on its filesystem. |
+| `perchtail_connector_slots_in_use`, `perchtail_connector_slots_max`, `perchtail_connector_slots_per_source_max`, `perchtail_connector_slots_busiest_source` | | Listings, opens, downloads and ZIPs talking to sources, against the limits. |
+| `perchtail_transfers_in_use`, `perchtail_transfers_per_user_max` | | Downloads and folder ZIPs in progress, and the per-user limit. |
+| `perchtail_limit_rejections_total` (counter) | `limit` (`global`, `source`, `user`) | Requests answered 503 because a limit was full. |
 | `perchtail_log_used_bytes`, `perchtail_log_max_bytes`, `perchtail_log_size_limit_deleted_early` | | PerchTail's own logs. |
 | `perchtail_disk_free_bytes`, `perchtail_disk_total_bytes` | `dir` (`data`, `scratch`, `logs`) | Filesystem space per directory. |
 | `perchtail_sources_enabled` | `protocol` | Enabled sources. |

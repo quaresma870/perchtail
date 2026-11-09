@@ -176,7 +176,12 @@ def test_health_reports_ok_shape_with_valid_token(session, admin_client):
 
     assert body["status"] == "ok"
     assert body["database"]["reachable"] is True
-    assert body["scratch"] == {"used_bytes": 0, "max_bytes": 1024, "used_fraction": 0.0}
+    assert body["scratch"] == {
+        "used_bytes": 0,
+        "max_bytes": 1024,
+        "used_fraction": 0.0,
+        "min_free_bytes": 0,
+    }
     assert body["sources_by_protocol"]["local"] == 1
     assert body["sources_by_protocol"]["ssh"] == 1
     assert body["agent"] == {"configured": 0, "connected": 0}
@@ -523,3 +528,32 @@ def test_metric_labels_are_escaped():
     from app.metrics import _escape
 
     assert _escape('a"b\\c\nd') == 'a\\"b\\\\c\\nd'
+
+
+def test_health_and_metrics_report_the_limits_in_use(session, metrics_client):
+    from app.limits import current_limits, get_limiter
+
+    held = get_limiter().connector(current_limits(session), 42)
+    transfer = get_limiter().transfer(current_limits(session), 7)
+    body = _health(metrics_client)
+    assert body["limits"] == {
+        "global_in_use": 1,
+        "global_max": 16,
+        "per_source_max": 4,
+        "busiest_source_in_use": 1,
+        "sources_in_use": {"42": 1},
+        "per_user_transfers_max": 2,
+        "transfers_in_use": 1,
+        "busiest_user_transfers": 1,
+        "rejected": {"global": 0, "source": 0, "user": 0},
+    }
+    token = metrics_client.post("/monitoring/token").json()["token"]
+    text = metrics_client.get("/metrics", headers={"Authorization": f"Bearer {token}"}).text
+    samples = _samples(text)
+    assert samples["perchtail_connector_slots_in_use"] == 1
+    assert samples["perchtail_connector_slots_max"] == 16
+    assert samples["perchtail_transfers_in_use"] == 1
+    assert samples['perchtail_limit_rejections_total{limit="user"}'] == 0
+    assert "# TYPE perchtail_limit_rejections_total counter" in text
+    held.release()
+    transfer.release()
