@@ -256,3 +256,19 @@ def test_glob_exclude_with_wildcards_covers_matching_folders():
     rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "**/private-*/**")]
     assert not rules_module.is_dir_visible("x/private-hr", rules)
     assert rules_module.is_dir_visible("x/public", rules)
+
+
+def test_a_name_with_a_control_character_is_never_visible():
+    # RE2's `$` is end of text only: `logs/secret.key\n` slipped past
+    # `exclude logs/*.key` while `include logs/*` still matched.
+    from app.rules import is_entry_visible
+
+    rules = [
+        _rule(1, RuleType.include, "logs/*"),
+        _rule(2, RuleType.exclude, "logs/*.key"),
+    ]
+    assert not is_visible("logs/secret.key", rules)
+    assert not is_visible("logs/secret.key\n", rules)
+    assert not is_entry_visible("logs/app\x07.log", False, rules)
+    assert not is_entry_visible("logs/odd\tdir", True, [_rule(1, RuleType.include, "**")])
+    assert is_visible("logs/app.log", rules)

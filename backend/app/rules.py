@@ -172,7 +172,13 @@ def is_visible(path: str, rules: list[Rule], *, case_insensitive: bool = False) 
     `case_insensitive` must be set for sources whose filesystem is
     case-insensitive (see rules_case_insensitive): otherwise `SECRET/x`
     would slip past an exclude rule written as `secret/**` while still
-    opening the very same file."""
+    opening the very same file.
+
+    A path with a control character is never visible: it can't be opened
+    either (is_safe_relative_path), and a name ending in a newline could
+    otherwise slip past an exclude glob (RE2's `$` is end of text only)."""
+    if _has_control_character(path):
+        return False
     verdict = False
     for rule in sorted(rules, key=lambda r: r.order):
         if _rule_matches(path, rule, case_insensitive):
@@ -279,7 +285,10 @@ def is_entry_visible(
     path: str, is_dir: bool, rules: list[Rule], *, case_insensitive: bool = False
 ) -> bool:
     """Listing filter shared by every connector: files go through the rule
-    chain, directories through is_dir_visible."""
+    chain, directories through is_dir_visible. A path with a control
+    character is never listed (see is_visible)."""
+    if _has_control_character(path):
+        return False
     if is_dir:
         return is_dir_visible(path, rules, case_insensitive=case_insensitive)
     return is_visible(path, rules, case_insensitive=case_insensitive)
@@ -291,6 +300,10 @@ def rules_case_insensitive(source: Source) -> bool:
     if source.protocol in _WINDOWS_PROTOCOLS:
         return True
     return source.protocol == Protocol.agent and source.agent_os == "windows"
+
+
+def _has_control_character(path: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in path)
 
 
 def is_safe_relative_path(path: str) -> bool:
@@ -311,7 +324,7 @@ def is_safe_relative_path(path: str) -> bool:
         return True
     if "\\" in path or ":" in path:
         return False
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in path):
+    if _has_control_character(path):
         return False
     return all(segment not in ("", ".", "..") for segment in path.split("/"))
 
