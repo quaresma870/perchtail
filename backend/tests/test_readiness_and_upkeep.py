@@ -38,7 +38,7 @@ def ready_app(monkeypatch, tmp_path, file_engine):
     monkeypatch.setattr("app.main.scheduler", _Scheduler())
     monkeypatch.setattr(get_settings(), "data_dir", str(data_dir))
     monkeypatch.setattr(health, "READY_DB_TIMEOUT_MS", 200)
-    return TestClient(app)
+    return TestClient(app, client=("127.0.0.1", 50000))
 
 
 def test_readyz_is_ready_and_leaves_nothing_behind(ready_app, file_engine, tmp_path):

@@ -49,7 +49,9 @@ function schedulePing(): void {
     pingTimer = null
     try {
       const response = await fetch('/healthz', { cache: 'no-store' })
-      if (response.ok) {
+      // A browser elsewhere gets 401 from /healthz (#366), but any answer
+      // PerchTail marks as its own means it's back; a proxy's error isn't.
+      if (response.ok || response.headers?.has('x-perchtail')) {
         noteAnswered()
         return
       }

@@ -13,6 +13,7 @@ release ships (0.x releases may include breaking changes between minors).
 - **Alerts read new lines live** (#305). Existing alerts keep their name, query, source and webhook, and start again at the end of each file they watch. Their query is now plain text (anywhere in a line, any letter case) or a regular expression, not full-text search syntax: an alert that used operators like `AND` or quotes needs its query rewritten.
 - **Webhook calls changed shape**: each hit has `source_name`, `file_path`, `offset` (byte position in the file) and `line` (the matching line, plain text), in place of `line_number` and `snippet_html`. Receivers that read `snippet_html` need updating.
 - A YAML import that still sets `search_indexing_enabled` applies with a warning; from 1.0 it's refused.
+- **The health probes need authorization** (#366). `/healthz` and `/readyz` answer only a local caller without proxy headers (the Docker `HEALTHCHECK`), the monitoring token, or an address in the new `PROBE_ALLOWED_NETWORKS`. A load balancer or Kubernetes probe that called them without the token stops working: send the token as `Authorization: Bearer <token>`, or list its network in `PROBE_ALLOWED_NETWORKS` (see docs/monitoring.md, "Who may call them").
 
 ### Added
 - **Bulk credential update** (#248). In Settings → Sources, tick sources and **Update credentials** to set one new username and password (or SSH key) on all of them; each source keeps its own encrypted copy. By default the new credential is tried on each source first and applied only where it works, with a summary of what was updated, failed and skipped; every update is audited per source, without the secret. Sources show how old their credential is (sortable), with a warning and a filter past an age set in Settings → System (90 days by default, 0 turns it off).
@@ -55,6 +56,7 @@ release ships (0.x releases may include breaking changes between minors).
 - The full-text content index, the Search page, `GET /search`, the per-source "indexed for search" option and the Search setting (#303). Searching file names across sources is the file-name index (#304); watching for lines is live alerts (#305).
 
 ### Security
+- `/healthz` and `/readyz` no longer answer the world: a caller needs to be local, in `PROBE_ALLOWED_NETWORKS`, or hold the monitoring token, and a refused probe learns nothing about the instance's health. The new `MONITORING_ALLOWED_NETWORKS` can also restrict `/monitoring/health` and `/metrics` to the monitoring system's addresses, on top of the token (#366).
 - Regenerating a push agent's token, or disabling or deleting its source, now closes the agent's open connection. Before, an agent that had connected with the old token kept answering for the source until it disconnected on its own, so regenerating a leaked token didn't cut off whoever was using it.
 
 ### Fixed

@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
@@ -62,6 +62,7 @@ from app.health import mark_started, readiness_failures
 from app.jobs import register as register_job
 from app.jobs import shutdown as shutdown_background_work
 from app.logging_config import configure_logging, get_logger
+from app.monitoring_access import require_probe_access
 from app.name_index import run_name_index_sweep
 from app.scheduler import scheduler
 from app.scratch import get_scratch_store
@@ -382,18 +383,20 @@ install_error_handlers(app)
 path_outside_base = _path_outside_base
 
 
-@app.get("/healthz")
+@app.get("/healthz", dependencies=[Depends(require_probe_access)])
 async def healthz():
-    """Liveness: the process is up and answers HTTP. Touches nothing else,
-    so a busy database never gets the container restarted."""
+    """Liveness: the process is up and answers HTTP. Touches nothing else
+    for a local or allowed caller, so a busy database never gets the
+    container restarted. Who may call it: app/monitoring_access.py (#366)."""
     return {"status": "ok"}
 
 
-@app.get("/readyz")
+@app.get("/readyz", dependencies=[Depends(require_probe_access)])
 def readyz():
     """Readiness (#330): a database write works, DATA_DIR is writable and
     the scheduler runs. 503, naming what failed, when any doesn't. A sync
-    endpoint, so the checks run in the thread pool."""
+    endpoint, so the checks run in the thread pool. Who may call it:
+    app/monitoring_access.py (#366)."""
     failures = readiness_failures(engine, get_settings().data_dir, scheduler)
     if failures:
         return JSONResponse(status_code=503, content={"status": "not_ready", "failed": failures})

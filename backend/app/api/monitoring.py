@@ -1,4 +1,3 @@
-import hashlib
 import os
 import secrets
 import socket
@@ -29,6 +28,8 @@ from app.log_rotation import retention_pressure
 from app.logging_config import get_logger
 from app.metrics import PROMETHEUS_CONTENT_TYPE, render_metrics
 from app.models import Alert, AlertDelivery, MonitoringToken, Protocol, Source
+from app.monitoring_access import hash_token as _hash_token
+from app.monitoring_access import require_monitoring_network
 from app.name_index import interval as name_index_interval
 from app.scheduler import scheduler
 from app.scratch import get_scratch_store, min_free_bytes
@@ -44,10 +45,6 @@ logger = get_logger(__name__)
 require_manage = require_global_capability(
     GlobalCapability.manage_system_settings, get_current_active_user
 )
-
-
-def _hash_token(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 class MonitoringTokenResult(BaseModel):
@@ -283,7 +280,7 @@ DISK_FREE_MIN_FRACTION = 0.05
 @router.get(
     "/health",
     response_model=DetailedHealth,
-    dependencies=[Depends(_require_monitoring_bearer_token)],
+    dependencies=[Depends(require_monitoring_network), Depends(_require_monitoring_bearer_token)],
 )
 def detailed_health(session: Session = Depends(get_session)):
     """The endpoint external monitoring (Zabbix HTTP agent item + JSONPath
@@ -298,7 +295,7 @@ def detailed_health(session: Session = Depends(get_session)):
 @metrics_router.get(
     "/metrics",
     response_class=PlainTextResponse,
-    dependencies=[Depends(_require_monitoring_bearer_token)],
+    dependencies=[Depends(require_monitoring_network), Depends(_require_monitoring_bearer_token)],
 )
 def prometheus_metrics(session: Session = Depends(get_session)):
     """The same report in the Prometheus text format (#331)."""

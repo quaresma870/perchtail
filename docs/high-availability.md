@@ -82,6 +82,13 @@ spec:
           envFrom:
             - secretRef:
                 name: perchtail-env # CREDENTIAL_ENCRYPTION_KEY, PUBLIC_BASE_URL, etc.
+          env:
+            # The kubelet probes from the node's address, not loopback: let
+            # the nodes' network call /healthz and /readyz without the
+            # monitoring token (docs/monitoring.md, "Who may call them").
+            # Or send the token with httpGet.httpHeaders instead.
+            - name: PROBE_ALLOWED_NETWORKS
+              value: "10.0.0.0/8" # your nodes' CIDR
           volumeMounts:
             - name: data
               mountPath: /data
