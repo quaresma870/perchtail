@@ -23,7 +23,7 @@ import re2
 from sqlalchemy import text
 from sqlmodel import Session
 
-from app.rules import compile_linear
+from app.rules import compile_linear, glob_literal
 
 FTS_TABLE = "file_name_fts"
 # The DDL spells the table name out (no string building), like the migration.
@@ -68,7 +68,7 @@ class InvalidPattern(ValueError):
 @dataclass(frozen=True)
 class Matcher:
     by_path: bool
-    regex: object | None  # a compiled RE2 or re pattern; None: plain text
+    regex: object | None  # a compiled RE2 pattern; None: plain text
     needle: str
     # The longest piece of text every match contains, to narrow the search
     # with the trigram index first ("" = no narrowing).
@@ -94,7 +94,7 @@ def _glob_to_regex(glob: str) -> str:
             out.append("[^/]")
             i += 1
         else:
-            out.append(re.escape(glob[i]))
+            out.append(glob_literal(glob[i]))
             i += 1
     return "".join(out)
 
@@ -115,7 +115,10 @@ def compile_matcher(query: str, regex: bool) -> Matcher | None:
     if re.search(r"[*?]", q):
         pieces = [p for p in re.split(r"[*?]+", q) if p]
         literal = max(pieces, key=len) if pieces else ""
-        return Matcher(by_path, re.compile(f"^{_glob_to_regex(q)}$", re.IGNORECASE), "", literal)
+        # RE2 like a regex (#347): many `*` can't make the search backtrack.
+        return Matcher(
+            by_path, compile_linear(f"^{_glob_to_regex(q)}$", ignore_case=True), "", literal
+        )
     return Matcher(by_path, None, q.casefold(), q)
 
 

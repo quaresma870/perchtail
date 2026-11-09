@@ -212,11 +212,11 @@ func serveCommand(ctx context.Context, cfg Config, cmd Command, send func(any) e
 func handleCommand(cfg Config, cmd Command) any {
 	switch cmd.Type {
 	case "list":
-		entries, err := HandleList(cfg.BasePath, cmd.Path)
+		entries, truncated, err := ListDirectory(cfg.BasePath, cmd.Path, cmd.MaxEntries)
 		if err != nil {
 			return ErrorResult{Type: "list_error", ID: cmd.ID, Error: err.Error()}
 		}
-		return ListResult{Type: "list_result", ID: cmd.ID, Entries: entries}
+		return ListResult{Type: "list_result", ID: cmd.ID, Entries: entries, Truncated: truncated}
 	case "fetch":
 		content, err := HandleFetch(cfg.BasePath, cmd.Path)
 		if err != nil {

@@ -17,6 +17,10 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await requestWithHeaders<T>(path, init)).data
+}
+
+async function requestWithHeaders<T>(path: string, init?: RequestInit): Promise<{ data: T; headers: Headers }> {
   // trackedFetch: tells the connection banner whether PerchTail answers (#276).
   const response = await trackedFetch(path, {
     credentials: 'include',
@@ -42,13 +46,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (response.status === 204) {
-    return undefined as T
+    return { data: undefined as T, headers: response.headers }
   }
-  return (await response.json()) as T
+  return { data: (await response.json()) as T, headers: response.headers }
 }
 
 export const api = {
   get: <T>(path: string) => request<T>(path),
+  /** A GET whose response headers matter too (the listing cap, #347). */
+  getWithHeaders: <T>(path: string) => requestWithHeaders<T>(path),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'POST', body: body !== undefined ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body: unknown) =>

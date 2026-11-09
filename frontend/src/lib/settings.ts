@@ -28,6 +28,10 @@ export const systemSettings = writable<SystemSettings>({
   name_index_minutes: 15,
   alerts_interval_seconds: 60,
   credential_max_age_days: 90,
+  concurrency_global: 16,
+  concurrency_per_source: 4,
+  concurrency_user_transfers: 2,
+  listing_max_entries: 5000,
 })
 
 let loadedAt = 0

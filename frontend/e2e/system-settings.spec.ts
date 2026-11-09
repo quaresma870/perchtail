@@ -63,3 +63,35 @@ test('system settings: audit log toggle hides the nav link and redirects the rou
     page.locator('.settings-nav').getByRole('link', { name: 'Audit log' }),
   ).toBeVisible()
 })
+
+test('system settings: server limits are saved and kept within range (#344)', async ({ page }) => {
+  await page.goto('/#/settings/system')
+
+  const perUser = page.getByLabel('Downloads per user')
+  const perSource = page.getByLabel('At once on one source')
+  const save = page.getByRole('button', { name: 'Save limits' })
+  const card = page.locator('.card', { has: save })
+  // Defaults from app/system_settings.py; restored at the end.
+  await expect(perUser).toHaveValue('2')
+  await expect(save).toBeDisabled()
+
+  await perUser.fill('99')
+  await save.click()
+  await expect(card.locator('.error')).toContainText('1 to 32')
+
+  await perUser.fill('3')
+  await save.click()
+  await expect(save).toBeDisabled()
+  await page.reload()
+  await expect(perUser).toHaveValue('3')
+
+  // More at once on one source than in all is refused by the server.
+  await perSource.fill('64')
+  await save.click()
+  await expect(card.locator('.error')).toContainText("can't be above")
+
+  await perSource.fill('4')
+  await perUser.fill('2')
+  await save.click()
+  await expect(save).toBeDisabled()
+})

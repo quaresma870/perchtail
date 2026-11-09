@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
@@ -16,6 +16,27 @@ class DirEntry:
     # Last modification, as seconds since the epoch (#273); None when the
     # source doesn't say (an agent older than 0.6).
     mtime: float | None = None
+    # A directory's identity on the source (its resolved real path, or
+    # device:inode), when the connector knows it: recursive walks keep the
+    # ones they've listed, so a symlink loop ends (#347). Not compared.
+    real_key: str | None = field(default=None, compare=False)
+
+
+class DirListing(list):
+    """What list_directory returns when the source cut the listing short
+    (an agent caps a huge folder, #347): a list of DirEntry with
+    `truncated` set."""
+
+    truncated: bool = False
+
+
+def is_truncated(entries) -> bool:
+    return bool(getattr(entries, "truncated", False))
+
+
+# The most entries a folder or archive listing returns (#347); the response
+# says when there were more.
+MAX_LISTING_ENTRIES = 5000
 
 
 class SourceError(Exception):

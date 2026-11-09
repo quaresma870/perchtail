@@ -40,3 +40,25 @@ describe('describeFetchFailure', () => {
     expect(describeFetchFailure(500, null, 'x.log').message).toContain('could not be reached')
   })
 })
+
+describe('describeFetchFailure for the server limits (#344, #345)', () => {
+  it('says the server is busy and offers to try again on a 503', () => {
+    const problem = describeFetchFailure(
+      503,
+      { detail: { message: 'This source is busy with other requests right now. Try again in a few seconds.', error_code: 'busy' } },
+      'app.log',
+    )
+    expect(problem.message).toBe('app.log: This source is busy with other requests right now. Try again in a few seconds.')
+    expect(problem.retryable).toBe(true)
+    expect(describeFetchFailure(503, null, 'app.log').message).toMatch(/busy/)
+  })
+
+  it("passes on why there's no room on a 507, without a retry", () => {
+    const problem = describeFetchFailure(
+      507,
+      { detail: { message: "The server's disk is almost full.", error_code: 'disk_low' } },
+      'app.log',
+    )
+    expect(problem).toEqual({ message: "app.log: The server's disk is almost full.", retryable: false })
+  })
+})

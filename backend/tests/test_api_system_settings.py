@@ -59,6 +59,10 @@ _DEFAULTS = {
     "name_index_minutes": 15,
     "alerts_interval_seconds": 60,
     "credential_max_age_days": 90,
+    "concurrency_global": 16,
+    "concurrency_per_source": 4,
+    "concurrency_user_transfers": 2,
+    "listing_max_entries": 5000,
 }
 
 
@@ -213,3 +217,29 @@ def test_name_index_interval_is_kept_between_5_minutes_and_a_day(session, client
     admin = _make_user(session, is_super_admin=True)
     response = client_for(admin).patch("/system-settings", json={"name_index_minutes": minutes})
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "payload, status",
+    [
+        ({"concurrency_global": 32, "concurrency_per_source": 8}, 200),
+        ({"concurrency_user_transfers": 5}, 200),
+        ({"concurrency_global": 0}, 422),
+        ({"concurrency_global": 257}, 422),
+        ({"concurrency_per_source": 65}, 422),
+        ({"concurrency_user_transfers": 0}, 422),
+        # More per source than in all makes no sense (#344).
+        ({"concurrency_per_source": 20}, 422),
+        ({"concurrency_global": 2}, 422),
+        ({"listing_max_entries": 100}, 200),
+        ({"listing_max_entries": 99}, 422),
+        ({"listing_max_entries": 20001}, 422),
+    ],
+)
+def test_limits_are_kept_within_their_ranges(session, client_for, payload, status):
+    client = client_for(_make_user(session, is_super_admin=True))
+    response = client.patch("/system-settings", json=payload)
+    assert response.status_code == status
+    current = client.get("/system-settings").json()
+    for key, value in payload.items():
+        assert (current[key] == value) is (status == 200)

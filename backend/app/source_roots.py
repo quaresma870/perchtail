@@ -21,7 +21,7 @@ import re
 from dataclasses import replace
 from types import ModuleType
 
-from app.collectors.base import DirEntry, SourceNotFoundError
+from app.collectors.base import DirEntry, DirListing, SourceNotFoundError, is_truncated
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 from app.rules import is_entry_visible, rules_case_insensitive
 
@@ -105,8 +105,10 @@ def list_directory(
         ]
     rooted, rest = split(source, relative_path)
     label = relative_path.partition("/")[0]
-    entries = []
-    for entry in module.list_directory(rooted, ALLOW_ALL, rest):
+    entries = DirListing()
+    listed = module.list_directory(rooted, ALLOW_ALL, rest)
+    entries.truncated = is_truncated(listed)
+    for entry in listed:
         full = f"{label}/{entry.path}"
         if is_entry_visible(full, entry.is_dir, rules, case_insensitive=case_insensitive):
             entries.append(replace(entry, path=full))

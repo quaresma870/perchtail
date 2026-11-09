@@ -25,6 +25,7 @@ from app.collectors.base import (
     SourceTLSError,
     SourceUnreachableError,
 )
+from app.scratch import ScratchFullError
 
 Translator = Callable[[BaseException], SourceError | None]
 
@@ -261,7 +262,14 @@ def translate_local(exc: BaseException) -> SourceError | None:
     return _common(exc)
 
 
-_PASS_THROUGH = (SourceError, FetchTooLargeError, PathOutsideBaseError, RangeNotSupportedError)
+# ScratchFullError (#345): refused before anything reached the source.
+_PASS_THROUGH = (
+    SourceError,
+    FetchTooLargeError,
+    PathOutsideBaseError,
+    RangeNotSupportedError,
+    ScratchFullError,
+)
 
 
 @contextmanager

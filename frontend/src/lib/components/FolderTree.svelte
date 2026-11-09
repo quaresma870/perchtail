@@ -2,7 +2,7 @@
   import { createEventDispatcher, onDestroy, onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { explorerExpanded, setExpanded } from '../viewer-tabs'
-  import { api, ApiError } from '../api'
+  import { ApiError } from '../api'
   import { tabKey, memberPath } from '../tab-key'
   import { downloadHref } from '../download-href'
   import { registerFolder } from '../explorer-refresh'
@@ -10,6 +10,7 @@
   import { sortEntries } from '../explorer-sort'
   import { fileDetails, formatSize } from '../file-details'
   import { explorerSort } from '../preferences'
+  import { archiveChildren, archiveMembersUrl, fetchListing, truncatedNotice } from '../listing'
   import type { BrowseEntry } from '../types'
 
   export let sourceId: number
@@ -29,9 +30,13 @@
   export let canDownload = true
   // Just appeared in an auto-refresh (#272): highlighted for a moment.
   export let isNew = false
+  // Inside an archive: every member of it, listed once when the archive was
+  // expanded and kept while it's open (#347), so a folder inside it opens
+  // without fetching the archive again.
+  export let archiveMembers: BrowseEntry[] | null = null
 
   const dispatch = createEventDispatcher<{
-    open: { path: string; member: string | null; name: string }
+    open: { path: string; member: string | null; name: string; size: number }
   }>()
 
   let expanded = false
@@ -39,6 +44,10 @@
   let loaded = false
   let loading = false
   let error = ''
+  // The listing was capped on the server (#347): what to say about it.
+  let truncatedText = ''
+  // This archive's members, when this node is an archive.
+  let ownMembers: BrowseEntry[] | null = null
 
   const canExpand = entry.is_dir || (entry.is_archive && archiveRoot === null)
   const expandKey = `dir:${sourceId}:${archiveRoot ?? ''}:${entry.path}`
@@ -66,7 +75,9 @@
     if (refreshing) return true
     refreshing = true
     try {
-      const fresh = await api.get<BrowseEntry[]>(`${browseUrl()}&refresh=true`)
+      const listing = await fetchListing(`${browseUrl()}&refresh=true`)
+      const fresh = listing.entries
+      truncatedText = listing.truncated ? truncatedNotice(listing) : ''
       const known = new Set(children.map((c) => c.path))
       const added = fresh.filter((c) => !known.has(c.path)).map((c) => c.path)
       children = fresh
@@ -110,13 +121,28 @@
     if (newTimer) clearTimeout(newTimer)
   })
 
+  async function load() {
+    if (entry.is_archive && archiveRoot === null) {
+      const listing = await fetchListing(archiveMembersUrl(sourceId, entry.path))
+      ownMembers = listing.entries
+      children = archiveChildren(listing.entries, entry.path)
+      truncatedText = listing.truncated ? truncatedNotice(listing) : ''
+    } else if (archiveRoot !== null && archiveMembers !== null) {
+      children = archiveChildren(archiveMembers, entry.path)
+    } else {
+      const listing = await fetchListing(browseUrl())
+      children = listing.entries
+      truncatedText = listing.truncated ? truncatedNotice(listing) : ''
+    }
+  }
+
   async function toggle() {
     if (canExpand) {
       if (!loaded) {
         loading = true
         error = ''
         try {
-          children = await api.get<BrowseEntry[]>(browseUrl())
+          await load()
           loaded = true
         } catch (err) {
           error = err instanceof ApiError ? err.detail : 'Failed to load'
@@ -132,9 +158,9 @@
     } else if (!entry.is_dir) {
       if (archiveRoot !== null) {
         const member = memberPath(entry.path, archiveRoot)
-        dispatch('open', { path: archiveRoot, member, name: entry.name })
+        dispatch('open', { path: archiveRoot, member, name: entry.name, size: entry.size })
       } else {
-        dispatch('open', { path: entry.path, member: null, name: entry.name })
+        dispatch('open', { path: entry.path, member: null, name: entry.name, size: entry.size })
       }
     }
   }
@@ -237,6 +263,7 @@
           isNew={newPaths.has(child.path)}
           depth={depth + 1}
           archiveRoot={entry.is_archive ? entry.path : archiveRoot}
+          archiveMembers={entry.is_archive ? ownMembers : archiveMembers}
           {activeKey}
           {canDownload}
           on:open
@@ -244,6 +271,9 @@
       {/each}
       {#if children.length === 0}
         <div class="hint" style="padding-left: {(depth + 1) * 14}px">empty</div>
+      {/if}
+      {#if truncatedText}
+        <div class="hint truncated" role="status" style="padding-left: {(depth + 1) * 14}px">{truncatedText}</div>
       {/if}
     {/if}
   {/if}

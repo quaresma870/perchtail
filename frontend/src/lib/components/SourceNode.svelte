@@ -5,6 +5,7 @@
   import { advancedFilter, coveringScope, scopeContext, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
   import { sortEntries } from '../explorer-sort'
   import { explorerSort } from '../preferences'
+  import { fetchListing, truncatedNotice } from '../listing'
   import { serverReachable } from '../server-status'
   import { sourceStatusView } from '../source-status'
   import type { BrowseEntry, Source } from '../types'
@@ -21,7 +22,7 @@
   export let initiallyExpanded = false
 
   const dispatch = createEventDispatcher<{
-    open: { sourceId: number; sourceName: string; path: string; member: string | null; name: string }
+    open: { sourceId: number; sourceName: string; path: string; member: string | null; name: string; size?: number }
   }>()
 
   let expanded = false
@@ -29,6 +30,8 @@
   let loading = false
   let error = ''
   let entries: BrowseEntry[] = []
+  // The listing was capped on the server (#347).
+  let truncatedText = ''
   let element: HTMLElement
 
   $: canDownload = source.my_capabilities?.includes('download') ?? true
@@ -37,7 +40,9 @@
     loading = true
     error = ''
     try {
-      entries = await api.get<BrowseEntry[]>(`/sources/${source.id}/browse?path=`)
+      const listing = await fetchListing(`/sources/${source.id}/browse?path=`)
+      entries = listing.entries
+      truncatedText = listing.truncated ? truncatedNotice(listing) : ''
       loaded = true
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load'
@@ -58,7 +63,9 @@
     try {
       // refresh=true: re-listing isn't "opening the source" again, so it
       // isn't audited as source.open.
-      const fresh = await api.get<BrowseEntry[]>(`/sources/${source.id}/browse?path=&refresh=true`)
+      const listing = await fetchListing(`/sources/${source.id}/browse?path=&refresh=true`)
+      const fresh = listing.entries
+      truncatedText = listing.truncated ? truncatedNotice(listing) : ''
       const known = new Set(entries.map((e) => e.path))
       const added = fresh.filter((e) => !known.has(e.path)).map((e) => e.path)
       entries = fresh
@@ -220,6 +227,9 @@
           <div class="hint" style="padding-left: {(depth + 1) * 14}px">
             Nothing visible here — check the source's rules.
           </div>
+        {/if}
+        {#if truncatedText}
+          <div class="hint" role="status" style="padding-left: {(depth + 1) * 14}px">{truncatedText}</div>
         {/if}
       {/if}
     </div>

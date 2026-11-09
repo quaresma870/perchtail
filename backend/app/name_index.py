@@ -33,6 +33,8 @@ from app.worker_pool import DrainablePool
 
 logger = get_logger(__name__)
 
+# How deep every recursive walk of a source goes (this index's and the
+# folder ZIP's, #347), a guard against links that loop back up.
 MAX_DEPTH = 32
 # Sources listed at once. The pool outlives each pass, so a slow source (a
 # WinRM one lists about a folder a second) only holds one worker while the
@@ -83,6 +85,10 @@ def _walk(
     files: dict[str, DirEntry] = {}
     pending: list[tuple[str, int]] = [("", 0)]
     unreadable = too_deep = 0
+    # Folders already queued, by their identity on the source when the
+    # connector knows it (#347): a link back to one of them isn't listed
+    # again, so a loop ends at once instead of at MAX_DEPTH.
+    visited: set[str] = set()
     while pending:
         directory, depth = pending.pop()
         try:
@@ -99,6 +105,10 @@ def _walk(
             continue
         for entry in entries:
             if entry.is_dir:
+                if entry.real_key is not None:
+                    if entry.real_key in visited:
+                        continue
+                    visited.add(entry.real_key)
                 if depth + 1 >= MAX_DEPTH:
                     too_deep += 1
                 else:

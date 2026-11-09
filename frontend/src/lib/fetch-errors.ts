@@ -37,6 +37,18 @@ export function describeFetchFailure(status: number, body: ErrorBody | null, nam
       }
     case 409:
       return { message: `${name}: ${serverMessage ?? 'the file is locked on the source.'}`, retryable: true }
+    case 503:
+      // The server's limits (#344): busy, try again in a few seconds.
+      return {
+        message: `${name}: ${serverMessage ?? 'PerchTail is busy right now. Try again in a few seconds.'}`,
+        retryable: true,
+      }
+    case 507:
+      // Scratch or its disk is full (#345): retrying soon won't help.
+      return {
+        message: `${name}: ${serverMessage ?? "the server is out of space for this file right now."}`,
+        retryable: false,
+      }
     default:
       if (status >= 500) {
         return {

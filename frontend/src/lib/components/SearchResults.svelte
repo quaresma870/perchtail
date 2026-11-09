@@ -35,7 +35,7 @@
 
   const PAGE = 200
   const dispatch = createEventDispatcher<{
-    open: { sourceId: number; sourceName: string; path: string; member: null; name: string }
+    open: { sourceId: number; sourceName: string; path: string; member: null; name: string; size?: number }
     reveal: { source: Source }
     select: null
   }>()
@@ -130,6 +130,7 @@
       path: hit.path,
       member: null,
       name: fileName(hit.path),
+      size: hit.size,
     })
   }
 

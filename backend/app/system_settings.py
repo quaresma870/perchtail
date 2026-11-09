@@ -74,6 +74,16 @@ INT_DEFAULTS: dict[str, str] = {
     # Credentials older than this are flagged in the Sources list (#248);
     # 0 turns the warning off.
     "credential_max_age_days": "90",
+    # Server-side limits on connector work (#344, app/limits.py): listings,
+    # opens, downloads, folder ZIPs and archive listings running at once in
+    # all, and on one source; downloads and folder ZIPs one user may have in
+    # progress. Over a limit, the request is answered 503 with Retry-After.
+    "concurrency_global": "16",
+    "concurrency_per_source": "4",
+    "concurrency_user_transfers": "2",
+    # The most entries a folder or archive listing returns (#347); the
+    # explorer says when there were more.
+    "listing_max_entries": "5000",
 }
 
 

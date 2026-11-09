@@ -53,6 +53,21 @@ class SystemSettingsPublic(BaseModel):
     alerts_interval_seconds: int
     # Credential age warning (#248); 0 = off.
     credential_max_age_days: int
+    # Server-side limits (#344, app/limits.py).
+    concurrency_global: int
+    concurrency_per_source: int
+    concurrency_user_transfers: int
+    # Listing cap (#347).
+    listing_max_entries: int
+
+
+# Ranges for the server-side limits (#344).
+CONCURRENCY_GLOBAL_MAX = 256
+CONCURRENCY_PER_SOURCE_MAX = 64
+CONCURRENCY_USER_TRANSFERS_MAX = 32
+# Listing cap (#347): below an agent's own cap (collectors/agent.py).
+LISTING_MAX_ENTRIES_MIN = 100
+LISTING_MAX_ENTRIES_MAX = 20000
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -92,6 +107,14 @@ class SystemSettingsUpdate(BaseModel):
     # At least 15 s (the scheduler's tick), at most an hour.
     alerts_interval_seconds: int | None = Field(default=None, ge=15, le=3600)
     credential_max_age_days: int | None = Field(default=None, ge=0, le=3650)
+    concurrency_global: int | None = Field(default=None, ge=1, le=CONCURRENCY_GLOBAL_MAX)
+    concurrency_per_source: int | None = Field(default=None, ge=1, le=CONCURRENCY_PER_SOURCE_MAX)
+    concurrency_user_transfers: int | None = Field(
+        default=None, ge=1, le=CONCURRENCY_USER_TRANSFERS_MAX
+    )
+    listing_max_entries: int | None = Field(
+        default=None, ge=LISTING_MAX_ENTRIES_MIN, le=LISTING_MAX_ENTRIES_MAX
+    )
 
 
 _PASSWORD_INTS = (
@@ -100,6 +123,12 @@ _PASSWORD_INTS = (
     "password_history",
     "password_required_classes",
     "password_max_age_days",
+)
+_CONCURRENCY_INTS = (
+    "concurrency_global",
+    "concurrency_per_source",
+    "concurrency_user_transfers",
+    "listing_max_entries",
 )
 
 
@@ -117,6 +146,7 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         alerts_interval_seconds=system_settings.get_int(session, "alerts_interval_seconds"),
         credential_max_age_days=system_settings.get_int(session, "credential_max_age_days"),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
+        **{key: system_settings.get_int(session, key) for key in _CONCURRENCY_INTS},
     )
 
 
@@ -156,6 +186,17 @@ def update_system_settings(
         raise HTTPException(
             status_code=422,
             detail="The minimum password length can't be above the maximum",
+        )
+    per_source = changed.get(
+        "concurrency_per_source", system_settings.get_int(session, "concurrency_per_source")
+    )
+    overall = changed.get(
+        "concurrency_global", system_settings.get_int(session, "concurrency_global")
+    )
+    if per_source > overall:
+        raise HTTPException(
+            status_code=422,
+            detail="The limit per source can't be above the limit for the whole server",
         )
     for key in system_settings.INT_DEFAULTS:
         if key in changed:

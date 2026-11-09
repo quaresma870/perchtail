@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,64 +14,128 @@ import (
 // answers 404 for it, as for SMB and WinRM (#206).
 var ErrNotADirectory = errors.New("not a directory")
 
-// HandleList lists the immediate children of relPath under basePath. Rule
-// filtering (which files are actually visible per the source's rule chain)
-// happens on the backend side — collectors/agent.py's list_directory
-// applies is_visible to what this returns — so this just reports everything
-// under the requested directory, unfiltered, same division of labor as
-// every other connector's live-listing call.
+// Caps on one listing (#347), so a huge folder never makes a message over
+// the backend's WebSocket limit (16 MiB in uvicorn by default), which
+// failed every time: at most MaxListEntries entries, and no more than
+// maxListBytes of them once JSON-encoded. A backend from 0.7 asks for its
+// own maximum (Command.MaxEntries), never above MaxListEntries.
+const (
+	MaxListEntries = 50000
+	// Entries read from the directory at a time, so a folder with millions
+	// of files isn't read whole into memory first.
+	listBatch = 1000
+)
+
+// A variable so tests can lower it.
+var maxListBytes = 8 << 20
+
+// HandleList lists every immediate child of relPath under basePath, up to
+// the caps above. See ListDirectory.
 func HandleList(basePath, relPath string) ([]DirEntryWire, error) {
+	entries, _, err := ListDirectory(basePath, relPath, 0)
+	return entries, err
+}
+
+// ListDirectory lists the immediate children of relPath under basePath.
+// Rule filtering (which files are actually visible per the source's rule
+// chain) happens on the backend side — collectors/agent.py's
+// list_directory applies is_visible to what this returns — so this just
+// reports everything under the requested directory, unfiltered, same
+// division of labor as every other connector's live-listing call.
+//
+// It stops at maxEntries entries (0, or anything above MaxListEntries,
+// means MaxListEntries) or once they would take more than maxListBytes,
+// and then reports truncated, in the directory's own order (#347).
+func ListDirectory(basePath, relPath string, maxEntries int) ([]DirEntryWire, bool, error) {
 	if !IsSafeRelativePath(relPath) {
-		return nil, fmt.Errorf("unsafe path: %q", relPath)
+		return nil, false, fmt.Errorf("unsafe path: %q", relPath)
+	}
+	if maxEntries <= 0 || maxEntries > MaxListEntries {
+		maxEntries = MaxListEntries
 	}
 	root, err := os.OpenRoot(basePath)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer root.Close()
 	dir, err := root.Open(rootName(relPath))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer dir.Close()
 	if st, err := dir.Stat(); err != nil {
-		return nil, err
+		return nil, false, err
 	} else if !st.IsDir() {
-		return nil, ErrNotADirectory
-	}
-	entries, err := dir.ReadDir(-1)
-	if err != nil {
-		return nil, err
+		return nil, false, ErrNotADirectory
 	}
 
-	result := make([]DirEntryWire, 0, len(entries))
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
-			return nil, err
-		}
-		isDir := entry.IsDir()
-		// Symlinks, and junctions on Windows (reported as irregular), are
-		// listed only when they resolve inside basePath, with their
-		// target's type and size. One that leads out (escape -> /etc), is
-		// broken or can't be read is left out: opening it would be refused
-		// by os.Root anyway (#206), as SSH and local sources already do.
-		if entry.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
-			target, err := root.Stat(path.Join(rootName(relPath), entry.Name()))
+	result := make([]DirEntryWire, 0)
+	encoded := 0
+	for {
+		batch, readErr := dir.ReadDir(listBatch)
+		for _, entry := range batch {
+			wire, ok, err := listEntry(root, relPath, entry)
 			if err != nil {
+				return nil, false, err
+			}
+			if !ok {
 				continue
 			}
-			info, isDir = target, target.IsDir()
+			size, err := wireSize(wire)
+			if err != nil {
+				return nil, false, err
+			}
+			if len(result) >= maxEntries || encoded+size > maxListBytes {
+				return result, true, nil
+			}
+			encoded += size
+			result = append(result, wire)
 		}
-		size := info.Size()
-		if isDir {
-			size = 0
+		if errors.Is(readErr, io.EOF) || (readErr == nil && len(batch) == 0) {
+			return result, false, nil
 		}
-		result = append(result, DirEntryWire{
-			Name: entry.Name(), IsDir: isDir, Size: size, MTimeMs: info.ModTime().UnixMilli(),
-		})
+		if readErr != nil {
+			return nil, false, readErr
+		}
 	}
-	return result, nil
+}
+
+// wireSize is how many bytes the entry takes in the list_result message.
+func wireSize(wire DirEntryWire) (int, error) {
+	encoded, err := json.Marshal(wire)
+	if err != nil {
+		return 0, err
+	}
+	return len(encoded) + 1, nil // and a comma
+}
+
+// listEntry turns one directory entry into its wire form; ok is false for
+// one that is left out.
+func listEntry(root *os.Root, relPath string, entry fs.DirEntry) (DirEntryWire, bool, error) {
+	info, err := entry.Info()
+	if err != nil {
+		return DirEntryWire{}, false, err
+	}
+	isDir := entry.IsDir()
+	// Symlinks, and junctions on Windows (reported as irregular), are
+	// listed only when they resolve inside basePath, with their
+	// target's type and size. One that leads out (escape -> /etc), is
+	// broken or can't be read is left out: opening it would be refused
+	// by os.Root anyway (#206), as SSH and local sources already do.
+	if entry.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+		target, err := root.Stat(path.Join(rootName(relPath), entry.Name()))
+		if err != nil {
+			return DirEntryWire{}, false, nil
+		}
+		info, isDir = target, target.IsDir()
+	}
+	size := info.Size()
+	if isDir {
+		size = 0
+	}
+	return DirEntryWire{
+		Name: entry.Name(), IsDir: isDir, Size: size, MTimeMs: info.ModTime().UnixMilli(),
+	}, true, nil
 }
 
 // HandleFetch reads relPath's full content off local disk under basePath —

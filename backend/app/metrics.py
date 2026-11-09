@@ -53,6 +53,13 @@ class _Writer:
                 label_text = "{" + ",".join(f'{k}="{_escape(v)}"' for k, v in labels.items()) + "}"
             self.lines.append(f"perchtail_{name}{label_text} {_number(value)}")
 
+    def counter(self, name: str, help_text: str, samples: list) -> None:
+        """Like gauge, typed as a counter (a total since the process started)."""
+        before = len(self.lines)
+        self.gauge(name, help_text, samples)
+        if len(self.lines) > before:
+            self.lines[before + 1] = f"# TYPE perchtail_{name} counter"
+
     def text(self) -> str:
         return "\n".join(self.lines) + "\n"
 
@@ -79,6 +86,39 @@ def render_metrics(health) -> str:
 
     out.gauge("scratch_used_bytes", "Bytes used under SCRATCH_DIR.", health.scratch.used_bytes)
     out.gauge("scratch_max_bytes", "SCRATCH_MAX_GB in bytes.", health.scratch.max_bytes)
+    out.gauge(
+        "scratch_min_free_bytes",
+        "Free space kept on the scratch filesystem; below it fetches are refused.",
+        health.scratch.min_free_bytes,
+    )
+    limits = health.limits
+    out.gauge(
+        "connector_slots_in_use",
+        "Listings, opens, downloads and folder ZIPs talking to sources now.",
+        limits.global_in_use,
+    )
+    out.gauge("connector_slots_max", "How many may run at once in all.", limits.global_max)
+    out.gauge(
+        "connector_slots_per_source_max",
+        "How many may run at once on one source.",
+        limits.per_source_max,
+    )
+    out.gauge(
+        "connector_slots_busiest_source",
+        "Slots in use on the busiest source.",
+        limits.busiest_source_in_use,
+    )
+    out.gauge("transfers_in_use", "Downloads and folder ZIPs in progress.", limits.transfers_in_use)
+    out.gauge(
+        "transfers_per_user_max",
+        "Downloads and folder ZIPs one user may have in progress.",
+        limits.per_user_transfers_max,
+    )
+    out.counter(
+        "limit_rejections_total",
+        "Requests answered 503 because a limit was full, by limit.",
+        [({"limit": scope}, n) for scope, n in limits.rejected.items()],
+    )
     out.gauge("log_used_bytes", "Bytes used by PerchTail's own logs.", health.logs.used_bytes)
     out.gauge("log_max_bytes", "LOG_MAX_TOTAL_MB in bytes.", health.logs.max_total_bytes)
     out.gauge(

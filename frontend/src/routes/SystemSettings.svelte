@@ -52,6 +52,77 @@
     policyDraft !== null &&
     POLICY_KEYS.some((key) => savedPolicy?.[key] !== policyDraft?.[key])
 
+  // Server-side limits (#344, #347), saved together with one button.
+  const LIMIT_FIELDS = [
+    {
+      key: 'concurrency_global',
+      label: 'Listings and downloads at once',
+      unit: 'in all',
+      min: 1,
+      max: 256,
+      hint: 'Folder listings, file opens, downloads, folder ZIPs and archive listings running at the same time across the server.',
+    },
+    {
+      key: 'concurrency_per_source',
+      label: 'At once on one source',
+      unit: 'per source',
+      min: 1,
+      max: 64,
+      hint: 'The same, on any one source, so one busy server can\'t take every slot. At most the number above.',
+    },
+    {
+      key: 'concurrency_user_transfers',
+      label: 'Downloads per user',
+      unit: 'per user',
+      min: 1,
+      max: 32,
+      hint: 'Downloads and folder ZIPs one person may have in progress.',
+    },
+    {
+      key: 'listing_max_entries',
+      label: 'Entries per listing',
+      unit: 'entries',
+      min: 100,
+      max: 20000,
+      hint: 'The most entries a folder or archive shows in the explorer. A bigger folder shows the first ones and says so; the search finds the rest.',
+    },
+  ] as const
+  type LimitFields = Pick<SystemSettings, (typeof LIMIT_FIELDS)[number]['key']>
+  let savedLimits: LimitFields | null = null
+  let limitsDraft: LimitFields | null = null
+  let limitsSaving = false
+  let limitsError = ''
+  const pickLimits = (settings: SystemSettings): LimitFields =>
+    Object.fromEntries(LIMIT_FIELDS.map((field) => [field.key, settings[field.key]])) as LimitFields
+  $: limitsDirty =
+    savedLimits !== null &&
+    limitsDraft !== null &&
+    LIMIT_FIELDS.some((field) => Number(savedLimits?.[field.key]) !== Number(limitsDraft?.[field.key]))
+
+  async function saveLimits() {
+    if (!limitsDraft) return
+    for (const field of LIMIT_FIELDS) {
+      const value = Number(limitsDraft[field.key])
+      if (!Number.isInteger(value) || value < field.min || value > field.max) {
+        limitsError = `${field.label}: enter a whole number from ${field.min} to ${field.max}.`
+        return
+      }
+    }
+    limitsError = ''
+    limitsSaving = true
+    try {
+      const patch = Object.fromEntries(LIMIT_FIELDS.map((field) => [field.key, Number(limitsDraft?.[field.key])]))
+      const settings = await api.patch<SystemSettings>('/system-settings', patch)
+      savedLimits = pickLimits(settings)
+      limitsDraft = { ...savedLimits }
+      systemSettings.set(settings)
+    } catch (err) {
+      limitsError = err instanceof ApiError ? err.detail : 'Failed to update the limits'
+    } finally {
+      limitsSaving = false
+    }
+  }
+
   let monitoringConfigured = false
   let monitoringToken = ''
   let monitoringTokenError = ''
@@ -82,6 +153,8 @@
       credentialAgeInput = String(credentialAgeSaved)
       savedPolicy = pickPolicy(settings)
       policyDraft = { ...savedPolicy }
+      savedLimits = pickLimits(settings)
+      limitsDraft = { ...savedLimits }
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load system settings'
     } finally {
@@ -681,6 +754,44 @@
         </div>
       </div>
     </section>
+
+    {#if limitsDraft}
+      <section class="card">
+        <h2 class="section-title">Limits</h2>
+        <p class="hint">
+          What the server takes on at once, so a few big folders or a script can't hold every worker. A request
+          over a limit is answered "busy, try again in a few seconds" instead of waiting.
+        </p>
+        {#each LIMIT_FIELDS as field (field.key)}
+          <div class="setting-row column">
+            <div>
+              <div class="setting-name">{field.label}</div>
+              <p class="hint">{field.hint}</p>
+            </div>
+            <div class="interval-row">
+              <input
+                class="input interval-input"
+                type="number"
+                min={field.min}
+                max={field.max}
+                step="1"
+                aria-label={field.label}
+                bind:value={limitsDraft[field.key]}
+              />
+              <span class="hint">{field.unit}</span>
+            </div>
+          </div>
+        {/each}
+        {#if limitsError}
+          <p class="error">{limitsError}</p>
+        {/if}
+        <div>
+          <button type="button" class="btn btn-ghost" on:click={saveLimits} disabled={limitsSaving || !limitsDirty}>
+            {limitsSaving ? 'Saving…' : 'Save limits'}
+          </button>
+        </div>
+      </section>
+    {/if}
 
     {#if $currentUser?.is_super_admin}
       <UpdatesCard />

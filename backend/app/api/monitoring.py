@@ -24,13 +24,14 @@ from app.config import get_settings
 from app.db import get_session, sqlite_file
 from app.health import uptime_seconds
 from app.jobs import job_name, job_records
+from app.limits import current_limits, get_limiter
 from app.log_rotation import retention_pressure
 from app.logging_config import get_logger
 from app.metrics import PROMETHEUS_CONTENT_TYPE, render_metrics
 from app.models import Alert, AlertDelivery, MonitoringToken, Protocol, Source
 from app.name_index import interval as name_index_interval
 from app.scheduler import scheduler
-from app.scratch import get_scratch_store
+from app.scratch import get_scratch_store, min_free_bytes
 from app.source_status import FAILING
 from app.timeutils import utcnow
 from app.version import APP_VERSION
@@ -135,6 +136,26 @@ class ScratchHealth(BaseModel):
     used_bytes: int
     max_bytes: int
     used_fraction: float
+    # Free space kept on the scratch filesystem (#345): below it, new
+    # fetches are refused (507). None when the filesystem can't be read.
+    min_free_bytes: int | None = None
+
+
+class LimitsHealth(BaseModel):
+    """Server-side limits on connector work (#344, app/limits.py): slots in
+    use now and the limits (Settings -> System). sources_in_use is keyed by
+    source id; rejected counts requests answered 503 since this process
+    started, by which limit was full (global, source, user)."""
+
+    global_in_use: int
+    global_max: int
+    per_source_max: int
+    busiest_source_in_use: int
+    sources_in_use: dict[str, int]
+    per_user_transfers_max: int
+    transfers_in_use: int
+    busiest_user_transfers: int
+    rejected: dict[str, int]
 
 
 class DiskHealth(BaseModel):
@@ -240,6 +261,7 @@ class DetailedHealth(BaseModel):
     instance: InstanceHealth
     database: DatabaseHealth
     scratch: ScratchHealth
+    limits: LimitsHealth
     disks: dict[str, DiskHealth]
     sources_by_protocol: dict[str, int]
     agent: AgentHealth
@@ -401,8 +423,16 @@ def compute_health(session: Session) -> DetailedHealth:
             wal_bytes=wal_bytes,
         ),
         scratch=ScratchHealth(
-            used_bytes=scratch_used, max_bytes=store.max_bytes, used_fraction=scratch_fraction
+            used_bytes=scratch_used,
+            max_bytes=store.max_bytes,
+            used_fraction=scratch_fraction,
+            min_free_bytes=(
+                min_free_bytes(disks["scratch"].total_bytes)
+                if disks["scratch"].total_bytes is not None
+                else None
+            ),
         ),
+        limits=LimitsHealth(**get_limiter().snapshot(current_limits(session))),
         disks=disks,
         sources_by_protocol=sources_by_protocol,
         agent=AgentHealth(configured=agent_configured, connected=agent_connected),
