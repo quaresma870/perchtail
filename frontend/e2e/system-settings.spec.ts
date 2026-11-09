@@ -1,4 +1,10 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
+
+/** Resolves once a settings save has been answered. */
+const saved = (page: Page) =>
+  page.waitForResponse(
+    (response) => response.url().endsWith('/system-settings') && response.request().method() === 'PATCH',
+  )
 
 test('system settings: alert interval, monitoring token generation', async ({ page }) => {
   await page.goto('/#/settings/system')
@@ -17,12 +23,14 @@ test('system settings: alert interval, monitoring token generation', async ({ pa
   await expect(intervalRow.locator('.error')).toContainText('15 to 3600')
 
   await interval.fill('30')
-  await intervalRow.getByRole('button', { name: 'Save' }).click()
+  // The button is disabled while the request runs too: wait for the save
+  // itself, or the reload below can cut it short.
+  await Promise.all([saved(page), intervalRow.getByRole('button', { name: 'Save' }).click()])
   await expect(intervalRow.getByRole('button', { name: 'Save' })).toBeDisabled()
   await page.reload()
   await expect(interval).toHaveValue('30')
   await interval.fill('60')
-  await intervalRow.getByRole('button', { name: 'Save' }).click()
+  await Promise.all([saved(page), intervalRow.getByRole('button', { name: 'Save' }).click()])
   await expect(intervalRow.getByRole('button', { name: 'Save' })).toBeDisabled()
 
   // Monitoring token: shown once, right after generation.
@@ -80,7 +88,7 @@ test('system settings: server limits are saved and kept within range (#344)', as
   await expect(card.locator('.error')).toContainText('1 to 32')
 
   await perUser.fill('3')
-  await save.click()
+  await Promise.all([saved(page), save.click()])
   await expect(save).toBeDisabled()
   await page.reload()
   await expect(perUser).toHaveValue('3')
@@ -92,6 +100,6 @@ test('system settings: server limits are saved and kept within range (#344)', as
 
   await perSource.fill('4')
   await perUser.fill('2')
-  await save.click()
+  await Promise.all([saved(page), save.click()])
   await expect(save).toBeDisabled()
 })
