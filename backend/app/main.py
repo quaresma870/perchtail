@@ -16,6 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import name_index, source_status
 from app.agent_registry import get_agent_registry
+from app.agent_upgrades import run_scheduled_upgrades
 from app.alerts import run_alert_pass
 from app.api.agent_upgrades import router as agent_upgrades_router
 from app.api.agent_ws import router as agent_ws_router
@@ -299,6 +300,15 @@ async def lifespan(app: FastAPI):
     # Background source check (#276): every minute it checks whatever is due.
     register_job(
         scheduler, "source_checks", "Source checks", run_source_checks, timedelta(minutes=1)
+    )
+    # Agent upgrades (#319): every minute it ends attempts that timed out
+    # and, inside the window, upgrades the agents set to "automatic".
+    register_job(
+        scheduler,
+        "agent_upgrades",
+        "Automatic agent upgrades",
+        run_scheduled_upgrades,
+        timedelta(minutes=1),
     )
     # The long-interval jobs catch up after a restart (#327): with a fresh
     # interval on every start, a container restarted more often than the

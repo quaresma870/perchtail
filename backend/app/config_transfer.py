@@ -57,7 +57,10 @@ _SOURCE_KEYS = {
     "rules",
     "winrm_scheme",
     "tls_ca_pem",
+    "agent_upgrade_policy",
 }
+# Push-agent sources only (#319): follow Settings -> Agents, or their own.
+_AGENT_UPGRADE_POLICIES = ("inherit", "off", "manual", "automatic")
 _CONTAINER_KEYS = {"name", "folders", "sources"}
 
 
@@ -106,6 +109,7 @@ class _SourceSpec:
     rules: list[_RuleSpec] | None
     winrm_scheme: str | None = None
     tls_ca_pem: str | None = None
+    agent_upgrade_policy: str = "inherit"
 
 
 @dataclass
@@ -330,6 +334,26 @@ def _parse_source(
         # As in the editor: a WinRM source always stores its scheme.
         scheme = "https" if not port or port == 5986 else "http"
 
+    upgrade_policy = node.get("agent_upgrade_policy", "inherit")
+    if upgrade_policy is False:
+        upgrade_policy = "off"  # YAML reads an unquoted off as false
+    if upgrade_policy not in _AGENT_UPGRADE_POLICIES:
+        problems.append(
+            Problem(
+                f"{where}.agent_upgrade_policy",
+                f"agent_upgrade_policy must be one of {', '.join(_AGENT_UPGRADE_POLICIES)}",
+            )
+        )
+        return
+    if protocol != Protocol.agent and upgrade_policy != "inherit":
+        problems.append(
+            Problem(
+                f"{where}.agent_upgrade_policy",
+                "agent_upgrade_policy is for push-agent sources only",
+            )
+        )
+        return
+
     credential = _parse_credential(
         node.get("credential"), protocol, f"{where}.credential", problems
     )
@@ -351,6 +375,7 @@ def _parse_source(
             rules=rules,
             winrm_scheme=scheme,
             tls_ca_pem=ca_pem,
+            agent_upgrade_policy=upgrade_policy,
             **flags,
         )
     )
@@ -609,6 +634,7 @@ def _create_source(session, spec, customer_id, folder_id, credential, apply, use
         credential_updated_at=utcnow() if credential else None,
         winrm_scheme=spec.winrm_scheme,
         tls_ca_pem=spec.tls_ca_pem,
+        agent_upgrade_policy=spec.agent_upgrade_policy,
     )
     session.add(source)
     session.flush()
@@ -656,6 +682,7 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         "name_index_enabled": spec.name_index_enabled,
         "winrm_scheme": spec.winrm_scheme,
         "tls_ca_pem": spec.tls_ca_pem,
+        "agent_upgrade_policy": spec.agent_upgrade_policy,
     }
     changes = {
         k: {"from": getattr(source, k), "to": v}
@@ -796,6 +823,8 @@ def _source_out(source: Source) -> dict:
         out["enabled"] = False
     if not source.name_index_enabled:
         out["name_index_enabled"] = False
+    if source.protocol == Protocol.agent and source.agent_upgrade_policy not in (None, "inherit"):
+        out["agent_upgrade_policy"] = source.agent_upgrade_policy
     out["rules"] = [_rule_out(r) for r in sorted(source.rules, key=lambda r: r.order)]
     return out
 

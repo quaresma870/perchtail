@@ -135,6 +135,14 @@ class Source(SQLModel, table=True):
     # sends on connect (#215). Null until an agent that reports it (0.6 or
     # later) has connected.
     agent_version: str | None = None
+    # Remote upgrades (#319, app/agent_upgrades.py): this source's own
+    # policy -- "inherit" (follow Settings -> Agents), "off", "manual" or
+    # "automatic" -- and its consecutive failed upgrades. At the failure
+    # limit automatic upgrades skip it until an admin resumes it.
+    agent_upgrade_policy: str = Field(
+        default="inherit", sa_column_kwargs={"server_default": "inherit"}
+    )
+    agent_upgrade_failures: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
     # Reachability (#276), shared by everyone: "ok" or "failing", when it was
     # last known, and the public reason when failing (never the raw error).
     # Set by the background check and by every real operation on the source
@@ -334,6 +342,36 @@ class JobRun(SQLModel, table=True):
     last_ok: bool | None = None
     last_error: str | None = None
     last_duration_ms: int | None = None
+
+
+class AgentUpgradeRun(SQLModel, table=True):
+    """One attempt to upgrade a push agent from the portal (#319,
+    app/agent_upgrades.py), from the request to how it ended. The agent's
+    progress updates the row; it only succeeds once the agent reconnects
+    reporting the new version. Deleted with its source."""
+
+    __tablename__ = "agent_upgrade_run"
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_id: int = Field(foreign_key="source.id", index=True)
+    # The id of the "upgrade" command, which the agent's progress refers to.
+    command_id: str = Field(index=True, unique=True)
+    from_version: str | None = None
+    to_version: str
+    # Null when the schedule asked (trigger "automatic").
+    requested_by_user_id: int | None = None
+    trigger: str  # manual | automatic
+    started_at: datetime
+    # The last news from the agent, for the timeout.
+    updated_at: datetime
+    finished_at: datetime | None = None
+    # requested | accepted | downloading | installing | restarting, then
+    # succeeded | failed | refused | too_old | timeout.
+    status: str = Field(index=True)
+    message: str | None = None
+    # This failure reached the failure limit: automatic upgrades of the
+    # source stopped here.
+    suspended_source: bool = False
 
 
 class SystemSetting(SQLModel, table=True):

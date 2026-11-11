@@ -59,8 +59,6 @@ class SystemSettingsPublic(BaseModel):
     concurrency_user_transfers: int
     # Listing cap (#347).
     listing_max_entries: int
-    # Push-agent upgrades from the portal (#319); off by default.
-    agent_remote_upgrade_enabled: bool
 
 
 # Ranges for the server-side limits (#344).
@@ -117,7 +115,6 @@ class SystemSettingsUpdate(BaseModel):
     listing_max_entries: int | None = Field(
         default=None, ge=LISTING_MAX_ENTRIES_MIN, le=LISTING_MAX_ENTRIES_MAX
     )
-    agent_remote_upgrade_enabled: bool | None = None
 
 
 _PASSWORD_INTS = (

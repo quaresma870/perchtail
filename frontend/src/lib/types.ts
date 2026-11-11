@@ -87,8 +87,6 @@ export interface Source {
   // The version the agent reported (#215), and whether it's older than the server.
   agent_version: string | null
   agent_outdated: boolean
-  // The latest upgrade from the portal (#319) since the server started.
-  agent_upgrade: AgentUpgrade | null
   // Reachability (#276): last known, shared by every user; for an agent
   // source, its live connection.
   status: 'ok' | 'failing' | 'unknown'
@@ -253,8 +251,6 @@ export interface SystemSettings {
   concurrency_user_transfers: number
   // Most entries a folder or archive listing returns (#347).
   listing_max_entries: number
-  // Upgrading push agents from the portal (#319); off by default.
-  agent_remote_upgrade_enabled: boolean
 }
 
 export type ExplorerSort = 'name_asc' | 'name_desc' | 'mtime_desc' | 'mtime_asc' | 'size_desc'
@@ -391,25 +387,88 @@ export interface MonitoringTokenStatus {
   configured: boolean
 }
 
-// A push agent's upgrade from the portal (#319).
-export interface AgentUpgrade {
-  status: 'requested' | 'running' | 'restarting' | 'succeeded' | 'failed'
-  // downloading, installing or restarting, as the agent reports it.
-  stage: string | null
-  detail: string | null
+// Push-agent upgrades from the portal (#319), Settings -> Agents.
+export type AgentUpgradeSystemPolicy = 'off' | 'manual' | 'automatic'
+export type AgentUpgradePolicy = 'inherit' | AgentUpgradeSystemPolicy
+
+export type AgentUpgradeStatus =
+  | 'requested'
+  | 'accepted'
+  | 'downloading'
+  | 'installing'
+  | 'restarting'
+  | 'succeeded'
+  | 'failed'
+  | 'refused'
+  | 'too_old'
+  | 'timeout'
+
+// One upgrade attempt.
+export interface AgentUpgradeRun {
+  id: number
+  status: AgentUpgradeStatus
+  message: string | null
   from_version: string | null
   to_version: string
+  trigger: 'manual' | 'automatic'
+  // Who asked; null when the schedule did.
+  requested_by: string | null
   started_at: string
   finished_at: string | null
+  // This failure reached the failure limit and suspended automatic upgrades.
+  suspended_source: boolean
 }
 
-// GET /agent-upgrades: whether upgrades from the portal are on, the version
-// agents are upgraded to, and whether this server carries their binaries.
-export interface AgentUpgradeAvailability {
-  enabled: boolean
+export interface AgentUpgradeWindowSummary {
+  start: string
+  end: string
+  upgraded: number
+  failed: number
+  suspended: number
+  running: number
+}
+
+// GET /agent-upgrades: the settings, the window, and what the server offers.
+export interface AgentUpgradeOverview {
+  policy: AgentUpgradeSystemPolicy
+  // 0 = Monday.
+  window_days: number[]
+  window_start: string
+  window_hours: number
+  failure_limit: number
+  concurrency: number
+  // The server's time zone, which the window is in.
+  timezone: string
+  window_open: boolean
+  next_window_start: string | null
+  last_window: AgentUpgradeWindowSummary | null
   version: string
   bundled: boolean
   bundled_reason: string | null
+}
+
+// GET /agent-upgrades/agents: one row per push-agent source.
+export interface AgentRow {
+  source_id: number
+  name: string
+  customer: string | null
+  enabled: boolean
+  connected: boolean
+  agent_version: string | null
+  outdated: boolean
+  policy: AgentUpgradePolicy
+  effective_policy: AgentUpgradeSystemPolicy
+  failures: number
+  suspended: boolean
+  // Why Upgrade can't start now, or null.
+  blocker: string | null
+  last_run: AgentUpgradeRun | null
+  upgrading: boolean
+}
+
+export interface AgentUpgradeHistory {
+  total: number
+  items: AgentUpgradeRun[]
 }
 
 export type AgentUpgradeResult = 'accepted' | 'refused' | 'too_old' | 'failed' | 'busy'
@@ -417,7 +476,7 @@ export type AgentUpgradeResult = 'accepted' | 'refused' | 'too_old' | 'failed' |
 export interface AgentUpgradeStarted {
   result: AgentUpgradeResult
   detail: string | null
-  upgrade: AgentUpgrade | null
+  run: AgentUpgradeRun | null
 }
 
 export interface BulkAgentUpgradeResult {

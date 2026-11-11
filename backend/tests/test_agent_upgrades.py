@@ -1,155 +1,502 @@
-"""The upgrade tracker and the bundled agent binaries (#319)."""
+"""Upgrade attempts, the automatic upgrades (#319), and the bundled agent
+binaries."""
 
-import threading
+import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from app import agent_upgrades
+from app import agent_upgrade_policy as policies
+from app import agent_upgrades, system_settings
+from app.agent_registry import AgentCommandError, AgentTimeoutError
 from app.agent_upgrades import (
-    AgentUpgrades,
+    TIMEOUT_SECONDS,
     UpgradeInProgressError,
+    agent_connected,
+    begin_run,
     binary_path,
     bundled_binaries,
-    final_audit_metadata,
+    expire_stale,
+    handle_message,
+    record_answer,
+    run_scheduled_upgrades,
+    start_upgrades,
+    window_summary,
 )
+from app.auth.models import AuditLog
 from app.config import get_settings
+from app.models import AgentUpgradeRun, Protocol, Source
 from app.version import APP_VERSION
+from sqlmodel import select
 
 
-class Recorder:
+class FakeRegistry:
+    """Which sources are connected, and how each agent answers."""
+
     def __init__(self):
-        self.states = []
-        self.event = threading.Event()
+        self.connected: set[int] = set()
+        self.answers: dict[int, object] = {}
+        self.sent: list[tuple[int, str, dict]] = []
 
-    def __call__(self, state):
-        self.states.append(state)
-        self.event.set()
+    def is_connected(self, source_id):
+        return source_id in self.connected
 
-    def wait(self):
-        assert self.event.wait(2), "no final audit was written"
-        return self.states[-1]
+    def send_command_sync(self, source_id, command_type, timeout=30.0, **fields):
+        self.sent.append((source_id, command_type, fields))
+        answer = self.answers.get(source_id, {"type": "upgrade_accepted"})
+        if isinstance(answer, Exception):
+            raise answer
+        return {**answer, "id": fields["command_id"]}
 
 
 @pytest.fixture()
-def tracker():
-    recorder = Recorder()
-    upgrades = AgentUpgrades(audit_writer=recorder)
-    upgrades.recorder = recorder
-    return upgrades
+def registry(monkeypatch):
+    fake = FakeRegistry()
+    monkeypatch.setattr(agent_upgrades, "get_agent_registry", lambda: fake)
+    return fake
 
 
-def _begin(tracker, source_id=1, command_id="c1"):
-    return tracker.begin(
-        source_id, user_id=7, command_id=command_id, from_version="0.7.0", to_version="0.7.1"
+def _agent(session, *, version="0.0.1", policy="inherit", failures=0, enabled=True) -> Source:
+    source = Source(
+        name=f"agent-{uuid.uuid4().hex[:6]}",
+        protocol=Protocol.agent,
+        host="host01",
+        base_path="/var/log",
+        agent_version=version,
+        agent_upgrade_policy=policy,
+        agent_upgrade_failures=failures,
+        enabled=enabled,
+    )
+    session.add(source)
+    session.commit()
+    session.refresh(source)
+    return source
+
+
+def _audits(session):
+    return session.exec(
+        select(AuditLog).where(AuditLog.action == "agent.upgrade").order_by(AuditLog.id)
+    ).all()
+
+
+def _run(session, source, *, trigger="manual", now=None) -> AgentUpgradeRun:
+    return begin_run(
+        session, source.id, source.agent_version, trigger=trigger, user_id=None, now=now
     )
 
 
-def test_an_upgrade_runs_and_succeeds_when_the_agent_returns_with_the_new_version(tracker):
-    _begin(tracker)
-    assert tracker.get(1).status == "requested"
-    tracker.accepted(1, "c1")
-    assert tracker.get(1).status == "running"
+def _accept(session, source, **kwargs) -> AgentUpgradeRun:
+    run = _run(session, source, **kwargs)
+    record_answer(session, run, "accepted", None, now=kwargs.get("now"))
+    session.commit()
+    return run
 
-    assert tracker.handle_message(
-        1,
-        {
-            "type": "upgrade_progress",
-            "id": "c1",
-            "stage": "downloading",
-            "detail": "from the PerchTail server",
-        },
+
+def _progress(session, source, run, stage, **extra):
+    assert handle_message(
+        session,
+        source.id,
+        {"type": "upgrade_progress", "id": run.command_id, "stage": stage, **extra},
     )
-    state = tracker.get(1)
-    assert (state.status, state.stage, state.detail) == (
-        "running",
-        "downloading",
-        "from the PerchTail server",
+    session.commit()
+
+
+def _fresh(session, row):
+    session.expire_all()
+    return session.get(type(row), row.id)
+
+
+# --- one attempt ----------------------------------------------------------------
+
+
+def test_an_attempt_is_stored_and_succeeds_when_the_agent_returns_upgraded(session):
+    source = _agent(session)
+    run = _accept(session, source)
+    assert run.status == "accepted"
+    assert (run.from_version, run.to_version, run.trigger) == ("0.0.1", APP_VERSION, "manual")
+
+    _progress(session, source, run, "downloading", detail="from the PerchTail server")
+    run = _fresh(session, run)
+    assert (run.status, run.message) == ("downloading", "from the PerchTail server")
+    _progress(session, source, run, "installing")
+    _progress(session, source, run, "restarting")
+    assert _fresh(session, run).status == "restarting"
+
+    agent_connected(session, source.id, APP_VERSION)
+    session.commit()
+    run = _fresh(session, run)
+    assert run.status == "succeeded"
+    assert run.finished_at is not None
+    results = [a.event_metadata["result"] for a in _audits(session)]
+    assert results == ["accepted", "succeeded"]
+
+
+def test_an_agent_back_with_the_old_version_after_restarting_failed(session):
+    source = _agent(session)
+    run = _accept(session, source)
+    _progress(session, source, run, "restarting")
+    agent_connected(session, source.id, "0.0.1")
+    session.commit()
+    run = _fresh(session, run)
+    assert run.status == "failed"
+    assert "came back with version 0.0.1" in run.message
+    assert _fresh(session, source).agent_upgrade_failures == 1
+
+
+def test_a_reconnect_during_the_download_fails_the_attempt(session):
+    source = _agent(session)
+    run = _accept(session, source)
+    _progress(session, source, run, "downloading")
+    agent_connected(session, source.id, "0.0.1")
+    session.commit()
+    assert "dropped during the upgrade" in _fresh(session, run).message
+
+
+def test_the_agents_failure_report_ends_the_attempt(session):
+    source = _agent(session)
+    run = _accept(session, source)
+    handle_message(
+        session,
+        source.id,
+        {"type": "upgrade_failed", "id": run.command_id, "error": "doesn't match its SHA-256"},
     )
-    tracker.handle_message(1, {"type": "upgrade_progress", "id": "c1", "stage": "restarting"})
-    assert tracker.get(1).status == "restarting"
-
-    tracker.agent_connected(1, "0.7.1")
-    state = tracker.get(1)
-    assert state.status == "succeeded"
-    assert state.finished_at is not None
-    audited = tracker.recorder.wait()
-    assert final_audit_metadata(audited) == {"from": "0.7.0", "to": "0.7.1", "result": "succeeded"}
+    session.commit()
+    run = _fresh(session, run)
+    assert (run.status, run.message) == ("failed", "doesn't match its SHA-256")
+    final = _audits(session)[-1].event_metadata
+    assert final["result"] == "failed"
+    assert final["reason"] == "doesn't match its SHA-256"
 
 
-def test_an_agent_back_with_the_old_version_after_restarting_failed(tracker):
-    _begin(tracker)
-    tracker.accepted(1, "c1")
-    tracker.handle_message(1, {"type": "upgrade_progress", "id": "c1", "stage": "restarting"})
-    tracker.agent_connected(1, "0.7.0")
-    state = tracker.get(1)
-    assert state.status == "failed"
-    assert "came back with version 0.7.0" in state.detail
-    assert final_audit_metadata(tracker.recorder.wait())["result"] == "failed"
+def test_messages_about_another_attempt_are_ignored(session):
+    source = _agent(session)
+    other = _agent(session)
+    run = _accept(session, source)
+    assert not handle_message(session, source.id, {"type": "upgrade_failed", "id": "x"})
+    # The command belongs to another source.
+    assert not handle_message(session, other.id, {"type": "upgrade_failed", "id": run.command_id})
+    assert not handle_message(session, source.id, {"type": "upgrade_failed"})
+    assert _fresh(session, run).status == "accepted"
 
 
-def test_a_reconnect_during_the_download_fails_the_upgrade(tracker):
-    _begin(tracker)
-    tracker.accepted(1, "c1")
-    tracker.agent_connected(1, "0.7.0")
-    assert tracker.get(1).status == "failed"
-    assert "dropped during the upgrade" in tracker.get(1).detail
+def test_progress_before_the_answer_is_kept(session):
+    # The agent may report progress before the request records its answer.
+    source = _agent(session)
+    run = _run(session, source)
+    _progress(session, source, run, "downloading")
+    record_answer(session, _fresh(session, run), "accepted", None)
+    session.commit()
+    assert _fresh(session, run).status == "downloading"
 
 
-def test_the_agents_failure_report_ends_the_upgrade(tracker):
-    _begin(tracker)
-    tracker.accepted(1, "c1")
-    tracker.handle_message(
-        1, {"type": "upgrade_failed", "id": "c1", "error": "doesn't match its SHA-256"}
-    )
-    state = tracker.get(1)
-    assert state.status == "failed"
-    assert state.detail == "doesn't match its SHA-256"
-    audited = tracker.recorder.wait()
-    assert final_audit_metadata(audited) == {
-        "from": "0.7.0",
-        "to": "0.7.1",
-        "result": "failed",
-        "reason": "doesn't match its SHA-256",
-    }
+@pytest.mark.parametrize(
+    ("answer", "status", "counted"),
+    [
+        (
+            AgentCommandError(
+                "this host doesn't allow upgrades", code="refused", message_type="upgrade_error"
+            ),
+            "refused",
+            True,
+        ),
+        (AgentCommandError("unknown command", message_type="unknown_error"), "too_old", False),
+        (AgentTimeoutError("no answer"), "failed", True),
+    ],
+)
+def test_answers_that_end_the_attempt(session, registry, answer, status, counted):
+    source = _agent(session)
+    registry.connected.add(source.id)
+    registry.answers[source.id] = answer
+    [started] = start_upgrades(session, [(source.id, "0.0.1")], trigger="manual", user_id=None)
+    assert started.result == status
+    run = session.get(AgentUpgradeRun, started.run_id)
+    assert run.status == status
+    assert run.finished_at is not None
+    # Audited once, with the answer.
+    [audit] = _audits(session)
+    assert audit.event_metadata["result"] == status
+    assert _fresh(session, source).agent_upgrade_failures == (1 if counted else 0)
 
 
-def test_messages_about_another_command_are_ignored(tracker):
-    _begin(tracker)
-    assert not tracker.handle_message(1, {"type": "upgrade_failed", "id": "other", "error": "x"})
-    assert not tracker.handle_message(2, {"type": "upgrade_failed", "id": "c1", "error": "x"})
-    assert tracker.get(1).status == "requested"
-
-
-def test_a_refusal_is_not_audited_twice(tracker):
-    # The endpoint audits a refusal with the request itself.
-    _begin(tracker)
-    tracker.refused(1, "c1", "host opted out")
-    assert tracker.get(1).status == "failed"
-    assert tracker.recorder.states == []
-
-
-def test_one_upgrade_at_a_time_per_source(tracker):
-    _begin(tracker)
+def test_one_attempt_at_a_time_per_source(session):
+    source = _agent(session)
+    other = _agent(session)
+    run = _run(session, source)
     with pytest.raises(UpgradeInProgressError):
-        _begin(tracker, command_id="c2")
-    _begin(tracker, source_id=2, command_id="c3")  # another source is fine
-    tracker.refused(1, "c1", "no")
-    _begin(tracker, command_id="c4")  # and again once it ended
+        _run(session, source)
+    _run(session, other)  # another source is fine
+    record_answer(session, run, "refused", "no")
+    session.commit()
+    _run(session, source)  # and again once it ended
 
 
-def test_an_upgrade_without_news_times_out(tracker, monkeypatch):
-    _begin(tracker)
-    tracker.accepted(1, "c1")
-    tracker.handle_message(1, {"type": "upgrade_progress", "id": "c1", "stage": "restarting"})
-    monkeypatch.setattr(agent_upgrades, "STALL_SECONDS", -1)
-    state = tracker.get(1)
-    assert state.status == "failed"
-    assert "didn't come back" in state.detail
-    assert tracker.recorder.wait().status == "failed"
+def test_an_attempt_without_news_times_out(session):
+    source = _agent(session)
+    started = datetime(2026, 11, 11, 2, 0)
+    run = _accept(session, source, now=started)
+    handle_message(
+        session,
+        source.id,
+        {"type": "upgrade_progress", "id": run.command_id, "stage": "restarting"},
+        now=started,
+    )
+    session.commit()
+
+    assert expire_stale(session, started + timedelta(seconds=TIMEOUT_SECONDS - 1)) == 0
+    assert expire_stale(session, started + timedelta(seconds=TIMEOUT_SECONDS + 1)) == 1
+    session.commit()
+    run = _fresh(session, run)
+    assert run.status == "timeout"
+    assert "didn't come back" in run.message
+    assert _fresh(session, source).agent_upgrade_failures == 1
+    assert _audits(session)[-1].event_metadata["result"] == "timeout"
 
 
-def test_reconnects_without_an_upgrade_change_nothing(tracker):
-    tracker.agent_connected(1, "0.7.1")
-    assert tracker.get(1) is None
+def test_news_from_the_agent_keeps_the_attempt_alive(session):
+    source = _agent(session)
+    started = datetime(2026, 11, 11, 2, 0)
+    run = _accept(session, source, now=started)
+    later = started + timedelta(seconds=TIMEOUT_SECONDS - 60)
+    handle_message(
+        session,
+        source.id,
+        {"type": "upgrade_progress", "id": run.command_id, "stage": "installing"},
+        now=later,
+    )
+    session.commit()
+    assert expire_stale(session, started + timedelta(seconds=TIMEOUT_SECONDS + 1)) == 0
+
+
+def test_a_timed_out_attempt_frees_the_source(session):
+    source = _agent(session)
+    _run(session, source, now=datetime(2020, 1, 1))
+    run = _run(session, source)  # the old one times out first
+    assert run.status == "requested"
+
+
+def test_reconnects_without_an_attempt_change_nothing(session):
+    source = _agent(session)
+    agent_connected(session, source.id, APP_VERSION)
+    session.commit()
+    assert session.exec(select(AgentUpgradeRun)).all() == []
+
+
+# --- failures and suspension -------------------------------------------------------
+
+
+def _fail(session, source):
+    run = _accept(session, source)
+    handle_message(session, source.id, {"type": "upgrade_failed", "id": run.command_id})
+    session.commit()
+    return _fresh(session, run)
+
+
+def test_consecutive_failures_reach_the_limit_and_success_clears_them(session):
+    system_settings.set_int(session, "agent_upgrade_failure_limit", 2)
+    session.commit()
+    source = _agent(session)
+    first = _fail(session, source)
+    assert not first.suspended_source
+    second = _fail(session, source)
+    assert second.suspended_source  # this one suspended the source
+    third = _fail(session, source)
+    assert not third.suspended_source  # already suspended
+    assert _fresh(session, source).agent_upgrade_failures == 3
+
+    run = _accept(session, source)
+    agent_connected(session, source.id, APP_VERSION)
+    session.commit()
+    assert _fresh(session, run).status == "succeeded"
+    assert _fresh(session, source).agent_upgrade_failures == 0
+
+
+# --- automatic upgrades ------------------------------------------------------------
+
+# Wednesday 2026-11-11; the default window is every day 02:00-06:00.
+IN_WINDOW = datetime(2026, 11, 11, 3, 0)
+OUT_OF_WINDOW = datetime(2026, 11, 11, 12, 0)
+
+
+@pytest.fixture()
+def utc_server(monkeypatch):
+    monkeypatch.setattr(policies, "server_timezone", lambda: (UTC, "UTC"))
+
+
+@pytest.fixture()
+def automatic(session, utc_server):
+    system_settings.set_choice(session, "agent_upgrade_policy", "automatic")
+    session.commit()
+
+
+def _schedule(session, now=IN_WINDOW):
+    asked = run_scheduled_upgrades(now, engine=session.get_bind())
+    session.expire_all()
+    return asked
+
+
+def _runs(session, source=None):
+    query = select(AgentUpgradeRun)
+    if source is not None:
+        query = query.where(AgentUpgradeRun.source_id == source.id)
+    return session.exec(query.order_by(AgentUpgradeRun.id)).all()
+
+
+def test_automatic_upgrades_run_only_inside_the_window(session, registry, automatic):
+    source = _agent(session)
+    registry.connected.add(source.id)
+    assert _schedule(session, OUT_OF_WINDOW) == 0
+    assert registry.sent == []
+    assert _schedule(session, IN_WINDOW) == 1
+    [run] = _runs(session, source)
+    assert (run.trigger, run.requested_by_user_id, run.status) == ("automatic", None, "accepted")
+    [audit] = _audits(session)
+    assert audit.user_id is None
+    assert audit.event_metadata["trigger"] == "automatic"
+
+
+def test_automatic_upgrades_follow_each_sources_policy(session, registry, utc_server):
+    # The system is off, but a source set to automatic still upgrades; one
+    # set to off doesn't with the system automatic.
+    own = _agent(session, policy="automatic")
+    following = _agent(session)
+    manual = _agent(session, policy="manual")
+    registry.connected.update({own.id, following.id, manual.id})
+    _schedule(session)
+    assert {s for s, _c, _f in registry.sent} == {own.id}
+
+    system_settings.set_choice(session, "agent_upgrade_policy", "automatic")
+    session.commit()
+    off = _agent(session, policy="off")
+    registry.connected.add(off.id)
+    _schedule(session)
+    assert {s for s, _c, _f in registry.sent} == {own.id, following.id}
+
+
+def test_only_connected_outdated_enabled_agents(session, registry, automatic):
+    outdated = _agent(session)
+    current = _agent(session, version=APP_VERSION)
+    offline = _agent(session)
+    disabled = _agent(session, enabled=False)
+    registry.connected.update({outdated.id, current.id, disabled.id})
+    assert offline.id not in registry.connected
+    _schedule(session)
+    assert [s for s, _c, _f in registry.sent] == [outdated.id]
+
+
+def test_at_most_the_concurrency_at_a_time(session, registry, automatic):
+    system_settings.set_int(session, "agent_upgrade_concurrency", 2)
+    session.commit()
+    sources = [_agent(session) for _ in range(5)]
+    registry.connected.update(s.id for s in sources)
+    assert _schedule(session) == 2
+    # Both still under way: no room for more.
+    assert _schedule(session, IN_WINDOW + timedelta(minutes=1)) == 0
+    # One finishes: one more starts.
+    first = _runs(session)[0]
+    agent_connected(session, first.source_id, APP_VERSION, now=IN_WINDOW + timedelta(minutes=1))
+    session.commit()
+    assert _schedule(session, IN_WINDOW + timedelta(minutes=2)) == 1
+    assert len(registry.sent) == 3
+
+
+def test_manual_attempts_do_not_take_automatic_slots(session, registry, automatic):
+    system_settings.set_int(session, "agent_upgrade_concurrency", 1)
+    session.commit()
+    manual, auto = _agent(session), _agent(session)
+    registry.connected.update({manual.id, auto.id})
+    _accept(session, manual)
+    assert _schedule(session) == 1
+    assert [s for s, _c, _f in registry.sent] == [auto.id]
+
+
+def test_a_failed_agent_is_not_retried_in_the_same_window(session, registry, automatic):
+    source = _agent(session)
+    registry.connected.add(source.id)
+    registry.answers[source.id] = AgentTimeoutError("no answer")
+    assert _schedule(session) == 1
+    assert _schedule(session, IN_WINDOW + timedelta(minutes=1)) == 0
+    assert len(registry.sent) == 1
+    # The next day's window tries again.
+    assert _schedule(session, IN_WINDOW + timedelta(days=1)) == 1
+
+
+def test_a_too_old_agent_is_not_asked_again_while_it_runs_the_same_version(
+    session, registry, automatic
+):
+    source = _agent(session)
+    registry.connected.add(source.id)
+    registry.answers[source.id] = AgentCommandError("unknown", message_type="unknown_error")
+    assert _schedule(session) == 1
+    assert _schedule(session, IN_WINDOW + timedelta(days=1)) == 0
+    # Upgraded by hand to a version that knows the command (still outdated).
+    source = session.get(Source, source.id)
+    source.agent_version = "0.0.2"
+    session.add(source)
+    session.commit()
+    registry.answers.pop(source.id)
+    assert _schedule(session, IN_WINDOW + timedelta(days=2)) == 1
+
+
+def test_a_suspended_source_is_skipped_until_resumed(session, registry, automatic):
+    system_settings.set_int(session, "agent_upgrade_failure_limit", 2)
+    session.commit()
+    source = _agent(session, failures=2)
+    registry.connected.add(source.id)
+    assert _schedule(session) == 0
+    # Only clearing the count resumes it.
+    source = session.get(Source, source.id)
+    source.agent_upgrade_failures = 0
+    session.add(source)
+    session.commit()
+    assert _schedule(session) == 1
+
+
+def test_failures_in_automatic_windows_suspend_the_source(session, registry, automatic):
+    system_settings.set_int(session, "agent_upgrade_failure_limit", 2)
+    session.commit()
+    source = _agent(session)
+    registry.connected.add(source.id)
+    registry.answers[source.id] = AgentCommandError(
+        "PERCHTAIL_REMOTE_UPGRADE=false", code="refused", message_type="upgrade_error"
+    )
+    for day in range(4):
+        _schedule(session, IN_WINDOW + timedelta(days=day))
+    # Two windows, then suspended.
+    assert len(registry.sent) == 2
+    assert session.get(Source, source.id).agent_upgrade_failures == 2
+
+
+def test_the_last_window_is_summarised(session, registry, automatic):
+    system_settings.set_int(session, "agent_upgrade_failure_limit", 1)
+    session.commit()
+    good, bad, running = _agent(session), _agent(session), _agent(session)
+    registry.connected.update({good.id, bad.id, running.id})
+    registry.answers[bad.id] = AgentTimeoutError("no answer")
+    assert window_summary(session) is None
+    _schedule(session)
+    agent_connected(session, good.id, APP_VERSION, now=IN_WINDOW + timedelta(minutes=5))
+    session.commit()
+    summary = window_summary(session)
+    assert summary["start"] == datetime(2026, 11, 11, 2, 0)
+    assert summary["end"] == datetime(2026, 11, 11, 6, 0)
+    assert (summary["upgraded"], summary["failed"], summary["suspended"]) == (1, 1, 1)
+    assert summary["running"] == 1
+
+
+def test_no_window_is_recorded_without_automatic_sources(session, registry, utc_server):
+    source = _agent(session)
+    registry.connected.add(source.id)
+    _schedule(session)
+    assert window_summary(session) is None
+
+
+def test_the_job_ends_timed_out_attempts_outside_the_window(session, registry, utc_server):
+    source = _agent(session)
+    _accept(session, source, now=OUT_OF_WINDOW - timedelta(hours=1))
+    _schedule(session, OUT_OF_WINDOW)
+    assert _runs(session, source)[0].status == "timeout"
+
+
+# --- the bundled binaries ------------------------------------------------------------
 
 
 def _bundle(tmp_path, version=APP_VERSION, *, signed=True):

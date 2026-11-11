@@ -19,10 +19,6 @@ BOOL_DEFAULTS: dict[str, str] = {
     # The file-name index (#304, app/name_index.py): names, sizes and times
     # of every source's rule-visible files, never content. On by default.
     "name_index_enabled": "true",
-    # Upgrading push agents from the portal (#319). Off by default: it
-    # replaces a binary on every host that runs an agent. Each host can
-    # still refuse with PERCHTAIL_REMOTE_UPGRADE=false.
-    "agent_remote_upgrade_enabled": "false",
 }
 
 # Enumerated string settings: key -> (default, allowed values). A value
@@ -36,6 +32,11 @@ CHOICE_DEFAULTS: dict[str, tuple[str, tuple[str, ...]]] = {
         "name_asc",
         ("name_asc", "name_desc", "mtime_desc", "mtime_asc", "size_desc"),
     ),
+    # Upgrading push agents from the portal (#319, app/agent_upgrade_policy.py),
+    # Settings -> Agents. Off by default: it replaces a binary on every host
+    # that runs an agent. Each host can still refuse with
+    # PERCHTAIL_REMOTE_UPGRADE=false.
+    "agent_upgrade_policy": ("off", ("off", "manual", "automatic")),
 }
 
 # Separate from BOOL_DEFAULTS since get_all_bool()/get_bool() would silently
@@ -88,6 +89,16 @@ INT_DEFAULTS: dict[str, str] = {
     # The most entries a folder or archive listing returns (#347); the
     # explorer says when there were more.
     "listing_max_entries": "5000",
+    # Automatic agent upgrades (#319, app/agent_upgrade_policy.py): the
+    # window's days (a bit per day, Monday first: 127 is every day), start
+    # (minutes after midnight, server time) and length in hours; how many
+    # consecutive failures suspend a source's automatic upgrades; and how
+    # many agents upgrade at once.
+    "agent_upgrade_window_days": "127",
+    "agent_upgrade_window_start_minutes": "120",
+    "agent_upgrade_window_hours": "4",
+    "agent_upgrade_failure_limit": "3",
+    "agent_upgrade_concurrency": "5",
 }
 
 

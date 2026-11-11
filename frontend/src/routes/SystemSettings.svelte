@@ -8,7 +8,6 @@
   import { EXPLORER_SORTS } from '../lib/explorer-sort'
   import { DEFAULT_TAIL_INTERVAL_SECONDS, TAIL_INTERVALS_SECONDS } from '../lib/follow'
   import type {
-    AgentUpgradeAvailability,
     ExplorerSort,
     MonitoringTokenResult,
     MonitoringTokenStatus,
@@ -146,7 +145,6 @@
       checkSaved = settings.source_check_minutes
       checkInput = String(checkSaved)
       nameIndexEnabled = settings.name_index_enabled
-      agentUpgradeEnabled = settings.agent_remote_upgrade_enabled
       nameIndexSaved = settings.name_index_minutes
       nameIndexInput = String(nameIndexSaved)
       alertsIntervalSaved = settings.alerts_interval_seconds
@@ -161,12 +159,6 @@
       error = err instanceof ApiError ? err.detail : 'Failed to load system settings'
     } finally {
       loading = false
-    }
-
-    try {
-      agentUpgradeAvailability = await api.get<AgentUpgradeAvailability>('/agent-upgrades')
-    } catch {
-      // Only for users who can manage sources; the switch works without it.
     }
 
     try {
@@ -218,27 +210,6 @@
       systemSettings.set(settings)
     } catch (err) {
       nameIndexError = err instanceof ApiError ? err.detail : 'Failed to update the file-name index'
-    } finally {
-      saving = false
-    }
-  }
-
-  // Push-agent upgrades from the portal (#319).
-  let agentUpgradeEnabled = false
-  let agentUpgradeError = ''
-  let agentUpgradeAvailability: AgentUpgradeAvailability | null = null
-
-  async function toggleAgentUpgrade() {
-    saving = true
-    agentUpgradeError = ''
-    try {
-      const settings = await api.patch<SystemSettings>('/system-settings', {
-        agent_remote_upgrade_enabled: !agentUpgradeEnabled,
-      })
-      agentUpgradeEnabled = settings.agent_remote_upgrade_enabled
-      systemSettings.set(settings)
-    } catch (err) {
-      agentUpgradeError = err instanceof ApiError ? err.detail : 'Failed to update the setting'
     } finally {
       saving = false
     }
@@ -715,33 +686,6 @@
             Save
           </button>
         </div>
-      </div>
-
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">Upgrade push agents from the portal</div>
-          <p class="hint">
-            Lets whoever can manage sources upgrade a push agent to this server's version from its page, or every outdated agent at once from Settings → Sources. The agent downloads the signed release, installs it only if the release signature and checksum verify and the version is newer than its own, and restarts; a failed upgrade leaves the current version running. Each host can still refuse with PERCHTAIL_REMOTE_UPGRADE=false.
-          </p>
-          {#if agentUpgradeAvailability && !agentUpgradeAvailability.bundled}
-            <p class="hint">
-              This server doesn't carry the agent binaries ({agentUpgradeAvailability.bundled_reason}): agents download {agentUpgradeAvailability.version} from GitHub instead, so their hosts need to reach github.com.
-            </p>
-          {/if}
-          {#if agentUpgradeError}
-            <p class="error">{agentUpgradeError}</p>
-          {/if}
-        </div>
-        <label class="switch">
-          <input
-            type="checkbox"
-            aria-label="Upgrade push agents from the portal"
-            checked={agentUpgradeEnabled}
-            disabled={saving}
-            on:change={toggleAgentUpgrade}
-          />
-          <span class="switch-track"></span>
-        </label>
       </div>
 
       <div class="setting-row column">

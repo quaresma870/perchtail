@@ -64,3 +64,35 @@ def test_the_repair_restores_it_and_the_sequence(tmp_path):
     with sqlite3.connect(db) as conn:
         seq = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'source'").fetchone()[0]
     assert seq >= 41
+
+
+def test_the_agent_upgrade_migration_goes_down_and_up(tmp_path):
+    # e3a9c5f17b28 (#319): the source columns and agent_upgrade_run come and
+    # go, and the source table keeps AUTOINCREMENT both ways.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "head")
+
+    def columns(table):
+        with sqlite3.connect(db) as conn:
+            return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    assert {"agent_upgrade_policy", "agent_upgrade_failures"} <= columns("source")
+    assert "status" in columns("agent_upgrade_run")
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source (name, protocol, host, base_path, enabled, is_system, "
+            "check_failures, name_index_enabled) VALUES ('a', 'agent', 'h', '/', 1, 0, 0, 1)"
+        )
+        policy, failures = conn.execute(
+            "SELECT agent_upgrade_policy, agent_upgrade_failures FROM source"
+        ).fetchone()
+    assert (policy, failures) == ("inherit", 0)
+
+    _alembic(tmp_path, "downgrade", "f2b8d4c61e93")
+    assert not {"agent_upgrade_policy", "agent_upgrade_failures"} & columns("source")
+    assert columns("agent_upgrade_run") == set()
+    assert _autoincrement_tables(db)["source"] is True
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert "agent_upgrade_policy" in columns("source")
+    assert _autoincrement_tables(db)["source"] is True

@@ -434,32 +434,36 @@ def test_an_agent_that_answers_pings_stays_connected(session, monkeypatch):
 # --- upgrades from the portal (#319) -------------------------------------------
 
 
-def test_upgrade_progress_and_the_reconnect_reach_the_tracker(session):
-    from app.agent_upgrades import get_agent_upgrades
+def test_upgrade_progress_and_the_reconnect_reach_the_attempt(session):
+    from app.agent_upgrades import begin_run
+    from app.models import AgentUpgradeRun
+    from app.version import APP_VERSION
 
     source = _agent_source(session, "s3cret")
     registry = get_agent_registry()
-    upgrades = get_agent_upgrades()
     client = _client(session)
-    headers = {"authorization": "Bearer s3cret", "x-perchtail-agent-version": "0.6.0"}
+
+    def status():
+        session.expire_all()
+        return session.get(AgentUpgradeRun, run_id).status
+
+    headers = {"authorization": "Bearer s3cret", "x-perchtail-agent-version": "0.0.1"}
     with client.websocket_connect("/agent/connect", headers=headers) as ws:
         assert _wait_until(lambda: registry.is_connected(source.id))
-        upgrades.begin(
-            source.id, user_id=None, command_id="up-1", from_version="0.6.0", to_version="0.7.1"
-        )
-        upgrades.accepted(source.id, "up-1")
+        run = begin_run(session, source.id, "0.0.1", trigger="manual", user_id=None)
+        run_id, command_id = run.id, run.command_id
         ws.send_json(
-            {"type": "upgrade_progress", "id": "up-1", "stage": "downloading", "detail": "x"}
+            {"type": "upgrade_progress", "id": command_id, "stage": "downloading", "detail": "x"}
         )
-        assert _wait_until(lambda: upgrades.get(source.id).stage == "downloading")
-        ws.send_json({"type": "upgrade_progress", "id": "up-1", "stage": "restarting"})
-        assert _wait_until(lambda: upgrades.get(source.id).status == "restarting")
+        assert _wait_until(lambda: status() == "downloading")
+        ws.send_json({"type": "upgrade_progress", "id": command_id, "stage": "restarting"})
+        assert _wait_until(lambda: status() == "restarting")
     assert _wait_until(lambda: not registry.is_connected(source.id))
 
     # The agent restarted into the new version and connects again.
-    headers["x-perchtail-agent-version"] = "0.7.1"
+    headers["x-perchtail-agent-version"] = APP_VERSION
     with client.websocket_connect("/agent/connect", headers=headers):
-        assert _wait_until(lambda: upgrades.get(source.id).status == "succeeded")
+        assert _wait_until(lambda: status() == "succeeded")
 
 
 def _binaries(tmp_path, monkeypatch):

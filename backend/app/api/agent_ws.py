@@ -16,7 +16,7 @@ from sqlmodel import Session, select
 
 from app import agent_registry as registry_module
 from app.agent_registry import AgentRegistry, get_agent_registry
-from app.agent_upgrades import AgentUpgrades, binary_path, get_agent_upgrades
+from app.agent_upgrades import agent_connected, binary_path, on_agent_message
 from app.db import get_session
 from app.logging_config import get_logger
 from app.models import Protocol, Source
@@ -116,7 +116,14 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
         )
         source.agent_version = agent_version
     source_id = source.id
+    bind = session.get_bind()
     session.add(source)
+    # An upgrade from the portal (#319) ends with the agent coming back:
+    # with the new version, it worked. Committed with the version.
+    try:
+        agent_connected(session, source_id, agent_version)
+    except Exception as exc:  # noqa: BLE001 - never refuse the agent over it
+        logger.error("agent.upgrade_update_failed", source_id=source_id, error=str(exc))
     session.commit()
     # The socket stays open for as long as the agent runs, and so does this
     # request's session. The commit handed its database connection back to
@@ -140,15 +147,10 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    # An upgrade from the portal (#319) ends with the agent coming back:
-    # with the new version, it worked.
-    upgrades = get_agent_upgrades()
-    upgrades.agent_connected(source_id, agent_version)
-
     # The receive loop and the keepalive (#333) run side by side: when the
     # agent goes silent the keepalive ends first, and the socket is closed
     # here rather than left to a TCP timeout that may never come.
-    receiving = asyncio.create_task(_receive(websocket, registry, upgrades, source_id))
+    receiving = asyncio.create_task(_receive(websocket, registry, bind, source_id))
     watching = asyncio.create_task(
         registry.watch(
             source_id,
@@ -178,9 +180,7 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
         registry.unregister(source_id, websocket)
 
 
-async def _receive(
-    websocket: WebSocket, registry: AgentRegistry, upgrades: AgentUpgrades, source_id: int
-) -> None:
+async def _receive(websocket: WebSocket, registry: AgentRegistry, bind, source_id: int) -> None:
     try:
         while True:
             message = await websocket.receive_json()
@@ -194,9 +194,9 @@ async def _receive(
                 await registry.receive_chunk(source_id, message, websocket)
             elif kind in ("upgrade_progress", "upgrade_failed"):
                 # An accepted upgrade's progress (#319), from the current
-                # connection only.
+                # connection only, written to its attempt off the loop.
                 if registry.is_current(source_id, websocket):
-                    upgrades.handle_message(source_id, message)
+                    await asyncio.to_thread(on_agent_message, bind, source_id, message)
             elif kind == "pong":
                 pass  # the keepalive only needs to know something arrived
             else:

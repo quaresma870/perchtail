@@ -3,17 +3,15 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser, hasCapability } from '../lib/auth'
-  import { upgradeBlocker, upgradeInProgress, upgradeResultText, upgradeStatusText } from '../lib/agent-upgrade'
-  import { confirmAction } from '../lib/confirm'
-  import { systemSettings } from '../lib/settings'
+  import { runStatusText, statusTone } from '../lib/agent-upgrade'
   import RuleEditor from '../lib/components/RuleEditor.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import { justCreatedSourceId } from '../lib/source-created'
   import { ago } from '../lib/source-status'
   import type {
     AgentTokenResult,
-    AgentUpgradeAvailability,
-    AgentUpgradeStarted,
+    AgentUpgradeHistory,
+    AgentUpgradeRun,
     ConnectionCheckResult,
     Source,
   } from '../lib/types'
@@ -70,19 +68,18 @@
     source = null
     check = null
     agentToken = ''
+    lastUpgrade = null
     tokenError = ''
-    upgradeNote = ''
-    availability = null
     try {
       const loaded = await api.get<Source>(`/sources/${id}`)
       if (id !== sourceId) return // a newer load took over
       source = loaded
       ruleCount = loaded.rule_count
-      if (loaded.protocol === 'agent' && hasCapability($currentUser, 'create_source')) {
+      if (loaded.protocol === 'agent' && !loaded.is_system && hasCapability($currentUser, 'create_source')) {
         api
-          .get<AgentUpgradeAvailability>('/agent-upgrades')
-          .then((result) => {
-            if (id === sourceId) availability = result
+          .get<AgentUpgradeHistory>(`/sources/${id}/agent-upgrades?limit=1`)
+          .then((history) => {
+            if (id === sourceId) lastUpgrade = history.items[0] ?? null
           })
           .catch(() => {})
       }
@@ -140,55 +137,10 @@
     }
   }
 
-  // Upgrade from the portal (#319): ask, then follow the agent's progress
-  // until it's back with the new version (or the upgrade failed).
-  let availability: AgentUpgradeAvailability | null = null
-  let upgrading = false
-  let upgradeNote = ''
-  let pollTimer: ReturnType<typeof setTimeout> | null = null
-  $: upgradeEnabled = availability?.enabled ?? $systemSettings.agent_remote_upgrade_enabled
-  $: blocker = source ? upgradeBlocker(source, upgradeEnabled) : null
-  $: showUpgrade = canManage && source?.protocol === 'agent' && source.agent_outdated
-  $: if (source && upgradeInProgress(source.agent_upgrade)) schedulePoll()
-
-  function schedulePoll() {
-    if (pollTimer !== null) return
-    pollTimer = setTimeout(async () => {
-      pollTimer = null
-      const id = sourceId
-      try {
-        const fresh = await api.get<Source>(`/sources/${id}`)
-        if (id === sourceId) source = fresh
-      } catch {
-        // Try again on the next tick while the upgrade is shown as running.
-        if (id === sourceId && source) source = { ...source }
-      }
-    }, 3000)
-  }
-
-  async function upgradeAgent() {
-    if (!source) return
-    const ok = await confirmAction({
-      title: 'Upgrade agent',
-      message: `Upgrade the agent of "${source.name}" from ${source.agent_version} to ${availability?.version ?? "this server's version"}? It downloads the signed release, checks it, replaces its binary and restarts. If anything fails, the current version keeps running.`,
-      confirmLabel: 'Upgrade',
-    })
-    if (!ok) return
-    upgrading = true
-    upgradeNote = ''
-    try {
-      const started = await api.post<AgentUpgradeStarted>(`/sources/${source.id}/agent-upgrade`)
-      upgradeNote = started.result === 'accepted' ? '' : upgradeResultText(started.result, started.detail)
-      if (source) source = { ...source, agent_upgrade: started.upgrade }
-    } catch (err) {
-      upgradeNote = err instanceof ApiError ? err.detail : 'Failed to start the upgrade'
-    } finally {
-      upgrading = false
-    }
-  }
+  // The last upgrade from the portal (#319); Settings -> Agents has the rest.
+  let lastUpgrade: AgentUpgradeRun | null = null
 
   onDestroy(() => {
-    if (pollTimer !== null) clearTimeout(pollTimer)
     unsubscribe()
     justCreatedSourceId.set(null)
   })
@@ -303,32 +255,14 @@
           {:else}
             not reported yet (agent older than 0.6, or never connected)
           {/if}
-          {#if showUpgrade}
-            <button
-              class="btn btn-ghost btn-sm upgrade-agent"
-              disabled={upgrading || blocker !== null}
-              title={blocker ?? `Upgrade the agent to ${availability?.version ?? "this server's version"}`}
-              on:click={upgradeAgent}>{upgrading ? 'Asking…' : 'Upgrade agent'}</button
-            >
-          {/if}
-          {#if source.agent_upgrade}
-            <p
-              class="upgrade-status"
-              class:upgrade-failed={source.agent_upgrade.status === 'failed'}
-              class:upgrade-done={source.agent_upgrade.status === 'succeeded'}
-              role="status"
-            >
-              {upgradeStatusText(source.agent_upgrade)}
-            </p>
-          {/if}
-          {#if upgradeNote}
-            <p class="upgrade-status upgrade-failed" role="status">{upgradeNote}</p>
-          {/if}
-          {#if showUpgrade && availability && !availability.bundled}
-            <p class="hint">
-              This server doesn't carry the agent binaries ({availability.bundled_reason}): the
-              agent downloads {availability.version} from GitHub, so its host needs to reach
-              github.com.
+          {#if canManage}
+            {#if lastUpgrade}
+              <p class="upgrade-status upgrade-{statusTone(lastUpgrade.status)}" role="status">
+                Last upgrade, {ago(lastUpgrade.started_at, new Date())}: {runStatusText(lastUpgrade)}
+              </p>
+            {/if}
+            <p class="upgrade-status">
+              <a href="#/settings/agents">{source.agent_outdated ? 'Upgrade it from Settings → Agents' : 'Agent upgrades: Settings → Agents'}</a>
             </p>
           {/if}
         </dd>
@@ -394,19 +328,16 @@
   .agent-outdated {
     color: var(--warning);
   }
-  .upgrade-agent {
-    margin-left: 0.6rem;
-  }
   .upgrade-status {
     margin: 0.3rem 0 0;
     font-size: 0.82rem;
     color: var(--text-muted);
     word-break: normal;
   }
-  .upgrade-status.upgrade-failed {
+  .upgrade-status.upgrade-fail {
     color: var(--danger);
   }
-  .upgrade-status.upgrade-done {
+  .upgrade-status.upgrade-ok {
     color: var(--success, #34d399);
   }
   .http-warning {

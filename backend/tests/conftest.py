@@ -99,18 +99,3 @@ def session():
     ensure_name_index_schema(engine)
     with Session(engine) as session:
         yield session
-
-
-@pytest.fixture(autouse=True)
-def _reset_agent_upgrades():
-    # app.agent_upgrades keeps each source's upgrade in a module-level
-    # tracker (#319), and writes how one ended through app.db.engine, which
-    # tests don't point at their database; tests that check it set their own.
-    from app.agent_upgrades import get_agent_upgrades
-
-    upgrades = get_agent_upgrades()
-    upgrades.reset()
-    upgrades.set_audit_writer(lambda state: None)
-    yield
-    upgrades.reset()
-    upgrades.set_audit_writer(None)

@@ -379,3 +379,66 @@ customers:
     source = session.exec(select(Source).where(Source.name == "quiet")).one()
     assert source.name_index_enabled is False
     assert "name_index_enabled: false" in config_transfer.export(session)
+
+
+def test_an_agents_upgrade_policy_round_trips(session):
+    yaml_text = """
+version: 1
+sources:
+  - name: dmz
+    protocol: agent
+    host: dmz-host
+    base_path: /var/log
+    agent_upgrade_policy: automatic
+  - name: follows
+    protocol: agent
+    host: other
+    base_path: /var/log
+"""
+    items, problems = config_transfer.run(
+        session, config_transfer.parse(yaml_text), credentials={}, apply=True, user_id=None
+    )
+    assert problems == []
+    session.commit()
+    dmz = session.exec(select(Source).where(Source.name == "dmz")).one()
+    assert dmz.agent_upgrade_policy == "automatic"
+    follows = session.exec(select(Source).where(Source.name == "follows")).one()
+    assert follows.agent_upgrade_policy == "inherit"
+    exported = config_transfer.export(session)
+    assert exported.count("agent_upgrade_policy") == 1
+    assert "agent_upgrade_policy: automatic" in exported
+
+    # Changing it is an update.
+    items, problems = config_transfer.run(
+        session,
+        config_transfer.parse(yaml_text.replace("policy: automatic", "policy: off")),
+        credentials={},
+        apply=False,
+        user_id=None,
+    )
+    assert problems == []
+    [update] = [i for i in items if i.action == "update"]
+    assert "agent_upgrade_policy" in update.changes[0]
+
+
+@pytest.mark.parametrize(
+    ("protocol", "value", "fragment"),
+    [
+        ("agent", "always", "must be one of inherit, off, manual, automatic"),
+        ("ssh", "manual", "push-agent sources only"),
+    ],
+)
+def test_a_bad_upgrade_policy_is_a_problem(session, protocol, value, fragment):
+    yaml_text = f"""
+version: 1
+sources:
+  - name: one
+    protocol: {protocol}
+    host: h1
+    base_path: /var/log
+    agent_upgrade_policy: {value}
+"""
+    parsed = config_transfer.parse(yaml_text)
+    assert any(
+        p.where.endswith("agent_upgrade_policy") and fragment in p.message for p in parsed.problems
+    ), parsed.problems

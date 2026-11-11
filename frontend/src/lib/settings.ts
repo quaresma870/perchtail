@@ -32,7 +32,6 @@ export const systemSettings = writable<SystemSettings>({
   concurrency_per_source: 4,
   concurrency_user_transfers: 2,
   listing_max_entries: 5000,
-  agent_remote_upgrade_enabled: false,
 })
 
 let loadedAt = 0

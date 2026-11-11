@@ -26,6 +26,7 @@
   import UserMenu from './lib/components/UserMenu.svelte'
   import ConfirmHost from './lib/components/ConfirmHost.svelte'
   import AuditLogSettings from './routes/AuditLogSettings.svelte'
+  import AgentsSettings from './routes/AgentsSettings.svelte'
 
   const routes = {
     '/login': Login,
@@ -40,6 +41,7 @@
     '/settings/sources/:id/edit': SourceEditorPopup,
     '/settings/sources/:id': SourceOverview,
     '/settings/folders': Folders,
+    '/settings/agents': AgentsSettings,
     '/settings/roles': Roles,
     '/settings/roles/new': RoleEditorPopup,
     '/settings/roles/:id': RoleEditorPopup,

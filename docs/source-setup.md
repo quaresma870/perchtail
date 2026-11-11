@@ -395,7 +395,7 @@ Environment variables; the first three are required:
 
 Run it under whatever process supervisor the host already uses (systemd, a Windows service wrapper such as NSSM, etc.) so it restarts on failure or reboot — it reconnects with exponential backoff and jitter on its own if the connection drops, and notices a connection that died silently, but something still needs to restart the process itself if it exits. Run it as a least-privilege account that only has read access under `PERCHTAIL_BASE_PATH` — same read-only, scope-to-what's-needed principle as every other protocol here, just enforced by the OS account the agent runs as instead of a protocol-level ACL.
 
-To upgrade the agent from the portal later (Settings → System turns it on), that account also needs write access to the folder holding the agent's binary, and the supervisor must restart the agent when it exits: see [Upgrades from the portal](../agent/README.md#upgrades-from-the-portal) for a systemd unit and the Windows service settings.
+To upgrade the agent from the portal later (Settings → Agents, off by default), that account also needs write access to the folder holding the agent's binary, and the supervisor must restart the agent when it exits: see [Upgrades from the portal](../agent/README.md#upgrades-from-the-portal) for a systemd unit and the Windows service settings.
 
 ### 4. Firewall
 
