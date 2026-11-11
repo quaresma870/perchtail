@@ -128,7 +128,7 @@ Push agents upgraded from the portal (#319) install a binary only if `SHA256SUMS
    ```
 
 2. Replace the empty `agent/internal/agent/upgrade_signing_key.pem` with `upgrade_signing_key.pem` (the public key, `-----BEGIN PUBLIC KEY-----`) and merge it through a PR like any other change. Agents built from then on can verify upgrades.
-3. Create the repository secret `AGENT_SIGNING_KEY` (Settings → Secrets and variables → Actions) with the whole content of `agent-signing.pem`, the private key (`-----BEGIN PRIVATE KEY-----` lines included).
+3. Create an environment named `release` (Settings → Environments), limit its deployment branches to `dev` and `main`, and add the environment secret `AGENT_SIGNING_KEY` there with the whole content of `agent-signing.pem`, the private key (`-----BEGIN PRIVATE KEY-----` lines included). An environment secret, not a repository secret: only the release workflow's `agent` job names that environment, so a workflow pushed on another branch can't read the key.
 4. Keep `agent-signing.pem` offline (an encrypted backup, a password manager), and never commit it. Losing it means new agents need a new public key and the agents already installed can't verify upgrades signed with another one: they would have to be upgraded by hand once.
 
 Rotating the key works the same way, and has the same cost: agents built with the old public key refuse releases signed with the new one, so each of them is upgraded by hand once.
