@@ -44,6 +44,11 @@ router = APIRouter(tags=["agent-upgrades"])
 logger = get_logger(__name__)
 
 require_manage = require_global_capability(GlobalCapability.create_source, get_current_active_user)
+# The system-wide policy and window change every agent's behaviour, like the
+# other System settings.
+require_system_settings = require_global_capability(
+    GlobalCapability.manage_system_settings, get_current_active_user
+)
 
 _MAX_BULK = 500
 _MAX_PAGE = 100
@@ -210,7 +215,7 @@ class AgentUpgradeSettingsUpdate(BaseModel):
 @router.patch("/agent-upgrades/settings", response_model=AgentUpgradeOverview)
 def update_agent_upgrade_settings(
     payload: AgentUpgradeSettingsUpdate,
-    user: User = Depends(require_manage),
+    user: User = Depends(require_system_settings),
     session: Session = Depends(get_session),
 ):
     changed = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}

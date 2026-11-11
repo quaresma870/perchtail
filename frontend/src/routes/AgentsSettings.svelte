@@ -17,6 +17,7 @@
     upgradeResultText,
     windowText,
   } from '../lib/agent-upgrade'
+  import { currentUser, hasCapability } from '../lib/auth'
   import { confirmAction } from '../lib/confirm'
   import { parseUtc } from '../lib/credential-age'
   import Modal from '../lib/components/Modal.svelte'
@@ -36,6 +37,8 @@
    * every push agent, and one row per agent with its own policy, its last
    * upgrade and the actions. Only for users who can manage sources. */
 
+  // The system-wide policy and window need System settings rights (#319).
+  $: canEditSettings = hasCapability($currentUser, 'manage_system_settings')
   let overview: AgentUpgradeOverview | null = null
   let rows: AgentRow[] = []
   let loading = true
@@ -274,7 +277,10 @@
     <p class="error">{error}</p>
   {:else if overview}
     <section class="card top">
-      <div class="settings">
+      {#if !canEditSettings}
+        <p class="hint">The system-wide policy and window are System settings: only who can manage them can change them.</p>
+      {/if}
+      <fieldset class="settings" disabled={!canEditSettings}>
         <label class="field">
           Remote upgrades
           <select class="input" bind:value={policy} aria-label="Remote upgrades">
@@ -351,10 +357,10 @@
           />
           <span class="hint">How many agents the schedule upgrades at the same time.</span>
         </label>
-      </div>
+      </fieldset>
 
       <div class="actions">
-        <button class="btn btn-primary" disabled={!dirty || saving} on:click={save}>{saving ? 'Saving…' : 'Save'}</button>
+        <button class="btn btn-primary" disabled={!canEditSettings || !dirty || saving} on:click={save}>{saving ? 'Saving…' : 'Save'}</button>
         {#if saveError}<span class="error">{saveError}</span>{/if}
         {#if saved && !dirty}<span class="hint">{saved}</span>{/if}
         <span class="spacer"></span>
@@ -583,6 +589,10 @@
     gap: 1rem;
   }
   .settings {
+    border: none;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
     gap: 1rem 1.5rem;

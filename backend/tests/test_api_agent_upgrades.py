@@ -303,6 +303,13 @@ def test_users_who_cannot_manage_sources_cannot_use_any_of_it(session, registry)
     manager = _client(session, _user(session, capabilities=[GlobalCapability.create_source]))
     assert manager.post(f"/sources/{source.id}/agent-upgrade").status_code == 200
     assert manager.get("/agent-upgrades/agents").status_code == 200
+    # The system-wide policy is a System setting: managing sources isn't enough.
+    body = {"policy": "automatic"}
+    assert manager.patch("/agent-upgrades/settings", json=body).status_code == 403
+    settings_admin = _client(
+        session, _user(session, capabilities=[GlobalCapability.manage_system_settings])
+    )
+    assert settings_admin.patch("/agent-upgrades/settings", json=body).status_code == 200
 
 
 # --- upgrading all outdated agents ------------------------------------------------

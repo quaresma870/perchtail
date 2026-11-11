@@ -380,6 +380,9 @@ def record_answer(
 ) -> None:
     """The agent's answer to the request, audited. Its progress may already
     have moved the attempt on: an acceptance then changes nothing."""
+    # The reason may come from the agent: kept to the same length as the
+    # other text it sends.
+    reason = _text(reason)
     session.refresh(run)
     _audit(session, run, result, reason)
     if result == "accepted":
