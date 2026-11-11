@@ -222,34 +222,35 @@ func expectedHash(sums []byte, name string) ([]byte, error) {
 	return found, nil
 }
 
-// shortVersion keeps whatever the server sent readable in a message.
-func shortVersion(v string) string {
-	if len(v) > 40 {
-		return v[:40] + "…"
-	}
-	return v
+// logSafe keeps a message on one log line: text that came from the server
+// or the network can't start a forged one.
+func logSafe(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.ReplaceAll(s, "\r", " ")
 }
 
 // precheck refuses an upgrade the agent won't make, before anything is
-// downloaded.
-func (u *upgrader) precheck(target string) error {
+// downloaded. It returns the target version rebuilt by canonicalVersion,
+// the only form used from then on.
+func (u *upgrader) precheck(requested string) (string, error) {
 	if !u.allowed {
-		return fmt.Errorf("this host doesn't allow upgrades from the portal (%s=false)", remoteUpgradeEnv)
+		return "", fmt.Errorf("this host doesn't allow upgrades from the portal (%s=false)", remoteUpgradeEnv)
 	}
 	if _, err := parseSigningKey(u.signingKeyPEM); err != nil {
-		return err
+		return "", err
 	}
-	if _, ok := parseVersion(target); !ok {
-		return fmt.Errorf("%q is not a PerchTail release version", shortVersion(target))
+	target, ok := canonicalVersion(requested)
+	if !ok {
+		return "", errors.New("the server asked for a version that isn't a PerchTail release")
 	}
-	if _, ok := parseVersion(u.current); !ok {
-		return fmt.Errorf("this agent's version (%q) is not a release, so it can't tell whether %s is newer; upgrade it by hand",
-			shortVersion(u.current), target)
+	current, ok := canonicalVersion(u.current)
+	if !ok {
+		return "", fmt.Errorf("this agent's version is not a release, so it can't tell whether %s is newer; upgrade it by hand", target)
 	}
-	if !isNewerVersion(target, u.current) {
-		return fmt.Errorf("%s is not newer than this agent's %s; agents only upgrade to a newer release", target, u.current)
+	if !isNewerVersion(target, current) {
+		return "", fmt.Errorf("%s is not newer than this agent's %s; agents only upgrade to a newer release", target, current)
 	}
-	return nil
+	return target, nil
 }
 
 func (u *upgrader) get(ctx context.Context, src binarySource, file string) (*http.Response, error) {
@@ -465,7 +466,7 @@ func (u *upgrader) perform(ctx context.Context, target string, progress func(sta
 		if ctx.Err() != nil {
 			return fmt.Errorf("upgrade interrupted: %w", ctx.Err())
 		}
-		log.Printf("agent: upgrade: %s: %v", src.label, err)
+		log.Printf("agent: upgrade: %s: %s", src.label, logSafe(err.Error()))
 		failures = append(failures, fmt.Sprintf("%s: %v", src.label, err))
 	}
 	if newPath == "" {
@@ -497,8 +498,9 @@ func (u *upgrader) perform(ctx context.Context, target string, progress func(sta
 // reports its progress and, on failure, why. closeConn ends the
 // connection once an upgrade is installed and the agent must exit.
 func (u *upgrader) handle(ctx context.Context, cmd Command, send func(any) error, closeConn func()) {
-	if err := u.precheck(cmd.Version); err != nil {
-		log.Printf("agent: upgrade refused: %v", err)
+	target, err := u.precheck(cmd.Version)
+	if err != nil {
+		log.Printf("agent: upgrade refused: %s", logSafe(err.Error()))
 		_ = send(ErrorResult{Type: "upgrade_error", ID: cmd.ID, Error: err.Error(), Code: "refused"})
 		return
 	}
@@ -507,18 +509,18 @@ func (u *upgrader) handle(ctx context.Context, cmd Command, send func(any) error
 		return
 	}
 	defer u.running.Store(false)
-	_ = send(UpgradeAccepted{Type: "upgrade_accepted", ID: cmd.ID, From: u.current, To: cmd.Version})
-	log.Printf("agent: upgrading from %s to %s", u.current, cmd.Version)
-	err := u.perform(ctx, cmd.Version, func(stage, detail string) {
+	_ = send(UpgradeAccepted{Type: "upgrade_accepted", ID: cmd.ID, From: u.current, To: target})
+	log.Printf("agent: upgrading from %s to %s", logSafe(u.current), target)
+	err = u.perform(ctx, target, func(stage, detail string) {
 		_ = send(UpgradeProgress{Type: "upgrade_progress", ID: cmd.ID, Stage: stage, Detail: detail})
 	})
 	if err != nil {
-		log.Printf("agent: upgrade to %s failed: %v", cmd.Version, err)
+		log.Printf("agent: upgrade to %s failed: %s", target, logSafe(err.Error()))
 		_ = send(UpgradeFailed{Type: "upgrade_failed", ID: cmd.ID, Error: err.Error()})
 		return
 	}
 	if u.restartRequested() {
-		log.Printf("agent: upgrade to %s installed; exiting for the service manager to restart the agent", cmd.Version)
+		log.Printf("agent: upgrade to %s installed; exiting for the service manager to restart the agent", target)
 		closeConn()
 	}
 }

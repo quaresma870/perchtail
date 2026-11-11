@@ -93,17 +93,23 @@ def bundled_binaries() -> tuple[bool, str | None]:
 def binary_path(name: str) -> Path | None:
     """The bundled file `name` -- SHA256SUMS, its signature, or an agent
     binary of this server's version -- or None. Only those exact names are
-    ever served, from the one folder."""
+    ever served, from the one folder. The path returned is one the folder
+    listed, picked by comparing names: the requested name never becomes
+    part of a path."""
     directory = binaries_dir()
     if directory is None:
         return None
-    if name not in (SUMS_FILE, SIG_FILE) and not _binary_name_pattern(APP_VERSION).match(name):
+    if name not in (SUMS_FILE, SIG_FILE) and not _binary_name_pattern(APP_VERSION).fullmatch(name):
         return None
-    path = directory / name
     try:
-        if not path.is_file() or path.stat().st_size > MAX_BINARY_BYTES:
-            return None
-        if path.resolve().parent != directory.resolve():
+        listed = {entry.name: entry for entry in directory.iterdir()}
+    except OSError:
+        return None
+    path = listed.get(name)
+    if path is None:
+        return None
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BINARY_BYTES:
             return None
     except OSError:
         return None

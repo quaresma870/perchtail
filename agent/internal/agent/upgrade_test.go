@@ -432,16 +432,19 @@ func TestPrecheck(t *testing.T) {
 		{"older version", "0.7.1", "0.6.0", true, release.pubPEM, "not newer"},
 		{"candidate of the same release", "0.7.1", "0.7.1-rc.3", true, release.pubPEM, "not newer"},
 		{"dev build", "dev", "0.7.1", true, release.pubPEM, "is not a release"},
-		{"not a version", "0.7.0", "../../evil", true, release.pubPEM, "not a PerchTail release version"},
-		{"tag form", "0.7.0", "v0.7.1", true, release.pubPEM, "not a PerchTail release version"},
+		{"not a version", "0.7.0", "../../evil", true, release.pubPEM, "isn't a PerchTail release"},
+		{"tag form", "0.7.0", "v0.7.1", true, release.pubPEM, "isn't a PerchTail release"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			u := &upgrader{current: tc.current, allowed: tc.allowed, signingKeyPEM: tc.key}
-			err := u.precheck(tc.target)
+			got, err := u.precheck(tc.target)
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("precheck: %v", err)
+				}
+				if got != tc.target {
+					t.Fatalf("precheck returned %q, want %q", got, tc.target)
 				}
 				return
 			}

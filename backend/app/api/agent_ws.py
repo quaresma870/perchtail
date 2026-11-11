@@ -218,4 +218,4 @@ def agent_binary(name: str, request: Request, session: Session = Depends(get_ses
     path = binary_path(name)
     if path is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    return FileResponse(path, media_type="application/octet-stream", filename=name)
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)

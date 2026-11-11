@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 )
@@ -30,6 +31,20 @@ func parseVersion(v string) ([4]int, bool) {
 		parts[3], _ = strconv.Atoi(m[4])
 	}
 	return parts, true
+}
+
+// canonicalVersion rebuilds a PerchTail version from its parsed numbers, so
+// what goes into a download URL, a file name or a log line is made here,
+// not copied from the server's message. False when v isn't one.
+func canonicalVersion(v string) (string, bool) {
+	p, ok := parseVersion(v)
+	if !ok {
+		return "", false
+	}
+	if p[3] == finalRelease {
+		return fmt.Sprintf("%d.%d.%d", p[0], p[1], p[2]), true
+	}
+	return fmt.Sprintf("%d.%d.%d-rc.%d", p[0], p[1], p[2], p[3]), true
 }
 
 // isNewerVersion reports whether candidate is a later release than current.

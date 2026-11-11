@@ -202,3 +202,11 @@ def test_only_the_release_files_are_served(binaries_dir):
     assert binary_path("SHA256SUMS.sig") is not None
     for refused in ("notes.txt", "../SHA256SUMS", f"../{name}", "", ".", "SHA256SUMS/.."):
         assert binary_path(refused) is None, refused
+
+
+def test_a_link_in_the_binaries_folder_is_not_served(binaries_dir, tmp_path_factory):
+    # Only files the folder itself holds: a link out of it isn't followed.
+    outside = tmp_path_factory.mktemp("outside") / "secret"
+    outside.write_text("not for agents", encoding="utf-8")
+    (binaries_dir / "SHA256SUMS").symlink_to(outside)
+    assert binary_path("SHA256SUMS") is None
