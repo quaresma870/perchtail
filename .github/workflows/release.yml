@@ -188,7 +188,7 @@ jobs:
         working-directory: dist
         env:
           AGENT_SIGNING_KEY: ${{ secrets.AGENT_SIGNING_KEY }}
-          PUBLIC_KEY: ../agent/internal/agent/upgrade_signing_key.pem
+          PUBLIC_KEY: ../agent/internal/agent/upgrade_signing_key.pub
         run: |
           set -euo pipefail
           if [ -z "${AGENT_SIGNING_KEY:-}" ]; then
@@ -196,7 +196,7 @@ jobs:
             exit 1
           fi
           if ! grep -q "BEGIN PUBLIC KEY" "$PUBLIC_KEY"; then
-            echo "::error::agent/internal/agent/upgrade_signing_key.pem is empty: the agents of this release couldn't verify any upgrade. Commit the release key's public half first (CONTRIBUTING.md)."
+            echo "::error::agent/internal/agent/upgrade_signing_key.pub is empty: the agents of this release couldn't verify any upgrade. Commit the release key's public half first (CONTRIBUTING.md)."
             exit 1
           fi
           umask 077
@@ -207,7 +207,7 @@ jobs:
           rm -f "$keyfile"
           if ! openssl pkeyutl -verify -pubin -inkey "$PUBLIC_KEY" -rawin \
               -in SHA256SUMS -sigfile SHA256SUMS.sig; then
-            echo "::error::The AGENT_SIGNING_KEY secret doesn't match agent/internal/agent/upgrade_signing_key.pem."
+            echo "::error::The AGENT_SIGNING_KEY secret doesn't match agent/internal/agent/upgrade_signing_key.pub."
             exit 1
           fi
           ls -l SHA256SUMS SHA256SUMS.sig

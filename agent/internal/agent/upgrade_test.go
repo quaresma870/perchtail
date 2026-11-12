@@ -455,12 +455,11 @@ func TestPrecheck(t *testing.T) {
 	}
 }
 
-func TestTheCommittedSigningKeyIsEmptyOrEd25519(t *testing.T) {
-	// The repository ships the release key's public half, or nothing until
-	// the maintainer adds it; anything else would break every upgrade.
-	_, err := parseSigningKey(upgradeSigningKeyPEM)
-	if err != nil && !errors.Is(err, errNoSigningKey) {
-		t.Fatalf("upgrade_signing_key.pem: %v", err)
+func TestTheCommittedSigningKeyIsEd25519(t *testing.T) {
+	// The repository ships the release key's public half; an empty or
+	// malformed key would make every agent refuse every upgrade.
+	if _, err := parseSigningKey(upgradeSigningKeyPEM); err != nil {
+		t.Fatalf("upgrade_signing_key.pub: %v", err)
 	}
 }
 

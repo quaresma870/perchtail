@@ -32,7 +32,7 @@ The server only says which version to upgrade to: its own. The agent then:
 
 1. refuses straight away if `PERCHTAIL_REMOTE_UPGRADE=false`, if it was built without the release public key, if its own version isn't a release (a `dev` build), or if the target isn't newer than its own version (no downgrades, no reinstalling the same version);
 2. downloads `SHA256SUMS`, `SHA256SUMS.sig` and `perchtail-agent-<version>-<os>-<arch>[.exe]` from the PerchTail server it's connected to (`/agent/binaries/` next to `PERCHTAIL_SERVER_URL`, with its own token), or, if the server has no valid copy, from `https://github.com/quaresma870/perchtail/releases/download/v<version>/` — the only two places, never a URL the server names;
-3. checks the Ed25519 signature over `SHA256SUMS` against the release public key built into the agent (`internal/agent/upgrade_signing_key.pem`), then the binary's SHA-256 against its line, with downloads capped in size;
+3. checks the Ed25519 signature over `SHA256SUMS` against the release public key built into the agent (`internal/agent/upgrade_signing_key.pub`), then the binary's SHA-256 against its line, with downloads capped in size;
 4. writes the new binary next to the current one, keeps the current one as `<binary>.old`, and moves the new one in place;
 5. restarts into it: on Linux it replaces its own process (same PID, so systemd keeps tracking it); on Windows it exits with code **3** for the service manager to start the new binary.
 
@@ -86,8 +86,8 @@ Every [GitHub release](https://github.com/quaresma870/perchtail/releases) has pr
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-# and, with the release public key (internal/agent/upgrade_signing_key.pem):
-openssl pkeyutl -verify -pubin -inkey upgrade_signing_key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
+# and, with the release public key (internal/agent/upgrade_signing_key.pub):
+openssl pkeyutl -verify -pubin -inkey upgrade_signing_key.pub -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
 ```
 
 On Windows: `Get-FileHash .\perchtail-agent-<version>-windows-amd64.exe` and compare with the line in `SHA256SUMS`.
@@ -106,7 +106,7 @@ GOOS=linux   GOARCH=arm64 go build -o perchtail-agent-linux-arm64   .
 GOOS=windows GOARCH=amd64 go build -o perchtail-agent-windows-amd64.exe .
 ```
 
-A local build reports version `dev` and refuses upgrades from the portal: it can't tell whether a release is newer than itself. A build from a checkout whose `internal/agent/upgrade_signing_key.pem` is empty refuses them too.
+A local build reports version `dev` and refuses upgrades from the portal: it can't tell whether a release is newer than itself. A build from a checkout whose `internal/agent/upgrade_signing_key.pub` is empty refuses them too.
 
 ## Test
 
