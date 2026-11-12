@@ -77,9 +77,6 @@ release ships (0.x releases may include breaking changes between minors).
 - `/healthz` and `/readyz` no longer answer the world: a caller needs to be local, in `PROBE_ALLOWED_NETWORKS`, or hold the monitoring token, and a refused probe learns nothing about the instance's health. The new `MONITORING_ALLOWED_NETWORKS` can also restrict `/monitoring/health` and `/metrics` to the monitoring system's addresses, on top of the token (#366).
 - Regenerating a push agent's token, or disabling or deleting its source, now closes the agent's open connection. Before, an agent that had connected with the old token kept answering for the source until it disconnected on its own, so regenerating a leaked token didn't cut off whoever was using it.
 - A push agent upgraded from the portal (#319) installs a binary only when the Ed25519 signature over the release's `SHA256SUMS` verifies against the release public key built into the agent, the binary matches its SHA-256 line, and the version is newer than its own; wherever the files came from, a server that is compromised can't make it run anything but a genuine, newer PerchTail release, nor downgrade it. The server never sends a URL, only the version. An agent built without the public key refuses every remote upgrade. Downloads are capped in size, and the binaries the server serves are limited to its own version's release files.
-- The push agent is built with Go 1.27, at its latest patch release, instead of Go 1.24, which no longer receives security fixes. The vulnerability scan checks the same Go release the binaries are built with.
-- The base images in the `Dockerfile` are pinned by digest, and Dependabot proposes their updates like any other dependency.
-- A daily scan checks the backend's Python packages, the frontend's npm packages and the agent's Go modules on `main` and `dev`, the latest release's agent binaries, and the published image with its OS packages, so a new advisory is caught even when no code changes.
 
 ### Fixed
 - Rotating `CREDENTIAL_ENCRYPTION_KEY` left users' MFA secrets under the old key, so MFA users could no longer sign in, and broke the audit log's hash chain, whose key comes from the same secret. The rotation now re-encrypts MFA secrets and re-signs the audit chain in the same transaction, after checking the chain under the old key (a broken chain stops the rotation), and records itself in the audit log (#326).
@@ -96,6 +93,24 @@ release ships (0.x releases may include breaking changes between minors).
 - A download cut short by the client could keep its scratch file until the idle sweep: the release ran only when the response finished normally. It now runs however the response ends (#344).
 - An integer above 9223372036854775807 in a request (an id in the path or body, a port) crashed with a 500; it is now refused with 422 and "A number in the request is out of range" (#376).
 - Accessibility (#377): faint text, accent links and badges, and primary buttons now meet the WCAG AA contrast ratio; switches, selects and date fields in Settings, the user role selects and the log viewer's content have accessible names; the user menu and explorer file names now include their visible text (initials, file size) in their accessible names.
+
+## [0.6.1] - 2026-11-12
+
+A security release, the code retested in the lab as 0.6.1-rc.1. 0.6.0's push-agent binaries were built with Go 1.24, which no longer receives security fixes, and govulncheck finds 43 known vulnerabilities in the Go standard library they contain. Nothing else in the server or the agent changes. Upgrade the server and then upgrade each push agent to 0.6.1 by hand (download the binary for its platform from the release and replace the old one); from 0.7.0 on, agents can be upgraded from the portal.
+
+### Security
+- The push agent is built with Go 1.27, at its latest patch release, instead of Go 1.24. The vulnerability scan checks the same Go release the binaries are built with.
+- The image is rebuilt on current base images and OS packages. The base images in the `Dockerfile` are pinned by digest, and Dependabot proposes their updates like any other dependency.
+- A daily scan checks the backend's Python packages, the frontend's npm packages and the agent's Go modules on `main` and `dev`, the latest release's agent binaries, and the published image with its OS packages, so a new advisory is caught even when no code changes. SECURITY.md now states how fast fixes ship and what that covers.
+
+## [0.6.1-rc.1] - 2026-11-12
+
+A security release: 0.6.0's push-agent binaries were built with Go 1.24, which no longer receives security fixes, and govulncheck finds 43 known vulnerabilities in the Go standard library they contain. Nothing else in the server or the agent changes. Upgrade the server and then upgrade each push agent to 0.6.1 by hand (download the binary for its platform from the release and replace the old one); from 0.7.0 on, agents can be upgraded from the portal.
+
+### Security
+- The push agent is built with Go 1.27, at its latest patch release, instead of Go 1.24. The vulnerability scan checks the same Go release the binaries are built with.
+- The image is rebuilt on current base images and OS packages. The base images in the `Dockerfile` are pinned by digest, and Dependabot proposes their updates like any other dependency.
+- A daily scan checks the backend's Python packages, the frontend's npm packages and the agent's Go modules on `main` and `dev`, the latest release's agent binaries, and the published image with its OS packages, so a new advisory is caught even when no code changes. SECURITY.md now states how fast fixes ship and what that covers.
 
 ## [0.6.0] - 2026-11-07
 
