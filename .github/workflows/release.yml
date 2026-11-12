@@ -102,10 +102,17 @@ jobs:
             sha="$(git rev-parse --verify "origin/$INPUT_TARGET^{commit}" 2>/dev/null || git rev-parse --verify "$INPUT_TARGET^{commit}")"
           fi
 
-          # Releases are built only from code on dev or main, which went
-          # through a PR and CI; a manual run can't release any other commit.
-          if ! git merge-base --is-ancestor "$sha" origin/dev && ! git merge-base --is-ancestor "$sha" origin/main; then
-            echo "::error::${sha:0:7} is on neither dev nor main; a release is built only from code merged there"
+          # Releases are built only from code that went through a PR and
+          # CI: on dev, on main, or on the hotfix/* branch this run uses
+          # (hotfix branches have the same rules as dev). A manual run
+          # can't release any other commit.
+          on_branch() { git merge-base --is-ancestor "$sha" "$1"; }
+          hotfix=false
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [[ "$REF_NAME" == hotfix/* ]] && on_branch "origin/$REF_NAME"; then
+            hotfix=true
+          fi
+          if ! on_branch origin/dev && ! on_branch origin/main && [ "$hotfix" = false ]; then
+            echo "::error::${sha:0:7} is on neither dev, main nor a hotfix branch; a release is built only from code merged there"
             exit 1
           fi
 
@@ -376,6 +383,7 @@ jobs:
     if: github.event_name == 'release' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
     steps:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -389,6 +397,7 @@ jobs:
       - name: Point X.Y and latest at this release
         env:
           TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="${TAG#v}"
@@ -397,6 +406,14 @@ jobs:
           fi
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
-          docker buildx imagetools create \
-            -t "$image:$minor" -t "$image:latest" "$image:$version"
-          echo "$image:$minor and :latest -> $version" >> "$GITHUB_STEP_SUMMARY"
+          # A hotfix for an older line (0.6.2 after 0.7.0) moves its own
+          # X.Y but never latest, which stays on the newest full release.
+          newest="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+          tags=(-t "$image:$minor")
+          if [ "$newest" = "$version" ]; then
+            tags+=(-t "$image:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" "$image:$version"
+          echo "${tags[*]} -> $version (newest full release: $newest)" >> "$GITHUB_STEP_SUMMARY"
