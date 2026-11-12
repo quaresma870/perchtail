@@ -1,4 +1,4 @@
-fastapi>=0.115
+fastapi>=0.162.2
 uvicorn[standard]>=0.54.0
 sqlmodel>=0.0.22,<0.0.45  # 0.0.45 made UTCDateTime reject naive datetimes; breaks app/timeutils.py's deliberate naive-storage design
 structlog>=26.1.0
