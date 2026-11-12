@@ -297,7 +297,7 @@ publish in `docker-compose.yml` entirely rather than binding it to loopback.
   deployment, broken down by solution and load-balancing type
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
   submit changes
-- [SECURITY.md](SECURITY.md) — how to report a vulnerability
+- [SECURITY.md](SECURITY.md) — how to report a vulnerability, and how fast fixes ship
 - [CHANGELOG.md](CHANGELOG.md) — what's shipped, release by release
 
 ## License
