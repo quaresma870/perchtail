@@ -43,6 +43,13 @@ def _load_or_create_salt(path: Path) -> bytes:
 
 def _derive_fernet_key(secret: str) -> bytes:
     salt = _load_or_create_salt(Path(get_settings().credential_salt_path))
+    return fernet_key_for_salt(secret, salt)
+
+
+def fernet_key_for_salt(secret: str, salt: bytes) -> bytes:
+    """The Fernet key for a CREDENTIAL_ENCRYPTION_KEY and a given salt, for
+    app/backup.py, which checks a backup's credentials against the salt in
+    the backup rather than the one on disk."""
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=_KEY_LENGTH_BYTES,

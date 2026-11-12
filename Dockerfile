@@ -54,11 +54,14 @@ COPY --from=frontend-build /frontend/dist /app/frontend/dist
 # undecryptable, and losing known_hosts silently resets SSH host-key
 # pinning), /data/logs and /data/scratch what can be lost. Images before
 # 0.5.0 kept the database and its siblings at /data itself; the entrypoint
-# moves them (app/data_layout.py). PERCHTAIL_INSTALL tells the Updates card
-# under Settings -> System which upgrade steps to show (#215).
+# moves them (app/data_layout.py). /data/backups holds the encrypted backups
+# `python -m app.backup` makes (docs/backup-and-restore.md); copy them off
+# the host. PERCHTAIL_INSTALL tells the Updates card under Settings ->
+# System which upgrade steps to show (#215).
 ENV DATA_DIR=/data/db \
     LOG_DIR=/data/logs \
     SCRATCH_DIR=/data/scratch \
+    BACKUP_DIR=/data/backups \
     AGENT_BINARIES_DIR=/app/agent-binaries \
     PERCHTAIL_INSTALL=docker
 

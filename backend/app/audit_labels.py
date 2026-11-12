@@ -29,7 +29,7 @@ from app.models import Alert, Customer, Folder, Rule, SeverityPattern, Source
 logger = get_logger(__name__)
 
 # Target types whose events never carry an id: there's nothing to name.
-UNNAMED_TARGET_TYPES = frozenset({"system_settings", "monitoring_token", "audit_log"})
+UNNAMED_TARGET_TYPES = frozenset({"system_settings", "monitoring_token", "audit_log", "backup"})
 
 _MAX_FOLDER_DEPTH = 64
 
