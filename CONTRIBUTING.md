@@ -74,6 +74,7 @@ up to date as the source of truth for design decisions.
 - `ruff` + `black` for lint/format — run both before opening a PR.
 - Tests via `pytest`. Mock the SSH/SMB/WinRM clients in unit tests; never hit a
   real remote host in CI.
+- Two backend tests cover every endpoint at once. `tests/test_every_endpoint_needs_auth.py` calls each operation without signing in and expects 401 or 403, except those in its `PUBLIC_OPERATIONS` list: a new endpoint that must be public goes in that list, with a one-line comment saying why. `tests/test_api_properties.py` runs Schemathesis against the OpenAPI schema as a super admin and fails on any 5xx; operations that would reach a source, agent, webhook, SSO provider or GitHub are excluded, and any other outbound connection fails the test. It runs 25 examples per operation with a fixed seed; set `SCHEMATHESIS_MAX_EXAMPLES` for a longer run by hand.
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
   (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`) — this drives the changelog.
 
