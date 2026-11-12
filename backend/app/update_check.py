@@ -8,7 +8,8 @@ available and how to do it.
   User-Agent: nothing about this install is sent. The ETag is kept, so a
   check that finds nothing new is a 304 and doesn't count against GitHub's
   limit of 60 requests an hour per IP.
-- `releases/latest` skips drafts and pre-releases, so a release candidate is
+- `releases/latest` skips drafts and pre-releases, and a tag that isn't a
+  final release is refused as well, so a beta or a release candidate is
   never offered.
 - HTTPS_PROXY and friends are honoured (trust_env).
 - A failure is logged (update_check.failed) and shown as "couldn't check",
@@ -30,7 +31,7 @@ from app.logging_config import get_logger
 from app.models import UpdateCheckState
 from app.timeutils import utcnow
 from app.version import APP_VERSION
-from app.versions import is_newer, parse_version
+from app.versions import is_final, is_newer, parse_version
 
 logger = get_logger(__name__)
 
@@ -92,6 +93,10 @@ def _apply_release(state: UpdateCheckState, release) -> None:
     tag = release.get("tag_name")
     if not isinstance(tag, str) or parse_version(tag) is None:
         raise ValueError(f"unexpected tag in the latest release: {str(tag)[:40]!r}")
+    if not is_final(tag):
+        # releases/latest already skips pre-releases; an install on a final
+        # release is never offered a beta or a release candidate regardless.
+        raise ValueError(f"the latest release is a pre-release: {tag[:40]!r}")
     url = release.get("html_url")
     name = release.get("name")
     state.latest_version = tag.removeprefix("v")

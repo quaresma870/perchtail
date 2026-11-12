@@ -68,6 +68,7 @@ release ships (0.x releases may include breaking changes between minors).
 - `docker-compose.yml` and the install docs recommend separate volumes for the database, scratch and logs (#345).
 - **Dead push-agent connections are noticed** (#333). The server pings each agent every 30 seconds and drops a connection it has heard nothing from for 90 seconds, so a connection a NAT or firewall dropped silently no longer shows the agent as connected; agents older than 0.7 answer too. The agent pings the server every 25 seconds and reconnects when it has heard nothing for 75 seconds, older servers included.
 - A push agent's reconnect delay starts again from 1 second after a connection that stayed up for a minute, and every delay is random between half and one and a half times the backoff (within 1 to 30 seconds), so agents don't all reconnect at the same moment after a server restart (#333).
+- Versions like `0.7.0-beta.1` are recognised alongside release candidates, ordered before them, so the server and push agents compare and upgrade between beta pre-releases. The update check never offers a pre-release to an install, even if GitHub's latest release were one.
 
 ### Removed
 - The full-text content index, the Search page, `GET /search`, the per-source "indexed for search" option and the Search setting (#303). Searching file names across sources is the file-name index (#304); watching for lines is live alerts (#305).

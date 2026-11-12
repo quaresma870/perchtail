@@ -130,6 +130,32 @@ def test_an_attempt_is_stored_and_succeeds_when_the_agent_returns_upgraded(sessi
     assert results == ["accepted", "succeeded"]
 
 
+@pytest.mark.parametrize(
+    "server, agent, reason",
+    [
+        ("0.7.0", "0.7.0-beta.2", None),  # a beta is upgraded to its final release
+        ("0.7.0-beta.2", "0.7.0-beta.1", None),  # and to a later beta
+        ("0.7.0-beta.2", "0.7.0", "isn't older than this server"),  # never down to a beta
+        ("0.7.0-rc.1", "0.7.0", "isn't older than this server"),
+    ],
+)
+def test_pre_releases_upgrade_only_upwards(session, registry, monkeypatch, server, agent, reason):
+    monkeypatch.setattr(agent_upgrades, "APP_VERSION", server)
+    source = _agent(session, version=agent)
+    registry.connected.add(source.id)
+
+    refused = agent_upgrades.not_upgradable(source)
+    if reason is None:
+        assert refused is None
+        started = start_upgrades(session, [(source.id, agent)], trigger="manual", user_id=None)
+        assert [s.result for s in started] == ["accepted"]
+        # The target is always this server's own version.
+        assert registry.sent[0][2]["version"] == server
+        assert _fresh(session, session.get(AgentUpgradeRun, started[0].run_id)).to_version == server
+    else:
+        assert reason in refused
+
+
 def test_an_agent_back_with_the_old_version_after_restarting_failed(session):
     source = _agent(session)
     run = _accept(session, source)
