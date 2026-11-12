@@ -123,6 +123,8 @@ therefore prepares a **draft**, and a maintainer publishes it.
 To fix a draft, push the fix, delete the draft and its tag, and run the
 workflow again. Once a release is published, a fix needs a new version.
 
+A fix for a released version that can't wait for the next one goes on a `hotfix/X.Y.Z` branch cut from `main`, which has the same rules as `dev` (changes by PR with CI green, no force push). Run the workflow from that branch ("Use workflow from" and the branch to tag both set to it); the workflow accepts a commit on the hotfix branch it runs from. Once the full release is published, merge the hotfix branch into `main` and `main` back into `dev`.
+
 ### Agent release signing key
 
 Push agents upgraded from the portal (#319) install a binary only if `SHA256SUMS` carries a valid Ed25519 signature from the release key, whose public half is built into the agent. The release workflow fails without the private key, and when it doesn't match the public key in the source. The maintainer's public key is already committed as `agent/internal/agent/upgrade_signing_key.pub`; the steps below set up a key pair from scratch, and are the same for a rotation:
@@ -135,7 +137,7 @@ Push agents upgraded from the portal (#319) install a binary only if `SHA256SUMS
    ```
 
 2. Replace `agent/internal/agent/upgrade_signing_key.pub` with the new `upgrade_signing_key.pub` (the public key, `-----BEGIN PUBLIC KEY-----`) and merge it through a PR like any other change. Agents built from then on verify upgrades with the new key.
-3. Create an environment named `release` (Settings → Environments), limit its deployment branches to `dev` and `main`, and add the environment secret `AGENT_SIGNING_KEY` there with the whole content of `agent-signing.pem`, the private key (`-----BEGIN PRIVATE KEY-----` lines included). An environment secret, not a repository secret: only the release workflow's `agent` job names that environment, so a workflow pushed on another branch can't read the key.
+3. Create an environment named `release` (Settings → Environments), limit its deployment branches to `dev`, `main` and `hotfix/*`, and add the environment secret `AGENT_SIGNING_KEY` there with the whole content of `agent-signing.pem`, the private key (`-----BEGIN PRIVATE KEY-----` lines included). An environment secret, not a repository secret: only the release workflow's `agent` job names that environment, so a workflow pushed on another branch can't read the key.
 4. Keep `agent-signing.pem` offline (an encrypted backup, a password manager), and never commit it. Losing it means new agents need a new public key and the agents already installed can't verify upgrades signed with another one: they would have to be upgraded by hand once.
 
 Rotating the key works the same way, and has the same cost: agents built with the old public key refuse releases signed with the new one, so each of them is upgraded by hand once.
