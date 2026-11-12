@@ -89,6 +89,7 @@ use absolute paths:
 | `DATA_DIR` | `/var/lib/perchtail/db` | database, credential salt, SSH `known_hosts` (back this up) |
 | `LOG_DIR` | `/var/log/perchtail` | the app's own logs, rotated by size and day |
 | `SCRATCH_DIR` | `/var/lib/perchtail/scratch` | short-lived fetches, purged on close |
+| `BACKUP_DIR` | `/var/lib/perchtail/backups` (the default next to `DATA_DIR`) | encrypted backups made by `python -m app.backup` |
 
 ```bash
 sudo install -d -o perchtail -g perchtail -m 0700 /var/lib/perchtail /var/lib/perchtail/db /var/lib/perchtail/scratch
@@ -106,7 +107,17 @@ covers scratch.
 Keep `DATA_DIR` on a local disk. The database runs in SQLite's WAL mode,
 which doesn't work over a network share. On every start, PerchTail sets
 `DATA_DIR` so that only its own user can read it (directory `0700`, files
-`0600`).
+`0600`), and `BACKUP_DIR` too.
+
+Back up `DATA_DIR` with `python -m app.backup`, run as the `perchtail` user with the service's environment file, while PerchTail runs:
+
+```bash
+sudo systemd-run --pipe --wait --uid=perchtail --gid=perchtail \
+  -p EnvironmentFile=/etc/perchtail/perchtail.env -p WorkingDirectory=/opt/perchtail/backend \
+  /opt/perchtail-venv/bin/python -m app.backup create
+```
+
+[backup-and-restore.md](backup-and-restore.md) covers scheduled backups, the keys, checking and restoring a backup, and copying backups off the host.
 
 ## 5. Configure
 
@@ -195,8 +206,10 @@ cd ~/perchtail-build
 git fetch --tags && git checkout "$PERCHTAIL_TAG"
 (cd frontend && npm ci && npm run build)
 
+sudo systemd-run --pipe --wait --uid=perchtail --gid=perchtail \
+  -p EnvironmentFile=/etc/perchtail/perchtail.env -p WorkingDirectory=/opt/perchtail/backend \
+  /opt/perchtail-venv/bin/python -m app.backup create --reason pre-upgrade
 sudo systemctl stop perchtail
-sudo cp -a /var/lib/perchtail/db "/var/lib/perchtail/db.backup-$(date +%F)"
 sudo rsync -a --chown=root:root --delete --exclude .git --exclude frontend/node_modules ~/perchtail-build/ /opt/perchtail/
 sudo /opt/perchtail-venv/bin/pip install -r /opt/perchtail/backend/requirements.txt
 sudo systemctl start perchtail          # migrates on start
@@ -204,6 +217,16 @@ sudo systemctl start perchtail          # migrates on start
 
 Read the release's CHANGELOG entry first; it says when an upgrade needs
 anything more than this.
+
+The first command makes an encrypted `pre-upgrade` backup while the old version still runs.
+
+Upgrading from a release before 0.7.0: the command doesn't exist there yet, so stop PerchTail and copy `DATA_DIR` (and, for a source install, the database and salt files if they live outside it) as before. In place of the `systemd-run` command, after `sudo systemctl stop perchtail`:
+
+```bash
+sudo cp -a /var/lib/perchtail/db "/var/lib/perchtail/db.backup-$(date +%F)"
+```
+
+To roll the upgrade back, check out and install the previous tag the same way, restore that backup with PerchTail stopped, and start it again ([backup-and-restore.md](backup-and-restore.md#rolling-back-an-upgrade)).
 
 If you installed with this guide before 0.5.2, `/opt/perchtail` belongs
 to your build account. Fix it once with

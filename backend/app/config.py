@@ -180,6 +180,16 @@ class Settings(BaseSettings):
     probe_allowed_networks: str = ""
     monitoring_allowed_networks: str = ""
 
+    # Online backups (#334, app/backup.py): where `python -m app.backup create`
+    # and the scheduled backup write their encrypted archives (by default
+    # `backups` next to DATA_DIR, /data/backups in the image), how many
+    # manual and scheduled ones to keep (the last 3 pre-upgrade ones are kept
+    # on their own), and an optional key of their own. Without it, the
+    # archive key is derived from CREDENTIAL_ENCRYPTION_KEY.
+    backup_dir: str = ""
+    backup_keep: int = 7
+    backup_encryption_key: str = ""
+
     # Which of the three DATA_DIR paths were left to default, so the legacy
     # layout move (app/data_layout.py) never touches an explicit setting.
     derived_from_data_dir: frozenset[str] = frozenset()
@@ -197,6 +207,9 @@ class Settings(BaseSettings):
             self.ssh_known_hosts_path = os.path.join(self.data_dir, "ssh_known_hosts")
             derived.add("ssh_known_hosts")
         self.derived_from_data_dir = frozenset(derived)
+        if not self.backup_dir:
+            parent = os.path.dirname(os.path.normpath(self.data_dir)) or "."
+            self.backup_dir = os.path.join(parent, "backups")
         return self
 
     @model_validator(mode="after")

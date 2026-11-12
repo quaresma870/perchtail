@@ -24,9 +24,7 @@ only derives the *new* one (see the KDF's own startup check in
   it started with) for the duration of the rotation window — if it re-encrypts
   something mid-rotation, that row could end up back under the old key after
   this script already moved past it.
-- Have a **backup of the database file** before running this, same as before
-  any operation that rewrites every credential row. `docker compose stop` and
-  copy the volume, or your usual backup process.
+- Make a **backup** before running this, same as before any operation that rewrites every credential row: `docker compose exec -u perchtail perchtail python -m app.backup create`, then `verify` it ([backup-and-restore.md](backup-and-restore.md)).
 
 ## Running it
 
@@ -59,6 +57,8 @@ error explaining which row failed.
 Update `CREDENTIAL_ENCRYPTION_KEY` in `.env` to the new value and restart the
 app. The database now only decrypts correctly under the new key — the old one
 no longer works, by design.
+
+**Backups made before the rotation still need the old key.** The credentials inside them are encrypted under it, and, unless `BACKUP_ENCRYPTION_KEY` is set, so are the backup files themselves. Keep the old key, labelled with the date it was retired, for as long as you keep those backups, and make a new backup right away so the latest one uses the new key. See [backup-and-restore.md](backup-and-restore.md#the-key).
 
 ## Generating a new key
 
