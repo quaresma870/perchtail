@@ -28,6 +28,15 @@ logger = get_logger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
+# Keepalive (#333): the server pings each agent this often, and drops a
+# connection it has heard nothing from (no answer, no message) for
+# AGENT_DEAD_AFTER_SECONDS -- a half-open connection a NAT or firewall
+# dropped silently would otherwise keep showing the agent as connected.
+# Any message counts, so agents older than 0.7, which answer "ping" with an
+# unknown_error, are kept as well.
+AGENT_PING_INTERVAL_SECONDS = 30.0
+AGENT_DEAD_AFTER_SECONDS = 90.0
+
 
 class AgentError(Exception):
     """Base for every agent-connector failure — collectors/agent.py lets
@@ -46,12 +55,23 @@ class AgentTimeoutError(AgentError):
 class AgentCommandError(AgentError):
     """The agent itself reported a failure (e.g. path not found) via a
     `*_error` message. `code` is "too_large" (with `size`) when a streamed
-    fetch is over the limit (#205); None otherwise, and from older agents."""
+    fetch is over the limit (#205); None otherwise, and from older agents.
+    `message_type` is the message's own type: "unknown_error" means the
+    agent doesn't know the command (#319: an agent older than 0.7 asked to
+    upgrade)."""
 
-    def __init__(self, message: str, *, code: str | None = None, size: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        size: int | None = None,
+        message_type: str | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.size = size
+        self.message_type = message_type
 
 
 @dataclass
@@ -71,6 +91,8 @@ class _AgentConnection:
     websocket: WebSocket
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
     streams: dict[str, _Stream] = field(default_factory=dict)
+    # When the agent last sent anything (#333), for the keepalive.
+    last_message_at: float = field(default_factory=time.monotonic)
 
 
 def _fail_pending(connection: _AgentConnection, reason: str) -> None:
@@ -176,6 +198,53 @@ class AgentRegistry:
         asyncio.run_coroutine_threadsafe(_close(connection, reason), loop)
         return True
 
+    def is_current(self, source_id: int, websocket: WebSocket) -> bool:
+        """Whether `websocket` is still the source's registered connection."""
+        with self._lock:
+            connection = self._connections.get(source_id)
+        return connection is not None and connection.websocket is websocket
+
+    def touch(self, source_id: int, websocket: WebSocket) -> None:
+        """Records that the agent just sent something (#333)."""
+        with self._lock:
+            connection = self._connections.get(source_id)
+        if connection is not None and connection.websocket is websocket:
+            connection.last_message_at = time.monotonic()
+
+    async def watch(
+        self,
+        source_id: int,
+        websocket: WebSocket,
+        *,
+        interval: float = AGENT_PING_INTERVAL_SECONDS,
+        dead_after: float = AGENT_DEAD_AFTER_SECONDS,
+    ) -> bool:
+        """The keepalive for one connection (#333), run alongside its receive
+        loop: pings the agent every `interval` and returns True once nothing
+        has come from it for `dead_after` -- the connection is then
+        unregistered, so the source shows as disconnected, and the caller
+        closes the socket. Returns False when the connection was replaced or
+        unregistered in the meantime."""
+        while True:
+            await asyncio.sleep(interval)
+            with self._lock:
+                connection = self._connections.get(source_id)
+            if connection is None or connection.websocket is not websocket:
+                return False
+            silent = time.monotonic() - connection.last_message_at
+            if silent >= dead_after:
+                logger.warning(
+                    "agent.connection_dead", source_id=source_id, silent_seconds=round(silent)
+                )
+                self.unregister(source_id, websocket)
+                return True
+            try:
+                await websocket.send_json({"type": "ping", "id": f"ping-{uuid.uuid4()}"})
+            except Exception as exc:  # noqa: BLE001 - the connection may be gone
+                logger.info("agent.ping_failed", source_id=source_id, error=str(exc))
+                self.unregister(source_id, websocket)
+                return True
+
     def resolve_response(
         self, source_id: int, message: dict, websocket: WebSocket | None = None
     ) -> None:
@@ -193,13 +262,15 @@ class AgentRegistry:
         future = connection.pending.get(request_id)
         if future is None or future.done():
             return
-        if message.get("type", "").endswith("_error"):
+        message_type = message.get("type", "")
+        if isinstance(message_type, str) and message_type.endswith("_error"):
             code = message.get("code")
             future.set_exception(
                 AgentCommandError(
                     str(message.get("error", "agent command failed")),
                     code=code if isinstance(code, str) else None,
                     size=as_int(message.get("size")),
+                    message_type=message_type,
                 )
             )
             return
@@ -324,6 +395,7 @@ class AgentRegistry:
         *,
         sink: BinaryIO | None = None,
         limit: int | None = None,
+        command_id: str | None = None,
         **fields,
     ) -> dict:
         """The entry point collectors/agent.py actually calls — runs on
@@ -334,11 +406,12 @@ class AgentRegistry:
         With `sink`, `fetch_chunk` messages for this command are written to
         it as they arrive, refusing more than `limit` bytes (#205); the
         timeout then applies to the wait for each chunk, not to the whole
-        transfer."""
+        transfer. `command_id` sets the command's id, for a caller that
+        tracks later messages about it (an upgrade's progress, #319)."""
         if self._loop is None:
             raise AgentNotConnectedError("agent registry has no event loop bound yet")
 
-        command = {"type": command_type, "id": str(uuid.uuid4()), **fields}
+        command = {**fields, "type": command_type, "id": command_id or str(uuid.uuid4())}
         future = asyncio.run_coroutine_threadsafe(
             self._send_command(source_id, command, timeout, sink=sink, limit=limit), self._loop
         )

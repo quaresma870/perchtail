@@ -61,6 +61,7 @@ A source:
 | `enabled` | no | default `true` |
 | `search_indexing_enabled` | no | removed in 0.7 with the content index: ignored with a warning, refused from 1.0 |
 | `name_index_enabled` | no | default `true`: the source's file names (never content) go into the file-name index |
+| `agent_upgrade_policy` | no | push-agent sources only: `inherit` (default, follows Settings → Agents), `off`, `manual` or `automatic`; see [agent upgrades](../agent/README.md#upgrades-from-the-portal) |
 | `credential` | no | `username` plus `password` or `private_key`; see below |
 | `rules` | no | replaces the source's rules when given; leave it out to keep the rules it has |
 

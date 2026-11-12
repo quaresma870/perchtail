@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 
 from app import source_roots, source_status, system_settings
 from app.agent_registry import disconnect_after_commit, get_agent_registry
+from app.agent_upgrades import delete_runs as delete_agent_upgrade_runs
 from app.alerts import drop_scoped_alerts, forget_source
 from app.api.archive import SOURCE_DISABLED
 from app.api.auth import get_current_active_user
@@ -731,6 +732,7 @@ def delete_source(
     forget_source(session, source_id)
     session.execute(sa_delete(FileNameEntry).where(FileNameEntry.source_id == source_id))
     drop_scoped_alerts(session, source_id=source_id)
+    delete_agent_upgrade_runs(session, source_id)
     for row in session.exec(
         select(SeverityPattern).where(SeverityPattern.source_id == source_id)
     ).all():

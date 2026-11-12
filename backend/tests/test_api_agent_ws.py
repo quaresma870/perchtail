@@ -381,3 +381,130 @@ def test_a_token_regenerated_during_the_handshake_still_closes_the_connection(se
         except WebSocketDisconnect as exc:
             code = exc.code
     assert code == 1008
+
+
+# --- keepalive (#333) ---------------------------------------------------------
+
+
+def test_a_silent_agent_is_disconnected_and_its_socket_closed(session, monkeypatch):
+    from app import agent_registry as registry_module
+
+    monkeypatch.setattr(registry_module, "AGENT_PING_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(registry_module, "AGENT_DEAD_AFTER_SECONDS", 0.4)
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    with client.websocket_connect(
+        "/agent/connect", headers={"authorization": "Bearer s3cret"}
+    ) as ws:
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        # The server pings; this agent never answers.
+        assert ws.receive_json()["type"] == "ping"
+        assert _wait_until(lambda: not registry.is_connected(source.id), timeout=3)
+        code = None
+        try:
+            while True:
+                ws.receive_json()
+        except WebSocketDisconnect as exc:
+            code = exc.code
+        assert code == 1001
+
+
+def test_an_agent_that_answers_pings_stays_connected(session, monkeypatch):
+    from app import agent_registry as registry_module
+
+    monkeypatch.setattr(registry_module, "AGENT_PING_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(registry_module, "AGENT_DEAD_AFTER_SECONDS", 0.4)
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    with client.websocket_connect(
+        "/agent/connect", headers={"authorization": "Bearer s3cret"}
+    ) as ws:
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            ping = ws.receive_json()
+            assert ping["type"] == "ping"
+            ws.send_json({"type": "pong", "id": ping["id"]})
+        assert registry.is_connected(source.id)
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+
+
+# --- upgrades from the portal (#319) -------------------------------------------
+
+
+def test_upgrade_progress_and_the_reconnect_reach_the_attempt(session):
+    from app.agent_upgrades import begin_run
+    from app.models import AgentUpgradeRun
+    from app.version import APP_VERSION
+
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+
+    def status():
+        session.expire_all()
+        return session.get(AgentUpgradeRun, run_id).status
+
+    headers = {"authorization": "Bearer s3cret", "x-perchtail-agent-version": "0.0.1"}
+    with client.websocket_connect("/agent/connect", headers=headers) as ws:
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        run = begin_run(session, source.id, "0.0.1", trigger="manual", user_id=None)
+        run_id, command_id = run.id, run.command_id
+        ws.send_json(
+            {"type": "upgrade_progress", "id": command_id, "stage": "downloading", "detail": "x"}
+        )
+        assert _wait_until(lambda: status() == "downloading")
+        ws.send_json({"type": "upgrade_progress", "id": command_id, "stage": "restarting"})
+        assert _wait_until(lambda: status() == "restarting")
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+
+    # The agent restarted into the new version and connects again.
+    headers["x-perchtail-agent-version"] = APP_VERSION
+    with client.websocket_connect("/agent/connect", headers=headers):
+        assert _wait_until(lambda: status() == "succeeded")
+
+
+def _binaries(tmp_path, monkeypatch):
+    from app.config import get_settings
+    from app.version import APP_VERSION
+
+    name = f"perchtail-agent-{APP_VERSION}-linux-amd64"
+    (tmp_path / name).write_bytes(b"agent binary")
+    (tmp_path / "SHA256SUMS").write_text(f"{'0' * 64}  {name}\n", encoding="utf-8")
+    (tmp_path / "SHA256SUMS.sig").write_bytes(b"s" * 64)
+    monkeypatch.setattr(get_settings(), "agent_binaries_dir", str(tmp_path))
+    return name
+
+
+def test_the_bundled_binaries_are_served_to_an_agent_with_its_token(session, tmp_path, monkeypatch):
+    name = _binaries(tmp_path, monkeypatch)
+    _agent_source(session, "s3cret")
+    client = _client(session)
+    auth = {"authorization": "Bearer s3cret"}
+    response = client.get(f"/agent/binaries/{name}", headers=auth)
+    assert response.status_code == 200
+    assert response.content == b"agent binary"
+    assert client.get("/agent/binaries/SHA256SUMS.sig", headers=auth).status_code == 200
+    assert client.get("/agent/binaries/other-file", headers=auth).status_code == 404
+
+
+def test_the_bundled_binaries_need_a_valid_agent_token(session, tmp_path, monkeypatch):
+    name = _binaries(tmp_path, monkeypatch)
+    _agent_source(session, "s3cret")
+    disabled = Source(
+        name="agent02",
+        protocol=Protocol.agent,
+        host="agent02",
+        base_path="/var/log/app",
+        agent_token_hash=_hash_token("disabled-token"),
+        enabled=False,
+    )
+    session.add(disabled)
+    session.commit()
+    client = _client(session)
+    assert client.get(f"/agent/binaries/{name}").status_code == 401
+    for token in ("wrong", "disabled-token"):
+        headers = {"authorization": f"Bearer {token}"}
+        assert client.get(f"/agent/binaries/{name}", headers=headers).status_code == 401

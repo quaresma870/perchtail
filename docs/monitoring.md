@@ -165,7 +165,7 @@ Timestamps are UTC, without a time zone (`next_run_at` has one). Fields that can
 | `logs.used_bytes`, `logs.max_total_bytes`, `logs.retention_days` | PerchTail's own logs under `LOG_DIR`, against `LOG_MAX_TOTAL_MB` and `LOG_RETENTION_DAYS`. |
 | `logs.size_limit_deleted_early`, `logs.size_limit_deleted_files`, `logs.size_limit_newest_deleted_day` | `true` once `LOG_MAX_TOTAL_MB` has deleted archives that `LOG_RETENTION_DAYS` would still have kept, usually because `LOG_LEVEL=DEBUG` was left on: you have less log history than configured. Lower the log level, set `LOG_QUIET_THIRD_PARTY=true`, or give the logs more space. |
 
-The background jobs are `scratch_idle_sweep`, `scratch_size_guard`, `alert_pass`, `name_index_sweep`, `source_checks`, `audit_purge`, `session_purge`, `update_check`, `audit_integrity_check` and `wal_checkpoint`.
+The background jobs are `scratch_idle_sweep`, `scratch_size_guard`, `alert_pass`, `name_index_sweep`, `source_checks`, `agent_upgrades`, `audit_purge`, `session_purge`, `update_check`, `audit_integrity_check` and `wal_checkpoint`.
 
 ## When the status degrades
 

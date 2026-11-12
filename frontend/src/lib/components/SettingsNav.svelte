@@ -10,6 +10,7 @@
   <a href="#/settings/sources" class:active={isActive('/settings/sources')}>Sources</a>
   {#if hasCapability($currentUser, 'create_source')}
     <a href="#/settings/folders" class:active={isActive('/settings/folders')}>Folders</a>
+    <a href="#/settings/agents" class:active={isActive('/settings/agents')}>Agents</a>
   {/if}
   {#if hasCapability($currentUser, 'manage_roles')}
     <a href="#/settings/roles" class:active={isActive('/settings/roles')}>Roles</a>

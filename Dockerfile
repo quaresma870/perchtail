@@ -37,6 +37,12 @@ COPY backend/alembic.ini .
 COPY backend/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
+# The signed push-agent binaries of this version (#319), which agents
+# upgraded from the portal download from the server (app/agent_upgrades.py).
+# The release workflow puts them in agent-dist/; in any other build the
+# folder only holds its .gitkeep, and agents use the GitHub release instead.
+COPY agent-dist/ /app/agent-binaries/
+
 # Sibling of backend/, matching the repo layout — app/main.py locates it via
 # a path relative to itself, so this placement isn't arbitrary.
 COPY --from=frontend-build /frontend/dist /app/frontend/dist
@@ -53,6 +59,7 @@ COPY --from=frontend-build /frontend/dist /app/frontend/dist
 ENV DATA_DIR=/data/db \
     LOG_DIR=/data/logs \
     SCRATCH_DIR=/data/scratch \
+    AGENT_BINARIES_DIR=/app/agent-binaries \
     PERCHTAIL_INSTALL=docker
 
 EXPOSE 8000

@@ -109,7 +109,7 @@ func TestConnectSendsOSHeader(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{ServerURL: "ws" + strings.TrimPrefix(server.URL, "http"), Token: "t"}
-	_ = connectAndServe(context.Background(), cfg)
+	_, _ = connectAndServe(context.Background(), cfg, newUpgrader(cfg))
 
 	if reported := <-got; reported != runtime.GOOS {
 		t.Fatalf("OS header = %q, want %q", reported, runtime.GOOS)
@@ -182,7 +182,7 @@ func TestConnectSendsTheAgentVersion(t *testing.T) {
 	Version = "0.6.0"
 	defer func() { Version = previous }()
 	cfg := Config{ServerURL: "ws" + strings.TrimPrefix(server.URL, "http"), Token: "t"}
-	_ = connectAndServe(context.Background(), cfg)
+	_, _ = connectAndServe(context.Background(), cfg, newUpgrader(cfg))
 
 	if reported := <-got; reported != "0.6.0" {
 		t.Fatalf("version header = %q, want 0.6.0", reported)

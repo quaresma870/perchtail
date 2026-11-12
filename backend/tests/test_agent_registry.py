@@ -367,3 +367,100 @@ def test_a_completed_stream_sends_no_cancel(loop_in_thread, streaming_registry):
     registry, ws = streaming_registry
     _streamed_fetch(loop_in_thread, registry, ws, [_chunk(0, b"abcd"), _end(1, 4)])
     assert [message["type"] for message in ws.sent] == ["fetch"]
+
+
+def test_an_unknown_command_error_keeps_its_type(loop_in_thread):
+    # #319: an agent older than 0.7 answers "upgrade" with unknown_error,
+    # which the server reports as "too old to upgrade remotely".
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = FakeWebSocket()
+    registry.register(1, ws)
+
+    def responder():
+        assert _wait_until(lambda: len(ws.sent) > 0)
+        loop_in_thread.call_soon_threadsafe(
+            registry.resolve_response,
+            1,
+            {"type": "unknown_error", "id": ws.sent[0]["id"], "error": "unknown command"},
+        )
+
+    thread = threading.Thread(target=responder)
+    thread.start()
+    try:
+        with pytest.raises(AgentCommandError) as caught:
+            registry.send_command_sync(
+                1, "upgrade", timeout=2, command_id="upgrade-1", version="0.7.0"
+            )
+        assert caught.value.message_type == "unknown_error"
+        assert ws.sent[0] == {"type": "upgrade", "id": "upgrade-1", "version": "0.7.0"}
+    finally:
+        thread.join(timeout=2)
+        registry.unregister(1)
+
+
+# --- keepalive (#333) -------------------------------------------------------
+
+
+def test_the_keepalive_drops_a_silent_agent(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = FakeWebSocket()
+    registry.register(1, ws)
+    started = time.monotonic()
+    watch = asyncio.run_coroutine_threadsafe(
+        registry.watch(1, ws, interval=0.05, dead_after=0.3), loop_in_thread
+    )
+    assert watch.result(timeout=3) is True
+    assert time.monotonic() - started >= 0.3
+    assert not registry.is_connected(1)
+    # It pinged before giving up.
+    assert any(message["type"] == "ping" for message in ws.sent)
+
+
+def test_the_keepalive_keeps_an_agent_that_answers(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = FakeWebSocket()
+    registry.register(1, ws)
+    watch = asyncio.run_coroutine_threadsafe(
+        registry.watch(1, ws, interval=0.05, dead_after=0.3), loop_in_thread
+    )
+    deadline = time.monotonic() + 0.9
+    while time.monotonic() < deadline:
+        registry.touch(1, ws)  # the agent's pongs and messages
+        time.sleep(0.05)
+    assert not watch.done()
+    assert registry.is_connected(1)
+    registry.unregister(1)
+    assert watch.result(timeout=3) is False
+
+
+def test_the_keepalive_of_a_replaced_connection_just_ends(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    old, new = FakeWebSocket(), FakeWebSocket()
+    registry.register(1, old)
+    watch = asyncio.run_coroutine_threadsafe(
+        registry.watch(1, old, interval=0.05, dead_after=10), loop_in_thread
+    )
+    registry.register(1, new)
+    assert watch.result(timeout=3) is False
+    assert registry.is_connected(1)
+    registry.unregister(1)
+
+
+def test_a_failed_ping_drops_the_connection(loop_in_thread):
+    class BrokenWebSocket(FakeWebSocket):
+        async def send_json(self, data):
+            raise RuntimeError("connection reset")
+
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = BrokenWebSocket()
+    registry.register(1, ws)
+    watch = asyncio.run_coroutine_threadsafe(
+        registry.watch(1, ws, interval=0.05, dead_after=10), loop_in_thread
+    )
+    assert watch.result(timeout=3) is True
+    assert not registry.is_connected(1)

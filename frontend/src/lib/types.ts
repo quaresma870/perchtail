@@ -386,3 +386,102 @@ export interface MonitoringTokenResult {
 export interface MonitoringTokenStatus {
   configured: boolean
 }
+
+// Push-agent upgrades from the portal (#319), Settings -> Agents.
+export type AgentUpgradeSystemPolicy = 'off' | 'manual' | 'automatic'
+export type AgentUpgradePolicy = 'inherit' | AgentUpgradeSystemPolicy
+
+export type AgentUpgradeStatus =
+  | 'requested'
+  | 'accepted'
+  | 'downloading'
+  | 'installing'
+  | 'restarting'
+  | 'succeeded'
+  | 'failed'
+  | 'refused'
+  | 'too_old'
+  | 'timeout'
+
+// One upgrade attempt.
+export interface AgentUpgradeRun {
+  id: number
+  status: AgentUpgradeStatus
+  message: string | null
+  from_version: string | null
+  to_version: string
+  trigger: 'manual' | 'automatic'
+  // Who asked; null when the schedule did.
+  requested_by: string | null
+  started_at: string
+  finished_at: string | null
+  // This failure reached the failure limit and suspended automatic upgrades.
+  suspended_source: boolean
+}
+
+export interface AgentUpgradeWindowSummary {
+  start: string
+  end: string
+  upgraded: number
+  failed: number
+  suspended: number
+  running: number
+}
+
+// GET /agent-upgrades: the settings, the window, and what the server offers.
+export interface AgentUpgradeOverview {
+  policy: AgentUpgradeSystemPolicy
+  // 0 = Monday.
+  window_days: number[]
+  window_start: string
+  window_hours: number
+  failure_limit: number
+  concurrency: number
+  // The server's time zone, which the window is in.
+  timezone: string
+  window_open: boolean
+  next_window_start: string | null
+  last_window: AgentUpgradeWindowSummary | null
+  version: string
+  bundled: boolean
+  bundled_reason: string | null
+}
+
+// GET /agent-upgrades/agents: one row per push-agent source.
+export interface AgentRow {
+  source_id: number
+  name: string
+  customer: string | null
+  enabled: boolean
+  connected: boolean
+  agent_version: string | null
+  outdated: boolean
+  policy: AgentUpgradePolicy
+  effective_policy: AgentUpgradeSystemPolicy
+  failures: number
+  suspended: boolean
+  // Why Upgrade can't start now, or null.
+  blocker: string | null
+  last_run: AgentUpgradeRun | null
+  upgrading: boolean
+}
+
+export interface AgentUpgradeHistory {
+  total: number
+  items: AgentUpgradeRun[]
+}
+
+export type AgentUpgradeResult = 'accepted' | 'refused' | 'too_old' | 'failed' | 'busy'
+
+export interface AgentUpgradeStarted {
+  result: AgentUpgradeResult
+  detail: string | null
+  run: AgentUpgradeRun | null
+}
+
+export interface BulkAgentUpgradeResult {
+  source_id: number
+  name: string | null
+  result: AgentUpgradeResult | 'skipped'
+  detail: string | null
+}

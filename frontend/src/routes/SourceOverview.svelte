@@ -3,11 +3,18 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser, hasCapability } from '../lib/auth'
+  import { runStatusText, statusTone } from '../lib/agent-upgrade'
   import RuleEditor from '../lib/components/RuleEditor.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import { justCreatedSourceId } from '../lib/source-created'
   import { ago } from '../lib/source-status'
-  import type { AgentTokenResult, ConnectionCheckResult, Source } from '../lib/types'
+  import type {
+    AgentTokenResult,
+    AgentUpgradeHistory,
+    AgentUpgradeRun,
+    ConnectionCheckResult,
+    Source,
+  } from '../lib/types'
 
   /** Read-only overview of a source -- where creating one lands (#157),
    * instead of back on its edit form. Shows what the source is, whether it
@@ -61,12 +68,21 @@
     source = null
     check = null
     agentToken = ''
+    lastUpgrade = null
     tokenError = ''
     try {
       const loaded = await api.get<Source>(`/sources/${id}`)
       if (id !== sourceId) return // a newer load took over
       source = loaded
       ruleCount = loaded.rule_count
+      if (loaded.protocol === 'agent' && !loaded.is_system && hasCapability($currentUser, 'create_source')) {
+        api
+          .get<AgentUpgradeHistory>(`/sources/${id}/agent-upgrades?limit=1`)
+          .then((history) => {
+            if (id === sourceId) lastUpgrade = history.items[0] ?? null
+          })
+          .catch(() => {})
+      }
     } catch (err) {
       if (id !== sourceId) return
       error = err instanceof ApiError ? err.detail : 'Failed to load source'
@@ -120,6 +136,9 @@
       generatingToken = false
     }
   }
+
+  // The last upgrade from the portal (#319); Settings -> Agents has the rest.
+  let lastUpgrade: AgentUpgradeRun | null = null
 
   onDestroy(() => {
     unsubscribe()
@@ -236,6 +255,16 @@
           {:else}
             not reported yet (agent older than 0.6, or never connected)
           {/if}
+          {#if canManage}
+            {#if lastUpgrade}
+              <p class="upgrade-status upgrade-{statusTone(lastUpgrade.status)}" role="status">
+                Last upgrade, {ago(lastUpgrade.started_at, new Date())}: {runStatusText(lastUpgrade)}
+              </p>
+            {/if}
+            <p class="upgrade-status">
+              <a href="#/settings/agents">{source.agent_outdated ? 'Upgrade it from Settings → Agents' : 'Agent upgrades: Settings → Agents'}</a>
+            </p>
+          {/if}
         </dd>
       {/if}
       <dt>File names</dt>
@@ -298,6 +327,18 @@
 <style>
   .agent-outdated {
     color: var(--warning);
+  }
+  .upgrade-status {
+    margin: 0.3rem 0 0;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    word-break: normal;
+  }
+  .upgrade-status.upgrade-fail {
+    color: var(--danger);
+  }
+  .upgrade-status.upgrade-ok {
+    color: var(--success, #34d399);
   }
   .http-warning {
     margin: 0.3rem 0 0;

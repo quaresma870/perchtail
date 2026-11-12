@@ -13,6 +13,11 @@ import (
 // link would expose both to anyone on the path.
 const allowInsecureEnv = "PERCHTAIL_ALLOW_INSECURE"
 
+// remoteUpgradeEnv is the host's say over upgrades from the portal (#319):
+// "false" refuses every upgrade command, whatever the server asks. Unset
+// allows them (the server has its own switch, off by default).
+const remoteUpgradeEnv = "PERCHTAIL_REMOTE_UPGRADE"
+
 // Config holds everything the agent needs to dial out to a PerchTail
 // connector and answer live list/fetch commands against a local directory
 // tree. Per ROADMAP.md's Phase 2 design, the agent only ever dials out and
@@ -22,9 +27,12 @@ type Config struct {
 	ServerURL string // e.g. wss://perchtail.example.com/agent/connect
 	Token     string // enrollment token from POST /sources/{id}/agent-token
 	BasePath  string // local root the agent is allowed to read from
+	// Whether the host allows upgrades from the portal (#319); see
+	// remoteUpgradeEnv.
+	RemoteUpgrade bool
 }
 
-// LoadConfig reads the three required settings via getenv (os.Getenv in
+// LoadConfig reads the three required settings and the optional ones via getenv (os.Getenv in
 // production; a fake lookup in tests, so no env-var pollution is needed to
 // exercise the validation paths).
 func LoadConfig(getenv func(string) string) (Config, error) {
@@ -43,6 +51,16 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}
 	if err := checkServerURL(cfg.ServerURL, isTruthy(getenv(allowInsecureEnv))); err != nil {
 		return cfg, err
+	}
+	// A typo must not silently leave upgrades on for a host that meant to
+	// turn them off, so anything but a clear yes or no stops the agent.
+	switch raw := getenv(remoteUpgradeEnv); {
+	case strings.TrimSpace(raw) == "" || isTruthy(raw):
+		cfg.RemoteUpgrade = true
+	case isFalsy(raw):
+		cfg.RemoteUpgrade = false
+	default:
+		return cfg, fmt.Errorf("%s must be true or false (got %q)", remoteUpgradeEnv, raw)
 	}
 	return cfg, nil
 }
@@ -71,6 +89,14 @@ func checkServerURL(raw string, allowInsecure bool) error {
 func isTruthy(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+func isFalsy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "no", "off":
 		return true
 	}
 	return false

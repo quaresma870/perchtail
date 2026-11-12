@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -26,6 +27,14 @@ func main() {
 	defer stop()
 
 	if err := agent.Run(ctx, cfg); err != nil {
+		if errors.Is(err, agent.ErrRestart) {
+			// An upgrade from the portal was installed (#319) where the
+			// agent can't restart itself in place (Windows): the service
+			// manager starts the new binary when this exits.
+			log.Printf("agent: %v", err)
+			stop()
+			os.Exit(agent.ExitCodeRestart)
+		}
 		log.Fatalf("agent: %v", err)
 	}
 }
