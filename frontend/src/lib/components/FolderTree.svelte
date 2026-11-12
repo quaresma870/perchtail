@@ -193,7 +193,7 @@
     <button
       class="label"
       style="padding-left: {depth * 14}px"
-      aria-label={entry.name}
+      aria-label={entry.is_dir ? entry.name : `${entry.name}, ${formatSize(entry.size)}`}
       title={entry.is_dir ? undefined : fileDetails(entry)}
       on:click={toggle}
     >

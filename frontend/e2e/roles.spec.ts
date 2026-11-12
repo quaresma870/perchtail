@@ -56,8 +56,8 @@ test('roles: create, global capabilities, grants (add + remove), duplicate, dele
   const addGrantForm = page.locator('.add-grant')
   await addGrantForm.locator('select').first().selectOption('customer')
   await addGrantForm.locator('select').nth(1).selectOption({ label: customerName })
-  await addGrantForm.getByLabel('view', { exact: true }).check()
-  await addGrantForm.getByLabel('download', { exact: true }).check()
+  await addGrantForm.getByLabel('Grant view', { exact: true }).check()
+  await addGrantForm.getByLabel('Grant download', { exact: true }).check()
   await addGrantForm.getByRole('button', { name: 'Add grant' }).click()
 
   const grantRow = page.getByRole('row', { name: new RegExp(customerName) })

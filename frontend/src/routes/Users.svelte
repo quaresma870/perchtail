@@ -308,6 +308,7 @@
               <td>
                 <select
                   class="input"
+                  aria-label="Role of {user.username}"
                   value={user.role_id}
                   on:change={(e) =>
                     changeRole(user, Number((e.target as HTMLSelectElement).value))}

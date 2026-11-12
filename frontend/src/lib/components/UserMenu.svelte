@@ -69,7 +69,7 @@
     bind:this={button}
     aria-haspopup="menu"
     aria-expanded={open}
-    aria-label="User menu: {name}"
+    aria-label="User menu: {userInitials(name)} {name}"
     title={name}
     on:click={() => (open ? close() : show())}
     on:keydown={onButtonKeydown}

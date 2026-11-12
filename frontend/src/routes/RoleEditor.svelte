@@ -212,7 +212,12 @@
 
       <div class="switch-row">
         <label class="switch">
-          <input type="checkbox" bind:checked={isSuperAdmin} disabled={!canEditSuperAdmin} />
+          <input
+            type="checkbox"
+            aria-label="Super-admin"
+            bind:checked={isSuperAdmin}
+            disabled={!canEditSuperAdmin}
+          />
           <span class="switch-track"></span>
         </label>
         <span>Super-admin (bypasses all grants, reaches system sources)</span>
@@ -228,6 +233,7 @@
             <label class="switch">
               <input
                 type="checkbox"
+                aria-label={cap.label}
                 checked={globalCaps.has(cap.key)}
                 on:change={() => (globalCaps = toggle(globalCaps, cap.key))}
               />
@@ -292,12 +298,17 @@
 
         {#if !isBuiltin}
         <form class="add-grant" on:submit|preventDefault={addGrant}>
-          <select class="input" bind:value={newScopeType} on:change={() => (newScopeId = null)}>
+          <select
+            class="input"
+            aria-label="Grant scope type"
+            bind:value={newScopeType}
+            on:change={() => (newScopeId = null)}
+          >
             <option value="customer">customer</option>
             <option value="folder">folder</option>
             <option value="source">source</option>
           </select>
-          <select class="input" bind:value={newScopeId}>
+          <select class="input" aria-label="Grant target" bind:value={newScopeId}>
             <option value={null}>— pick —</option>
             {#each scopeOptions() as opt (opt.id)}
               <option value={opt.id}>{opt.label}</option>
@@ -308,6 +319,7 @@
               <label class="chip" class:chip-active={newCaps.has(cap)} title={CAP_HINTS[cap]}>
                 <input
                   type="checkbox"
+                  aria-label={`Grant ${cap}`}
                   checked={newCaps.has(cap)}
                   on:change={() => (newCaps = toggle(newCaps, cap))}
                 />
