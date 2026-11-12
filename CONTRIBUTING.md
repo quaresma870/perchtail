@@ -3,6 +3,10 @@
 Thanks for considering it — this project is early-stage, so contributions of any
 size (a typo fix, a bug report, a whole connector) genuinely help.
 
+## License and CLA
+
+PerchTail is licensed under the [AGPL-3.0](LICENSE). Before a pull request can be merged, its author signs the [Contributor License Agreement](CLA.md), once: it lets the maintainer distribute your contribution under the project's license and under other terms, while you keep the copyright in it. Say so in the pull request if your employer has rights in what you write.
+
 ## Before you start
 
 For anything beyond a small fix, please open an issue or discussion first. This

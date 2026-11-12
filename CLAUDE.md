@@ -22,8 +22,8 @@ ephemeral fetch behavior" below for why.
 
 Built by a support/DevOps engineer who does forensic log analysis across many customer
 production environments (mixed Linux + Windows, telecom/contact-center stack) and
-wanted a lightweight, always-fresh viewing layer rather than a full SIEM. Intended to
-be released publicly on GitHub under MIT.
+wanted a lightweight, always-fresh viewing layer rather than a full SIEM. Released publicly on
+GitHub under the AGPL-3.0 (MIT up to 0.6.1).
 
 ## Why it exists
 
@@ -85,7 +85,7 @@ concern, independent of the always-fresh rule above).
   reverse proxy alongside other self-hosted internal tools.
 - **Logging**: `structlog`, JSON output, request-scoped context (see "Application
   logging" section below).
-- **License**: MIT.
+- **License**: AGPL-3.0-only from 0.7.0 (MIT up to 0.6.1); contributions under the CLA (`CLA.md`).
 
 ## Data model (v1)
 
@@ -315,7 +315,7 @@ the exact same viewer as customer sources, via a **system source**:
 Being technically solid doesn't get an open-source project used — it has to be
 easy to find, easy to trust, and easy to contribute to. Baseline files (already
 drafted, see repo root): `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`,
-`LICENSE`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `.github/FUNDING.yml`.
+`LICENSE`, `CLA.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `.github/FUNDING.yml`.
 
 A few things worth doing deliberately once phase 1 is real, not just present:
 
@@ -422,7 +422,7 @@ perchtail/
   agent/                  # phase 2 — Go push-agent
   docker-compose.yml
   Dockerfile
-  LICENSE                 # MIT
+  LICENSE                 # AGPL-3.0
   CLAUDE.md               # this file
 ```
 
