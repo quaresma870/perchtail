@@ -99,6 +99,9 @@ INT_DEFAULTS: dict[str, str] = {
     "agent_upgrade_window_hours": "4",
     "agent_upgrade_failure_limit": "3",
     "agent_upgrade_concurrency": "5",
+    # Scheduled online backup (#334, app/backup.py), in hours, 1 to 168;
+    # 0 (the default) turns it off.
+    "backup_interval_hours": "0",
 }
 
 

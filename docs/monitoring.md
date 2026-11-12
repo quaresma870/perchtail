@@ -165,7 +165,7 @@ Timestamps are UTC, without a time zone (`next_run_at` has one). Fields that can
 | `logs.used_bytes`, `logs.max_total_bytes`, `logs.retention_days` | PerchTail's own logs under `LOG_DIR`, against `LOG_MAX_TOTAL_MB` and `LOG_RETENTION_DAYS`. |
 | `logs.size_limit_deleted_early`, `logs.size_limit_deleted_files`, `logs.size_limit_newest_deleted_day` | `true` once `LOG_MAX_TOTAL_MB` has deleted archives that `LOG_RETENTION_DAYS` would still have kept, usually because `LOG_LEVEL=DEBUG` was left on: you have less log history than configured. Lower the log level, set `LOG_QUIET_THIRD_PARTY=true`, or give the logs more space. |
 
-The background jobs are `scratch_idle_sweep`, `scratch_size_guard`, `alert_pass`, `name_index_sweep`, `source_checks`, `agent_upgrades`, `audit_purge`, `session_purge`, `update_check`, `audit_integrity_check` and `wal_checkpoint`.
+The background jobs are `scratch_idle_sweep`, `scratch_size_guard`, `alert_pass`, `name_index_sweep`, `source_checks`, `agent_upgrades`, `audit_purge`, `session_purge`, `update_check`, `audit_integrity_check`, `wal_checkpoint` and `backup` (the scheduled backup, see [backup-and-restore.md](backup-and-restore.md); it does nothing while its interval is 0, and after a failed attempt it tries again only once an hour has passed, or the interval if that's shorter, or straight away after a restart).
 
 ## When the status degrades
 
@@ -212,6 +212,8 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `shutdown.jobs_still_running` | warning | A stop didn't wait for a running job within `SHUTDOWN_TIMEOUT_SECONDS`. |
 | `shutdown.pool_still_running` | warning | Same for the file-name index or source-check workers. |
 | `db.wal_checkpoint` | warning when `busy` | The hourly WAL checkpoint couldn't finish because readers were busy; it's tried again next hour. |
+| `backup.create_failed` | error | A backup couldn't be made (`reason` says whether it was manual, scheduled or pre-upgrade); a scheduled one also fails the `backup` job. |
+| `backup.restore` | info, warning when `result` is `refused` | A backup was restored (`file`, `previous` names where the data before it went), or a restore was refused and changed nothing (`error` says why). |
 | `readyz.database_not_writable`, `readyz.data_dir_not_writable` | warning | A readiness check failed. |
 | `update_check.failed` | warning | The update check couldn't reach GitHub. |
 | `sso.login.discovery_failed`, `sso.callback.no_access_role_missing` | error | SSO sign-in can't work: the provider can't be reached, or the no-access role is missing. |

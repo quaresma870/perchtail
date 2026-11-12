@@ -155,6 +155,7 @@ volume (`/data` in the container), one directory per kind of data:
 | `/data/db` | `DATA_DIR` | SQLite database, credential-encryption salt (`credential_salt`), SSH `known_hosts` | yes |
 | `/data/logs` | `LOG_DIR` | the app's own logs, rotated by size and day | optional |
 | `/data/scratch` | `SCRATCH_DIR` | short-lived fetches, purged on close and emptied at startup | no |
+| `/data/backups` | `BACKUP_DIR` | encrypted backups made by `python -m app.backup` | copy them off the host |
 
 Each can be mounted as its own volume, and in production they should be:
 `docker-compose.yml` has the three volumes ready to uncomment. Then a burst
@@ -163,14 +164,22 @@ database's disk. PerchTail also refuses a new fetch (HTTP 507) when scratch
 is full or its disk is down to `SCRATCH_MIN_FREE_GB` / `SCRATCH_MIN_FREE_PERCENT`
 free (1 GiB or 5%, whichever is larger). Keep `/data/db`
 on a local disk, not a network share: the database runs in SQLite's WAL
-mode, which needs one (it also leaves `perchtail.db-wal` and
-`perchtail.db-shm` next to the database; back up the whole directory, with
-PerchTail stopped). Back up the
-database and `credential_salt` together. Either one is useless without the
-other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`.
-Upgrading from a release before 0.5.0 moves the database, salt and
+mode, which needs one. Upgrading from a release before 0.5.0 moves the database, salt and
 `known_hosts` from `/data` into `/data/db` on first start; see the
 CHANGELOG's upgrade notes.
+
+Back up with `python -m app.backup` while PerchTail runs: it puts a consistent copy of the database, the salt and `known_hosts` into one file, always encrypted (with a key derived from `CREDENTIAL_ENCRYPTION_KEY`, or from an optional `BACKUP_ENCRYPTION_KEY`), checks it, and restores it with PerchTail stopped. Settings → System can also make one on a schedule. The database and `credential_salt` are useless without each other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`: keep the keys somewhere you can reach without this host. Before an upgrade, make a `pre-upgrade` backup; restoring it, with the previous image, rolls the upgrade back:
+
+```bash
+docker compose exec -u perchtail perchtail python -m app.backup create --reason pre-upgrade
+docker compose stop perchtail
+# set the new image tag in docker-compose.yml, then:
+docker compose pull && docker compose up -d
+```
+
+Upgrading from a release before 0.7.0: the command doesn't exist there yet, so stop PerchTail and copy `DATA_DIR` (and, for a source install, the database and salt files if they live outside it) as before.
+
+[docs/backup-and-restore.md](docs/backup-and-restore.md) covers scheduled backups, the keys, checking and restoring a backup, rolling back an upgrade, copies off the host and testing a restore.
 
 Only one PerchTail may run per `DATA_DIR`: a second instance (or an `alembic upgrade` while one runs) refuses to start, and so does an older image on a database a newer version has already migrated (see [docs/monitoring.md](docs/monitoring.md#log-events-worth-alerting-on)).
 
@@ -288,7 +297,7 @@ publish in `docker-compose.yml` entirely rather than binding it to loopback.
   deployment, broken down by solution and load-balancing type
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
   submit changes
-- [SECURITY.md](SECURITY.md) — how to report a vulnerability
+- [SECURITY.md](SECURITY.md) — how to report a vulnerability, and how fast fixes ship
 - [CHANGELOG.md](CHANGELOG.md) — what's shipped, release by release
 
 ## License

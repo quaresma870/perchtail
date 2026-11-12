@@ -433,7 +433,11 @@ func TestPrecheck(t *testing.T) {
 		{"candidate of the same release", "0.7.1", "0.7.1-rc.3", true, release.pubPEM, "not newer"},
 		{"dev build", "dev", "0.7.1", true, release.pubPEM, "is not a release"},
 		{"not a version", "0.7.0", "../../evil", true, release.pubPEM, "isn't a PerchTail release"},
-		{"tag form", "0.7.0", "v0.7.1", true, release.pubPEM, "isn't a PerchTail release"},
+		{"tag form", "0.7.0", "v0.7.1", true, release.pubPEM, ""},
+		{"newer beta", "0.7.0", "0.8.0-beta.1", true, release.pubPEM, ""},
+		{"candidate after its beta", "0.8.0-beta.3", "0.8.0-rc.1", true, release.pubPEM, ""},
+		{"beta of the same release", "0.7.1", "0.7.1-beta.9", true, release.pubPEM, "not newer"},
+		{"alpha", "0.7.0", "0.8.0-alpha.1", true, release.pubPEM, "isn't a PerchTail release"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -443,8 +447,9 @@ func TestPrecheck(t *testing.T) {
 				if err != nil {
 					t.Fatalf("precheck: %v", err)
 				}
-				if got != tc.target {
-					t.Fatalf("precheck returned %q, want %q", got, tc.target)
+				// The target comes back rebuilt, without a tag's "v".
+				if want := strings.TrimPrefix(tc.target, "v"); got != want {
+					t.Fatalf("precheck returned %q, want %q", got, want)
 				}
 				return
 			}
@@ -509,10 +514,65 @@ func TestVersionComparison(t *testing.T) {
 		{"0.7.1", "dev", false},
 		{"dev", "0.7.0", false},
 		{"0.7.1-beta", "0.7.0", false},
+		{"0.7.0-beta.2", "0.7.0-beta.1", true},
+		{"0.7.0-beta.10", "0.7.0-beta.2", true}, // numeric, not lexical
+		{"0.7.0-rc.1", "0.7.0-beta.10", true},
+		{"0.7.0", "0.7.0-beta.10", true},
+		{"0.7.0-beta.1", "0.7.0-rc.1", false},
+		{"0.7.0-beta.1", "0.7.0", false},
+		{"0.7.0-beta.1", "0.6.0", true},
+		{"0.7.0-beta.1", "0.6.1-rc.1", true},
+		{"v0.7.0-beta.1", "0.7.0-beta.1", false},
+		{"0.7.0-beta.1", "v0.7.0-beta.1", false},
+		{"v0.7.0-beta.2", "0.7.0-beta.1", true},
 	}
 	for _, tc := range cases {
 		if got := isNewerVersion(tc.a, tc.b); got != tc.want {
 			t.Errorf("isNewerVersion(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestVersionOrder(t *testing.T) {
+	// Each version is newer than every one before it.
+	order := []string{"0.6.0", "0.6.1-rc.1", "0.7.0-beta.1", "0.7.0-beta.2", "0.7.0-beta.10", "0.7.0-rc.1", "0.7.0"}
+	for i, a := range order {
+		for j, b := range order {
+			if got := isNewerVersion(a, b); got != (i > j) {
+				t.Errorf("isNewerVersion(%q, %q) = %v, want %v", a, b, got, i > j)
+			}
+		}
+	}
+}
+
+func TestUnknownVersions(t *testing.T) {
+	for _, v := range []string{
+		"0.7.0-alpha.1", "0.7.0-beta", "0.7.0-beta.", "0.7.0-beta.1.2", "0.7.0-BETA.1",
+		"0.7.0-beta.12345", "0.7.0-rc.1-beta.1", "dev", "", "0.7.0-beta.1\n", " 0.7.0",
+	} {
+		if _, ok := parseVersion(v); ok {
+			t.Errorf("parseVersion(%q) accepted an unknown version", v)
+		}
+		if got, ok := canonicalVersion(v); ok || got != "" {
+			t.Errorf("canonicalVersion(%q) = %q, %v, want it refused", v, got, ok)
+		}
+		if isNewerVersion(v, "0.6.0") || isNewerVersion("0.8.0", v) {
+			t.Errorf("an unknown version %q was compared", v)
+		}
+	}
+}
+
+func TestCanonicalVersion(t *testing.T) {
+	cases := map[string]string{
+		"v0.7.0-beta.3": "0.7.0-beta.3",
+		"0.7.0-beta.03": "0.7.0-beta.3",
+		"v0.7.0-rc.2":   "0.7.0-rc.2",
+		"0.7.0":         "0.7.0",
+		"v00.07.00":     "0.7.0",
+	}
+	for in, want := range cases {
+		if got, ok := canonicalVersion(in); !ok || got != want {
+			t.Errorf("canonicalVersion(%q) = %q, %v, want %q", in, got, ok, want)
 		}
 	}
 }

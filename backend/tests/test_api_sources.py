@@ -868,6 +868,15 @@ def test_an_agent_older_than_the_server_is_flagged(session, admin_client, monkey
     assert flagged("dev") == ("dev", False)  # a local build isn't compared
     assert flagged(None) == (None, False)
 
+    # Pre-releases: a beta is behind its final release, never the other way.
+    assert flagged("0.6.0-beta.3") == ("0.6.0-beta.3", True)
+    monkeypatch.setattr("app.api.sources.APP_VERSION", "0.7.0")
+    assert flagged("0.7.0-beta.2") == ("0.7.0-beta.2", True)
+    monkeypatch.setattr("app.api.sources.APP_VERSION", "0.7.0-beta.2")
+    assert flagged("0.7.0") == ("0.7.0", False)
+    assert flagged("0.7.0-beta.1") == ("0.7.0-beta.1", True)
+    assert flagged("0.7.0-rc.1") == ("0.7.0-rc.1", False)
+
 
 def test_sources_carry_their_status(session, admin_client):
     """#276: the explorer shows each source's reachability."""

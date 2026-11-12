@@ -45,6 +45,8 @@ from app.audit_hash_chain import backfill_chain_if_needed
 from app.audit_integrity import run_audit_integrity_check
 from app.audit_purge import run_audit_purge_sweep
 from app.auth.sessions import run_session_purge_sweep
+from app.backup import SCHEDULE_TICK as BACKUP_TICK
+from app.backup import record_pending_restore, run_scheduled_backup
 from app.bootstrap import (
     assert_credential_salt_present,
     backfill_sso_user_issuers,
@@ -277,6 +279,10 @@ async def _started(app: FastAPI, settings):
         if backfilled:
             logger.info("audit_hash_chain.backfill_complete", rows=backfilled)
         session.commit()
+        # A restore (app/backup.py) can't audit itself in the database it
+        # replaces: the first start on the restored database does.
+        if record_pending_restore(session, settings):
+            session.commit()
         seed_system_log_source(session)
         seed_initial_super_admin(session)
         seed_no_access_role(session)
@@ -293,6 +299,7 @@ async def _started(app: FastAPI, settings):
         protected=[
             Path(settings.data_dir),
             Path(settings.log_dir),
+            Path(settings.backup_dir),
             Path(db_file).parent,
             Path(settings.credential_salt_path),
             Path(settings.ssh_known_hosts_path),
@@ -365,6 +372,9 @@ async def _started(app: FastAPI, settings):
         timedelta(days=settings.audit_integrity_check_interval_days),
         catch_up=True,
     )
+    # Scheduled backup (#334): ticks every few minutes and backs up once the
+    # interval set in Settings -> System has gone by; 0 (the default) is off.
+    register_job(scheduler, "backup", "Scheduled backup", run_scheduled_backup, BACKUP_TICK)
     register_db_upkeep_jobs(scheduler)
     scheduler.start()
     logger.info("startup.complete")

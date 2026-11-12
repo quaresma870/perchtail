@@ -44,3 +44,14 @@ updates:
     labels:
       - dependencies
       - ci
+
+  # Base images (Dockerfile), pinned by digest so a rebuilt upstream image
+  # arrives as a PR rather than silently at the next build.
+  - package-ecosystem: docker
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - docker
