@@ -2,5 +2,5 @@
 ruff>=0.17.3
 black>=26.10.1
 pytest>=9.2.0
-hypothesis>=6.170.14
+hypothesis>=6.170.15
 schemathesis==4.33.2
