@@ -19,49 +19,65 @@ permissions:
 jobs:
   python:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        ref: [main, dev]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ matrix.ref }}
+          ref: main
+          path: main
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: dev
+          path: dev
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
-      - name: pip-audit
+      - name: pip-audit (main and dev)
         run: |
           pip install pip-audit
-          pip-audit -r backend/requirements.txt
-          pip-audit -r backend/requirements-dev.txt
+          status=0
+          for ref in main dev; do
+            for req in requirements.txt requirements-dev.txt; do
+              echo "== $ref $req"
+              pip-audit -r "$ref/backend/$req" || status=1
+            done
+          done
+          exit "$status"
 
   frontend:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        ref: [main, dev]
-    defaults:
-      run:
-        working-directory: frontend
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ matrix.ref }}
+          ref: main
+          path: main
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: dev
+          path: dev
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+          package-manager-cache: false
 
       # Every severity, dev dependencies included: the lockfile is all
       # npm audit needs, nothing is installed.
-      - name: npm audit
-        run: npm audit --audit-level=low
+      - name: npm audit (main and dev)
+        run: |
+          status=0
+          for ref in main dev; do
+            echo "== $ref"
+            (cd "$ref/frontend" && npm audit --audit-level=low) || status=1
+          done
+          exit "$status"
 
   agent-source:
     runs-on: ubuntu-latest
@@ -78,6 +94,7 @@ jobs:
         with:
           go-version-input: "1.27"
           check-latest: true
+          cache: false
           work-dir: agent
 
   agent-release:
