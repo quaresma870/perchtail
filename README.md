@@ -172,6 +172,8 @@ Upgrading from a release before 0.5.0 moves the database, salt and
 `known_hosts` from `/data` into `/data/db` on first start; see the
 CHANGELOG's upgrade notes.
 
+Only one PerchTail may run per `DATA_DIR`: a second instance (or an `alembic upgrade` while one runs) refuses to start, and so does an older image on a database a newer version has already migrated (see [docs/monitoring.md](docs/monitoring.md#log-events-worth-alerting-on)).
+
 **Update check.** Once a day, PerchTail asks the GitHub releases API which
 release is the latest (one unauthenticated request; nothing about your
 installation is sent, and pre-releases are never offered). Super admins see

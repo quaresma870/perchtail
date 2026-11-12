@@ -11,6 +11,8 @@ need to change, organized by how much traffic-splitting you actually want,
 so a decision to invest in any of it is made deliberately rather than by
 someone assuming "just add replicas" works.
 
+**One instance per `DATA_DIR`, enforced.** On startup, and before `alembic upgrade` migrates, PerchTail takes an exclusive lock from the operating system on `DATA_DIR/.perchtail.lock`. A second instance on the same `DATA_DIR` refuses to start with `startup.instance_lock_held` (naming the host, PID, version and start time of the one running) before it opens the database; there is no setting to turn this off. The lock dies with the process that holds it, however it ends, so a crash or `kill -9` never leaves a stale lock behind. The same lock covers every Alembic command run in online mode (`upgrade`, `downgrade`, `stamp`, even `current`), so while the app is running any of them is refused on purpose: stop the app first. Keep `DATA_DIR` on a local disk: locks on a network share may not reach other machines. High availability with several instances at once comes with PostgreSQL (#306), not with SQLite.
+
 Every solution below is compatible with nginx in front (see the main
 [README](../README.md#deployment-reverse-proxy-nginx--tls) for the base TLS
 config) and with running under k3s or any other Kubernetes distribution —

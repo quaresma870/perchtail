@@ -191,6 +191,8 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `startup.credential_salt_missing` | critical | The credential salt file is missing while encrypted data exists, so PerchTail refuses to start. Restore the salt from a backup. |
 | `startup.credential_salt_regenerated` | critical | The salt was missing and `CREDENTIAL_SALT_ALLOW_REGENERATE` let PerchTail start with a new one: everything encrypted with the old salt can't be read. |
 | `startup.insecure_credential_encryption_key` | critical | `CREDENTIAL_ENCRYPTION_KEY` is still the default; PerchTail refuses to start. |
+| `startup.instance_lock_held` | critical | Another PerchTail process is using the same `DATA_DIR`, so this one refuses to start, or `alembic upgrade` refuses to migrate, without touching the database. `holder_host`, `holder_pid`, `holder_version` and `holder_started_at` name the one running. Only one instance may run per `DATA_DIR`; the lock is released by the operating system when that process ends, however it ends. |
+| `startup.database_newer_than_app` | critical | The database is at a migration (`database_revision`) this version (`app_version`) doesn't know: a newer PerchTail already migrated it. Startup and `alembic upgrade` refuse. Run the newer version again, or restore a backup taken before the upgrade. |
 | `audit_integrity.chain_broken` | error | The audit log hash chain is broken: a row was changed or deleted outside PerchTail. |
 | `audit_integrity.race_breaks_unrecorded` | warning | Breaks from the 0.5.x race wait to be recorded on the Audit Log page. |
 | `job.failed` | error | A background job raised an error (`job_id` names it); also in `scheduler.jobs[]`. |
