@@ -1,0 +1,120 @@
+name: Security scan
+
+# A new advisory can affect a dependency nobody has touched, so the
+# vulnerability scans also run every day, not only on a push or a PR. A
+# failed run is the alert: it reaches the maintainers like any failed
+# workflow. Covers everything that ships -- the backend's Python packages,
+# the frontend's npm packages, the push agent's Go modules and standard
+# library, and the published image with its OS packages -- plus the
+# dev-only tooling, which is fixed on dev without a release.
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [main, dev]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ matrix.ref }}
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit -r backend/requirements.txt
+          pip-audit -r backend/requirements-dev.txt
+
+  frontend:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [main, dev]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ matrix.ref }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      # Every severity, dev dependencies included: the lockfile is all
+      # npm audit needs, nothing is installed.
+      - name: npm audit
+        run: npm audit --audit-level=low
+
+  agent-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: dev
+
+      # The Go release the agent is built with (see ci.yml and release.yml),
+      # at its latest patch.
+      - name: govulncheck (dev)
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
+        with:
+          go-version-input: "1.27"
+          check-latest: true
+          work-dir: agent
+
+  agent-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          check-latest: true
+          cache: false
+
+      # The binaries people run: govulncheck reads the Go version and the
+      # module versions built into each one.
+      - name: govulncheck (latest release binaries)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern 'perchtail-agent-*' --dir bin
+          status=0
+          for f in bin/*; do
+            echo "== $f"
+            "$(go env GOPATH)/bin/govulncheck" -mode=binary "$f" || status=1
+          done
+          exit "$status"
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      # The image people run (docker compose, k3s or any Kubernetes): the
+      # latest full release, OS packages included. Only findings with a fix
+      # available fail the run -- those need a rebuilt release.
+      - name: Scan the published image (Grype)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: ghcr.io/quaresma870/perchtail:latest
+          only-fixed: true
+          severity-cutoff: low
+          fail-build: true
+          output-format: table
