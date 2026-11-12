@@ -8,6 +8,24 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-12
+
+A security release, the code retested in the lab as 0.6.1-rc.1. 0.6.0's push-agent binaries were built with Go 1.24, which no longer receives security fixes, and govulncheck finds 43 known vulnerabilities in the Go standard library they contain. Nothing else in the server or the agent changes. Upgrade the server and then upgrade each push agent to 0.6.1 by hand (download the binary for its platform from the release and replace the old one); from 0.7.0 on, agents can be upgraded from the portal.
+
+### Security
+- The push agent is built with Go 1.27, at its latest patch release, instead of Go 1.24. The vulnerability scan checks the same Go release the binaries are built with.
+- The image is rebuilt on current base images and OS packages. The base images in the `Dockerfile` are pinned by digest, and Dependabot proposes their updates like any other dependency.
+- A daily scan checks the backend's Python packages, the frontend's npm packages and the agent's Go modules on `main` and `dev`, the latest release's agent binaries, and the published image with its OS packages, so a new advisory is caught even when no code changes. SECURITY.md now states how fast fixes ship and what that covers.
+
+## [0.6.1-rc.1] - 2026-11-12
+
+A security release: 0.6.0's push-agent binaries were built with Go 1.24, which no longer receives security fixes, and govulncheck finds 43 known vulnerabilities in the Go standard library they contain. Nothing else in the server or the agent changes. Upgrade the server and then upgrade each push agent to 0.6.1 by hand (download the binary for its platform from the release and replace the old one); from 0.7.0 on, agents can be upgraded from the portal.
+
+### Security
+- The push agent is built with Go 1.27, at its latest patch release, instead of Go 1.24. The vulnerability scan checks the same Go release the binaries are built with.
+- The image is rebuilt on current base images and OS packages. The base images in the `Dockerfile` are pinned by digest, and Dependabot proposes their updates like any other dependency.
+- A daily scan checks the backend's Python packages, the frontend's npm packages and the agent's Go modules on `main` and `dev`, the latest release's agent binaries, and the published image with its OS packages, so a new advisory is caught even when no code changes. SECURITY.md now states how fast fixes ship and what that covers.
+
 ## [0.6.0] - 2026-11-07
 
 The release after 0.5.3. It carries everything from the pre-releases
