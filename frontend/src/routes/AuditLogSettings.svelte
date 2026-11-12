@@ -306,9 +306,21 @@
     <div class="filter-group">
       <div class="filter-label">Date range</div>
       <div class="date-range">
-        <input type="datetime-local" class="input" bind:value={since} on:change={applyDateRange} />
+        <input
+          type="datetime-local"
+          class="input"
+          aria-label="From"
+          bind:value={since}
+          on:change={applyDateRange}
+        />
         <span class="hint">to</span>
-        <input type="datetime-local" class="input" bind:value={until} on:change={applyDateRange} />
+        <input
+          type="datetime-local"
+          class="input"
+          aria-label="To"
+          bind:value={until}
+          on:change={applyDateRange}
+        />
       </div>
     </div>
 

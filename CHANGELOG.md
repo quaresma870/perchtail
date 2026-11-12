@@ -44,6 +44,7 @@ release ships (0.x releases may include breaking changes between minors).
 - `PERCHTAIL_REMOTE_UPGRADE=false` on an agent's host refuses every upgrade from the portal, whatever the server asks (#319).
 - Releases carry `SHA256SUMS.sig`, an Ed25519 signature of `SHA256SUMS` with the release key; the release workflow fails if the `AGENT_SIGNING_KEY` secret is missing or doesn't match the public key in the agent's source (#319).
 - Property-based API tests (#376): Schemathesis generates requests from the app's OpenAPI schema and checks that none gets a server error, and a test checks that every endpoint refuses callers who aren't signed in, except a short list of public ones.
+- Accessibility checks in the end-to-end tests (#377): axe-core runs on the main pages (login, viewer, Settings, Alerts, My profile) and fails on serious or critical WCAG 2.0/2.1 A and AA violations.
 
 ### Changed
 - **One search in the explorer** (#300). The box finds sources (by name, host, customer or folder) and file names in every source the user can view, from the file-name index, without picking a mode; results replace the tree while there is text in the box, each with its source and folder, and say when the index last listed the files. Text matches anywhere, `*` and `?` make a glob, and a regex goes between slashes (`/app\.log\.\d/`); the Regex and Match case options and the Advanced filter button are gone (always case-insensitive). **Filter sources**, next to List/Tree, shows the checkboxes: with sources or folders ticked, the search runs live in those, as before, including sources left out of the index.
@@ -87,6 +88,7 @@ release ships (0.x releases may include breaking changes between minors).
 - A folder ZIP over SSH with a symlink that loops back up logged in again for every level until the depth limit, about a thousand logins (#347).
 - A download cut short by the client could keep its scratch file until the idle sweep: the release ran only when the response finished normally. It now runs however the response ends (#344).
 - An integer above 9223372036854775807 in a request (an id in the path or body, a port) crashed with a 500; it is now refused with 422 and "A number in the request is out of range" (#376).
+- Accessibility (#377): faint text, accent links and badges, and primary buttons now meet the WCAG AA contrast ratio; switches, selects and date fields in Settings, the user role selects and the log viewer's content have accessible names; the user menu and explorer file names now include their visible text (initials, file size) in their accessible names.
 
 ## [0.6.0] - 2026-11-07
 

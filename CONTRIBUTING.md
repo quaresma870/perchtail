@@ -65,6 +65,8 @@ will fail with nothing listening on those ports, everything else is
 unaffected). See `frontend/e2e/` and ROADMAP.md's "Frontend E2E testing
 (Playwright)" section for how it's wired together.
 
+`frontend/e2e/accessibility.spec.ts` runs axe-core on each main page and fails on serious or critical WCAG 2.0/2.1 A and AA violations, listing each rule, its impact and the selectors of the offending nodes. A new page, or a new popup on an existing one, gets its own test in that spec: open it, wait for it to finish loading, then check it. Fix what it finds in the component; only a third-party node that can't be fixed by configuration (such as CodeMirror's scroller) is excluded, with a comment saying why.
+
 See [CLAUDE.md](CLAUDE.md) for the full architecture and repo layout — it's kept
 up to date as the source of truth for design decisions.
 

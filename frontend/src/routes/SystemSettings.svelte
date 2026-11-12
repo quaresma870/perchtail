@@ -430,6 +430,7 @@
         </div>
         <select
           class="input view-select"
+          aria-label="Connections view"
           value={connectionsViewDefault}
           disabled={saving}
           on:change={(e) =>
@@ -453,6 +454,7 @@
         <label class="switch">
           <input
             type="checkbox"
+            aria-label="Let users switch between list and tree"
             checked={connectionsViewSwitchable}
             disabled={saving}
             on:change={() =>
@@ -812,6 +814,7 @@
         <label class="switch">
           <input
             type="checkbox"
+            aria-label="Audit log"
             checked={auditViewEnabled}
             disabled={saving}
             on:change={toggleAuditView}
@@ -834,6 +837,7 @@
         <div class="retention-row">
           <input
             class="input retention-input"
+            aria-label="Audit log retention in days"
             type="number"
             min="0"
             step="1"

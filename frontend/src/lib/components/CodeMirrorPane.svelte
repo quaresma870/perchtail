@@ -86,6 +86,10 @@
       ...(showWhitespace ? [whitespaceHighlighting(content)] : []),
       EditorView.editable.of(false),
       EditorState.readOnly.of(true),
+      // The content element has role="textbox" and needs a name (#377).
+      EditorView.contentAttributes.of({
+        'aria-label': filename ? `Contents of ${filename}` : 'File contents',
+      }),
     ]
   }
 

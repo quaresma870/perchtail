@@ -40,8 +40,10 @@ test.afterAll(() => {
 // each tab's label as same-named buttons -- scope to `.tree-body` so a
 // click always means "pick from the tree," not whichever same-named
 // element Playwright's accessible-name matching happens to find first.
+// A file's accessible name is "<name>, <size>" (#377).
 function treeFile(page: import('@playwright/test').Page, name: string) {
-  return page.locator('.tree-body').getByRole('button', { name, exact: true })
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return page.locator('.tree-body').getByRole('button', { name: new RegExp(`^${escaped}, `) })
 }
 
 test.beforeEach(async ({ page }) => {
