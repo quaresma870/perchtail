@@ -165,7 +165,7 @@ Timestamps are UTC, without a time zone (`next_run_at` has one). Fields that can
 | `logs.used_bytes`, `logs.max_total_bytes`, `logs.retention_days` | PerchTail's own logs under `LOG_DIR`, against `LOG_MAX_TOTAL_MB` and `LOG_RETENTION_DAYS`. |
 | `logs.size_limit_deleted_early`, `logs.size_limit_deleted_files`, `logs.size_limit_newest_deleted_day` | `true` once `LOG_MAX_TOTAL_MB` has deleted archives that `LOG_RETENTION_DAYS` would still have kept, usually because `LOG_LEVEL=DEBUG` was left on: you have less log history than configured. Lower the log level, set `LOG_QUIET_THIRD_PARTY=true`, or give the logs more space. |
 
-The background jobs are `scratch_idle_sweep`, `scratch_size_guard`, `alert_pass`, `name_index_sweep`, `source_checks`, `agent_upgrades`, `audit_purge`, `session_purge`, `update_check`, `audit_integrity_check` and `wal_checkpoint`.
+The background jobs are `scratch_idle_sweep`, `scratch_size_guard`, `alert_pass`, `name_index_sweep`, `source_checks`, `agent_upgrades`, `audit_purge`, `session_purge`, `update_check`, `audit_integrity_check`, `wal_checkpoint` and `backup` (the scheduled backup, see [backup-and-restore.md](backup-and-restore.md); it does nothing while its interval is 0, and after a failed attempt it tries again only once an hour has passed, or the interval if that's shorter, or straight away after a restart).
 
 ## When the status degrades
 
@@ -191,6 +191,8 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `startup.credential_salt_missing` | critical | The credential salt file is missing while encrypted data exists, so PerchTail refuses to start. Restore the salt from a backup. |
 | `startup.credential_salt_regenerated` | critical | The salt was missing and `CREDENTIAL_SALT_ALLOW_REGENERATE` let PerchTail start with a new one: everything encrypted with the old salt can't be read. |
 | `startup.insecure_credential_encryption_key` | critical | `CREDENTIAL_ENCRYPTION_KEY` is still the default; PerchTail refuses to start. |
+| `startup.instance_lock_held` | critical | Another PerchTail process is using the same `DATA_DIR`, so this one refuses to start, or `alembic upgrade` refuses to migrate, without touching the database. `holder_host`, `holder_pid`, `holder_version` and `holder_started_at` name the one running. Only one instance may run per `DATA_DIR`; the lock is released by the operating system when that process ends, however it ends. |
+| `startup.database_newer_than_app` | critical | The database is at a migration (`database_revision`) this version (`app_version`) doesn't know: a newer PerchTail already migrated it. Startup and `alembic upgrade` refuse. Run the newer version again, or restore a backup taken before the upgrade. |
 | `audit_integrity.chain_broken` | error | The audit log hash chain is broken: a row was changed or deleted outside PerchTail. |
 | `audit_integrity.race_breaks_unrecorded` | warning | Breaks from the 0.5.x race wait to be recorded on the Audit Log page. |
 | `job.failed` | error | A background job raised an error (`job_id` names it); also in `scheduler.jobs[]`. |
@@ -210,6 +212,8 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `shutdown.jobs_still_running` | warning | A stop didn't wait for a running job within `SHUTDOWN_TIMEOUT_SECONDS`. |
 | `shutdown.pool_still_running` | warning | Same for the file-name index or source-check workers. |
 | `db.wal_checkpoint` | warning when `busy` | The hourly WAL checkpoint couldn't finish because readers were busy; it's tried again next hour. |
+| `backup.create_failed` | error | A backup couldn't be made (`reason` says whether it was manual, scheduled or pre-upgrade); a scheduled one also fails the `backup` job. |
+| `backup.restore` | info, warning when `result` is `refused` | A backup was restored (`file`, `previous` names where the data before it went), or a restore was refused and changed nothing (`error` says why). |
 | `readyz.database_not_writable`, `readyz.data_dir_not_writable` | warning | A readiness check failed. |
 | `update_check.failed` | warning | The update check couldn't reach GitHub. |
 | `sso.login.discovery_failed`, `sso.callback.no_access_role_missing` | error | SSO sign-in can't work: the provider can't be reached, or the no-access role is missing. |

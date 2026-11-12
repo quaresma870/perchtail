@@ -251,6 +251,17 @@ export interface SystemSettings {
   concurrency_user_transfers: number
   // Most entries a folder or archive listing returns (#347).
   listing_max_entries: number
+  // Scheduled backup (#334), hours between backups, 1..168; 0 = off.
+  backup_interval_hours: number
+}
+
+// GET /system-settings/backups (#334): the backups in BACKUP_DIR, newest
+// first. Listed only, never downloadable.
+export interface BackupInfo {
+  name: string
+  created_at: string
+  size_bytes: number
+  reason: 'manual' | 'scheduled' | 'pre-upgrade'
 }
 
 export type ExplorerSort = 'name_asc' | 'name_desc' | 'mtime_desc' | 'mtime_asc' | 'size_desc'

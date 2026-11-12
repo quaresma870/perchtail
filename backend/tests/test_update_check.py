@@ -11,7 +11,7 @@ from app.auth.models import Role, User
 from app.db import get_session
 from app.models import UpdateCheckState
 from app.timeutils import utcnow
-from app.versions import is_newer, parse_version
+from app.versions import is_final, is_newer, parse_version
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -40,15 +40,74 @@ RELEASE = {
         ("0.6.0", "dev", False),  # unknown versions are never compared
         ("garbage", "0.5.3", False),
         (None, "0.5.3", False),
+        # Betas sort before release candidates, which sort before the final.
+        ("0.7.0-beta.2", "0.7.0-beta.1", True),
+        ("0.7.0-beta.10", "0.7.0-beta.2", True),  # numeric, not lexical
+        ("0.7.0-rc.1", "0.7.0-beta.10", True),
+        ("0.7.0", "0.7.0-beta.10", True),
+        ("0.7.0-beta.1", "0.7.0-rc.1", False),
+        ("0.7.0-beta.1", "0.7.0", False),
+        ("0.7.0-beta.1", "0.6.0", True),
+        ("0.7.0-beta.1", "0.6.1-rc.1", True),
+        ("v0.7.0-beta.1", "0.7.0-beta.1", False),
+        ("0.7.0-beta.1", "v0.7.0-beta.1", False),
+        ("0.7.0-beta.1", "dev", False),
     ],
 )
 def test_is_newer(candidate, current, newer):
     assert is_newer(candidate, current) is newer
 
 
+def test_versions_sort_beta_then_rc_then_final():
+    order = ["0.6.0", "0.6.1-rc.1", "0.7.0-beta.1", "0.7.0-beta.2", "0.7.0-beta.10"]
+    order += ["0.7.0-rc.1", "0.7.0"]
+    for i, a in enumerate(order):
+        for j, b in enumerate(order):
+            assert is_newer(a, b) is (i > j), (a, b)
+
+
+@pytest.mark.parametrize(
+    "value, parsed",
+    [
+        ("0.7.0-beta.3", (0, 7, 0, 0, 3)),
+        ("v0.7.0-beta.3", (0, 7, 0, 0, 3)),
+        ("0.7.0-rc.2", (0, 7, 0, 1, 2)),
+        ("0.7.0", (0, 7, 0, 2, 0)),
+        ("v1.2.3", (1, 2, 3, 2, 0)),
+    ],
+)
+def test_parse_version(value, parsed):
+    assert parse_version(value) == parsed
+
+
 def test_parse_version_rejects_anything_else():
-    for value in ("0.5", "0.5.3-beta", "0.5.3-rc", "0.5.3.1", " 0.5.3", "0.5.3\n"):
+    for value in (
+        "0.5",
+        "0.5.3-beta",
+        "0.5.3-rc",
+        "0.5.3.1",
+        " 0.5.3",
+        "0.5.3\n",
+        "0.7.0-alpha.1",
+        "0.7.0-beta",
+        "0.7.0-beta.",
+        "0.7.0-beta.1.2",
+        "0.7.0-BETA.1",
+        "0.7.0-beta.12345",
+        "0.7.0-rc.1-beta.1",
+        "0.7.0-beta.1\n",
+        "dev",
+        "",
+        None,
+    ):
         assert parse_version(value) is None
+        assert not is_final(value)
+
+
+def test_is_final():
+    assert is_final("0.7.0") and is_final("v0.7.0")
+    for value in ("0.7.0-beta.1", "v0.7.0-rc.1", "dev", None):
+        assert not is_final(value)
 
 
 # --- the check -------------------------------------------------------------
@@ -148,6 +207,27 @@ def test_nothing_is_offered_when_this_is_the_latest(session, running_053):
     body = {**RELEASE, "tag_name": "v0.5.3"}
     state = update_check.check_now(session, transport=FakeGitHub(body=body).transport())
     assert not update_check.update_available(state)
+
+
+@pytest.mark.parametrize("tag", ["v0.7.0-rc.1", "v0.7.0-beta.1"])
+def test_a_pre_release_is_never_offered(session, running_053, tag):
+    update_check.check_now(session, transport=FakeGitHub(body=RELEASE).transport())
+
+    body = {**RELEASE, "tag_name": tag}
+    state = update_check.check_now(session, transport=FakeGitHub(body=body).transport())
+
+    assert state.latest_version == "0.6.0"
+    assert state.last_error.startswith("the latest release is a pre-release:")
+    assert tag in state.last_error
+
+
+@pytest.mark.parametrize("latest, available", [("v0.6.0", False), ("v0.7.0", True)])
+def test_a_beta_server_is_offered_only_its_final_release(session, monkeypatch, latest, available):
+    monkeypatch.setattr(update_check, "APP_VERSION", "0.7.0-beta.1")
+    body = {**RELEASE, "tag_name": latest}
+    state = update_check.check_now(session, transport=FakeGitHub(body=body).transport())
+    assert state.last_error is None
+    assert update_check.update_available(state) is available
 
 
 def test_a_new_release_is_logged_once(session, running_053, monkeypatch):

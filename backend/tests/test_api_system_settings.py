@@ -63,6 +63,7 @@ _DEFAULTS = {
     "concurrency_per_source": 4,
     "concurrency_user_transfers": 2,
     "listing_max_entries": 5000,
+    "backup_interval_hours": 0,
 }
 
 
@@ -234,6 +235,10 @@ def test_name_index_interval_is_kept_between_5_minutes_and_a_day(session, client
         ({"listing_max_entries": 100}, 200),
         ({"listing_max_entries": 99}, 422),
         ({"listing_max_entries": 20001}, 422),
+        ({"backup_interval_hours": 24}, 200),
+        ({"backup_interval_hours": 168}, 200),
+        ({"backup_interval_hours": -1}, 422),
+        ({"backup_interval_hours": 169}, 422),
     ],
 )
 def test_limits_are_kept_within_their_ranges(session, client_for, payload, status):

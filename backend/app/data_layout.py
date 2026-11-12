@@ -121,6 +121,8 @@ def secure_data_dir(settings: Settings | None = None) -> list[str]:
         (Path(settings.data_dir), 0o700),
         # WinRM CA certificates per source (public, but kept like the rest, #206).
         (Path(settings.data_dir) / "winrm_ca", 0o700),
+        # Encrypted backups (#334, app/backup.py).
+        (Path(settings.backup_dir), 0o700),
     ]
     db = _sqlite_path(settings.database_url)
     files = [Path(settings.credential_salt_path), Path(settings.ssh_known_hosts_path)]

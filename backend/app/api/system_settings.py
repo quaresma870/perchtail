@@ -1,10 +1,11 @@
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
-from app import password_policy, system_settings
+from app import backup, password_policy, system_settings
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import GlobalCapability, User
@@ -59,6 +60,17 @@ class SystemSettingsPublic(BaseModel):
     concurrency_user_transfers: int
     # Listing cap (#347).
     listing_max_entries: int
+    # Scheduled backup (#334, app/backup.py), hours; 0 = off.
+    backup_interval_hours: int
+
+
+class BackupPublic(BaseModel):
+    """One backup in BACKUP_DIR (#334). Listed only: never downloadable."""
+
+    name: str
+    created_at: datetime
+    size_bytes: int
+    reason: str
 
 
 # Ranges for the server-side limits (#344).
@@ -115,6 +127,8 @@ class SystemSettingsUpdate(BaseModel):
     listing_max_entries: int | None = Field(
         default=None, ge=LISTING_MAX_ENTRIES_MIN, le=LISTING_MAX_ENTRIES_MAX
     )
+    # 0 = off; otherwise 1 hour to a week.
+    backup_interval_hours: int | None = Field(default=None, ge=0, le=168)
 
 
 _PASSWORD_INTS = (
@@ -145,6 +159,7 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         name_index_minutes=system_settings.get_int(session, "name_index_minutes"),
         alerts_interval_seconds=system_settings.get_int(session, "alerts_interval_seconds"),
         credential_max_age_days=system_settings.get_int(session, "credential_max_age_days"),
+        backup_interval_hours=system_settings.get_int(session, "backup_interval_hours"),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
         **{key: system_settings.get_int(session, key) for key in _CONCURRENCY_INTS},
     )
@@ -159,6 +174,21 @@ def get_system_settings(
     session: Session = Depends(get_session),
 ):
     return _read_all(session)
+
+
+@router.get("/backups", response_model=list[BackupPublic])
+def list_system_backups(user: User = Depends(require_manage)):
+    """The backups in BACKUP_DIR, newest first, for Settings -> System
+    (#334). Read-only: there is no way to download one, by design."""
+    return [
+        BackupPublic(
+            name=info.name,
+            created_at=info.created_at,
+            size_bytes=info.size_bytes,
+            reason=info.reason,
+        )
+        for info in backup.list_backups()
+    ]
 
 
 @router.patch("", response_model=SystemSettingsPublic)

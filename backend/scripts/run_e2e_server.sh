@@ -5,7 +5,7 @@
 # backend on every axis that matters:
 #   - port 8001, not the documented dev port 8000 (CONTRIBUTING.md), so this
 #     can run alongside `npm run dev` / a real local backend without conflict.
-#   - its own SQLite DB, credential salt, known_hosts, log dir, and scratch
+#   - its own DATA_DIR, SQLite DB, credential salt, known_hosts, log dir, and scratch
 #     dir under backend/data/e2e/ -- wiped and recreated on every run, so
 #     each test run starts from a clean, deterministic state.
 # Not meant to be run any other way -- it deletes backend/data/e2e/ on every
@@ -20,6 +20,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source .venv/bin/activate 2>/dev/null || true
 
 export DATABASE_URL="sqlite:///./data/e2e/perchtail.db"
+# Its own DATA_DIR, so the single-instance lock (DATA_DIR/.perchtail.lock)
+# never collides with a dev backend running from the same worktree.
+export DATA_DIR="./data/e2e"
 # Anything non-empty and not the insecure "changeme" default main.py refuses
 # to start with -- this DB is thrown away after every run, so there's no
 # real secret to protect here.

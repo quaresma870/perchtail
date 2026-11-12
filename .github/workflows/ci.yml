@@ -168,7 +168,8 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.24"
+          go-version: "1.27"
+          check-latest: true
           cache-dependency-path: agent/go.sum
 
       - name: Vet
@@ -199,13 +200,8 @@ jobs:
           GOOS=linux GOARCH=arm64 go build -o dist/perchtail-agent-linux-arm64 .
           GOOS=windows GOARCH=amd64 go build -o dist/perchtail-agent-windows-amd64.exe .
 
-      # gosec 2.30 needs Go >= 1.26. setup-go sets GOTOOLCHAIN=local, so this
-      # step sets it back to auto: `go install` then fetches that toolchain.
-      # The agent itself is still built with the Go set up above.
       - name: Static security analysis (gosec)
         working-directory: agent
-        env:
-          GOTOOLCHAIN: auto
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
           "$(go env GOPATH)/bin/gosec" -quiet ./...
@@ -216,18 +212,14 @@ jobs:
           name: perchtail-agent-binaries
           path: agent/dist/
 
-      # govulncheck-action installs golang.org/x/vuln@latest, which now
-      # requires Go >= 1.26 to build -- independent of agent/go.mod's own
-      # "go 1.24.7" directive (used for the build/vet/test steps above).
-      # This toolchain version here only runs the govulncheck tool itself;
-      # it doesn't change what Go version the agent binaries are built for.
-      # golang.org/x/vuln's own required Go version has moved twice now
-      # (1.25, then 1.26) independent of any change in this repo -- if this
-      # step starts failing with "requires go >= X" again, bump this to X.
+      # The same Go release the agent is built with (above and in the release
+      # workflow), so the standard library it checks is the one in the
+      # binaries. Keep the three in step.
       - name: Dependency vulnerability scan (govulncheck)
         uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
         with:
-          go-version-input: "1.26"
+          go-version-input: "1.27"
+          check-latest: true
           work-dir: agent
 
   docker-image:

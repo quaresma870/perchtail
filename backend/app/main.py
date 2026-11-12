@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app import name_index, source_status
+from app import instance_lock, name_index, source_status
 from app.agent_registry import get_agent_registry
 from app.agent_upgrades import run_scheduled_upgrades
 from app.alerts import run_alert_pass
@@ -45,6 +45,8 @@ from app.audit_hash_chain import backfill_chain_if_needed
 from app.audit_integrity import run_audit_integrity_check
 from app.audit_purge import run_audit_purge_sweep
 from app.auth.sessions import run_session_purge_sweep
+from app.backup import SCHEDULE_TICK as BACKUP_TICK
+from app.backup import record_pending_restore, run_scheduled_backup
 from app.bootstrap import (
     assert_credential_salt_present,
     backfill_sso_user_issuers,
@@ -67,6 +69,7 @@ from app.logging_config import configure_logging, get_logger
 from app.monitoring_access import require_probe_access
 from app.name_index import run_name_index_sweep
 from app.scheduler import scheduler
+from app.schema_version import check_database_revision
 from app.scratch import get_scratch_store
 from app.source_status import run_source_checks
 from app.update_check import run_update_check
@@ -235,7 +238,26 @@ async def lifespan(app: FastAPI):
             "derived from it, so this can't be silently defaulted."
         )
 
+    # One instance per DATA_DIR (#334): taken before anything moves files or
+    # opens the database, held until shutdown has finished.
+    try:
+        lock = instance_lock.acquire(settings)
+    except instance_lock.InstanceLockHeldError as exc:
+        instance_lock.log_held(logger, exc)
+        raise
+    try:
+        async with _started(app, settings):
+            yield
+    finally:
+        lock.release()
+
+
+@asynccontextmanager
+async def _started(app: FastAPI, settings):
     report_data_layout(settings)
+    # A database migrated by a newer PerchTail (#334): refuse before
+    # init_db() touches it.
+    check_database_revision(engine, logger)
     leftover = leftover_legacy_database(settings)
     if leftover is not None:
         logger.warning(
@@ -257,6 +279,10 @@ async def lifespan(app: FastAPI):
         if backfilled:
             logger.info("audit_hash_chain.backfill_complete", rows=backfilled)
         session.commit()
+        # A restore (app/backup.py) can't audit itself in the database it
+        # replaces: the first start on the restored database does.
+        if record_pending_restore(session, settings):
+            session.commit()
         seed_system_log_source(session)
         seed_initial_super_admin(session)
         seed_no_access_role(session)
@@ -273,6 +299,7 @@ async def lifespan(app: FastAPI):
         protected=[
             Path(settings.data_dir),
             Path(settings.log_dir),
+            Path(settings.backup_dir),
             Path(db_file).parent,
             Path(settings.credential_salt_path),
             Path(settings.ssh_known_hosts_path),
@@ -345,6 +372,9 @@ async def lifespan(app: FastAPI):
         timedelta(days=settings.audit_integrity_check_interval_days),
         catch_up=True,
     )
+    # Scheduled backup (#334): ticks every few minutes and backs up once the
+    # interval set in Settings -> System has gone by; 0 (the default) is off.
+    register_job(scheduler, "backup", "Scheduled backup", run_scheduled_backup, BACKUP_TICK)
     register_db_upkeep_jobs(scheduler)
     scheduler.start()
     logger.info("startup.complete")

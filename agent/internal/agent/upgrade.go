@@ -38,11 +38,12 @@ import (
 //   - the host can refuse every upgrade (PERCHTAIL_REMOTE_UPGRADE=false).
 
 // upgradeSigningKeyPEM is the release signing key's public half (PEM,
-// SubjectPublicKeyInfo), embedded at build time. Empty in a build without
-// it, which then refuses every upgrade from the portal. See CONTRIBUTING.md
-// for how the maintainer creates the key pair.
+// SubjectPublicKeyInfo), embedded at build time from upgrade_signing_key.pub.
+// Empty in a build without it, which then refuses every upgrade from the
+// portal. See CONTRIBUTING.md for how the maintainer creates and rotates the
+// key pair.
 //
-//go:embed upgrade_signing_key.pem
+//go:embed upgrade_signing_key.pub
 var upgradeSigningKeyPEM []byte
 
 // githubReleaseBase is where a release's assets are on GitHub; %s is the

@@ -2,7 +2,7 @@
 # node toolchain never ships in the final image. The bundle is the same on
 # every architecture, so it is built on the builder's own platform rather
 # than under emulation in multi-arch release builds.
-FROM --platform=$BUILDPLATFORM node:22-slim AS frontend-build
+FROM --platform=$BUILDPLATFORM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS frontend-build
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
@@ -11,7 +11,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # Backend + runtime stage
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 
 WORKDIR /app/backend
 
@@ -54,11 +54,14 @@ COPY --from=frontend-build /frontend/dist /app/frontend/dist
 # undecryptable, and losing known_hosts silently resets SSH host-key
 # pinning), /data/logs and /data/scratch what can be lost. Images before
 # 0.5.0 kept the database and its siblings at /data itself; the entrypoint
-# moves them (app/data_layout.py). PERCHTAIL_INSTALL tells the Updates card
-# under Settings -> System which upgrade steps to show (#215).
+# moves them (app/data_layout.py). /data/backups holds the encrypted backups
+# `python -m app.backup` makes (docs/backup-and-restore.md); copy them off
+# the host. PERCHTAIL_INSTALL tells the Updates card under Settings ->
+# System which upgrade steps to show (#215).
 ENV DATA_DIR=/data/db \
     LOG_DIR=/data/logs \
     SCRATCH_DIR=/data/scratch \
+    BACKUP_DIR=/data/backups \
     AGENT_BINARIES_DIR=/app/agent-binaries \
     PERCHTAIL_INSTALL=docker
 
