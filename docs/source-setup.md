@@ -52,6 +52,7 @@ See [CLAUDE.md](../CLAUDE.md) for how the `Source` model (`protocol`, `host`,
   reliably, use a glob exclude like `folder/**`. On SSH sources, rules are
   case-sensitive: `secret/**` doesn't hide `SECRET/`; use
   `re:(?i)^secret/` or a second glob rule for that.
+- **Rules reach inside archives.** A `.zip` or `.tar.gz` browses as a folder, and each file in it is matched by its path through the archive (`logs/old.zip/app.log`). An archive in which some file's last matching rule is an exclude can't be downloaded or opened whole, since that would hand over that file; its other files can still be opened and downloaded one by one, and a folder's ZIP leaves the archive out and lists it in `SKIPPED.txt`. The refusal and `SKIPPED.txt` don't say why; the audit log records each refused archive (`file.open_denied`, `file.download_denied`, and `skipped_archives` on `folder.download`). Files no rule matches don't count: with only `include **/*.zip`, the archive's files aren't listed but the archive still downloads whole. An archive that can't be read as one is refused whole whenever the source has an exclude rule, and so is an archive that holds another archive (the inner archive's own files aren't matched against the rules), whether it's the outer archive or the inner one taken on its own.
 - **Links don't lead out of the base path.** Symlinks (SSH, local, agent)
   and junctions or symlinks (SMB, WinRM) that point outside the base path
   are left out of listings, and any path that goes through one answers

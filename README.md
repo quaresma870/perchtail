@@ -37,7 +37,7 @@ PerchTail gives support and ops engineers one place to browse, open, and downloa
 log files live from a mix of Linux and Windows servers — without installing
 anything on those servers, and without permanently copying their content anywhere.
 
-You configure **sources** (a host and how to reach it — SSH/SFTP, SMB, WinRM, or a push agent), attach **rules** (which files and folders are visible, glob or regex, evaluated in order), and PerchTail lists and fetches matching files live, opened in a Notepad++/VS-Code-style viewer and downloadable as single files or zipped folders. Nothing is proactively mirrored or cached across views — every open is a fresh fetch, because the logs behind it are still being written.
+You configure **sources** (a host and how to reach it — SSH/SFTP, SMB, WinRM, or a push agent), attach **rules** (which files and folders are visible, glob or regex, evaluated in order), and PerchTail lists and fetches matching files live, opened in a Notepad++/VS-Code-style viewer and downloadable as single files or zipped folders. A `.zip` or `.tar.gz` archive opens as a folder whose files go through the same rules; an archive with a file whose last matching rule is an exclude can't be downloaded whole (its other files still open and download one by one), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Nothing is proactively mirrored or cached across views — every open is a fresh fetch, because the logs behind it are still being written.
 
 RBAC is built in from day one: access is scoped per customer/environment, not just
 per user, so a support engineer working one account can't accidentally browse

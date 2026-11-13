@@ -102,7 +102,9 @@ a full disk under it would also stop the database and the logs. PerchTail
 refuses a new fetch (HTTP 507) when scratch reaches `SCRATCH_MAX_GB`, or when
 its filesystem is down to `SCRATCH_MIN_FREE_GB` / `SCRATCH_MIN_FREE_PERCENT`
 free (1 GiB or 5% by default, whichever is larger), but that guard only
-covers scratch.
+covers scratch. A folder ZIP fetches and checks the folder's `.zip` and
+`.tar.gz` files before the ZIP starts, and they wait in scratch for their
+turn, so size scratch for all the archives in the largest folder you zip.
 
 Keep `DATA_DIR` on a local disk. The database runs in SQLite's WAL mode,
 which doesn't work over a network share. On every start, PerchTail sets

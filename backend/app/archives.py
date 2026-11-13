@@ -49,17 +49,27 @@ def _zip_mtime(date_time: tuple) -> float | None:
         return None
 
 
+def _is_zip(filename: str) -> bool:
+    return filename.lower().endswith(".zip")
+
+
+def _is_tar_gz(filename: str) -> bool:
+    return filename.lower().endswith(_TAR_SUFFIXES)
+
+
 def is_archive(filename: str) -> bool:
     """Zip/tar.gz are virtual folders in the tree (CLAUDE.md's "Live
     browsing & ephemeral fetch behavior") — expanding one lists its members
-    rather than opening it directly."""
-    return filename.endswith(".zip") or filename.endswith(_TAR_SUFFIXES)
+    rather than opening it directly. The extension is matched whatever its
+    case (`OLD.ZIP`)."""
+    return _is_zip(filename) or _is_tar_gz(filename)
 
 
 def is_transparent_gzip(filename: str) -> bool:
     """A plain single-file .gz decompresses transparently and opens like any
-    other file — unlike .zip/.tar.gz, it is not a virtual folder."""
-    return filename.endswith(".gz") and not filename.endswith(_TAR_SUFFIXES)
+    other file — unlike .zip/.tar.gz, it is not a virtual folder. The
+    extension is matched whatever its case (`app.log.GZ`)."""
+    return filename.lower().endswith(".gz") and not _is_tar_gz(filename)
 
 
 def normalize_member_name(name: str) -> str:
@@ -109,7 +119,7 @@ def resolve_member_name(local_path: Path, filename: str, requested: str) -> str:
 
 
 def list_members(local_path: Path, filename: str) -> list[ArchiveMember]:
-    if filename.endswith(".zip"):
+    if _is_zip(filename):
         with zipfile.ZipFile(local_path) as zf:
             return [
                 ArchiveMember(
@@ -120,7 +130,7 @@ def list_members(local_path: Path, filename: str) -> list[ArchiveMember]:
                 )
                 for info in zf.infolist()
             ]
-    if filename.endswith(_TAR_SUFFIXES):
+    if _is_tar_gz(filename):
         with tarfile.open(local_path, mode="r:gz") as tf:
             return [
                 ArchiveMember(
@@ -145,11 +155,11 @@ def extract_member(
     always-fresh, purge-on-close rules apply to it as to anything else.
     The cap counts bytes actually produced, not the size the archive
     header claims, since a crafted header can lie."""
-    if filename.endswith(".zip"):
+    if _is_zip(filename):
         with zipfile.ZipFile(local_path) as zf, zf.open(member_name) as src:
             _bounded_copy(src, destination, max_bytes)
         return
-    if filename.endswith(_TAR_SUFFIXES):
+    if _is_tar_gz(filename):
         with tarfile.open(local_path, mode="r:gz") as tf:
             member = tf.getmember(member_name)
             src = tf.extractfile(member)

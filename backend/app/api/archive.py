@@ -1,7 +1,9 @@
 import hashlib
 import io
 import shutil
+import tarfile
 import zipfile
+import zlib
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from urllib.parse import quote
@@ -43,11 +45,12 @@ from app.config import get_settings
 from app.db import get_session
 from app.limits import Limits, Slot, current_limits, get_limiter
 from app.logging_config import get_logger
-from app.models import Protocol, Rule, Source
+from app.models import Protocol, Rule, RuleType, Source
 from app.name_index import MAX_DEPTH
 from app.rules import (
     is_dir_visible,
     is_entry_visible,
+    is_explicitly_excluded,
     is_safe_relative_path,
     is_safe_windows_relative_path,
     is_visible,
@@ -198,6 +201,71 @@ def _fetch_too_large(exc: FetchTooLargeError, *, folder: bool = False) -> HTTPEx
     )
 
 
+# Deliberately neutral: neither the refusal nor SKIPPED.txt says why, so they
+# don't reveal that the archive holds something the rules hide.
+WHOLE_ARCHIVE_REFUSED_MESSAGE = (
+    "This archive can't be downloaded whole: open or download its files one by one."
+)
+WHOLE_ARCHIVE_REFUSED_ERROR_CODE = "archive_not_downloadable_whole"
+_SKIPPED_REASON = "can't be included whole; open or download its files one by one"
+# The reason recorded in the audit log, which only view_audit_log can read.
+_AUDIT_REFUSAL_REASON = "archive_hidden_members"
+
+
+class WholeArchiveRefused(HTTPException):
+    """403 for a whole archive that holds a file the rules hide; /open and
+    /download audit it before passing it on."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "message": WHOLE_ARCHIVE_REFUSED_MESSAGE,
+                "error_code": WHOLE_ARCHIVE_REFUSED_ERROR_CODE,
+            },
+        )
+
+
+def _archive_has_hidden_members(
+    source: Source, path: str, local_archive: Path, rules: list[Rule]
+) -> bool:
+    """Whether the archive at `path` (already copied to `local_archive`)
+    holds a file the rules hide on purpose: the last rule matching its
+    virtual path (`<archive>/<member>`, the same path the explorer and
+    /open check) is an exclude. Members no rule matches don't count -- a
+    rule that shows only the archive still lets it be downloaded whole. An
+    archive that can't be read as one, or that holds another archive (whose
+    own members the rules are never checked against), counts as hiding
+    something whenever the source has an exclude rule."""
+    has_exclude = any(rule.type == RuleType.exclude for rule in rules)
+    filename = path.rsplit("/", 1)[-1]
+    try:
+        members = list_members(local_archive, filename)
+    except (zipfile.BadZipFile, tarfile.TarError, EOFError, OSError, zlib.error, ValueError):
+        return has_exclude
+    case_insensitive = rules_case_insensitive(source)
+    for member in members:
+        if member.is_dir:
+            continue
+        name = normalize_member_name(member.name)
+        if has_exclude and is_archive(name.rsplit("/", 1)[-1]):
+            return True
+        if is_explicitly_excluded(f"{path}/{name}", rules, case_insensitive=case_insensitive):
+            return True
+    return False
+
+
+def _require_whole_archive_allowed(
+    source: Source, path: str, local_archive: Path, rules: list[Rule]
+) -> None:
+    """A whole archive carries every member's bytes, so it is only served
+    when none of them is hidden by the rules (_archive_has_hidden_members);
+    its visible files stay reachable one by one through `member=`."""
+    if _archive_has_hidden_members(source, path, local_archive, rules):
+        logger.warning("archive.whole_archive_refused", source_id=source.id, path=path)
+        raise WholeArchiveRefused()
+
+
 def _materialize(
     source: Source, path: str, member: str | None, rules: list[Rule], destination: Path
 ) -> str:
@@ -231,6 +299,11 @@ def _materialize(
                 extract_member(
                     archive_local, filename, raw_name, destination, _max_decompressed_bytes()
                 )
+            if is_archive(member.rsplit("/", 1)[-1]):
+                # A member that is itself an archive is served whole, so it
+                # gets the same check as any whole archive, at its virtual
+                # path.
+                _require_whole_archive_allowed(source, f"{path}/{member}", destination, rules)
         except DecompressionLimitError as exc:
             raise _too_large(exc) from exc
         return member.rsplit("/", 1)[-1]
@@ -242,6 +315,13 @@ def _materialize(
         except DecompressionLimitError as exc:
             raise _too_large(exc) from exc
         return filename[: -len(".gz")]
+
+    if is_archive(filename):
+        # Read from the source once: the same copy is checked and served.
+        with connector.local_copy(source, path) as archive_local:
+            _require_whole_archive_allowed(source, path, Path(archive_local), rules)
+            shutil.copyfile(archive_local, destination)
+        return filename
 
     connector.fetch_file(source, path, destination)
     return filename
@@ -475,8 +555,12 @@ def _resolve_content(
         _require_local_source_allowed(source)
         if source_roots.is_multi_root(source):
             rooted, inner = source_roots.split(source, path)
-            return local_collector.resolve_path(rooted, inner), filename, None
-        return local_collector.resolve_path(source, path), filename, None
+            resolved = local_collector.resolve_path(rooted, inner)
+        else:
+            resolved = local_collector.resolve_path(source, path)
+        if is_archive(filename):
+            _require_whole_archive_allowed(source, path, resolved, rules)
+        return resolved, filename, None
 
     store = get_scratch_store()
     with get_limiter().connector(limits, source.id):
@@ -492,6 +576,36 @@ def _resolve_content(
             store.release(key)
             raise
     return destination, served_filename, key
+
+
+def _resolve_content_audited(
+    source: Source,
+    path: str,
+    member: str | None,
+    rules: list[Rule],
+    limits: Limits,
+    user: User,
+    session: Session,
+    denied_action: str,
+) -> tuple[Path, str, str | None]:
+    """_resolve_content, recording a refused whole archive in the audit log
+    (`denied_action`) before the 403 goes out, so every attempt leaves a
+    trace. For an archive inside an archive (`member=`), the path recorded
+    is the refused archive's virtual path, `<archive>/<member>`."""
+    try:
+        return _resolve_content(source, path, member, rules, limits)
+    except WholeArchiveRefused:
+        refused_path = path if member is None else f"{path}/{normalize_member_name(member)}"
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action=denied_action,
+            target_type="source",
+            target_id=source.id,
+            metadata={"path": refused_path, "reason": _AUDIT_REFUSAL_REASON},
+        )
+        session.commit()
+        raise
 
 
 class _FinishingMixin:
@@ -538,8 +652,8 @@ def open_file(
     ZIP). Every open is audited so reads are as traceable as downloads."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
-    served_path, filename, key = _resolve_content(
-        source, path, member, rules, current_limits(session)
+    served_path, filename, key = _resolve_content_audited(
+        source, path, member, rules, current_limits(session), user, session, "file.open_denied"
     )
     record_audit_event(
         session,
@@ -706,7 +820,9 @@ def download_file(
     limits = current_limits(session)
     transfer = get_limiter().transfer(limits, user.id)
     try:
-        served_path, filename, key = _resolve_content(source, path, member, rules, limits)
+        served_path, filename, key = _resolve_content_audited(
+            source, path, member, rules, limits, user, session, "file.download_denied"
+        )
     except BaseException:
         transfer.release()
         raise
@@ -748,7 +864,8 @@ def _zip_entries(
     against MAX_FETCH_MB before the first download (#191). Nested
     .zip/.tar.gz files are included as raw files rather than expanded --
     expanding archives-within-a-bulk-zip isn't worth the complexity for
-    what CLAUDE.md asks for here (download a folder).
+    what CLAUDE.md asks for here (download a folder). An archive holding a
+    file the rules hide is left out once fetched (see _check_archives).
 
     Like the file-name index, the walk stops MAX_DEPTH folders down and
     lists a folder only once, by its identity on the source when the
@@ -807,20 +924,67 @@ class _ZipSink(io.RawIOBase):
         return data
 
 
-def _stream_zip(
+def _arcname(path: str, request_root: str) -> str:
+    return path[len(request_root) + 1 :] if request_root else path
+
+
+def _check_archives(
     connector,
     source: Source,
+    rules: list[Rule],
     entries: list[DirEntry],
     request_root: str,
     tmp_dir: Path,
+) -> tuple[list[tuple[DirEntry, Path | None]], list[str]]:
+    """Before a folder's ZIP starts: fetches each archive among `entries`
+    into `tmp_dir` and leaves out any that holds a file the rules hide
+    (_archive_has_hidden_members), so the audit entry can name them. The
+    copy checked is the copy zipped -- each archive is read from the source
+    once. Returns the entries to zip, each with its already fetched copy
+    (None for a file fetched while streaming), and the arcnames of the
+    archives left out."""
+    planned: list[tuple[DirEntry, Path | None]] = []
+    skipped: list[str] = []
+    for index, entry in enumerate(entries):
+        if not is_archive(entry.name):
+            planned.append((entry, None))
+            continue
+        destination = tmp_dir / f"archive-{index}"
+        connector.fetch_file(source, entry.path, destination)
+        if _archive_has_hidden_members(source, entry.path, destination, rules):
+            destination.unlink()
+            skipped.append(_arcname(entry.path, request_root))
+            continue
+        planned.append((entry, destination))
+    return planned, skipped
+
+
+def _skipped_list_name(entries: list[DirEntry], request_root: str) -> str:
+    """SKIPPED.txt, unless the folder already has a file by that name at its
+    root (compared ignoring case, so extracting on Windows can't collide)."""
+    root_names = {_arcname(entry.path, request_root).lower() for entry in entries}
+    return "SKIPPED (PerchTail).txt" if "skipped.txt" in root_names else "SKIPPED.txt"
+
+
+def _stream_zip(
+    connector,
+    source: Source,
+    planned: list[tuple[DirEntry, Path | None]],
+    request_root: str,
+    tmp_dir: Path,
     limit: int,
+    skipped: list[str],
+    skipped_name: str,
 ) -> Iterator[bytes]:
-    """Fetches each of `entries` fresh, one at a time, into scratch, and
+    """Fetches each of `planned` fresh, one at a time, into scratch, and
     streams it into the ZIP the client is receiving -- same always-fresh
     rule as every other read in this project, just batched into one
-    archive. Arcnames are relative to `request_root`. The fetched size is
-    what counts against the MAX_FETCH_MB budget: a file may have grown since
-    it was listed, and one that takes the ZIP over it ends the download.
+    archive. An archive was already fetched and checked (_check_archives):
+    its copy is the one zipped. Arcnames are relative to `request_root`.
+    The fetched size is what counts against the MAX_FETCH_MB budget: a file
+    may have grown since it was listed, and one that takes the ZIP over it
+    ends the download. The archives left out (`skipped`) are listed last,
+    in `skipped_name`.
 
     Once the response has started, a failure can only cut the download
     short (the client sees an incomplete download); it's logged."""
@@ -828,11 +992,12 @@ def _stream_zip(
     remaining = limit
     try:
         with zipfile.ZipFile(sink, "w", zipfile.ZIP_DEFLATED) as zf:
-            for index, entry in enumerate(entries):
-                arcname = entry.path[len(request_root) + 1 :] if request_root else entry.path
-                destination = tmp_dir / f"member-{index}"
+            for index, (entry, fetched) in enumerate(planned):
+                arcname = _arcname(entry.path, request_root)
+                destination = fetched if fetched is not None else tmp_dir / f"member-{index}"
                 try:
-                    connector.fetch_file(source, entry.path, destination)
+                    if fetched is None:
+                        connector.fetch_file(source, entry.path, destination)
                     remaining -= destination.stat().st_size
                     if remaining < 0:
                         raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
@@ -847,6 +1012,10 @@ def _stream_zip(
                     destination.unlink(missing_ok=True)
                 if sink.pending:
                     yield sink.take()
+            if skipped:
+                zf.writestr(
+                    skipped_name, "".join(f"{arcname}: {_SKIPPED_REASON}\n" for arcname in skipped)
+                )
         # Closing the ZipFile wrote the central directory.
         yield sink.take()
     except Exception as exc:
@@ -883,8 +1052,10 @@ def download_folder_zip(
     file fresh — no different from any other read here, just batched.
 
     The ZIP is streamed as it's built (#345): each file is fetched into
-    scratch, written to the response and deleted before the next. The
-    folder's listed total is checked against MAX_FETCH_MB before anything
+    scratch, written to the response and deleted before the next; the
+    archives among them are fetched and checked first (_check_archives),
+    and one that holds a file the rules hide is left out and listed in
+    SKIPPED.txt. The folder's listed total is checked against MAX_FETCH_MB before anything
     is fetched (413). Holds one of the user's transfers and a connector
     slot until the client has it all or goes away (#344, 503 with
     Retry-After when none is free)."""
@@ -901,6 +1072,7 @@ def download_folder_zip(
         for slot in slots:
             slot.release()
 
+    tmp_dir: Path | None = None
     try:
         slots.append(get_limiter().connector(limits, source.id))
         limit = max_fetch_bytes()
@@ -913,23 +1085,54 @@ def download_folder_zip(
                 ),
                 folder=True,
             )
-        # One member sits in scratch at a time: room for the largest.
-        get_scratch_store().ensure_room(max((entry.size for entry in entries), default=0))
+        # The archives are fetched and checked before the ZIP starts and wait
+        # in scratch for their turn; the other files sit there one at a time.
+        archives = sum(entry.size for entry in entries if is_archive(entry.name))
+        largest_other = max(
+            (entry.size for entry in entries if not is_archive(entry.name)), default=0
+        )
+        get_scratch_store().ensure_room(archives + largest_other)
         tmp_dir = make_scratch_dir("perchtail-zip-")
+        try:
+            planned, skipped = _check_archives(connector, source, rules, entries, path, tmp_dir)
+        except FetchTooLargeError as exc:
+            raise _fetch_too_large(exc, folder=True) from exc
+        fetched = sum(copy.stat().st_size for _, copy in planned if copy is not None)
+        if fetched > limit:
+            raise _fetch_too_large(
+                FetchTooLargeError(
+                    "folder is over the MAX_FETCH_MB limit", size=fetched, limit=limit
+                ),
+                folder=True,
+            )
+        metadata: dict = {"path": path, "file_count": len(planned)}
+        if skipped:
+            metadata["skipped_archives"] = skipped
         record_audit_event(
             session,
             user_id=user.id,
             action="folder.download",
             target_type="source",
             target_id=source.id,
-            metadata={"path": path, "file_count": len(entries)},
+            metadata=metadata,
         )
         session.commit()
     except BaseException:
         finish()
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
 
-    stream = _stream_zip(connector, source, entries, path, tmp_dir, limit)
+    stream = _stream_zip(
+        connector,
+        source,
+        planned,
+        path,
+        tmp_dir,
+        limit,
+        skipped,
+        _skipped_list_name(entries, path),
+    )
 
     def finish_stream() -> None:
         finish()
