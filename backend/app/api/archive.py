@@ -213,11 +213,13 @@ def _archive_has_hidden_members(
     rule that shows only the archive still lets it be downloaded whole. An
     archive that can't be read as one, or that holds another archive (whose
     own members the rules are never checked against), counts as hiding
-    something whenever the source has an exclude rule."""
+    something whenever the source has an exclude rule. Every entry counts,
+    a tar's links, devices and FIFOs included: they are never listed or
+    opened, but the whole archive still carries their names."""
     has_exclude = any(rule.type == RuleType.exclude for rule in rules)
     filename = path.rsplit("/", 1)[-1]
     try:
-        members = list_members(local_archive, filename)
+        members = list_members(local_archive, filename, include_special=True)
     except (zipfile.BadZipFile, tarfile.TarError, EOFError, OSError, zlib.error, ValueError):
         return has_exclude
     case_insensitive = rules_case_insensitive(source)
@@ -283,6 +285,10 @@ def _materialize(
                 _require_whole_archive_allowed(source, f"{path}/{member}", destination, rules)
         except DecompressionLimitError as exc:
             raise _too_large(exc) from exc
+        except KeyError as exc:
+            # Not in the archive, or not a regular file (a link, a device):
+            # either way there's nothing to open under that name.
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found") from exc
         return member.rsplit("/", 1)[-1]
 
     if is_transparent_gzip(filename):

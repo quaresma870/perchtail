@@ -118,7 +118,12 @@ def resolve_member_name(local_path: Path, filename: str, requested: str) -> str:
     return requested
 
 
-def list_members(local_path: Path, filename: str) -> list[ArchiveMember]:
+def list_members(
+    local_path: Path, filename: str, *, include_special: bool = False
+) -> list[ArchiveMember]:
+    """The archive's members. A tar's links, devices and FIFOs are left out
+    (see _is_plain_tar_member) unless `include_special` is set, for checks
+    that must see every entry's name; they then list as files."""
     if _is_zip(filename):
         with zipfile.ZipFile(local_path) as zf:
             return [
@@ -140,8 +145,17 @@ def list_members(local_path: Path, filename: str) -> list[ArchiveMember]:
                     mtime=float(member.mtime) if member.mtime else None,
                 )
                 for member in tf.getmembers()
+                if include_special or _is_plain_tar_member(member)
             ]
     raise ValueError(f"Not a supported archive: {filename}")
+
+
+def _is_plain_tar_member(member: tarfile.TarInfo) -> bool:
+    """Only regular files and directories are members. A symbolic or hard
+    link would open whatever member it points at -- possibly one the rules
+    hide -- under its own, visible name; devices and FIFOs have no content
+    to show. So they are neither listed nor opened."""
+    return member.isfile() or member.isdir()
 
 
 def extract_member(
@@ -154,7 +168,10 @@ def extract_member(
     """Decompresses and fetches just the requested member — same
     always-fresh, purge-on-close rules apply to it as to anything else.
     The cap counts bytes actually produced, not the size the archive
-    header claims, since a crafted header can lie."""
+    header claims, since a crafted header can lie. A member that doesn't
+    exist, or a tar member that isn't a regular file (a link, a device),
+    raises KeyError: as far as the caller knows, it isn't there. Zip
+    members are always read as stored -- zipfile never follows a link."""
     if _is_zip(filename):
         with zipfile.ZipFile(local_path) as zf, zf.open(member_name) as src:
             _bounded_copy(src, destination, max_bytes)
@@ -162,6 +179,8 @@ def extract_member(
     if _is_tar_gz(filename):
         with tarfile.open(local_path, mode="r:gz") as tf:
             member = tf.getmember(member_name)
+            if not member.isfile():
+                raise KeyError(member_name)
             src = tf.extractfile(member)
             if src is None:
                 raise ValueError(f"{member_name} is not a regular file")

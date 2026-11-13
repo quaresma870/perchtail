@@ -4,6 +4,7 @@ from sqlmodel import Session, select
 
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
+from app.audit_labels import audit_labels
 from app.auth.models import (
     Capability,
     GlobalCapability,
@@ -16,8 +17,13 @@ from app.auth.models import (
 from app.auth.rbac import (
     create_role,
     create_role_grant,
+    record_role_created,
+    record_role_grant_created,
     require_capabilities_within_authority,
+    require_changed_role_within_authority,
     require_global_capability,
+    require_grant_within_authority,
+    require_not_own_role,
     require_role_within_authority,
 )
 from app.db import get_session
@@ -104,10 +110,11 @@ def _require_super_admin_for_super_admin_flag(user: User, is_super_admin: bool) 
 
 def _get_editable_role(session: Session, user: User, role_id: int) -> Role:
     """The role must exist, be within the caller's own authority (see
-    rbac.role_within_authority), and not be built-in. Built-in roles are
-    immutable: "No Access" is what every newly SSO-provisioned user lands
-    on, so quietly granting it anything would hand that to anyone with an
-    IdP account, and "Super Admin" is the break-glass role."""
+    rbac.role_within_authority), not be the role the caller holds (short of
+    super-admin), and not be built-in. Built-in roles are immutable: "No
+    Access" is what every newly SSO-provisioned user lands on, so quietly
+    granting it anything would hand that to anyone with an IdP account, and
+    "Super Admin" is the break-glass role."""
     role = session.get(Role, role_id)
     if role is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
@@ -115,7 +122,8 @@ def _get_editable_role(session: Session, user: User, role_id: int) -> Role:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Built-in roles cannot be modified"
         )
-    require_role_within_authority(user, role)
+    require_not_own_role(user, role)
+    require_role_within_authority(session, user, role)
     return role
 
 
@@ -222,7 +230,8 @@ def delete_role(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Cannot delete a built-in role"
         )
-    require_role_within_authority(user, role)
+    require_not_own_role(user, role)
+    require_role_within_authority(session, user, role)
 
     if session.exec(select(User).where(User.role_id == role_id)).first() is not None:
         raise HTTPException(
@@ -260,7 +269,7 @@ def duplicate_role(
     source_role = session.get(Role, role_id)
     if source_role is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
-    require_role_within_authority(user, source_role)
+    require_role_within_authority(session, user, source_role)
 
     new_name = payload.name or f"{source_role.name} (copy)"
     if session.exec(select(Role).where(Role.name == new_name)).first() is not None:
@@ -275,8 +284,10 @@ def duplicate_role(
         name=new_name,
         is_super_admin=source_role.is_super_admin,
         global_capabilities=list(source_role.global_capabilities),
+        commit=False,
+        audit=False,
     )
-    for grant in session.exec(select(RoleGrant).where(RoleGrant.role_id == role_id)).all():
+    copies = [
         create_role_grant(
             session,
             actor_user_id=user.id,
@@ -284,7 +295,18 @@ def duplicate_role(
             scope_type=grant.scope_type,
             scope_id=grant.scope_id,
             capabilities=list(grant.capabilities),
+            commit=False,
+            audit=False,
         )
+        for grant in session.exec(select(RoleGrant).where(RoleGrant.role_id == role_id)).all()
+    ]
+    # Checked before anything is recorded: a refused copy leaves no audit
+    # row and no log line for a change that never happened.
+    require_changed_role_within_authority(session, user, new_role)
+    record_role_created(session, actor_user_id=user.id, role=new_role)
+    for copy in copies:
+        record_role_grant_created(session, actor_user_id=user.id, grant=copy)
+    session.commit()
     session.refresh(new_role)
     return new_role
 
@@ -307,17 +329,32 @@ def create_grant(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    _get_editable_role(session, user, role_id)
+    role = _get_editable_role(session, user, role_id)
     _validate_scope_exists(session, scope_type=payload.scope_type, scope_id=payload.scope_id)
+    require_grant_within_authority(
+        session,
+        user,
+        scope_type=payload.scope_type,
+        scope_id=payload.scope_id,
+        capabilities=payload.capabilities,
+        role_id=role_id,
+    )
 
-    return create_role_grant(
+    grant = create_role_grant(
         session,
         actor_user_id=user.id,
         role_id=role_id,
         scope_type=payload.scope_type,
         scope_id=payload.scope_id,
         capabilities=payload.capabilities,
+        commit=False,
+        audit=False,
     )
+    require_changed_role_within_authority(session, user, role)
+    record_role_grant_created(session, actor_user_id=user.id, grant=grant)
+    session.commit()
+    session.refresh(grant)
+    return grant
 
 
 @router.patch("/{role_id}/grants/{grant_id}", response_model=RoleGrantPublic)
@@ -331,10 +368,19 @@ def update_grant(
     grant = session.get(RoleGrant, grant_id)
     if grant is None or grant.role_id != role_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Grant not found")
-    _get_editable_role(session, user, role_id)
+    role = _get_editable_role(session, user, role_id)
+    require_grant_within_authority(
+        session,
+        user,
+        scope_type=grant.scope_type,
+        scope_id=grant.scope_id,
+        capabilities=payload.capabilities,
+        role_id=role_id,
+    )
 
     grant.capabilities = payload.capabilities
     session.add(grant)
+    require_changed_role_within_authority(session, user, role)
     record_audit_event(
         session,
         user_id=user.id,
@@ -358,19 +404,22 @@ def delete_grant(
     grant = session.get(RoleGrant, grant_id)
     if grant is None or grant.role_id != role_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Grant not found")
-    _get_editable_role(session, user, role_id)
+    role = _get_editable_role(session, user, role_id)
 
+    metadata = {"role_id": role_id, "scope_type": grant.scope_type, "scope_id": grant.scope_id}
+    # The grant's names are read while it's still there: the check below
+    # flushes the delete, after which they can't be found anymore.
+    labels = audit_labels(session, "role_grant", grant_id, metadata)
     session.delete(grant)
+    # Checked before anything is recorded: a refused delete leaves no audit
+    # row and no log line for a change that never happened.
+    require_changed_role_within_authority(session, user, role)
     record_audit_event(
         session,
         user_id=user.id,
         action="role_grant.delete",
         target_type="role_grant",
         target_id=grant_id,
-        metadata={
-            "role_id": role_id,
-            "scope_type": grant.scope_type,
-            "scope_id": grant.scope_id,
-        },
+        metadata={**labels, **metadata},
     )
     session.commit()

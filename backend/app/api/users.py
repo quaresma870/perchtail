@@ -9,7 +9,11 @@ from app.api.auth import get_current_active_user, password_policy_error, profile
 from app.audit import record_audit_event
 from app.auth.models import AuthProviderType, GlobalCapability, Role, User
 from app.auth.providers.local import create_local_user, set_password
-from app.auth.rbac import require_global_capability, require_role_within_authority
+from app.auth.rbac import (
+    OWN_ROLE_REFUSED,
+    require_global_capability,
+    require_role_within_authority,
+)
 from app.auth.sessions import revoke_all_sessions
 from app.db import get_session
 
@@ -64,7 +68,7 @@ def _get_manageable_user(session: Session, actor: User, user_id: int) -> User:
     target = session.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    require_role_within_authority(actor, target.role)
+    require_role_within_authority(session, actor, target.role)
     return target
 
 
@@ -99,7 +103,7 @@ def create_user(
     role = session.get(Role, payload.role_id)
     if role is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
-    require_role_within_authority(user, role)
+    require_role_within_authority(session, user, role)
     if session.exec(select(User).where(User.username == payload.username)).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already in use")
     try:
@@ -142,7 +146,11 @@ def update_user(
         new_role = session.get(Role, payload.role_id)
         if new_role is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
-        require_role_within_authority(user, new_role)
+        if target.id == user.id and new_role.id != target.role_id and not user.role.is_super_admin:
+            # Only a super admin changes their own role: for anyone else it
+            # would be a way to widen their own access.
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=OWN_ROLE_REFUSED)
+        require_role_within_authority(session, user, new_role)
         if not new_role.is_super_admin:
             _require_not_last_super_admin(session, target)
         target.role_id = payload.role_id
