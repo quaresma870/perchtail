@@ -127,7 +127,11 @@ jobs:
             echo "::error::$tag doesn't match the code at ${sha:0:7}: backend/app/version.py says '$app_version', frontend/package.json says '$ui_version'"
             exit 1
           fi
-          if ! git show "$sha:CHANGELOG.md" | grep -q "^## \[$version\]"; then
+          # Read the whole file first: `git show | grep -q` stops reading at
+          # the first match, git show then dies of SIGPIPE, and with pipefail
+          # that fails the check at random once the CHANGELOG is large.
+          changelog="$(git show "$sha:CHANGELOG.md")"
+          if ! awk -v h="## [$version]" 'index($0, h) == 1 { found = 1 } END { exit !found }' <<<"$changelog"; then
             echo "::error::CHANGELOG.md at ${sha:0:7} has no '## [$version]' section"
             exit 1
           fi
