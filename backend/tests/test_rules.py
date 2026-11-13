@@ -256,3 +256,66 @@ def test_glob_exclude_with_wildcards_covers_matching_folders():
     rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "**/private-*/**")]
     assert not rules_module.is_dir_visible("x/private-hr", rules)
     assert rules_module.is_dir_visible("x/public", rules)
+
+
+# --- explicitly excluded paths (whole-archive downloads) --------------------
+
+
+def test_explicitly_excluded_when_the_last_matching_rule_is_an_exclude():
+    rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "**/*.tmp")]
+    assert rules_module.is_explicitly_excluded("logs.zip/cache.tmp", rules)
+    assert not rules_module.is_explicitly_excluded("logs.zip/app.log", rules)
+
+
+def test_unmatched_path_is_not_explicitly_excluded():
+    rules = [_r(0, RuleType.include, "**/*.zip")]
+    assert not rules_module.is_explicitly_excluded("logs.zip/secret.txt", rules)
+    assert not rules_module.is_explicitly_excluded("anything", [])
+
+
+def test_a_later_include_cancels_an_earlier_exclude():
+    rules = [
+        _r(0, RuleType.include, "**/*"),
+        _r(1, RuleType.exclude, "logs.zip/**"),
+        _r(2, RuleType.include, "logs.zip/app.log"),
+    ]
+    assert not rules_module.is_explicitly_excluded("logs.zip/app.log", rules)
+    assert rules_module.is_explicitly_excluded("logs.zip/other.log", rules)
+
+
+def test_explicitly_excluded_follows_rule_order_not_list_order():
+    rules = [_r(1, RuleType.include, "**/*"), _r(0, RuleType.exclude, "**/*.tmp")]
+    assert not rules_module.is_explicitly_excluded("a.tmp", rules)
+
+
+def test_explicitly_excluded_honours_case_insensitivity():
+    rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "**/secret.log")]
+    assert not rules_module.is_explicitly_excluded("logs.zip/SECRET.log", rules)
+    assert rules_module.is_explicitly_excluded("logs.zip/SECRET.log", rules, case_insensitive=True)
+
+
+def test_explicitly_excluded_with_a_regex_exclude():
+    rules = [
+        _r(0, RuleType.include, "**/*"),
+        _r(1, RuleType.exclude, r"\.key$", PatternKind.regex),
+    ]
+    assert rules_module.is_explicitly_excluded("certs.tar.gz/server.key", rules)
+    assert not rules_module.is_explicitly_excluded("certs.tar.gz/server.crt", rules)
+
+
+def test_broken_regex_exclude_counts_as_excluding():
+    rules = [
+        _r(0, RuleType.include, "**/*"),
+        _r(1, RuleType.exclude, "(?=x)", PatternKind.regex),
+    ]
+    assert rules_module.is_explicitly_excluded("logs.zip/app.log", rules)
+
+
+def test_broken_regex_include_does_not_count_as_excluding():
+    rules = [_r(0, RuleType.include, "(?=x)", PatternKind.regex)]
+    assert not rules_module.is_explicitly_excluded("logs.zip/app.log", rules)
+
+
+@pytest.mark.parametrize("path", ["logs.zip/a\nb.log", "logs.zip/a\x00.log", "x\x7f"])
+def test_path_with_a_control_character_counts_as_excluded(path):
+    assert rules_module.is_explicitly_excluded(path, [_r(0, RuleType.include, "**/*")])

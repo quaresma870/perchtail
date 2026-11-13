@@ -128,6 +128,22 @@ def is_visible(path: str, rules: list[Rule], *, case_insensitive: bool = False) 
     return verdict
 
 
+def is_explicitly_excluded(path: str, rules: list[Rule], *, case_insensitive: bool = False) -> bool:
+    """Whether `path` is hidden on purpose: the last rule that matches it
+    (same order and matching as is_visible, a broken regex included) is an
+    exclude. A path no rule matches is not visible, but isn't counted here --
+    a rule that shows only an archive leaves its members unmatched, and
+    that archive can still be downloaded whole. A path with a control
+    character counts as excluded."""
+    if _has_control_character(path):
+        return True
+    excluded = False
+    for rule in sorted(rules, key=lambda r: r.order):
+        if _rule_matches(path, rule, case_insensitive):
+            excluded = rule.type == RuleType.exclude
+    return excluded
+
+
 def _segment_matches(pattern_segment: str, name: str, ignore_case: bool) -> bool:
     """One glob path segment (`*`, `?` and literals, never crossing `/`)
     against one path segment -- the per-segment half of _compile_glob."""
@@ -241,6 +257,10 @@ def rules_case_insensitive(source: Source) -> bool:
     return source.protocol == Protocol.agent and source.agent_os == "windows"
 
 
+def _has_control_character(path: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in path)
+
+
 def is_safe_relative_path(path: str) -> bool:
     """Accepts only a canonical relative path: `/`-separated segments with
     no `..`, `.` or empty segments, no backslash, no `:`, and no control
@@ -259,7 +279,7 @@ def is_safe_relative_path(path: str) -> bool:
         return True
     if "\\" in path or ":" in path:
         return False
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in path):
+    if _has_control_character(path):
         return False
     return all(segment not in ("", ".", "..") for segment in path.split("/"))
 

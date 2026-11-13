@@ -79,6 +79,28 @@ def _fail_pending(connection: _AgentConnection, reason: str) -> None:
             future.set_exception(AgentNotConnectedError(reason))
 
 
+async def _close(connection: _AgentConnection, reason: str) -> None:
+    """On the event loop: fails what's waiting on the connection and closes
+    its socket. 1008 (policy violation) because the agent's credentials or
+    source no longer allow it; it reconnects and is then refused."""
+    _fail_pending(connection, reason)
+    try:
+        await connection.websocket.close(code=1008, reason=reason)
+    except Exception as exc:  # noqa: BLE001 - it may already be gone
+        logger.debug("agent.server_close_failed", error=str(exc))
+
+
+def disconnect_after_commit(session, source_id: int, reason: str) -> None:
+    """Closes the source's agent connection once `session` commits, so the
+    agent can't reconnect before the change that refuses it is written."""
+    from sqlalchemy import event
+
+    def _after_commit(_session) -> None:
+        get_agent_registry().disconnect(source_id, reason)
+
+    event.listen(session, "after_commit", _after_commit, once=True)
+
+
 class AgentRegistry:
     def __init__(self):
         self._connections: dict[int, _AgentConnection] = {}
@@ -133,6 +155,26 @@ class AgentRegistry:
         # woken up with an error rather than hanging until its own timeout.
         _fail_pending(connection, "agent disconnected")
         logger.info("agent.disconnected", source_id=source_id)
+
+    def disconnect(self, source_id: int, reason: str) -> bool:
+        """Closes the source's agent connection from the server side: its
+        token was regenerated, or the source was disabled or deleted. The
+        agent authenticated when it connected, so without this it would
+        keep answering for the source with a token that no longer works.
+        Callable from any thread; the source shows as disconnected at once,
+        and the socket is closed on the event loop. True when there was a
+        connection to close."""
+        with self._lock:
+            connection = self._connections.pop(source_id, None)
+        if connection is None:
+            return False
+        logger.info("agent.disconnected_by_server", source_id=source_id, reason=reason)
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            _fail_pending(connection, reason)
+            return True
+        asyncio.run_coroutine_threadsafe(_close(connection, reason), loop)
+        return True
 
     def resolve_response(
         self, source_id: int, message: dict, websocket: WebSocket | None = None
