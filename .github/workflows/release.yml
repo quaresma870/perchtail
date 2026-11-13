@@ -11,6 +11,9 @@ name: Release
 #   - the Docker image, pushed to ghcr.io/<owner>/perchtail:<version>, with
 #     those signed agent binaries in /app/agent-binaries, and its SBOM
 #     (CycloneDX);
+#   - perchtail-image.json, naming that image by digest, and
+#     perchtail-image.json.sig, its Ed25519 signature with the same release
+#     key: the updater (#320) only installs an image a signed manifest names;
 #   - release notes taken from the version's CHANGELOG.md section.
 # GitHub adds the source code archives itself when the release is published.
 #
@@ -232,6 +235,9 @@ jobs:
     permissions:
       contents: read
       packages: write # push to ghcr.io
+    outputs:
+      name: ${{ steps.image.outputs.name }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -272,6 +278,7 @@ jobs:
             org.opencontainers.image.revision=${{ needs.meta.outputs.sha }}
 
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build
         env:
           # No build-record artifact: the draft job only wants agent + sbom.
           DOCKER_BUILD_RECORD_UPLOAD: "false"
@@ -283,6 +290,22 @@ jobs:
           labels: ${{ steps.labels.outputs.labels }}
           provenance: true
           sbom: true
+
+      # The digest the build reported must be the one the registry serves
+      # for this version's tag, since the signed image manifest names it.
+      - name: Check the pushed digest
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          served="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)"
+          if [ -z "$DIGEST" ] || [ "$served" != "$DIGEST" ]; then
+            echo "::error::The registry serves $IMAGE:$VERSION as '$served', but the build pushed '$DIGEST'."
+            exit 1
+          fi
+          echo "$IMAGE:$VERSION -> $DIGEST"
 
       # Trivy doesn't create the output's directory.
       - run: mkdir -p sbom
@@ -305,8 +328,64 @@ jobs:
           path: sbom/
           if-no-files-found: error
 
+  # perchtail-image.json names this release's image by digest, signed with
+  # the same Ed25519 release key as the agents' SHA256SUMS (#320). The
+  # updater carries the public key and pulls only an image a genuine
+  # release names, by digest, whatever the registry's tags say.
+  image-manifest:
+    needs: [meta, image]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.meta.outputs.sha }}
+
+      - name: Write and sign perchtail-image.json
+        env:
+          AGENT_SIGNING_KEY: ${{ secrets.AGENT_SIGNING_KEY }}
+          PUBLIC_KEY: agent/internal/agent/upgrade_signing_key.pub
+          VERSION: ${{ needs.meta.outputs.version }}
+          IMAGE: ${{ needs.image.outputs.name }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AGENT_SIGNING_KEY:-}" ]; then
+            echo "::error::The AGENT_SIGNING_KEY secret of the release environment is missing. See CONTRIBUTING.md, 'Agent release signing key'."
+            exit 1
+          fi
+          if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::'$DIGEST' isn't an image digest."
+            exit 1
+          fi
+          mkdir -p manifest
+          jq -n --arg version "$VERSION" --arg image "$IMAGE" --arg digest "$DIGEST" \
+            '{version: $version, image: $image, digest: $digest}' > manifest/perchtail-image.json
+          cat manifest/perchtail-image.json
+          umask 077
+          keyfile="$(mktemp)"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s\n' "$AGENT_SIGNING_KEY" > "$keyfile"
+          openssl pkeyutl -sign -inkey "$keyfile" -rawin \
+            -in manifest/perchtail-image.json -out manifest/perchtail-image.json.sig
+          rm -f "$keyfile"
+          if ! openssl pkeyutl -verify -pubin -inkey "$PUBLIC_KEY" -rawin \
+              -in manifest/perchtail-image.json -sigfile manifest/perchtail-image.json.sig; then
+            echo "::error::The AGENT_SIGNING_KEY secret doesn't match agent/internal/agent/upgrade_signing_key.pub."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-manifest
+          path: manifest/
+          if-no-files-found: error
+
   draft:
-    needs: [meta, agent, image]
+    needs: [meta, agent, image, image-manifest]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create or update the draft release
@@ -328,6 +407,11 @@ jobs:
           name: sbom
           path: assets
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-manifest
+          path: assets
+
       - name: Release notes from CHANGELOG.md
         env:
           VERSION: ${{ needs.meta.outputs.version }}
@@ -342,7 +426,7 @@ jobs:
           {
             echo
             echo "### Install"
-            echo "- Docker: \`${IMAGE,,}:${VERSION}\` (amd64, arm64)"
+            echo "- Docker: \`${IMAGE,,}:${VERSION}\` (amd64, arm64); \`perchtail-image.json\` names it by digest, and \`perchtail-image.json.sig\` is its Ed25519 signature with the release key"
             echo "- Push agent: the binaries below; check them with \`sha256sum -c SHA256SUMS\` (\`SHA256SUMS.sig\` is its Ed25519 signature with the release key)"
             echo "- From source: [docs/install-from-source.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/install-from-source.md)"
           } >> notes.md
