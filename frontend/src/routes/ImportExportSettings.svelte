@@ -310,10 +310,18 @@
   .card {
     padding: 1rem 1.25rem;
   }
+  /* The import box can be dragged wider for long YAML, and the card grows
+     with it (never narrower than the page); the page scrolls sideways. */
   .editor {
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
+    width: fit-content;
+    min-width: 100%;
+  }
+  .editor textarea {
+    resize: both;
+    max-width: none;
   }
   .actions {
     display: flex;
