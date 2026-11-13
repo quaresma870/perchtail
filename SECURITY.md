@@ -4,29 +4,27 @@ PerchTail is designed to hold credentials for production systems (SSH keys, SMB 
 
 ## Supported versions
 
+Until 1.0, only the latest release gets security fixes, shipped as a patch release within the time below; upgrading to the latest release is how an install stays supported.
+
+From 1.0 on, the latest minor release always gets security fixes, and the previous minor keeps getting them for 6 months after the next one is published.
+
 | Version | Supported |
 |---|---|
-| 0.x (pre-release) | ✅ during active development |
-
-This table will be updated once a 1.0 is tagged and a support window is defined.
+| Latest release | ✅ |
+| Any earlier 0.x | ❌, upgrade to the latest release |
 
 ## Reporting a vulnerability
 
 Please **do not** open a public GitHub issue for security reports. Instead:
 
 1. Use [GitHub Security Advisories](../../security/advisories/new) on this repo (private by default), or
-2. Email the maintainer directly (see the repo's profile for current contact details).
+2. Email [security@perchtail.com](mailto:security@perchtail.com).
 
 Please include what you found, how to reproduce it, and its potential impact. Reports are acknowledged as soon as possible.
 
 ## Response times
 
-A confirmed vulnerability in anything PerchTail ships is fixed in a published release within:
-
-| Severity | Release with the fix |
-|---|---|
-| Critical, High | 3 days |
-| Medium, Low | 7 days |
+A confirmed vulnerability in anything PerchTail ships is fixed in a published release within **3 days**, whatever its severity. Severity decides how urgently it's handled within those days, not a longer deadline.
 
 The clock starts when the report is confirmed or the advisory for a dependency is published. A critical issue with a workaround gets an advisory describing it as soon as it's confirmed, ahead of the release. A vulnerability that only affects development tooling (tests, linters, the build) is fixed on `dev` within the same times, without a release of its own.
 

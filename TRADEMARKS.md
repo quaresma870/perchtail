@@ -1,25 +1,33 @@
 # Trademarks
 
-"PerchTail" and the PerchTail logo (the files under `frontend/public/brand/` and `frontend/public/favicon.svg`) are trademarks of João Quaresma, the project's maintainer. The [AGPL-3.0](LICENSE) covers the code. It gives no right to use the name or the logo, so this page says how they can be used.
+"PerchTail" and the PerchTail logo are trademarks of the project's maintainer. The [AGPL-3.0](LICENSE) covers the code. It gives no right to use the name or the logo. This policy is about the name and the logo only: it doesn't limit the rights the AGPL-3.0 gives over the code. Any use not allowed below needs written permission.
 
-The aim is simple: anyone who sees the name PerchTail should be able to trust that it is this project, as released here.
+## Allowed without asking
 
-## Fine without asking
+- **Referring to the project accurately**, in plain text: "runs on PerchTail", "works with PerchTail", "a PerchTail integration". The name can't be the most prominent part of your own product's or service's name, and can't be shown in a stylized form.
+- **Writing or talking about PerchTail**: articles, reviews, tutorials and talks that are clearly about the project and don't suggest they come from it.
+- **Redistributing an official release** exactly as it was published, with the name and the logo unchanged.
 
-- Saying what your product, service or document is about or works with, accurately: "runs PerchTail", "a fork of PerchTail", "based on PerchTail", "a PerchTail tutorial".
-- Using the name and the logo, unchanged, when you redistribute an official release as it was published, or when you link to the project.
-- Writing or talking about PerchTail: articles, reviews, talks, courses, screenshots.
+These uses must not suggest that your product, service, organization or content is official, endorsed, certified, sponsored or supported by the project.
 
 ## Needs written permission
 
-- Using "PerchTail", the logo, or a name or logo close enough to be confused with them (for example "PerchTail Pro", "PerchTail Cloud", "Perch-Tail") as the name or logo of a modified version, a fork, a product or a service, including one hosted for others.
-- Using them in a company, product or domain name, or in a social media account name.
-- Suggesting that your product, service or company is official, endorsed, certified or supported by the project when it isn't.
+- Any use of the logo, other than in an unchanged official release.
+- Using "PerchTail", or a name or logo close enough to be confused with it (for example "PerchTail Pro", "PerchTail Cloud", "Perch-Tail", "PerchTailer"), for a modified version, a fork, a product or a service, including one hosted for others.
+- Using it in a company, product, domain or social media account name, or in paid search ads.
+- Offering services under the name, such as "PerchTail hosting", "PerchTail support" or "PerchTail training".
+- Merchandise, and events named after the project.
+
+Permission is given in writing, case by case, and can be withdrawn.
 
 ## Modified versions
 
-A modified version, or a service that runs one, uses its own name and logo. It can say it is based on PerchTail, and it has to keep the copyright and license notices the AGPL-3.0 requires. Removing the PerchTail name and logo from the interface of a modified version is part of using your own.
+A modified version, or a service that runs one, uses its own name and logo, and removes the PerchTail name and logo from its interface. It may say, in plain text, that it is based on PerchTail, and it has to keep the copyright and license notices the AGPL-3.0 requires.
+
+## Changes to this policy
+
+This policy can change. Any use has to follow the version published in this repository at the time.
 
 ## Asking
 
-Open a [discussion or issue](https://github.com/quaresma870/perchtail/issues) describing what you'd like to do. Nothing here limits what the AGPL-3.0 lets you do with the code.
+Open an [issue](https://github.com/quaresma870/perchtail/issues) describing what you'd like to do.
