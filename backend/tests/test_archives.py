@@ -1,4 +1,5 @@
 import gzip
+import io
 import tarfile
 import zipfile
 
@@ -19,8 +20,13 @@ from app.archives import (
         ("logs.zip", True),
         ("logs.tar.gz", True),
         ("logs.tgz", True),
+        ("OLD.ZIP", True),
+        ("inner.Zip", True),
+        ("logs.TAR.GZ", True),
+        ("logs.Tgz", True),
         ("app.log", False),
         ("app.log.gz", False),
+        ("app.log.GZ", False),
     ],
 )
 def test_is_archive(filename, expected):
@@ -35,10 +41,32 @@ def test_is_archive(filename, expected):
         ("logs.tar.gz", False),
         ("logs.zip", False),
         ("logs.tgz", False),
+        ("app.log.GZ", True),
+        ("APP.LOG.Gz", True),
+        ("logs.TAR.GZ", False),
+        ("OLD.ZIP", False),
     ],
 )
 def test_is_transparent_gzip(filename, expected):
     assert is_transparent_gzip(filename) is expected
+
+
+def test_upper_case_extensions_list_and_extract_members(tmp_path):
+    zip_path = tmp_path / "OLD.ZIP"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("app.log", "from zip")
+    tar_path = tmp_path / "OLD.TAR.GZ"
+    data = b"from tar"
+    with tarfile.open(tar_path, mode="w:gz") as tf:
+        info = tarfile.TarInfo("app.log")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+
+    for path, expected in ((zip_path, b"from zip"), (tar_path, b"from tar")):
+        assert [m.name for m in list_members(path, path.name)] == ["app.log"]
+        destination = tmp_path / f"{path.name}.out"
+        extract_member(path, path.name, "app.log", destination)
+        assert destination.read_bytes() == expected
 
 
 def test_list_members_zip(tmp_path):

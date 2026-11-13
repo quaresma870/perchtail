@@ -26,6 +26,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from app import source_roots
+from app.agent_registry import disconnect_after_commit
 from app.audit import record_audit_event
 from app.crypto import decrypt_credential, encrypt_credential
 from app.logging_config import get_logger
@@ -696,6 +697,8 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         _replace_rules(session, source, spec.rules)
     if location_changed or not (source.enabled and source.search_indexing_enabled):
         delete_source_index(session, source.id)
+    if source.protocol == Protocol.agent and not source.enabled:
+        disconnect_after_commit(session, source.id, "source disabled")
     session.add(source)
     audit_changes = {k: v for k, v in changes.items()}
     if "tls_ca_pem" in audit_changes:

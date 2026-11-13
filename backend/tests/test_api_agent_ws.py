@@ -220,3 +220,144 @@ def test_connect_records_the_version_the_agent_reports(session):
             session.refresh(source)
             assert source.agent_version is None
         assert _wait_until(lambda: not registry.is_connected(source.id))
+
+
+# --- the server closes the connection when the agent may no longer use it ---
+
+
+def _admin_client(session):
+    import uuid
+
+    from app.api.auth import get_current_active_user
+    from app.api.sources import router as sources_router
+    from app.auth.models import Role, User
+
+    role = Role(name=f"admin-{uuid.uuid4().hex}", is_super_admin=True)
+    session.add(role)
+    session.commit()
+    admin = User(username=f"admin-{uuid.uuid4().hex[:8]}", role_id=role.id)
+    session.add(admin)
+    session.commit()
+    session.refresh(admin)
+    app = FastAPI()
+    app.include_router(agent_ws_router)
+    app.include_router(sources_router)
+    app.dependency_overrides[get_session] = lambda: session
+    app.dependency_overrides[get_current_active_user] = lambda: admin
+    return TestClient(app)
+
+
+def _connected_then(session, change, *, expect_closed=True):
+    """Connects an agent, runs `change(client, source_id)` and returns
+    whether the server closed the agent's socket, and how."""
+    import asyncio
+
+    source = _agent_source(session, "s3cret")
+    source_id = source.id
+    registry = get_agent_registry()
+    previous_loop = registry._loop
+    try:
+        with _admin_client(session) as client:
+            registry.bind_loop(client.portal.call(asyncio.get_running_loop))
+            with client.websocket_connect(
+                "/agent/connect", headers={"authorization": "Bearer s3cret"}
+            ) as ws:
+                assert _wait_until(lambda: registry.is_connected(source_id))
+                change(client, source_id)
+                if not expect_closed:
+                    assert registry.is_connected(source_id)
+                    return None
+                assert not registry.is_connected(source_id)
+                try:
+                    ws.receive_json()
+                except WebSocketDisconnect as exc:
+                    return exc.code
+                return None
+    finally:
+        registry.bind_loop(previous_loop)
+
+
+def test_regenerating_the_token_closes_the_agent_connected_with_the_old_one(session):
+    def regenerate(client, source_id):
+        assert client.post(f"/sources/{source_id}/agent-token").status_code == 200
+
+    assert _connected_then(session, regenerate) == 1008
+
+
+def test_disabling_the_source_closes_its_agent_connection(session):
+    def disable(client, source_id):
+        response = client.patch(f"/sources/{source_id}", json={"enabled": False})
+        assert response.status_code == 200
+
+    assert _connected_then(session, disable) == 1008
+
+
+def test_deleting_the_source_closes_its_agent_connection(session):
+    def delete(client, source_id):
+        assert client.delete(f"/sources/{source_id}").status_code == 204
+
+    assert _connected_then(session, delete) == 1008
+
+
+def test_other_changes_keep_the_agent_connected(session):
+    def rename(client, source_id):
+        response = client.patch(f"/sources/{source_id}", json={"name": "agent01-renamed"})
+        assert response.status_code == 200
+
+    _connected_then(session, rename, expect_closed=False)
+
+
+def test_the_close_waits_for_the_commit(session):
+    from app.agent_registry import disconnect_after_commit
+
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    closed = []
+    original = registry.disconnect
+    registry.disconnect = lambda sid, reason: closed.append((sid, reason)) or True
+    try:
+        disconnect_after_commit(session, source.id, "source disabled")
+        assert closed == []
+        session.rollback()
+        session.commit()
+        assert closed == [(source.id, "source disabled")]
+    finally:
+        registry.disconnect = original
+
+
+def test_a_token_regenerated_during_the_handshake_still_closes_the_connection(session, monkeypatch):
+    # The admin's change lands after the token was checked but before the
+    # socket registered, so its disconnect found nothing to close; the
+    # check after registering has to catch it.
+    from sqlalchemy import update
+
+    source = _agent_source(session, "s3cret")
+    source_id = source.id
+    registry = get_agent_registry()
+    original_register = registry.register
+    registered = []
+
+    def register_after_a_regeneration(sid, websocket):
+        session.execute(
+            update(Source).where(Source.id == sid).values(agent_token_hash=_hash_token("new"))
+        )
+        session.commit()
+        registry.disconnect(sid, "agent token regenerated")  # finds nothing yet
+        replaced = original_register(sid, websocket)
+        registered.append(sid)
+        return replaced
+
+    monkeypatch.setattr(registry, "register", register_after_a_regeneration)
+    client = _client(session)
+    with client.websocket_connect(
+        "/agent/connect", headers={"authorization": "Bearer s3cret"}
+    ) as ws:
+        assert _wait_until(lambda: registered)
+        # Without the check it stays registered (and open) for good.
+        assert _wait_until(lambda: not registry.is_connected(source_id))
+        try:
+            ws.receive_json()
+            code = None
+        except WebSocketDisconnect as exc:
+            code = exc.code
+    assert code == 1008
