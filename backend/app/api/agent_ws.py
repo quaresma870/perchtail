@@ -96,8 +96,23 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
             previous=source.agent_version,
         )
         source.agent_version = agent_version
+    source_id = source.id
     session.add(source)
     session.commit()
+
+    # The token was checked before accept() and register(). A token
+    # regenerated, or the source disabled or deleted, in between closed
+    # whatever was registered then -- not this socket, which registered
+    # after. Check again now that it's registered: a change committed from
+    # here on finds it and closes it (registry.disconnect).
+    current = session.exec(
+        select(Source.agent_token_hash, Source.enabled).where(Source.id == source_id)
+    ).first()
+    session.rollback()  # end the read transaction
+    if current is None or current[0] != _hash_token(token) or not current[1]:
+        registry.unregister(source_id, websocket)
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
 
     try:
         while True:
@@ -105,10 +120,10 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
             if message.get("type") == "fetch_chunk":
                 # Awaited before reading on, so the file is written as it
                 # arrives and a slow disk slows the agent down (#205).
-                await registry.receive_chunk(source.id, message, websocket)
+                await registry.receive_chunk(source_id, message, websocket)
             else:
-                registry.resolve_response(source.id, message, websocket)
+                registry.resolve_response(source_id, message, websocket)
     except WebSocketDisconnect:
         pass
     finally:
-        registry.unregister(source.id, websocket)
+        registry.unregister(source_id, websocket)
