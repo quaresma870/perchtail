@@ -75,6 +75,13 @@ textarea {
   color: inherit;
 }
 
+/* A text box only grows downwards and never wider than the card around
+   it: dragging its corner sideways used to push it out of the card. */
+textarea {
+  resize: vertical;
+  max-width: 100%;
+}
+
 a {
   color: var(--accent-hover);
 }
