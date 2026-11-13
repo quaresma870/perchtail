@@ -53,6 +53,65 @@ def resolve_folder_or_customer_capability(
     return False
 
 
+def holds_capability_at(
+    session: Session,
+    user: User,
+    *,
+    folder_id: int | None,
+    customer_id: int | None,
+    capability: Capability,
+) -> bool:
+    """Whether `user` holds `capability` at a folder (or, with no folder, at
+    the customer's root), by the grant resolution a source placed there
+    would get: the folder, its ancestors, then the customer. Super admins
+    hold everything. Used to check both what is being moved and where it
+    goes, so a move can never widen the mover's own access."""
+    if user.role.is_super_admin:
+        return True
+    return resolve_folder_or_customer_capability(
+        session, user, folder_id=folder_id, customer_id=customer_id, capability=capability
+    )
+
+
+def _capabilities_at(
+    session: Session, user: User, *, folder_id: int | None, customer_id: int | None
+) -> set[Capability]:
+    return {
+        capability
+        for capability in Capability
+        if resolve_folder_or_customer_capability(
+            session, user, folder_id=folder_id, customer_id=customer_id, capability=capability
+        )
+    }
+
+
+def move_keeps_access_within(
+    session: Session,
+    user: User,
+    *,
+    scope_type: ScopeType,
+    scope_id: int,
+    from_folder_id: int | None,
+    from_customer_id: int | None,
+    to_folder_id: int | None,
+    to_customer_id: int | None,
+) -> bool:
+    """Whether moving a folder or source (`scope_type`/`scope_id`) from one
+    place to another leaves the mover with no capability on it they didn't
+    already have. With no grant of the mover's role on the moved item itself,
+    it inherits whatever governs where it lands, so the capabilities the
+    mover holds at the destination must all be held where it is now. With a
+    grant of its own, that grant keeps governing it and the move changes
+    nothing for the mover. Super admins hold everything."""
+    if user.role.is_super_admin:
+        return True
+    if _find_grant(session, role_id=user.role_id, scope_type=scope_type, scope_id=scope_id):
+        return True
+    return _capabilities_at(
+        session, user, folder_id=to_folder_id, customer_id=to_customer_id
+    ) <= _capabilities_at(session, user, folder_id=from_folder_id, customer_id=from_customer_id)
+
+
 def resolve_capability(
     session: Session, user: User, source: Source, capability: Capability
 ) -> bool:

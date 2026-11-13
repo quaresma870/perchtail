@@ -7,7 +7,7 @@
 > Live, rule-scoped log browsing across Linux and Windows servers — agentless by default, nothing mirrored, nothing left behind.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.6.3%20%28pre--1.0%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.6.4%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -19,7 +19,7 @@
 
 ## Status
 
-🟢 **v0.6.3** is the current release: usable today, still pre-1.0.
+🟢 **v0.6.4** is the current release: usable today, still pre-1.0.
 
 - **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
 - **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks.
@@ -85,7 +85,7 @@ A role in its editor, opened over the roles list: global capabilities and access
 
 ![Role editor in a popup, with switches for global capabilities and a table of customer access grants](docs/images/screenshot-role-editor.png)
 
-The `create_source` global capability adds sources; changing, moving or deleting an existing one also needs manage rules on it (and, to move it, where it goes). Short of super admin, someone with `manage_users` or `manage_roles` can't change their own role or edit the role they hold, and can only hand out roles and grants within their own: no global capability they lack, and no capability in a customer, folder or source that they don't hold there themselves.
+The `create_source` global capability adds sources and folders; changing, moving or deleting an existing source, or moving or deleting a folder, also needs manage rules on it (and, to move it, where it goes), and a move can't give the person moving it more access than they had. Short of super admin, someone with `manage_users` or `manage_roles` can't change their own role or edit the role they hold, and can only hand out roles and grants within their own: no global capability they lack, and no capability in a customer, folder or source that they don't hold there themselves.
 
 ## Quick start
 
@@ -123,7 +123,7 @@ instead, replace `build: .` in `docker-compose.yml` with the image of that
 version (amd64 and arm64), for example:
 
 ```yaml
-    image: ghcr.io/quaresma870/perchtail:0.6.3
+    image: ghcr.io/quaresma870/perchtail:0.6.4
 ```
 
 Each [GitHub release](https://github.com/quaresma870/perchtail/releases)
