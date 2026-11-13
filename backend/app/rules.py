@@ -186,6 +186,22 @@ def is_visible(path: str, rules: list[Rule], *, case_insensitive: bool = False) 
     return verdict
 
 
+def is_explicitly_excluded(path: str, rules: list[Rule], *, case_insensitive: bool = False) -> bool:
+    """Whether `path` is hidden on purpose: the last rule that matches it
+    (same order and matching as is_visible, a broken regex included) is an
+    exclude. A path no rule matches is not visible, but isn't counted here --
+    a rule that shows only an archive leaves its members unmatched, and
+    that archive can still be downloaded whole. A path with a control
+    character counts as excluded."""
+    if _has_control_character(path):
+        return True
+    excluded = False
+    for rule in sorted(rules, key=lambda r: r.order):
+        if _rule_matches(path, rule, case_insensitive):
+            excluded = rule.type == RuleType.exclude
+    return excluded
+
+
 def _segment_matches(pattern_segment: str, name: str, ignore_case: bool) -> bool:
     """One glob path segment (`*`, `?` and literals, never crossing `/`)
     against one path segment -- the per-segment half of _compile_glob."""
