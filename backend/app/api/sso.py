@@ -132,7 +132,7 @@ def _require_trust_change_within_authority(session: Session, user: User) -> None
         return
     for mapping in session.exec(select(SSOGroupRoleMapping)).all():
         role = session.get(Role, mapping.role_id)
-        if role is not None and not role_within_authority(user, role):
+        if role is not None and not role_within_authority(session, user, role):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -231,7 +231,7 @@ def _require_mappable_role(session: Session, user: User, role_id: int) -> Role:
     (see rbac.role_within_authority) -- otherwise manage_sso alone could
     map a group to Super Admin."""
     role = _require_role_exists(session, role_id)
-    require_role_within_authority(user, role)
+    require_role_within_authority(session, user, role)
     return role
 
 
@@ -294,7 +294,7 @@ def update_group_mapping(
     mapping = _get_mapping_or_404(session, mapping_id)
     current_role = session.get(Role, mapping.role_id)
     if current_role is not None:
-        require_role_within_authority(user, current_role)
+        require_role_within_authority(session, user, current_role)
     if payload.order is not None:
         mapping.order = payload.order
     if payload.group_name is not None:

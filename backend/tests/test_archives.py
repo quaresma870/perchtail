@@ -176,3 +176,57 @@ def test_extract_tar_member_stops_at_the_byte_limit(tmp_path):
     with pytest.raises(DecompressionLimitError):
         extract_member(src, "bomb.tar.gz", "big.log", dest, max_bytes=1000)
     assert not dest.exists()
+
+
+def _special(name: str, kind: bytes, linkname: str = "") -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.type = kind
+    info.linkname = linkname
+    return info
+
+
+def _tar_with_special_members(path):
+    with tarfile.open(path, "w:gz") as tf:
+        data = b"hidden content"
+        info = tarfile.TarInfo("secret.txt")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+        directory = tarfile.TarInfo("logs")
+        directory.type = tarfile.DIRTYPE
+        tf.addfile(directory)
+        tf.addfile(_special("logs/sym.log", tarfile.SYMTYPE, "../secret.txt"))
+        tf.addfile(_special("hard.log", tarfile.LNKTYPE, "secret.txt"))
+        tf.addfile(_special("dev", tarfile.CHRTYPE))
+        tf.addfile(_special("blk", tarfile.BLKTYPE))
+        tf.addfile(_special("fifo", tarfile.FIFOTYPE))
+
+
+def test_list_members_tar_keeps_only_files_and_directories(tmp_path):
+    archive_path = tmp_path / "logs.tar.gz"
+    _tar_with_special_members(archive_path)
+
+    members = {m.name: m.is_dir for m in list_members(archive_path, "logs.tar.gz")}
+    assert members == {"secret.txt": False, "logs": True}
+
+
+@pytest.mark.parametrize("member", ["logs/sym.log", "hard.log", "dev", "blk", "fifo", "logs"])
+def test_extract_member_tar_refuses_anything_but_a_regular_file(tmp_path, member):
+    archive_path = tmp_path / "logs.tar.gz"
+    _tar_with_special_members(archive_path)
+    destination = tmp_path / "out"
+
+    with pytest.raises(KeyError):
+        extract_member(archive_path, "logs.tar.gz", member, destination)
+    assert not destination.exists()
+
+
+def test_extract_member_missing_is_a_key_error(tmp_path):
+    tar_path = tmp_path / "logs.tar.gz"
+    _tar_with_special_members(tar_path)
+    zip_path = tmp_path / "logs.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("app.log", "x")
+
+    for path in (tar_path, zip_path):
+        with pytest.raises(KeyError):
+            extract_member(path, path.name, "missing.log", tmp_path / "out")

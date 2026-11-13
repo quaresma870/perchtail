@@ -64,6 +64,8 @@ next sign-in. See per-provider notes below for what it takes to get a usable
 group claim onto the ID token in the first place — several IdPs don't include
 one by default.
 
+An admin with `manage_sso` but not super admin can only map a group to a role within their own access: no global capability they lack, and no capability in a customer, folder or source that they don't hold there themselves.
+
 ## 3. Test before enabling
 
 Use the **Test connection** action on the provider row before flipping
