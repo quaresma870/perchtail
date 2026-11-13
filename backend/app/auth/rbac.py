@@ -53,6 +53,65 @@ def resolve_folder_or_customer_capability(
     return False
 
 
+def holds_capability_at(
+    session: Session,
+    user: User,
+    *,
+    folder_id: int | None,
+    customer_id: int | None,
+    capability: Capability,
+) -> bool:
+    """Whether `user` holds `capability` at a folder (or, with no folder, at
+    the customer's root), by the grant resolution a source placed there
+    would get: the folder, its ancestors, then the customer. Super admins
+    hold everything. Used to check both what is being moved and where it
+    goes, so a move can never widen the mover's own access."""
+    if user.role.is_super_admin:
+        return True
+    return resolve_folder_or_customer_capability(
+        session, user, folder_id=folder_id, customer_id=customer_id, capability=capability
+    )
+
+
+def _capabilities_at(
+    session: Session, user: User, *, folder_id: int | None, customer_id: int | None
+) -> set[Capability]:
+    return {
+        capability
+        for capability in Capability
+        if resolve_folder_or_customer_capability(
+            session, user, folder_id=folder_id, customer_id=customer_id, capability=capability
+        )
+    }
+
+
+def move_keeps_access_within(
+    session: Session,
+    user: User,
+    *,
+    scope_type: ScopeType,
+    scope_id: int,
+    from_folder_id: int | None,
+    from_customer_id: int | None,
+    to_folder_id: int | None,
+    to_customer_id: int | None,
+) -> bool:
+    """Whether moving a folder or source (`scope_type`/`scope_id`) from one
+    place to another leaves the mover with no capability on it they didn't
+    already have. With no grant of the mover's role on the moved item itself,
+    it inherits whatever governs where it lands, so the capabilities the
+    mover holds at the destination must all be held where it is now. With a
+    grant of its own, that grant keeps governing it and the move changes
+    nothing for the mover. Super admins hold everything."""
+    if user.role.is_super_admin:
+        return True
+    if _find_grant(session, role_id=user.role_id, scope_type=scope_type, scope_id=scope_id):
+        return True
+    return _capabilities_at(
+        session, user, folder_id=to_folder_id, customer_id=to_customer_id
+    ) <= _capabilities_at(session, user, folder_id=from_folder_id, customer_id=from_customer_id)
+
+
 def resolve_capability(
     session: Session, user: User, source: Source, capability: Capability
 ) -> bool:
@@ -233,28 +292,185 @@ def require_global_capability(capability: GlobalCapability, get_current_user: Ca
     return dependency
 
 
-def role_within_authority(actor: User, role: Role) -> bool:
+ROLE_BEYOND_AUTHORITY = "Not permitted: that role has privileges beyond your own"
+
+
+def _actor_holds_at_scope(
+    session: Session, actor: User, scope_type: ScopeType, scope_id: int, capability: Capability
+) -> bool:
+    """Whether `actor` holds `capability` at a customer, folder or source,
+    by their own grant resolution: granted there, or at a scope above it
+    that covers it, the most specific grant winning as always."""
+    if scope_type == ScopeType.source:
+        source = session.get(Source, scope_id)
+        return source is None or resolve_capability(session, actor, source, capability)
+    if scope_type == ScopeType.folder:
+        folder = session.get(Folder, scope_id)
+        if folder is None:
+            return True
+        return resolve_folder_or_customer_capability(
+            session,
+            actor,
+            folder_id=folder.id,
+            customer_id=folder.customer_id,
+            capability=capability,
+        )
+    return resolve_folder_or_customer_capability(
+        session, actor, folder_id=None, customer_id=scope_id, capability=capability
+    )
+
+
+def _scope_chain(session: Session, scope_type: ScopeType, scope_id: int) -> list[tuple]:
+    """A scope and every scope above it, nearest first: a source, its folder
+    chain and its customer; a folder, its parents and its customer; a
+    customer alone. Scopes that no longer exist end the chain."""
+    chain: list[tuple] = [(scope_type, scope_id)]
+    folder_id: int | None = None
+    customer_id: int | None = None
+    if scope_type == ScopeType.source:
+        source = session.get(Source, scope_id)
+        if source is None:
+            return chain
+        folder_id, customer_id = source.folder_id, source.customer_id
+    elif scope_type == ScopeType.folder:
+        folder = session.get(Folder, scope_id)
+        if folder is None:
+            return chain
+        folder_id, customer_id = folder.parent_folder_id, folder.customer_id
+    while folder_id is not None:
+        chain.append((ScopeType.folder, folder_id))
+        folder = session.get(Folder, folder_id)
+        folder_id = folder.parent_folder_id if folder else None
+    if customer_id is not None:
+        chain.append((ScopeType.customer, customer_id))
+    return chain
+
+
+def grant_within_authority(
+    session: Session,
+    actor: User,
+    *,
+    scope_type: ScopeType,
+    scope_id: int,
+    capabilities: list[Capability],
+    role_id: int | None = None,
+) -> bool:
+    """Whether a grant of `capabilities` at one scope is within what `actor`
+    holds there themselves: by their grant resolution at that scope, and in
+    every narrower scope beneath it where the actor has a grant of their own
+    (a folder or source the actor holds less in). A narrower scope where the
+    role being changed (`role_id`) has its own grant, at it or between it and
+    this scope, is governed by that grant instead, so it isn't compared here.
+    A grant whose scope no longer exists gives nothing, so it is within
+    anyone's authority."""
+    if actor.role.is_super_admin:
+        return True
+    wanted = set(capabilities)
+    if not all(
+        _actor_holds_at_scope(session, actor, scope_type, scope_id, capability)
+        for capability in wanted
+    ):
+        return False
+    if not wanted:
+        return True
+
+    role_scopes: set[tuple] = set()
+    if role_id is not None:
+        role_scopes = {
+            (g.scope_type, g.scope_id)
+            for g in session.exec(select(RoleGrant).where(RoleGrant.role_id == role_id)).all()
+        }
+    target = (scope_type, scope_id)
+    for own in session.exec(select(RoleGrant).where(RoleGrant.role_id == actor.role_id)).all():
+        chain = _scope_chain(session, own.scope_type, own.scope_id)
+        if target not in chain[1:]:
+            continue
+        if any(scope in role_scopes for scope in chain[: chain.index(target)]):
+            continue
+        if not wanted <= set(own.capabilities):
+            return False
+    return True
+
+
+def role_within_authority(session: Session, actor: User, role: Role) -> bool:
     """Whether `actor` may assign, edit, or act on users holding `role`
     without that being a privilege escalation. A delegated admin
     (manage_users / manage_roles / manage_sso, short of super-admin) can
     only work with roles that are no more powerful than their own: never a
-    super-admin role, and never one carrying a global capability the actor
-    doesn't hold themselves. Without this, any of those capabilities is a
-    path to full super-admin -- e.g. manage_users assigning itself the
-    Super Admin role, or resetting a super-admin's password."""
+    super-admin role, never one carrying a global capability the actor
+    doesn't hold themselves, and never one with a grant reaching beyond what
+    the actor holds at that grant's scope (see grant_within_authority).
+    Without this, any of those capabilities is a path to wider access --
+    e.g. manage_users assigning itself the Super Admin role, resetting a
+    super-admin's password, or assigning someone a role that sees customers
+    the admin can't."""
     if actor.role.is_super_admin:
         return True
     if role.is_super_admin:
         return False
-    return set(role.global_capabilities) <= set(actor.role.global_capabilities)
-
-
-def require_role_within_authority(actor: User, role: Role) -> None:
-    if not role_within_authority(actor, role):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not permitted: that role has privileges beyond your own",
+    if not set(role.global_capabilities) <= set(actor.role.global_capabilities):
+        return False
+    grants = session.exec(select(RoleGrant).where(RoleGrant.role_id == role.id)).all()
+    return all(
+        grant_within_authority(
+            session,
+            actor,
+            scope_type=grant.scope_type,
+            scope_id=grant.scope_id,
+            capabilities=grant.capabilities,
+            role_id=role.id,
         )
+        for grant in grants
+    )
+
+
+def require_role_within_authority(session: Session, actor: User, role: Role) -> None:
+    if not role_within_authority(session, actor, role):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ROLE_BEYOND_AUTHORITY)
+
+
+def require_changed_role_within_authority(session: Session, actor: User, role: Role) -> None:
+    """Check a role after a change to its grants, before that change is
+    committed: the whole role, as it now stands, must still be within the
+    actor's authority. Removing or narrowing one grant can widen what
+    another grant reaches (a narrower grant of the role is what keeps the
+    actor's own narrower grant from bounding a broader one above it), so
+    checking only the grant being changed isn't enough. On refusal the
+    change is rolled back."""
+    session.flush()
+    if not role_within_authority(session, actor, role):
+        session.rollback()
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ROLE_BEYOND_AUTHORITY)
+
+
+def require_grant_within_authority(
+    session: Session,
+    actor: User,
+    *,
+    scope_type: ScopeType,
+    scope_id: int,
+    capabilities: list[Capability],
+    role_id: int | None = None,
+) -> None:
+    if not grant_within_authority(
+        session,
+        actor,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        capabilities=capabilities,
+        role_id=role_id,
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ROLE_BEYOND_AUTHORITY)
+
+
+OWN_ROLE_REFUSED = "You can't change your own role or the role you hold."
+
+
+def require_not_own_role(actor: User, role: Role) -> None:
+    """Only a super admin changes the role they hold: anyone else editing
+    it would widen their own access."""
+    if not actor.role.is_super_admin and role.id == actor.role_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=OWN_ROLE_REFUSED)
 
 
 def require_capabilities_within_authority(
@@ -269,6 +485,34 @@ def require_capabilities_within_authority(
         )
 
 
+def record_role_created(session: Session, *, actor_user_id: int | None, role: Role) -> None:
+    record_audit_event(
+        session,
+        user_id=actor_user_id,
+        action="role.create",
+        target_type="role",
+        target_id=role.id,
+        metadata={"name": role.name},
+    )
+
+
+def record_role_grant_created(
+    session: Session, *, actor_user_id: int | None, grant: RoleGrant
+) -> None:
+    record_audit_event(
+        session,
+        user_id=actor_user_id,
+        action="role_grant.create",
+        target_type="role_grant",
+        target_id=grant.id,
+        metadata={
+            "role_id": grant.role_id,
+            "scope_type": grant.scope_type,
+            "scope_id": grant.scope_id,
+        },
+    )
+
+
 def create_role(
     session: Session,
     *,
@@ -277,7 +521,12 @@ def create_role(
     is_builtin: bool = False,
     is_super_admin: bool = False,
     global_capabilities: list[GlobalCapability] | None = None,
+    commit: bool = True,
+    audit: bool = True,
 ) -> Role:
+    """With ``audit=False`` the caller records the event itself, with
+    ``record_role_created``, once it has checked the change it is part of:
+    a refused change then leaves no audit row and no log line behind."""
     role = Role(
         name=name,
         is_builtin=is_builtin,
@@ -287,16 +536,11 @@ def create_role(
     session.add(role)
     session.flush()
 
-    record_audit_event(
-        session,
-        user_id=actor_user_id,
-        action="role.create",
-        target_type="role",
-        target_id=role.id,
-        metadata={"name": name},
-    )
-    session.commit()
-    session.refresh(role)
+    if audit:
+        record_role_created(session, actor_user_id=actor_user_id, role=role)
+    if commit:
+        session.commit()
+        session.refresh(role)
     return role
 
 
@@ -308,7 +552,10 @@ def create_role_grant(
     scope_type: ScopeType,
     scope_id: int,
     capabilities: list[Capability],
+    commit: bool = True,
+    audit: bool = True,
 ) -> RoleGrant:
+    """``audit=False`` as in ``create_role``, with ``record_role_grant_created``."""
     grant = RoleGrant(
         role_id=role_id,
         scope_type=scope_type,
@@ -318,14 +565,9 @@ def create_role_grant(
     session.add(grant)
     session.flush()
 
-    record_audit_event(
-        session,
-        user_id=actor_user_id,
-        action="role_grant.create",
-        target_type="role_grant",
-        target_id=grant.id,
-        metadata={"role_id": role_id, "scope_type": scope_type, "scope_id": scope_id},
-    )
-    session.commit()
-    session.refresh(grant)
+    if audit:
+        record_role_grant_created(session, actor_user_id=actor_user_id, grant=grant)
+    if commit:
+        session.commit()
+        session.refresh(grant)
     return grant

@@ -2,7 +2,9 @@
 push agent with its version, policy and last attempt, and the actions --
 upgrade one agent, every outdated one, resume a suspended one. Only for users
 who can manage sources (the same create_source capability that edits them
-and issues their agent token).
+and issues their agent token); seeing an agent, its upgrades, changing its
+policy or upgrading it also needs manage rules on its source, as editing the
+source does.
 
 The server sends an agent an `upgrade` command carrying nothing but its own
 version; see app/agent_upgrades.py for what the agent then checks, how the
@@ -30,6 +32,11 @@ from app.agent_upgrades import (
     window_summary,
 )
 from app.api.auth import get_current_active_user
+from app.api.sources import (
+    MANAGE_EXISTING_SOURCE_REFUSED,
+    can_manage_existing_source,
+    require_manage_existing_source,
+)
 from app.audit import record_audit_event
 from app.auth.models import GlobalCapability, User
 from app.auth.rbac import require_global_capability
@@ -316,10 +323,20 @@ def _agent_sources(session: Session) -> list[Source]:
     )
 
 
-def _agent_source(session: Session, source_id: int) -> Source:
+def _agent_source(
+    session: Session, source_id: int, manager: User | None = None, reader: User | None = None
+) -> Source:
+    """The push-agent source. With `manager`, changing it (its policy, its
+    upgrades) also needs manage rules on it, as editing the source does.
+    With `reader`, reading its upgrades needs the same, and a source without
+    it is not found, so it isn't revealed."""
     source = session.get(Source, source_id)
     if source is None or source.is_system:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    if reader is not None and not can_manage_existing_source(session, reader, source):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    if manager is not None:
+        require_manage_existing_source(session, manager, source)
     if source.protocol != Protocol.agent:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -337,7 +354,9 @@ def _row_for(session: Session, source: Source) -> AgentRow:
 
 @router.get("/agent-upgrades/agents", response_model=list[AgentRow])
 def list_agents(user: User = Depends(require_manage), session: Session = Depends(get_session)):
-    sources = _agent_sources(session)
+    # Only the agents of sources the user may change: the others aren't
+    # theirs to look after, so they aren't named here.
+    sources = [s for s in _agent_sources(session) if can_manage_existing_source(session, user, s)]
     settings = policies.read_settings(session)
     runs = latest_runs(session, [s.id for s in sources])
     usernames = _usernames(session, list(runs.values()))
@@ -355,7 +374,7 @@ def set_source_policy(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    source = _agent_source(session, source_id)
+    source = _agent_source(session, source_id, user)
     previous = source.agent_upgrade_policy
     if previous != payload.policy:
         source.agent_upgrade_policy = payload.policy
@@ -383,7 +402,7 @@ def resume_agent_upgrades(
 ):
     """Clears the source's consecutive failure count, so automatic upgrades
     include it again."""
-    source = _agent_source(session, source_id)
+    source = _agent_source(session, source_id, user)
     failures = source.agent_upgrade_failures or 0
     source.agent_upgrade_failures = 0
     session.add(source)
@@ -414,7 +433,7 @@ def agent_upgrade_history(
     session: Session = Depends(get_session),
 ):
     """The source's upgrade attempts, most recent first."""
-    _agent_source(session, source_id)
+    _agent_source(session, source_id, reader=user)
     total = session.exec(
         select(func.count())
         .select_from(AgentUpgradeRun)
@@ -454,7 +473,7 @@ def upgrade_agent(
     policy is off. Also on a suspended source: an admin's explicit choice.
     Answers once the agent accepted (the Agents page then follows it) or
     refused."""
-    source = _agent_source(session, source_id)
+    source = _agent_source(session, source_id, user)
     settings = policies.read_settings(session)
     if policies.effective_policy(source.agent_upgrade_policy, settings.policy) == "off":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=POLICY_OFF)
@@ -500,10 +519,14 @@ def upgrade_agents(
         wanted = list(dict.fromkeys(payload.source_ids))
         found = {s.id: s for s in session.exec(select(Source).where(col(Source.id).in_(wanted)))}
     else:
+        # Every outdated agent the user may change: the others aren't theirs
+        # to upgrade, so they aren't named in the answer either.
         found = {
             s.id: s
             for s in _agent_sources(session)
-            if s.enabled and is_newer(APP_VERSION, s.agent_version)
+            if s.enabled
+            and is_newer(APP_VERSION, s.agent_version)
+            and can_manage_existing_source(session, user, s)
         }
         wanted = list(found)
     results: dict[int, BulkAgentUpgradeResult] = {}
@@ -513,6 +536,16 @@ def upgrade_agents(
         if source is None or source.is_system:
             results[source_id] = BulkAgentUpgradeResult(
                 source_id=source_id, name=None, result="skipped", detail="Not found"
+            )
+            continue
+        if not can_manage_existing_source(session, user, source):
+            # Same rule as upgrading it on its own; its name isn't given
+            # back, since the role may not even see it.
+            results[source_id] = BulkAgentUpgradeResult(
+                source_id=source_id,
+                name=None,
+                result="skipped",
+                detail=MANAGE_EXISTING_SOURCE_REFUSED,
             )
             continue
         reason = not_upgradable(source)
