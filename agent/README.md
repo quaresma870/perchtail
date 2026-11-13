@@ -20,7 +20,7 @@ The agent pings the server every 25 seconds and reconnects when it has heard not
 
 ## Upgrades from the portal
 
-From 0.7, agents are upgraded from **Settings → Agents** in PerchTail, by users who can manage sources. Agents older than 0.7 don't know the command: upgrade them by hand once.
+From 0.7, agents are upgraded from **Settings → Agents** in PerchTail, by users with create source and manage rules on the agent's source. Agents older than 0.7 don't know the command: upgrade them by hand once.
 
 - **Remote upgrades** applies to every agent: **Off** (the default), **Manual** (the page's **Upgrade** button on an agent, or **Upgrade all outdated agents**) or **Automatic** (also upgraded by the server inside a window). Each agent can **Follow the system** (the default) or have its own policy, either way: an agent can be upgraded with the system Off, or stay Off with the system Automatic.
 - **The automatic window** is a set of days of the week, a start time and a length in hours (1 to 24), in the server's time zone (shown on the page); a window may run past midnight. Inside it the server upgrades connected outdated agents whose policy is Automatic, a few at a time (5 by default, 1 to 50), and doesn't ask an agent again in the same window once its upgrade didn't work.

@@ -85,6 +85,8 @@ A role in its editor, opened over the roles list: global capabilities and access
 
 ![Role editor in a popup, with switches for global capabilities and a table of customer access grants](docs/images/screenshot-role-editor.png)
 
+The `create_source` global capability adds sources and folders; changing, moving or deleting an existing source, or moving or deleting a folder, also needs manage rules on it (and, to move it, where it goes), and a move can't give the person moving it more access than they had. Short of super admin, someone with `manage_users` or `manage_roles` can't change their own role or edit the role they hold, and can only hand out roles and grants within their own: no global capability they lack, and no capability in a customer, folder or source that they don't hold there themselves.
+
 ## Quick start
 
 ```bash

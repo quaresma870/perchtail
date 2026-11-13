@@ -5,8 +5,13 @@ from sqlmodel import Session, select
 from app.alerts import drop_scoped_alerts
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
-from app.auth.models import GlobalCapability, ScopeType, User
-from app.auth.rbac import delete_scope_grants, require_global_capability
+from app.auth.models import Capability, GlobalCapability, ScopeType, User
+from app.auth.rbac import (
+    delete_scope_grants,
+    holds_capability_at,
+    move_keeps_access_within,
+    require_global_capability,
+)
 from app.db import get_session
 from app.models import Customer, Folder, Source
 
@@ -66,6 +71,29 @@ def _validate_parent(
         walk = session.get(Folder, walk.parent_folder_id) if walk.parent_folder_id else None
 
 
+MANAGE_FOLDER_REFUSED = (
+    "You need manage rules on this folder (and where you're moving it) to change it."
+)
+
+
+def _require_manage_rules_at(
+    session: Session, user: User, *, customer_id: int, folder_id: int | None
+) -> None:
+    """Moving or deleting a folder needs manage_rules on it, and moving it
+    also needs manage_rules where it goes (the new parent folder, or the
+    customer for its root): sources inherit the grants of the folders above
+    them, so create_source alone would otherwise let a role pull a folder it
+    can't reach under one it can, and read its sources."""
+    if not holds_capability_at(
+        session,
+        user,
+        folder_id=folder_id,
+        customer_id=customer_id,
+        capability=Capability.manage_rules,
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=MANAGE_FOLDER_REFUSED)
+
+
 @router.get("", response_model=list[FolderPublic])
 def list_folders(
     customer_id: int | None = None,
@@ -123,17 +151,38 @@ def update_folder(
     if folder is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
 
-    if payload.name is not None:
-        folder.name = payload.name
-
-    if "parent_folder_id" in payload.model_fields_set:
+    if (
+        "parent_folder_id" in payload.model_fields_set
+        and payload.parent_folder_id != folder.parent_folder_id
+    ):
+        # Checked before anything changes: a refusal leaves the folder as it was.
+        _require_manage_rules_at(session, user, customer_id=folder.customer_id, folder_id=folder.id)
         _validate_parent(
             session,
             customer_id=folder.customer_id,
             parent_folder_id=payload.parent_folder_id,
             folder_id=folder.id,
         )
+        _require_manage_rules_at(
+            session, user, customer_id=folder.customer_id, folder_id=payload.parent_folder_id
+        )
+        # Nor may the move give the mover more on the folder than they have
+        # where it is now.
+        if not move_keeps_access_within(
+            session,
+            user,
+            scope_type=ScopeType.folder,
+            scope_id=folder.id,
+            from_folder_id=folder.parent_folder_id,
+            from_customer_id=folder.customer_id,
+            to_folder_id=payload.parent_folder_id,
+            to_customer_id=folder.customer_id,
+        ):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=MANAGE_FOLDER_REFUSED)
         folder.parent_folder_id = payload.parent_folder_id
+
+    if payload.name is not None:
+        folder.name = payload.name
 
     session.add(folder)
     record_audit_event(
@@ -157,6 +206,7 @@ def delete_folder(
     folder = session.get(Folder, folder_id)
     if folder is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
+    _require_manage_rules_at(session, user, customer_id=folder.customer_id, folder_id=folder.id)
 
     has_children = session.exec(select(Folder).where(Folder.parent_folder_id == folder_id)).first()
     has_sources = session.exec(select(Source).where(Source.folder_id == folder_id)).first()

@@ -11,8 +11,17 @@ from app.api import agent_upgrades as api
 from app.api.agent_upgrades import POLICY_OFF
 from app.api.agent_upgrades import router as agent_upgrades_router
 from app.api.auth import get_current_active_user
+from app.api.sources import MANAGE_EXISTING_SOURCE_REFUSED
 from app.api.sources import router as sources_router
-from app.auth.models import AuditLog, GlobalCapability, Role, User
+from app.auth.models import (
+    AuditLog,
+    Capability,
+    GlobalCapability,
+    Role,
+    RoleGrant,
+    ScopeType,
+    User,
+)
 from app.db import get_session
 from app.models import AgentUpgradeRun, Protocol, Source, SystemSetting
 from app.version import APP_VERSION
@@ -300,7 +309,9 @@ def test_users_who_cannot_manage_sources_cannot_use_any_of_it(session, registry)
         assert getattr(viewer, method)(url, **kwargs).status_code == 403, url
     assert registry.sent == []
 
-    manager = _client(session, _user(session, capabilities=[GlobalCapability.create_source]))
+    manager_user = _user(session, capabilities=[GlobalCapability.create_source])
+    _grant(session, manager_user, source, [Capability.view, Capability.manage_rules])
+    manager = _client(session, manager_user)
     assert manager.post(f"/sources/{source.id}/agent-upgrade").status_code == 200
     assert manager.get("/agent-upgrades/agents").status_code == 200
     # The system-wide policy is a System setting: managing sources isn't enough.
@@ -310,6 +321,119 @@ def test_users_who_cannot_manage_sources_cannot_use_any_of_it(session, registry)
         session, _user(session, capabilities=[GlobalCapability.manage_system_settings])
     )
     assert settings_admin.patch("/agent-upgrades/settings", json=body).status_code == 200
+
+
+def _grant(session, user, source, capabilities) -> None:
+    session.add(
+        RoleGrant(
+            role_id=user.role_id,
+            scope_type=ScopeType.source,
+            scope_id=source.id,
+            capabilities=capabilities,
+        )
+    )
+    session.commit()
+
+
+def test_changing_an_agent_needs_manage_rules_on_its_source(session, registry):
+    """Upgrading an agent, setting its policy or resuming it changes the
+    source, so create_source alone isn't enough: like editing the source, it
+    also needs manage rules on it. Seeing the source isn't enough either."""
+    _policy(session)
+    source = _agent(session, failures=3)
+    registry.connected.add(source.id)
+    user = _user(session, capabilities=[GlobalCapability.create_source])
+    _grant(session, user, source, [Capability.view])
+    manager = _client(session, user)
+
+    for method, url, body in (
+        ("post", f"/sources/{source.id}/agent-upgrade", None),
+        ("put", f"/sources/{source.id}/agent-upgrade-policy", {"policy": "off"}),
+        ("post", f"/sources/{source.id}/agent-upgrade/resume", None),
+    ):
+        kwargs = {"json": body} if body is not None else {}
+        response = getattr(manager, method)(url, **kwargs)
+        assert response.status_code == 403, url
+        assert response.json()["detail"] == MANAGE_EXISTING_SOURCE_REFUSED
+    assert registry.sent == []
+    session.refresh(source)
+    assert (source.agent_upgrade_policy, source.agent_upgrade_failures) == ("inherit", 3)
+
+    [grant] = session.exec(select(RoleGrant).where(RoleGrant.role_id == user.role_id)).all()
+    grant.capabilities = [Capability.view, Capability.manage_rules]
+    session.add(grant)
+    session.commit()
+    resumed = manager.post(f"/sources/{source.id}/agent-upgrade/resume")
+    assert resumed.status_code == 200, resumed.text
+    assert manager.post(f"/sources/{source.id}/agent-upgrade").status_code == 200
+    put = manager.put(f"/sources/{source.id}/agent-upgrade-policy", json={"policy": "off"})
+    assert put.status_code == 200
+
+
+def test_upgrade_all_leaves_out_agents_it_cannot_manage(session, registry):
+    """Upgrade all, without picked sources, asks only the agents whose
+    source the user may change; picked sources it can't change are skipped
+    without their name."""
+    _policy(session)
+    mine = _agent(session, name="mine")
+    other = _agent(session, name="other")
+    registry.connected.update({mine.id, other.id})
+    user = _user(session, capabilities=[GlobalCapability.create_source])
+    _grant(session, user, mine, [Capability.view, Capability.manage_rules])
+    manager = _client(session, user)
+
+    every = manager.post("/agent-upgrades", json={})
+    assert every.status_code == 200, every.text
+    assert [r["source_id"] for r in every.json()] == [mine.id]
+    assert {s for s, _c, _f in registry.sent} == {mine.id}
+
+    registry.sent.clear()
+    picked = manager.post("/agent-upgrades", json={"source_ids": [other.id]})
+    assert picked.json() == [
+        {
+            "source_id": other.id,
+            "name": None,
+            "result": "skipped",
+            "detail": MANAGE_EXISTING_SOURCE_REFUSED,
+        }
+    ]
+    assert registry.sent == []
+
+
+def test_reading_upgrades_shows_only_agents_it_can_manage(session, admin, registry):
+    """The agents list and an agent's upgrade history show only sources the
+    user has manage rules on; another source's history is not found. A super
+    admin sees them all."""
+    _policy(session)
+    mine = _agent(session, name="mine")
+    seen = _agent(session, name="seen")
+    other = _agent(session, name="other")
+    registry.connected.update({mine.id, seen.id, other.id})
+    for source in (mine, seen, other):
+        assert admin.post(f"/sources/{source.id}/agent-upgrade").status_code == 200
+    user = _user(session, capabilities=[GlobalCapability.create_source])
+    _grant(session, user, mine, [Capability.view, Capability.manage_rules])
+    _grant(session, user, seen, [Capability.view])
+    manager = _client(session, user)
+
+    rows = manager.get("/agent-upgrades/agents")
+    assert rows.status_code == 200, rows.text
+    assert [r["source_id"] for r in rows.json()] == [mine.id]
+
+    history = manager.get(f"/sources/{mine.id}/agent-upgrades")
+    assert history.status_code == 200, history.text
+    assert history.json()["total"] == 1
+    for source in (seen, other):
+        response = manager.get(f"/sources/{source.id}/agent-upgrades")
+        assert response.status_code == 404, source.name
+        assert response.json()["detail"] == "Source not found"
+
+    assert {r["source_id"] for r in admin.get("/agent-upgrades/agents").json()} == {
+        mine.id,
+        seen.id,
+        other.id,
+    }
+    assert admin.get(f"/sources/{other.id}/agent-upgrades").json()["total"] == 1
 
 
 # --- upgrading all outdated agents ------------------------------------------------
