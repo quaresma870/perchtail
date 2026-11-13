@@ -8,6 +8,12 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Security
+- Moving a folder or a source can no longer widen what the person moving it can do. Moving or deleting a folder now needs manage rules on it and, to move it, where it goes; and moving a folder or a source that has no grant of its own for the role is refused when the role holds more where it would go than where it is now. Before, create source alone was enough to move a folder, with its sources, under a folder the role could reach, and manage rules in both places was enough to move a source or folder to where the role had view or download, so the role could read sources it couldn't see.
+
+### Changed
+- Moving or deleting a folder now needs manage rules on it (and, to move it, where it goes) as well as create source, and a folder or source with no grant of its own for the role can't be moved to where the role holds more than where it is.
+
 ## [0.6.3] - 2026-11-13
 
 A security release, the code retested in the lab as 0.6.3-rc.1. Upgrade the server; push agents don't need to change. Check the Changed section first: delegated admins (create source, manage users, manage roles, manage SSO) may need manage rules on the sources they look after.
