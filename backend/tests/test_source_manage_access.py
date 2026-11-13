@@ -237,6 +237,73 @@ def test_destination_resolution_walks_the_target_folder_chain(session, two_custo
     assert moved.status_code == 200, moved.text
 
 
+FULL = [Capability.view, Capability.download, Capability.manage_rules]
+
+
+def test_a_move_cannot_widen_the_movers_access(session, two_customers):
+    """With no grant of its own, a source inherits from where it lands: a
+    destination granting more than where it is now is refused, even with
+    manage_rules on both."""
+    customer_a, _ = two_customers
+    target = _folder(session, customer_a, "target")
+    source = _source(session, customer_a)
+    role = _role(
+        session,
+        global_capabilities=[GlobalCapability.create_source],
+        grants=[
+            (ScopeType.customer, customer_a.id, [Capability.manage_rules]),
+            (ScopeType.folder, target.id, FULL),
+        ],
+    )
+    client = _client(session, _user(session, role))
+
+    _assert_refused(client.patch(f"/sources/{source.id}", json={"folder_id": target.id}))
+    session.refresh(source)
+    assert source.folder_id is None
+
+
+def test_a_move_to_the_same_or_less_access_is_allowed(session, two_customers):
+    customer_a, customer_b = two_customers
+    less = _folder(session, customer_a, "less")
+    source = _source(session, customer_a)
+    role = _role(
+        session,
+        global_capabilities=[GlobalCapability.create_source],
+        grants=[
+            (ScopeType.customer, customer_a.id, FULL),
+            (ScopeType.customer, customer_b.id, FULL),
+            (ScopeType.folder, less.id, [Capability.manage_rules]),
+        ],
+    )
+    client = _client(session, _user(session, role))
+
+    to_same = client.patch(f"/sources/{source.id}", json={"customer_id": customer_b.id})
+    assert to_same.status_code == 200, to_same.text
+    to_less = client.patch(
+        f"/sources/{source.id}", json={"customer_id": customer_a.id, "folder_id": less.id}
+    )
+    assert to_less.status_code == 200, to_less.text
+
+
+def test_a_source_with_its_own_grant_can_move_to_more_access(session, two_customers):
+    """Its own grant keeps governing it, so the move changes nothing for the mover."""
+    customer_a, _ = two_customers
+    target = _folder(session, customer_a, "target")
+    source = _source(session, customer_a)
+    role = _role(
+        session,
+        global_capabilities=[GlobalCapability.create_source],
+        grants=[
+            (ScopeType.source, source.id, [Capability.manage_rules]),
+            (ScopeType.folder, target.id, FULL),
+        ],
+    )
+    client = _client(session, _user(session, role))
+
+    response = client.patch(f"/sources/{source.id}", json={"folder_id": target.id})
+    assert response.status_code == 200, response.text
+
+
 def test_unchanged_location_is_not_a_move(session, two_customers):
     customer_a, _ = two_customers
     source = _source(session, customer_a)

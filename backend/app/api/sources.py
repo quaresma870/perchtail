@@ -21,10 +21,11 @@ from app.auth.rbac import (
     build_folder_visibility_context,
     delete_scope_grants,
     folder_path_boundary,
+    holds_capability_at,
+    move_keeps_access_within,
     require_capability,
     require_global_capability,
     resolve_capability,
-    resolve_folder_or_customer_capability,
     visible_source_ids,
 )
 from app.collectors import local as local_collector
@@ -441,19 +442,28 @@ def _require_manage_existing_source(session: Session, user: User, source: Source
 
 
 def _require_manage_destination(
-    session: Session, user: User, *, customer_id: int | None, folder_id: int | None
+    session: Session, user: User, source: Source, *, customer_id: int | None, folder_id: int | None
 ) -> None:
     """Moving a source also needs manage_rules where it goes: the grant
     resolution as if the source were already there (the destination folder,
-    its ancestors, then the customer)."""
-    if user.role.is_super_admin:
-        return
-    if not resolve_folder_or_customer_capability(
+    its ancestors, then the customer). Nor may the move give the mover more
+    on the source than they have where it is now (see
+    move_keeps_access_within)."""
+    if not holds_capability_at(
         session,
         user,
         folder_id=folder_id,
         customer_id=customer_id,
         capability=Capability.manage_rules,
+    ) or not move_keeps_access_within(
+        session,
+        user,
+        scope_type=ScopeType.source,
+        scope_id=source.id,
+        from_folder_id=source.folder_id,
+        from_customer_id=source.customer_id,
+        to_folder_id=folder_id,
+        to_customer_id=customer_id,
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=MANAGE_EXISTING_SOURCE_REFUSED
@@ -632,7 +642,7 @@ def update_source(
         _validate_scope(session, customer_id=new_customer_id, folder_id=new_folder_id)
         if (new_customer_id, new_folder_id) != (source.customer_id, source.folder_id):
             _require_manage_destination(
-                session, user, customer_id=new_customer_id, folder_id=new_folder_id
+                session, user, source, customer_id=new_customer_id, folder_id=new_folder_id
             )
         source.customer_id = new_customer_id
         source.folder_id = new_folder_id
