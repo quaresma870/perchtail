@@ -8,6 +8,10 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.6.3-rc.1] - 2026-11-13
+
+A security release. Upgrade the server; push agents don't need to change. Check the Changed section first: delegated admins (create source, manage users, manage roles, manage SSO) may need manage rules on the sources they look after.
+
 ### Security
 - Changing, moving or deleting an existing source, regenerating its push agent's token or browsing for a folder with its saved credential now needs manage rules on that source, and moving it also needs manage rules where it goes. Before, create source alone was enough to do all of this to any source, including ones the role couldn't see.
 - A delegated admin (manage users, manage roles or manage SSO, without super admin) can no longer change their own role or edit or delete the role they hold, and can only assign, create, edit, duplicate or map to an SSO group a role whose grants they hold themselves: each capability in each customer, folder or source has to be theirs there too, and in any folder or source beneath it where they hold less. Before, only the global capabilities were compared, so a delegated admin could give themselves or others access to customers they couldn't see.
