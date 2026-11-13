@@ -78,8 +78,6 @@ release ships (0.x releases may include breaking changes between minors).
 ### Security
 - Each release carries `perchtail-image.json`, naming its Docker image by digest, and `perchtail-image.json.sig`, an Ed25519 signature over it with the same release key as the agents' `SHA256SUMS` (#320). It lets a client check that an image comes from a genuine release, whatever the registry's tags say.
 - `/healthz` and `/readyz` no longer answer the world: a caller needs to be local, in `PROBE_ALLOWED_NETWORKS`, or hold the monitoring token, and a refused probe learns nothing about the instance's health. The new `MONITORING_ALLOWED_NETWORKS` can also restrict `/monitoring/health` and `/metrics` to the monitoring system's addresses, on top of the token (#366).
-- Downloading or opening a whole `.zip` or `.tar.gz` archive, or the ZIP of a folder that contains one, now follows the source's rules for the files inside the archive. An archive with a file whose last matching rule is an exclude can't be downloaded or opened whole (its other files can still be opened and downloaded one by one), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Each refused archive is recorded in the audit log.
-- Regenerating a push agent's token, or disabling or deleting its source, now closes the agent's open connection. Before, an agent that had connected with the old token kept answering for the source until it disconnected on its own, so regenerating a leaked token didn't cut off whoever was using it.
 - A push agent upgraded from the portal (#319) installs a binary only when the Ed25519 signature over the release's `SHA256SUMS` verifies against the release public key built into the agent, the binary matches its SHA-256 line, and the version is newer than its own; wherever the files came from, a server that is compromised can't make it run anything but a genuine, newer PerchTail release, nor downgrade it. The server never sends a URL, only the version. An agent built without the public key refuses every remote upgrade. Downloads are capped in size, and the binaries the server serves are limited to its own version's release files.
 
 ### Fixed
@@ -96,8 +94,29 @@ release ships (0.x releases may include breaking changes between minors).
 - A folder ZIP over SSH with a symlink that loops back up logged in again for every level until the depth limit, about a thousand logins (#347).
 - A download cut short by the client could keep its scratch file until the idle sweep: the release ran only when the response finished normally. It now runs however the response ends (#344).
 - An integer above 9223372036854775807 in a request (an id in the path or body, a port) crashed with a 500; it is now refused with 422 and "A number in the request is out of range" (#376).
-- .zip, .tar.gz and .gz files are recognised whatever the case of their extension (OLD.ZIP, app.log.GZ).
 - Accessibility (#377): faint text, accent links and badges, and primary buttons now meet the WCAG AA contrast ratio; switches, selects and date fields in Settings, the user role selects and the log viewer's content have accessible names; the user menu and explorer file names now include their visible text (initials, file size) in their accessible names.
+
+## [0.6.2] - 2026-11-13
+
+A security release, the code retested in the lab as 0.6.2-rc.1. Upgrade the server; push agents don't need to change.
+
+### Security
+- Downloading or opening a whole `.zip` or `.tar.gz` archive, or the ZIP of a folder that contains one, now follows the source's rules for the files inside the archive. An archive with a file whose last matching rule is an exclude can't be downloaded or opened whole (its other files can still be opened and downloaded one by one), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Each refused archive is recorded in the audit log.
+- Regenerating a push agent's token, or disabling or deleting its source, now closes the agent's open connection. Before, an agent that had connected with the old token kept answering for the source until it disconnected on its own, so regenerating a leaked token didn't cut off whoever was using it.
+
+### Fixed
+- .zip, .tar.gz and .gz files are recognised whatever the case of their extension (OLD.ZIP, app.log.GZ).
+
+## [0.6.2-rc.1] - 2026-11-13
+
+A security release. Upgrade the server; push agents don't need to change.
+
+### Security
+- Downloading or opening a whole `.zip` or `.tar.gz` archive, or the ZIP of a folder that contains one, now follows the source's rules for the files inside the archive. An archive with a file whose last matching rule is an exclude can't be downloaded or opened whole (its other files can still be opened and downloaded one by one), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Each refused archive is recorded in the audit log.
+- Regenerating a push agent's token, or disabling or deleting its source, now closes the agent's open connection. Before, an agent that had connected with the old token kept answering for the source until it disconnected on its own, so regenerating a leaked token didn't cut off whoever was using it.
+
+### Fixed
+- .zip, .tar.gz and .gz files are recognised whatever the case of their extension (OLD.ZIP, app.log.GZ).
 
 ## [0.6.1] - 2026-11-12
 
