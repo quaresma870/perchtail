@@ -72,10 +72,6 @@ release ships (0.x releases may include breaking changes between minors).
 - **Dead push-agent connections are noticed** (#333). The server pings each agent every 30 seconds and drops a connection it has heard nothing from for 90 seconds, so a connection a NAT or firewall dropped silently no longer shows the agent as connected; agents older than 0.7 answer too. The agent pings the server every 25 seconds and reconnects when it has heard nothing for 75 seconds, older servers included.
 - A push agent's reconnect delay starts again from 1 second after a connection that stayed up for a minute, and every delay is random between half and one and a half times the backoff (within 1 to 30 seconds), so agents don't all reconnect at the same moment after a server restart (#333).
 - Versions like `0.7.0-beta.1` are recognised alongside release candidates, ordered before them, so the server and push agents compare and upgrade between beta pre-releases. The update check never offers a pre-release to an install, even if GitHub's latest release were one.
-- Changing, moving, deleting an existing source, regenerating its agent token or picking folders with its saved credential now needs manage rules on that source (and, to move it, where it goes) as well as create source; give manage rules where people need it.
-- A delegated admin can no longer change their own role, edit the role they hold, or grant capabilities in a customer, folder or source that they don't hold there themselves.
-- A delegated admin can no longer reset the password of, deactivate or edit users whose role reaches beyond their own access.
-- Moving or deleting a folder now needs manage rules on it (and, to move it, where it goes) as well as create source, and a folder or source with no grant of its own for the role can't be moved to where the role holds more than where it is.
 - The same manage rules on a source now applies to what only this version has: changing credentials in bulk (#248) skips the sources without it; upgrading a push agent from the portal, setting its upgrade policy or resuming it (#319) needs it, and upgrade all leaves out those agents; the Agents list and an agent's upgrade history show only those sources; dragging a source or a folder to another place (#355) follows the move rules above.
 
 ### Removed
@@ -85,10 +81,6 @@ release ships (0.x releases may include breaking changes between minors).
 - Each release carries `perchtail-image.json`, naming its Docker image by digest, and `perchtail-image.json.sig`, an Ed25519 signature over it with the same release key as the agents' `SHA256SUMS` (#320). It lets a client check that an image comes from a genuine release, whatever the registry's tags say.
 - `/healthz` and `/readyz` no longer answer the world: a caller needs to be local, in `PROBE_ALLOWED_NETWORKS`, or hold the monitoring token, and a refused probe learns nothing about the instance's health. The new `MONITORING_ALLOWED_NETWORKS` can also restrict `/monitoring/health` and `/metrics` to the monitoring system's addresses, on top of the token (#366).
 - A push agent upgraded from the portal (#319) installs a binary only when the Ed25519 signature over the release's `SHA256SUMS` verifies against the release public key built into the agent, the binary matches its SHA-256 line, and the version is newer than its own; wherever the files came from, a server that is compromised can't make it run anything but a genuine, newer PerchTail release, nor downgrade it. The server never sends a URL, only the version. An agent built without the public key refuses every remote upgrade. Downloads are capped in size, and the binaries the server serves are limited to its own version's release files.
-- Changing, moving or deleting an existing source, regenerating its push agent's token or browsing for a folder with its saved credential now needs manage rules on that source, and moving it also needs manage rules where it goes. Before, create source alone was enough to do all of this to any source, including ones the role couldn't see.
-- A delegated admin (manage users, manage roles or manage SSO, without super admin) can no longer change their own role or edit or delete the role they hold, and can only assign, create, edit, duplicate or map to an SSO group a role whose grants they hold themselves: each capability in each customer, folder or source has to be theirs there too, and in any folder or source beneath it where they hold less. Before, only the global capabilities were compared, so a delegated admin could give themselves or others access to customers they couldn't see.
-- Symbolic and hard links, devices and FIFOs inside a `.tar.gz` archive are no longer listed, and opening or downloading one answers "not found", like a member that doesn't exist. Before, a link with a visible name opened the member it pointed at, even one the source's rules hide. `.zip` archives were not affected.
-- Moving a folder or a source can no longer widen what the person moving it can do. Moving or deleting a folder now needs manage rules on it and, to move it, where it goes; and moving a folder or a source that has no grant of its own for the role is refused when the role holds more where it would go than where it is now. Before, create source alone was enough to move a folder, with its sources, under a folder the role could reach, and manage rules in both places was enough to move a source or folder to where the role had view or download, so the role could read sources it couldn't see.
 
 ### Fixed
 - The release workflow's check that the CHANGELOG has a section for the version could fail at random once the CHANGELOG grew large; it now reads the whole file before looking.
@@ -107,6 +99,54 @@ release ships (0.x releases may include breaking changes between minors).
 - A download cut short by the client could keep its scratch file until the idle sweep: the release ran only when the response finished normally. It now runs however the response ends (#344).
 - An integer above 9223372036854775807 in a request (an id in the path or body, a port) crashed with a 500; it is now refused with 422 and "A number in the request is out of range" (#376).
 - Accessibility (#377): faint text, accent links and badges, and primary buttons now meet the WCAG AA contrast ratio; switches, selects and date fields in Settings, the user role selects and the log viewer's content have accessible names; the user menu and explorer file names now include their visible text (initials, file size) in their accessible names.
+
+## [0.6.4] - 2026-11-13
+
+A security release, the code retested in the lab as 0.6.4-rc.1. Upgrade the server; push agents don't need to change. Check the Changed section first: admins who move folders may need manage rules on them.
+
+### Security
+- Moving a folder or a source can no longer widen what the person moving it can do. Moving or deleting a folder now needs manage rules on it and, to move it, where it goes; and moving a folder or a source that has no grant of its own for the role is refused when the role holds more where it would go than where it is now. Before, create source alone was enough to move a folder, with its sources, under a folder the role could reach, and manage rules in both places was enough to move a source or folder to where the role had view or download, so the role could read sources it couldn't see.
+
+### Changed
+- Moving or deleting a folder now needs manage rules on it (and, to move it, where it goes) as well as create source, and a folder or source with no grant of its own for the role can't be moved to where the role holds more than where it is.
+
+## [0.6.4-rc.1] - 2026-11-13
+
+A security release. Upgrade the server; push agents don't need to change. Check the Changed section first: admins who move folders may need manage rules on them.
+
+### Security
+- Moving a folder or a source can no longer widen what the person moving it can do. Moving or deleting a folder now needs manage rules on it and, to move it, where it goes; and moving a folder or a source that has no grant of its own for the role is refused when the role holds more where it would go than where it is now. Before, create source alone was enough to move a folder, with its sources, under a folder the role could reach, and manage rules in both places was enough to move a source or folder to where the role had view or download, so the role could read sources it couldn't see.
+
+### Changed
+- Moving or deleting a folder now needs manage rules on it (and, to move it, where it goes) as well as create source, and a folder or source with no grant of its own for the role can't be moved to where the role holds more than where it is.
+
+## [0.6.3] - 2026-11-13
+
+A security release, the code retested in the lab as 0.6.3-rc.1. Upgrade the server; push agents don't need to change. Check the Changed section first: delegated admins (create source, manage users, manage roles, manage SSO) may need manage rules on the sources they look after.
+
+### Security
+- Changing, moving or deleting an existing source, regenerating its push agent's token or browsing for a folder with its saved credential now needs manage rules on that source, and moving it also needs manage rules where it goes. Before, create source alone was enough to do all of this to any source, including ones the role couldn't see.
+- A delegated admin (manage users, manage roles or manage SSO, without super admin) can no longer change their own role or edit or delete the role they hold, and can only assign, create, edit, duplicate or map to an SSO group a role whose grants they hold themselves: each capability in each customer, folder or source has to be theirs there too, and in any folder or source beneath it where they hold less. Before, only the global capabilities were compared, so a delegated admin could give themselves or others access to customers they couldn't see.
+- Symbolic and hard links, devices and FIFOs inside a `.tar.gz` archive are no longer listed, and opening or downloading one answers "not found", like a member that doesn't exist. Before, a link with a visible name opened the member it pointed at, even one the source's rules hide. `.zip` archives were not affected.
+
+### Changed
+- Changing, moving, deleting an existing source, regenerating its agent token or picking folders with its saved credential now needs manage rules on that source (and, to move it, where it goes) as well as create source; give manage rules where people need it.
+- A delegated admin can no longer change their own role, edit the role they hold, or grant capabilities in a customer, folder or source that they don't hold there themselves.
+- A delegated admin can no longer reset the password of, deactivate or edit users whose role reaches beyond their own access.
+
+## [0.6.3-rc.1] - 2026-11-13
+
+A security release. Upgrade the server; push agents don't need to change. Check the Changed section first: delegated admins (create source, manage users, manage roles, manage SSO) may need manage rules on the sources they look after.
+
+### Security
+- Changing, moving or deleting an existing source, regenerating its push agent's token or browsing for a folder with its saved credential now needs manage rules on that source, and moving it also needs manage rules where it goes. Before, create source alone was enough to do all of this to any source, including ones the role couldn't see.
+- A delegated admin (manage users, manage roles or manage SSO, without super admin) can no longer change their own role or edit or delete the role they hold, and can only assign, create, edit, duplicate or map to an SSO group a role whose grants they hold themselves: each capability in each customer, folder or source has to be theirs there too, and in any folder or source beneath it where they hold less. Before, only the global capabilities were compared, so a delegated admin could give themselves or others access to customers they couldn't see.
+- Symbolic and hard links, devices and FIFOs inside a `.tar.gz` archive are no longer listed, and opening or downloading one answers "not found", like a member that doesn't exist. Before, a link with a visible name opened the member it pointed at, even one the source's rules hide. `.zip` archives were not affected.
+
+### Changed
+- Changing, moving, deleting an existing source, regenerating its agent token or picking folders with its saved credential now needs manage rules on that source (and, to move it, where it goes) as well as create source; give manage rules where people need it.
+- A delegated admin can no longer change their own role, edit the role they hold, or grant capabilities in a customer, folder or source that they don't hold there themselves.
+- A delegated admin can no longer reset the password of, deactivate or edit users whose role reaches beyond their own access.
 
 ## [0.6.2] - 2026-11-13
 
