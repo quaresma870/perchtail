@@ -305,3 +305,5 @@ publish in `docker-compose.yml` entirely rather than binding it to loopback.
 PerchTail is free software under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only), from 0.7.0 on. You can use, change and share it, including running it for others; if you change it and let people use your changed version over a network, you have to offer them its source under the same license. Releases up to 0.6.1 were published under the MIT license and stay under it.
 
 Contributions are accepted under the [Contributor License Agreement](CLA.md) (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
+The PerchTail name and logo are trademarks; [TRADEMARKS.md](TRADEMARKS.md) says how they can be used, including by forks and modified versions.

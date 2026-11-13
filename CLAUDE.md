@@ -315,7 +315,7 @@ the exact same viewer as customer sources, via a **system source**:
 Being technically solid doesn't get an open-source project used — it has to be
 easy to find, easy to trust, and easy to contribute to. Baseline files (already
 drafted, see repo root): `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`,
-`LICENSE`, `CLA.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `.github/FUNDING.yml`.
+`LICENSE`, `CLA.md`, `TRADEMARKS.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `.github/FUNDING.yml`.
 
 A few things worth doing deliberately once phase 1 is real, not just present:
 
