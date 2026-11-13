@@ -8,6 +8,10 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.6.2-rc.1] - 2026-11-13
+
+A security release. Upgrade the server; push agents don't need to change.
+
 ### Security
 - Downloading or opening a whole `.zip` or `.tar.gz` archive, or the ZIP of a folder that contains one, now follows the source's rules for the files inside the archive. An archive with a file whose last matching rule is an exclude can't be downloaded or opened whole (its other files can still be opened and downloaded one by one), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Each refused archive is recorded in the audit log.
 - Regenerating a push agent's token, or disabling or deleting its source, now closes the agent's open connection. Before, an agent that had connected with the old token kept answering for the source until it disconnected on its own, so regenerating a leaked token didn't cut off whoever was using it.
