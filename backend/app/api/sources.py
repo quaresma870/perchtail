@@ -24,6 +24,7 @@ from app.auth.rbac import (
     require_capability,
     require_global_capability,
     resolve_capability,
+    resolve_folder_or_customer_capability,
     visible_source_ids,
 )
 from app.collectors import local as local_collector
@@ -422,6 +423,43 @@ def _validate_scope(session: Session, *, customer_id: int | None, folder_id: int
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
 
 
+MANAGE_EXISTING_SOURCE_REFUSED = (
+    "You need manage rules on this source (and where you're moving it) to change it."
+)
+
+
+def _require_manage_existing_source(session: Session, user: User, source: Source) -> None:
+    """create_source lets a role add sources; changing an existing one
+    (editing, moving, deleting it, its agent token, or browsing with its
+    saved credential) also needs manage_rules on that source, by the usual
+    grant resolution -- otherwise create_source alone would reach every
+    source, including ones the role can't even see."""
+    if not resolve_capability(session, user, source, Capability.manage_rules):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=MANAGE_EXISTING_SOURCE_REFUSED
+        )
+
+
+def _require_manage_destination(
+    session: Session, user: User, *, customer_id: int | None, folder_id: int | None
+) -> None:
+    """Moving a source also needs manage_rules where it goes: the grant
+    resolution as if the source were already there (the destination folder,
+    its ancestors, then the customer)."""
+    if user.role.is_super_admin:
+        return
+    if not resolve_folder_or_customer_capability(
+        session,
+        user,
+        folder_id=folder_id,
+        customer_id=customer_id,
+        capability=Capability.manage_rules,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=MANAGE_EXISTING_SOURCE_REFUSED
+        )
+
+
 @router.get("", response_model=list[SourcePublic])
 def list_sources(
     user: User = Depends(get_current_active_user), session: Session = Depends(get_session)
@@ -578,6 +616,7 @@ def update_source(
     if source is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
     _require_not_system(source)
+    _require_manage_existing_source(session, user, source)
 
     fields_set = payload.model_fields_set
     before = {
@@ -591,6 +630,10 @@ def update_source(
     new_folder_id = payload.folder_id if "folder_id" in fields_set else source.folder_id
     if "customer_id" in fields_set or "folder_id" in fields_set:
         _validate_scope(session, customer_id=new_customer_id, folder_id=new_folder_id)
+        if (new_customer_id, new_folder_id) != (source.customer_id, source.folder_id):
+            _require_manage_destination(
+                session, user, customer_id=new_customer_id, folder_id=new_folder_id
+            )
         source.customer_id = new_customer_id
         source.folder_id = new_folder_id
 
@@ -702,6 +745,7 @@ def delete_source(
     if source is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
     _require_not_system(source)
+    _require_manage_existing_source(session, user, source)
 
     # Everything that points at this source by id goes with it -- nothing may
     # outlive it and resurface under a later source (see app.models.NO_ID_REUSE).
@@ -798,6 +842,7 @@ def regenerate_agent_token(
     source = session.get(Source, source_id)
     if source is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    _require_manage_existing_source(session, user, source)
     if source.protocol != Protocol.agent:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -860,7 +905,7 @@ class FolderPickResult(BaseModel):
     truncated: bool
 
 
-def _picker_source(session: Session, payload: FolderPickRequest) -> Source:
+def _picker_source(session: Session, user: User, payload: FolderPickRequest) -> Source:
     saved = session.get(Source, payload.source_id) if payload.source_id is not None else None
     if payload.source_id is not None and saved is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
@@ -877,6 +922,7 @@ def _picker_source(session: Session, payload: FolderPickRequest) -> Source:
     if payload.credential is not None:
         credential_ref = encrypt_credential(payload.credential)
     elif saved is not None and saved.credential_ref is not None:
+        _require_manage_existing_source(session, user, saved)
         # The saved credential is only ever sent to the host it was saved
         # for -- pointing the picker somewhere else needs it typed again.
         if (host, port) != (saved.host, saved.port):
@@ -984,7 +1030,7 @@ def pick_folder(
     be picked instead of typed (#159). Folders only, never file names, and
     only for users who can manage sources; each listing is audited, since
     it reaches outside any configured base path."""
-    source = _picker_source(session, payload)
+    source = _picker_source(session, user, payload)
     path, parent, kind, entries = _pick(source, payload.path)
     record_audit_event(
         session,

@@ -1248,3 +1248,126 @@ def test_folder_zip_skipped_list_avoids_an_existing_skipped_txt(app_client, sess
         assert zf.read("SKIPPED (PerchTail).txt") == (
             b"hiding.zip: can't be included whole; open or download its files one by one\n"
         )
+
+
+def _tar_gz_with_links() -> bytes:
+    """app.log and secret.txt as regular files, plus a symbolic and a hard
+    link with visible names, both pointing at secret.txt."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, content in (("app.log", b"hello"), ("secret.txt", b"nope")):
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            tf.addfile(info, io.BytesIO(content))
+        for name, kind in (("link.log", tarfile.SYMTYPE), ("hard.log", tarfile.LNKTYPE)):
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            info.linkname = "secret.txt"
+            tf.addfile(info)
+    return buf.getvalue()
+
+
+def _zip_with_link() -> bytes:
+    """The zip equivalent: link.log stored with a symbolic link's mode, whose
+    content (the link's target) is "secret.txt"."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("app.log", "hello")
+        zf.writestr("secret.txt", "nope")
+        link = zipfile.ZipInfo("link.log")
+        link.external_attr = (stat_module.S_IFLNK | 0o777) << 16
+        zf.writestr(link, "secret.txt")
+    return buf.getvalue()
+
+
+def _links_source(session, app, fake_sftp, archive: str, content: bytes) -> Source:
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    _add_rule(session, source, 1, RuleType.exclude, f"{archive}/secret.txt")
+    fake_sftp.files[f"/var/log/appname/{archive}"] = content
+    return source
+
+
+def test_tar_links_are_not_listed_and_cannot_be_opened(
+    app_client, session, fake_sftp, scratch_store
+):
+    app, client = app_client
+    archive = "logs.tar.gz"
+    source = _links_source(session, app, fake_sftp, archive, _tar_gz_with_links())
+    url = f"/sources/{source.id}"
+
+    listed = client.get(f"{url}/browse", params={"path": archive})
+    assert listed.status_code == 200
+    assert [e["name"] for e in listed.json()] == ["app.log"]
+
+    for member in ("link.log", "hard.log"):
+        for endpoint in ("open", "download"):
+            response = client.get(f"{url}/{endpoint}", params={"path": archive, "member": member})
+            assert response.status_code == 404, (member, endpoint)
+            assert b"nope" not in response.content
+
+    opened = client.get(f"{url}/open", params={"path": archive, "member": "app.log"})
+    assert opened.status_code == 200 and opened.content == b"hello"
+
+
+@pytest.mark.parametrize("excluded", [True, False])
+def test_whole_tar_with_an_excluded_link_is_refused(
+    app_client, session, fake_sftp, scratch_store, excluded
+):
+    """A link is never listed or opened, but the whole archive still carries
+    its name and target, so an excluded link refuses the whole archive like
+    an excluded file would."""
+    app, client = app_client
+    archive = "a.tar.gz"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        info = tarfile.TarInfo("app.log")
+        info.size = len(b"hello")
+        tf.addfile(info, io.BytesIO(b"hello"))
+        link = tarfile.TarInfo("secret.log")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/hostname"
+        tf.addfile(link)
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**")
+    if excluded:
+        _add_rule(session, source, 1, RuleType.exclude, "**/secret.log")
+    fake_sftp.files[f"/var/log/appname/{archive}"] = buf.getvalue()
+
+    whole = client.get(f"/sources/{source.id}/download", params={"path": archive})
+
+    if excluded:
+        assert whole.status_code == 403
+        assert whole.json()["detail"]["error_code"] == "archive_not_downloadable_whole"
+    else:
+        assert whole.status_code == 200 and whole.content == buf.getvalue()
+
+
+def test_a_member_that_is_not_in_the_archive_is_a_404(
+    app_client, session, fake_sftp, scratch_store
+):
+    app, client = app_client
+    source = _links_source(session, app, fake_sftp, "logs.tar.gz", _tar_gz_with_links())
+    fake_sftp.files["/var/log/appname/logs.zip"] = _zip_with_link()
+
+    for archive in ("logs.tar.gz", "logs.zip"):
+        response = client.get(
+            f"/sources/{source.id}/open", params={"path": archive, "member": "missing.log"}
+        )
+        assert response.status_code == 404, archive
+
+
+def test_zip_links_are_read_as_stored(app_client, session, fake_sftp, scratch_store):
+    """zipfile never follows a link: a link member opens as the text of its
+    target's name, as before, never as the target's content."""
+    app, client = app_client
+    archive = "logs.zip"
+    source = _links_source(session, app, fake_sftp, archive, _zip_with_link())
+    url = f"/sources/{source.id}"
+
+    listed = client.get(f"{url}/browse", params={"path": archive})
+    assert [e["name"] for e in listed.json()] == ["app.log", "link.log"]
+    opened = client.get(f"{url}/open", params={"path": archive, "member": "link.log"})
+    assert opened.status_code == 200 and opened.content == b"secret.txt"
