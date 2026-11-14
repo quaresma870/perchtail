@@ -1,0 +1,425 @@
+{
+  "engine": 1,
+  "format": {
+    "vectors": "rules (the agent's redact block format), input or input_b64 (input_encoding encodes input: utf-8 by default, utf-16-le or utf-16-be), source_encoding (none: bytes; auto: detected from the first 64 bytes; utf-16-le; utf-16-be; utf-16-unsure: served as bytes, the detectors run on the bytes and on the UTF-16 LE and BE readings aligned on even file offsets, and the union is replaced), output_encoding (utf-8 by default, or source), final (true by default), max_line_bytes, pem_max_lines; expected or expected_b64 (expected_encoding like input_encoding), counts, source_offset, trailing_partial, or error. A vector with window redacts input[window.start:] of a read that began window.base_offset bytes into the file, and expects begin, end and aligned. Every vector without window must give the same result whatever block sizes the input is fed in.",
+    "long_line_cuts": "for every k from 0 to the length of value, the line kept + ' ' + '~' * n + ' ' + value + ' end\\n', with n such that max_line_bytes falls right after the first k bytes of value, is redacted with rules and max_line_bytes and must give expected_kept (followed by ' ' and the '~' filler when the blank just before value is at or before max_line_bytes - cut_guard_bytes), the long-line marker and '\\n', with counts, whatever block sizes it is fed in: the kept start of a long line ends at the last blank at or before max_line_bytes - cut_guard_bytes (detectors.json), or earlier at the start of a replacement that blank would cut, so nothing of a value cut by the limit is kept. With source_encoding utf-16-unsure, the line is encoded with input_encoding (utf-16-le or utf-16-be) and redacted as utf-16-unsure from file offset 0: k and n count characters, the guard is 2 * cut_guard_bytes source bytes (a character of the UTF-16 readings takes two), the blanks are found byte by byte (the 0x20 of '20 00' and of '00 20'), and the kept start ends at the blank's 0x20 byte; the expected output is expected_kept encoded with input_encoding except its markers, which stay ASCII, then the ' ' and '~' filler encoded likewise when kept, then for utf-16-be the 00 byte before the blank's 0x20, then the long-line marker and '\\n' in ASCII, then for utf-16-le the 00 byte that follows the line's 0x0A.",
+    "head_digests": "HMAC-SHA256 with key_b64 of the first min(64, offset) bytes of data, hex, first 32 characters.",
+    "detect": "the encoding decided from head_b64: utf-16-le, utf-16-be, utf-16-unsure, null (bytes) or error."
+  },
+  "vectors": [
+    {
+      "name": "no rules: output is the input, byte for byte",
+      "rules": [],
+      "input": "password=x 4111 1111 1111 1111\npartial",
+      "final": false,
+      "expected": "password=x 4111 1111 1111 1111\npartial",
+      "counts": {},
+      "source_offset": 38,
+      "trailing_partial": 0
+    },
+    {
+      "name": "card: brands, separators and the last four digits",
+      "rules": [{"id": 1, "name": "card", "detector": "card"}],
+      "input": "pay 4111 1111 1111 1111 ok\nmc 5555-5555-5555-4444\namex 378282246310005\n",
+      "expected": "pay [redacted: card ****1111] ok\nmc [redacted: card ****4444]\namex [redacted: card ****0005]\n",
+      "counts": {"card": 3}
+    },
+    {
+      "name": "card: IMEI, millisecond timestamp, mixed separators and a bad check digit are left alone",
+      "rules": [{"id": 1, "name": "card", "detector": "card"}],
+      "input": "imei 490154203237518\nts 1700000000000\nmixed 4111 1111-1111 1111\nluhn 4111 1111 1111 1112\n",
+      "expected": "imei 490154203237518\nts 1700000000000\nmixed 4111 1111-1111 1111\nluhn 4111 1111 1111 1112\n",
+      "counts": {}
+    },
+    {
+      "name": "card: digits written next to a card don't hide it",
+      "rules": [{"id": 1, "name": "card", "detector": "card"}],
+      "input": "ref 4111 1111 1111 1111 2\nqty 12 4111 1111 1111 1111\nid 123456 4111 1111 1111 1111\ntwo 4111 1111 1111 1111 5555 5555 5555 4444\n",
+      "expected": "ref [redacted: card ****1111] 2\nqty 12 [redacted: card ****1111]\nid 123456 [redacted: card ****1111]\ntwo [redacted: card ****1111] [redacted: card ****4444]\n",
+      "counts": {"card": 5}
+    },
+    {
+      "name": "card: at the start, in the middle and at the end of sequences of over 100 digits",
+      "rules": [{"id": 1, "name": "card", "detector": "card"}],
+      "input": "a 4111 1111 1111 1111 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12\nb 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 4111 1111 1111 1111 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12\nc 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 5555-5555-5555-4444\n",
+      "expected": "a [redacted: card ****1111] 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12\nb 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 [redacted: card ****1111] 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12\nc 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 [redacted: card ****4444]\n",
+      "counts": {"card": 3}
+    },
+    {
+      "name": "card: letters written against the digits don't hide it",
+      "rules": [{"id": 1, "name": "card", "detector": "card"}],
+      "input": "id:x4111111111111111y\n",
+      "expected": "id:x[redacted: card ****1111]y\n",
+      "counts": {"card": 1}
+    },
+    {
+      "name": "bearer: only the token is replaced",
+      "rules": [{"id": 2, "name": "bearer", "detector": "bearer"}],
+      "input": "Authorization: Bearer abcdefgh12345678\nthe bearer of news\n",
+      "expected": "Authorization: Bearer [redacted: token]\nthe bearer of news\n",
+      "counts": {"bearer": 1}
+    },
+    {
+      "name": "authorization before bearer: the merged span takes the first rule's label",
+      "rules": [
+        {"id": 3, "name": "authorization", "detector": "authorization"},
+        {"id": 2, "name": "bearer", "detector": "bearer"}
+      ],
+      "input": "Authorization: Bearer abcdefgh12345678\nProxy-Authorization: Basic Zm9vOmJhcg==\n",
+      "expected": "Authorization: [redacted: authorization]\nProxy-Authorization: [redacted: authorization]\n",
+      "counts": {"authorization": 2}
+    },
+    {
+      "name": "bearer before authorization",
+      "rules": [
+        {"id": 2, "name": "bearer", "detector": "bearer"},
+        {"id": 3, "name": "authorization", "detector": "authorization"}
+      ],
+      "input": "Authorization: Bearer abcdefgh12345678\n",
+      "expected": "Authorization: [redacted: token]\n",
+      "counts": {"bearer": 1}
+    },
+    {
+      "name": "secret_kv: the label comes from the key; placeholders are left alone",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input": "db_password=hunter2 user=bob\n\"api_key\": \"abc123\",\nX-Api-Key: k-999\npassword=null\ntoken=***\nclient_secret=s3\n",
+      "expected": "db_password=[redacted: password] user=bob\n\"api_key\": \"[redacted: api key]\",\nX-Api-Key: [redacted: api key]\npassword=null\ntoken=***\nclient_secret=[redacted: client secret]\n",
+      "counts": {"secret_kv": 4}
+    },
+    {
+      "name": "url_password",
+      "rules": [{"id": 5, "name": "url_password", "detector": "url_password"}],
+      "input": "dsn postgres://admin:s3cret@db.local:5432/app\nhttps://host/path\n",
+      "expected": "dsn postgres://admin:[redacted: password]@db.local:5432/app\nhttps://host/path\n",
+      "counts": {"url_password": 1}
+    },
+    {
+      "name": "private key over several lines keeps the line breaks",
+      "rules": [{"id": 6, "name": "private_key", "detector": "private_key"}],
+      "input": "start\nkey: -----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\nKUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQ==\n-----END RSA PRIVATE KEY----- done\nend\n",
+      "expected": "start\nkey: [redacted: private key]\n\n\n done\nend\n",
+      "counts": {"private_key": 1}
+    },
+    {
+      "name": "private key on one line (escaped newlines)",
+      "rules": [{"id": 6, "name": "private_key", "detector": "private_key"}],
+      "input": "cfg {\"k\":\"-----BEGIN PRIVATE KEY-----\\nMIIE\\n-----END PRIVATE KEY-----\"}\n",
+      "expected": "cfg {\"k\":\"[redacted: private key]\"}\n",
+      "counts": {"private_key": 1}
+    },
+    {
+      "name": "private key without END stops after pem_max_lines",
+      "rules": [{"id": 6, "name": "private_key", "detector": "private_key"}],
+      "pem_max_lines": 3,
+      "input": "-----BEGIN PRIVATE KEY-----\nAAAA\nBBBB\nCCCC\nafter\n",
+      "expected": "[redacted: private key]\n\n\nCCCC\nafter\n",
+      "counts": {"private_key": 1}
+    },
+    {
+      "name": "private key with CRLF line ends",
+      "rules": [{"id": 6, "name": "private_key", "detector": "private_key"}],
+      "input": "-----BEGIN EC PRIVATE KEY-----\r\nAAAA\r\n-----END EC PRIVATE KEY-----\r\nok\r\n",
+      "expected": "[redacted: private key]\r\n\r\n\r\nok\r\n",
+      "counts": {"private_key": 1}
+    },
+    {
+      "name": "certificates are not private keys",
+      "rules": [{"id": 6, "name": "private_key", "detector": "private_key"}],
+      "input": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+      "expected": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+      "counts": {}
+    },
+    {
+      "name": "jwt",
+      "rules": [{"id": 7, "name": "jwt", "detector": "jwt"}],
+      "input": "auth eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U ok\n",
+      "expected": "auth [redacted: jwt] ok\n",
+      "counts": {"jwt": 1}
+    },
+    {
+      "name": "email: nothing of the address is kept",
+      "rules": [{"id": 8, "name": "email", "detector": "email"}],
+      "input": "from alice@example.com to bob.smith+x@mail.example.co.uk\n@Override\n",
+      "expected": "from [redacted: email] to [redacted: email]\n@Override\n",
+      "counts": {"email": 2}
+    },
+    {
+      "name": "ipv4 (version numbers are a known false positive)",
+      "rules": [{"id": 9, "name": "ipv4", "detector": "ipv4"}],
+      "input": "client 10.1.2.3 port 80 ver 1.2.3.4 bad 1.2.3.400\n",
+      "expected": "client [redacted: ip] port 80 ver [redacted: ip] bad 1.2.3.400\n",
+      "counts": {"ipv4": 2}
+    },
+    {
+      "name": "ipv6: addresses, not times, MACs or C++ scopes",
+      "rules": [{"id": 10, "name": "ipv6", "detector": "ipv6"}],
+      "input": "a 2001:db8::1 b\nlink fe80::1%eth0 up\nlo ::1\ntime 12:30:45\nmac de:ad:be:ef:00:01\ncpp std::string\n[2001:db8::2]:8080\nnet 2001:db8::/32\n",
+      "expected": "a [redacted: ip] b\nlink [redacted: ip] up\nlo [redacted: ip]\ntime 12:30:45\nmac de:ad:be:ef:00:01\ncpp std::string\n[[redacted: ip]]:8080\nnet [redacted: ip]/32\n",
+      "counts": {"ipv6": 5}
+    },
+    {
+      "name": "iban: mod 97, the country's length, nothing of the number is kept",
+      "rules": [{"id": 11, "name": "iban", "detector": "iban"}],
+      "input": "iban GB82 WEST 1234 5698 7654 32 ok\nDE89370400440532013000\nbad GB82 WEST 1234 5698 7654 33\nbe BE68 5390 0754 7034 CODE\n",
+      "expected": "iban [redacted: iban] ok\n[redacted: iban]\nbad GB82 WEST 1234 5698 7654 33\nbe [redacted: iban] CODE\n",
+      "counts": {"iban": 3}
+    },
+    {
+      "name": "iban: one, two and three codes like AA99 before an IBAN don't hide it (search with overlap)",
+      "rules": [{"id": 11, "name": "iban", "detector": "iban"}],
+      "input": "tx AB12 PT50 0002 0123 1234 5678 9015 4\nref DE12 PT50 0002 0123 1234 5678 9015 4\ntwo AB12 CD34 PT50 0002 0123 1234 5678 9015 4\nthree AB12 CD34 DE12 PT50 0002 0123 1234 5678 9015 4\nflat AB12 DE89370400440532013000\n",
+      "expected": "tx AB12 [redacted: iban]\nref DE12 [redacted: iban]\ntwo AB12 CD34 [redacted: iban]\nthree AB12 CD34 DE12 [redacted: iban]\nflat AB12 [redacted: iban]\n",
+      "counts": {"iban": 5}
+    },
+    {
+      "name": "overlapping detectors merge into one replacement",
+      "rules": [
+        {"id": 8, "name": "email", "detector": "email"},
+        {"id": 5, "name": "url_password", "detector": "url_password"}
+      ],
+      "input": "u https://bob:pw@mail.example.com/x\n",
+      "expected": "u https://bob:[redacted: email]/x\n",
+      "counts": {"email": 1}
+    },
+    {
+      "name": "custom rule with a secret group",
+      "rules": [{"id": 31, "name": "msisdn", "pattern": "\\b255(\\d{9})\\b", "secret_group": 1}],
+      "input": "call +255712345678 now\n",
+      "expected": "call +255[redacted: msisdn] now\n",
+      "counts": {"msisdn": 1}
+    },
+    {
+      "name": "an ASCII custom rule matches bytes (Latin-1): invalid UTF-8 doesn't stop it",
+      "rules": [{"id": 32, "name": "x", "pattern": "id=.{3};"}],
+      "input_b64": "aWQ9//79OyBvawo=",
+      "expected": "[redacted: x] ok\n",
+      "counts": {"x": 1}
+    },
+    {
+      "name": "a custom rule with non-ASCII literals matches UTF-8",
+      "rules": [{"id": 33, "name": "nome", "pattern": "José \\w+"}],
+      "input": "cliente José Silva ok\n",
+      "expected": "cliente [redacted: nome] ok\n",
+      "counts": {"nome": 1}
+    },
+    {
+      "name": "a rule never matches across a newline",
+      "rules": [{"id": 34, "name": "pair", "pattern": "a\\s+b"}],
+      "input": "a\nb a  b\n",
+      "expected": "a\nb [redacted: pair]\n",
+      "counts": {"pair": 1}
+    },
+    {
+      "name": "binary content is redacted as bytes",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input_b64": "AAFwd2Q9czNjcul0AAo=",
+      "expected_b64": "AAFwd2Q9W3JlZGFjdGVkOiBwYXNzd29yZF0K",
+      "counts": {"secret_kv": 1}
+    },
+    {
+      "name": "a line over max_line_bytes keeps its start up to a blank, cut_guard_bytes before the limit, and a marker",
+      "rules": [{"id": 8, "name": "email", "detector": "email"}],
+      "max_line_bytes": 100,
+      "input": "short a@b.co\nmail a@b.co ok yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy tail\nend\n",
+      "expected": "short [redacted: email]\nmail [redacted: email] ok[redacted: line over 100 bytes]\nend\n",
+      "counts": {"email": 2}
+    },
+    {
+      "name": "a line over max_line_bytes with no blank before the guard keeps nothing",
+      "rules": [{"id": 8, "name": "email", "detector": "email"}],
+      "max_line_bytes": 16,
+      "input": "short a@b.co\n0123456789abcdefXYZ a@b.co\nend\n",
+      "expected": "short [redacted: email]\n[redacted: line over 16 bytes]\nend\n",
+      "counts": {"email": 1}
+    },
+    {
+      "name": "the kept start of a long line ends where a replacement it would cut begins",
+      "rules": [{"id": 3, "name": "authorization", "detector": "authorization"}],
+      "max_line_bytes": 100,
+      "input": "Authorization: Basic QUFB QkJC Q0ND RERE RUVF RkZG R0dH SEhI SUlJ SkpK S0tL TExM TU1N Tk5O T09P UFBQ UVFR UlJS\nok\n",
+      "expected": "Authorization: [redacted: line over 100 bytes]\nok\n",
+      "counts": {}
+    },
+    {
+      "name": "a private key BEGIN in the dropped part of a long line still hides the lines after it",
+      "rules": [{"id": 6, "name": "private_key", "detector": "private_key"}],
+      "max_line_bytes": 40,
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx -----BEGIN PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcN\n-----END PRIVATE KEY----- ok\nafter\nzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz -----BEGIN PRIVATE KEY----- -----END PRIVATE KEY-----\nshown\n",
+      "expected": "[redacted: line over 40 bytes]\n\n ok\nafter\n[redacted: line over 40 bytes]\nshown\n",
+      "counts": {}
+    },
+    {
+      "name": "an incomplete last line is a marker until it ends",
+      "rules": [{"id": 1, "name": "card", "detector": "card"}],
+      "final": false,
+      "input": "one 4111 1111 1111 1111\ntwo 4111 1111",
+      "expected": "one [redacted: card ****1111]\n[redacted: incomplete line]",
+      "counts": {"card": 1},
+      "source_offset": 24,
+      "trailing_partial": 27
+    },
+    {
+      "name": "a final read redacts the last line as it is",
+      "rules": [{"id": 1, "name": "card", "detector": "card"}],
+      "input": "one 4111 1111 1111 1111\ntwo 4111 1111",
+      "expected": "one [redacted: card ****1111]\ntwo 4111 1111",
+      "counts": {"card": 1},
+      "source_offset": 37,
+      "trailing_partial": 0
+    },
+    {
+      "name": "an incomplete line over max_line_bytes is all trailing_partial",
+      "rules": [{"id": 8, "name": "email", "detector": "email"}],
+      "final": false,
+      "max_line_bytes": 16,
+      "input": "ok\n0123456789abcdefXYZ",
+      "expected": "ok\n[redacted: line over 16 bytes]",
+      "counts": {},
+      "source_offset": 3,
+      "trailing_partial": 30
+    },
+    {
+      "name": "UTF-16 LE with a BOM is served as UTF-8 to the viewer",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "source_encoding": "auto",
+      "input_encoding": "utf-16-le",
+      "input": "﻿pass password=abc\r\nok\r\n",
+      "expected": "﻿pass password=[redacted: password]\r\nok\r\n",
+      "counts": {"secret_kv": 1}
+    },
+    {
+      "name": "UTF-16 LE encoded back for downloads",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "source_encoding": "auto",
+      "output_encoding": "source",
+      "input_encoding": "utf-16-le",
+      "input": "﻿pass password=abc\r\nok\r\n",
+      "expected_encoding": "utf-16-le",
+      "expected": "﻿pass password=[redacted: password]\r\nok\r\n",
+      "counts": {"secret_kv": 1}
+    },
+    {
+      "name": "UTF-16 BE without a BOM",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "source_encoding": "auto",
+      "input_encoding": "utf-16-be",
+      "input": "token=xyz\nfine\n",
+      "expected": "token=[redacted: token]\nfine\n",
+      "counts": {"secret_kv": 1}
+    },
+    {
+      "name": "UTF-16 offsets are in source bytes",
+      "rules": [{"id": 8, "name": "email", "detector": "email"}],
+      "source_encoding": "auto",
+      "input_encoding": "utf-16-le",
+      "final": false,
+      "input": "a=1\npartial",
+      "expected": "a=1\n[redacted: incomplete line]",
+      "counts": {},
+      "source_offset": 8,
+      "trailing_partial": 27
+    },
+    {
+      "name": "UTF-16 LE without a BOM, with U+4E00 (low byte zero): bytes, LE and BE readings, the union redacted",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "source_encoding": "auto",
+      "input_b64": "AE4gAHAAYQBzAHMAdwBvAHIAZAA9AGgAdQBuAHQAZQByADIACgBvAGsACgA=",
+      "expected_b64": "AE4gAHAAYQBzAHMAdwBvAHIAZAA9AFtyZWRhY3RlZDogcGFzc3dvcmRdCgBvAGsACgA=",
+      "counts": {"secret_kv": 1}
+    },
+    {
+      "name": "UTF-16 BE without a BOM, with U+3000 (low byte zero)",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "source_encoding": "auto",
+      "input_b64": "AEkATgBGAE8wAABwAGEAcwBzAHcAbwByAGQAPQBoAHUAbgB0AGUAcgAyAAoAbwBrAAo=",
+      "expected_b64": "AEkATgBGAE8wAABwAGEAcwBzAHcAbwByAGQAPVtyZWRhY3RlZDogcGFzc3dvcmRdAAoAbwBrAAo=",
+      "counts": {"secret_kv": 1}
+    },
+    {
+      "name": "UTF-16 LE without a BOM, with U+0100 (low byte zero), served as bytes",
+      "rules": [{"id": 8, "name": "email", "detector": "email"}],
+      "source_encoding": "auto",
+      "output_encoding": "source",
+      "input_b64": "AAEgAG0AYQBpAGwAIABhAGwAaQBjAGUALgBzAGUAYwByAGUAdABAAGUAeABhAG0AcABsAGUALgBjAG8AbQAgAGUAbgBkAAoA",
+      "expected_b64": "AAEgAG0AYQBpAGwAIABbcmVkYWN0ZWQ6IGVtYWlsXSAAZQBuAGQACgA=",
+      "counts": {"email": 1}
+    },
+    {
+      "name": "UTF-32 can't be redacted",
+      "rules": [{"id": 8, "name": "email", "detector": "email"}],
+      "source_encoding": "auto",
+      "input_b64": "//4AAGEAAAA=",
+      "error": "unsupported_encoding"
+    },
+    {
+      "name": "window: an offset inside a private key block",
+      "rules": [{"id": 6, "name": "private_key", "detector": "private_key"}],
+      "input": "x\n-----BEGIN PRIVATE KEY-----\nAAAA\nBBBB\n-----END PRIVATE KEY-----\nok\n",
+      "window": {"base_offset": 100, "start": 35},
+      "final": false,
+      "expected": "\n\nok\n",
+      "counts": {},
+      "begin": 35,
+      "end": 69,
+      "aligned": false,
+      "trailing_partial": 0
+    },
+    {
+      "name": "window: an offset in the middle of a line starts at the next line",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input": "abc password=secret1\nnext token=zz\npart",
+      "window": {"base_offset": 50, "start": 5},
+      "final": false,
+      "expected": "next token=[redacted: token]\n[redacted: incomplete line]",
+      "counts": {"secret_kv": 1},
+      "begin": 21,
+      "end": 35,
+      "aligned": true,
+      "trailing_partial": 27
+    },
+    {
+      "name": "window: the start of the file is the start of a line",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input": "token=a\n",
+      "window": {"base_offset": 0, "start": 0},
+      "final": false,
+      "expected": "token=[redacted: token]\n",
+      "counts": {"secret_kv": 1},
+      "begin": 0,
+      "end": 8,
+      "aligned": false,
+      "trailing_partial": 0
+    }
+  ],
+  "long_line_cuts": [
+    {"name": "card", "rules": [{"id": 1, "name": "card", "detector": "card"}], "max_line_bytes": 256, "kept": "keep 4111 1111 1111 1111", "value": "5555 5555 5555 4444", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}},
+    {"name": "card with hyphens", "rules": [{"id": 1, "name": "card", "detector": "card"}], "max_line_bytes": 256, "kept": "keep 4111 1111 1111 1111", "value": "5555-5555-5555-4444", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}},
+    {"name": "iban", "rules": [{"id": 1, "name": "card", "detector": "card"}, {"id": 11, "name": "iban", "detector": "iban"}], "max_line_bytes": 256, "kept": "keep 4111 1111 1111 1111", "value": "GB82 WEST 1234 5698 7654 32", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}},
+    {"name": "bearer token", "rules": [{"id": 1, "name": "card", "detector": "card"}, {"id": 2, "name": "bearer", "detector": "bearer"}], "max_line_bytes": 256, "kept": "keep 4111 1111 1111 1111", "value": "Bearer abcdefgh12345678", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}},
+    {"name": "token key-value", "rules": [{"id": 1, "name": "card", "detector": "card"}, {"id": 4, "name": "secret_kv", "detector": "secret_kv"}], "max_line_bytes": 256, "kept": "keep 4111 1111 1111 1111", "value": "token=s3cr3tvalue", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}},
+    {"name": "jwt", "rules": [{"id": 1, "name": "card", "detector": "card"}, {"id": 7, "name": "jwt", "detector": "jwt"}], "max_line_bytes": 256, "kept": "keep 4111 1111 1111 1111", "value": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}},
+    {"name": "email", "rules": [{"id": 1, "name": "card", "detector": "card"}, {"id": 8, "name": "email", "detector": "email"}], "max_line_bytes": 256, "kept": "keep 4111 1111 1111 1111", "value": "alice.secret@example.com", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}},
+    {"name": "iban in unsure utf-16 le", "rules": [{"id": 1, "name": "card", "detector": "card"}, {"id": 11, "name": "iban", "detector": "iban"}], "max_line_bytes": 256, "source_encoding": "utf-16-unsure", "input_encoding": "utf-16-le", "kept": "keep 4111 1111 1111 1111", "value": "MT84 MALT 0110 0001 2345 MTLC AST0 01S", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}},
+    {"name": "iban in unsure utf-16 be", "rules": [{"id": 1, "name": "card", "detector": "card"}, {"id": 11, "name": "iban", "detector": "iban"}], "max_line_bytes": 256, "source_encoding": "utf-16-unsure", "input_encoding": "utf-16-be", "kept": "keep 4111 1111 1111 1111", "value": "MT84 MALT 0110 0001 2345 MTLC AST0 01S", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}},
+    {"name": "19-digit card with a blank between digits in unsure utf-16 le", "rules": [{"id": 1, "name": "card", "detector": "card"}], "max_line_bytes": 256, "source_encoding": "utf-16-unsure", "input_encoding": "utf-16-le", "kept": "keep 4111 1111 1111 1111", "value": "4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}},
+    {"name": "19-digit card with a blank between digits in unsure utf-16 be", "rules": [{"id": 1, "name": "card", "detector": "card"}], "max_line_bytes": 256, "source_encoding": "utf-16-unsure", "input_encoding": "utf-16-be", "kept": "keep 4111 1111 1111 1111", "value": "4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0", "expected_kept": "keep [redacted: card ****1111]", "counts": {"card": 1}}
+  ],
+  "head_digests": [
+    {"key_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", "data": "password=1234\nnext line", "offset": 23, "expected": "f18b0f043e7fcaf2831145343b796ac2"},
+    {"key_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", "data": "password=1234\nnext line", "offset": 8, "expected": "efbcd5f31747b7a0b2be6b463f604026"},
+    {"key_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", "data": "0123456789012345678901234567890123456789012345678901234567890123456789", "offset": 70, "expected": "97ae90804b7d3f5a4a5fd2837f36413d"},
+    {"key_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", "data": "", "offset": 0, "expected": "d38b42096d80f45f826b44a9d5607de7"}
+  ],
+  "detect": [
+    {"head_b64": "//4AAGEAAAA=", "detected": "error"},
+    {"head_b64": "YQAAAGIAAAA=", "detected": "error"},
+    {"head_b64": "AAAAYQAAAGI=", "detected": "error"},
+    {"head_b64": "/v8AYQ==", "detected": "utf-16-be"},
+    {"head_b64": "YQBiAGMAZAA=", "detected": "utf-16-le"},
+    {"head_b64": "iVBORw0KGgoAAAANSUhEUg==", "detected": null},
+    {"head_b64": "cGFzc3dvcmQ9eA==", "detected": null},
+    {"head_b64": "AE4gAHAAYQBzAHMAdwBvAHIAZAA9AGgAdQBuAHQAZQByADIAIABhAG4AZAAgAG0AbwByAGUAIAB0AGUAeAB0AA==", "detected": "utf-16-unsure"},
+    {"head_b64": "AEkATgBGAE8wAABwAGEAcwBzAHcAbwByAGQAPQBoAHUAbgB0AGUAcgAyACAAYQBuAGQAIABtAG8AcgBlACAAdA==", "detected": "utf-16-unsure"},
+    {"head_b64": "5WUsZ56KbjDtMLAwAE6MTglOIAB1AHMAZQByAD0AYgBvAGIAIAB4AA==", "detected": "utf-16-unsure"}
+  ]
+}
