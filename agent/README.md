@@ -1,15 +1,15 @@
 # perchtail-agent
 
-The Phase 2 push-agent (see the repo root `ROADMAP.md`): a small binary for hosts PerchTail can't reach inbound over SSH/SMB/WinRM. It dials **out** to the server and holds a single persistent WebSocket connection open; the server then relays live `list`/`fetch` commands down that connection exactly as it would call any other connector directly. The agent never pushes files on its own — nothing is synced or mirrored ahead of time, so PerchTail's always-fresh, nothing-persisted rule holds for agent-mode sources too.
+The PerchTail push agent: a small binary for hosts PerchTail can't reach inbound over SSH/SMB/WinRM. It dials **out** to the server and holds a single persistent WebSocket connection open; the server then relays live `list`/`fetch` commands down that connection exactly as it would call any other connector directly. The agent never pushes files on its own — nothing is synced or mirrored ahead of time, so PerchTail's always-fresh, nothing-persisted rule holds for agent-mode sources too.
 
 ## Configuration
 
-Environment variables; the first three are required:
+The agent reads five environment variables, and has no configuration file. The first three are required:
 
 | Variable | Example | Meaning |
 |---|---|---|
 | `PERCHTAIL_SERVER_URL` | `wss://perchtail.example.com/agent/connect` | The server's agent endpoint |
-| `PERCHTAIL_AGENT_TOKEN` | (from the admin UI) | Enrollment token, issued once via `POST /sources/{id}/agent-token` |
+| `PERCHTAIL_AGENT_TOKEN` | (from the source's page) | Enrollment token: **Generate token** under **Agent enrollment** on the source's page; shown once |
 | `PERCHTAIL_BASE_PATH` | `/var/log/myapp` | Local root the agent is allowed to read from |
 | `PERCHTAIL_ALLOW_INSECURE` | unset | Set to `true` to allow a plain `ws://` URL. Without it the agent refuses to start unless the URL is `wss://`, because the token and every fetched file travel over this connection. Only for testing or a fully trusted network. |
 | `PERCHTAIL_REMOTE_UPGRADE` | unset (allowed) | Set to `false` to refuse every upgrade from the portal, whatever the server asks (see below). Anything but `true`/`false` (or `1`/`0`, `yes`/`no`, `on`/`off`) stops the agent at startup, so a typo can't leave upgrades on. |
@@ -20,7 +20,7 @@ The agent pings the server every 25 seconds and reconnects when it has heard not
 
 ## Upgrades from the portal
 
-From 0.7, agents are upgraded from **Settings → Agents** in PerchTail, by users with create source and manage sources on the agent's source. Agents older than 0.7 don't know the command: upgrade them by hand once.
+From 0.7, agents are upgraded from **Settings → Agents** in PerchTail. The page lists the agents of the sources a user can manage (the **Create new sources** global capability and `manage_source` on the source), and those users can upgrade them; changing **Remote upgrades**, the window and the failure limit needs **Manage system settings**. Agents older than 0.7 don't know the command: upgrade them by hand once.
 
 - **Remote upgrades** applies to every agent: **Off** (the default), **Manual** (the page's **Upgrade** button on an agent, or **Upgrade all outdated agents**) or **Automatic** (also upgraded by the server inside a window). Each agent can **Follow the system** (the default) or have its own policy, either way: an agent can be upgraded with the system Off, or stay Off with the system Automatic.
 - **The automatic window** is a set of days of the week, a start time and a length in hours (1 to 24), in the server's time zone (shown on the page); a window may run past midnight. Inside it the server upgrades connected outdated agents whose policy is Automatic, a few at a time (5 by default, 1 to 50), and doesn't ask an agent again in the same window once its upgrade didn't work.
@@ -94,19 +94,28 @@ On Windows: `Get-FileHash .\perchtail-agent-<version>-windows-amd64.exe` and com
 
 ## Build
 
-```sh
-go build .
-```
-
-Cross-compile for another platform:
+Build with Go 1.27 or later (`go.mod`), from this folder, setting the version the way the release workflow does (`.github/workflows/release.yml`): the agent reports it when it connects, and upgrades from the portal compare it with the server's.
 
 ```sh
-GOOS=linux   GOARCH=amd64 go build -o perchtail-agent-linux-amd64   .
-GOOS=linux   GOARCH=arm64 go build -o perchtail-agent-linux-arm64   .
-GOOS=windows GOARCH=amd64 go build -o perchtail-agent-windows-amd64.exe .
+VERSION=0.6.4   # the release tag you checked out, without the "v"
+CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-s -w -X github.com/quaresma870/perchtail/agent/internal/agent.Version=${VERSION}" \
+  -o perchtail-agent .
 ```
 
-A local build reports version `dev` and refuses upgrades from the portal: it can't tell whether a release is newer than itself. A build from a checkout whose `internal/agent/upgrade_signing_key.pub` is empty refuses them too.
+Cross-compile for another platform with `GOOS` and `GOARCH`, as the release does:
+
+```sh
+for target in linux/amd64 linux/arm64 windows/amd64; do
+  os="${target%/*}"; arch="${target#*/}"
+  ext=""; [ "$os" = windows ] && ext=".exe"
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+    -ldflags "-s -w -X github.com/quaresma870/perchtail/agent/internal/agent.Version=${VERSION}" \
+    -o "perchtail-agent-${VERSION}-${os}-${arch}${ext}" .
+done
+```
+
+The version must be a release version: `X.Y.Z`, `X.Y.Z-rc.N` or `X.Y.Z-beta.N` (a leading `v` is accepted). Built without `-X ...Version=`, as with a plain `go build .`, the agent reports version `dev` and refuses upgrades from the portal: it can't tell whether a release is newer than itself. A build from a checkout whose `internal/agent/upgrade_signing_key.pub` is empty refuses them too. Set the version only to the release your checkout really is (`git checkout vX.Y.Z`): an agent built from other code but labelled with a release version would be treated as that release.
 
 ## Test
 

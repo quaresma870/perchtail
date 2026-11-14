@@ -1,23 +1,41 @@
 # High availability & horizontal scaling
 
-**Where PerchTail stands today: single-instance by design, not by oversight.**
-SQLite (with a raw FTS5 virtual table for the file-name index), an in-process
-APScheduler running nine background jobs, and in-memory state for
-login-throttle lockouts and live push-agent WebSocket connections are all
-deliberate choices for a self-hosted, single-deployment tool (see CLAUDE.md's
-tech-stack rationale). None of that is safe to run as multiple simultaneous
-replicas without changing it first — this doc lays out exactly what would
-need to change, organized by how much traffic-splitting you actually want,
-so a decision to invest in any of it is made deliberately rather than by
-someone assuming "just add replicas" works.
+**PerchTail runs as one process per `DATA_DIR`.** Its database is SQLite (with an FTS5 trigram table for the file-name index), its twelve background jobs run inside the process, and part of its state lives only in that process's memory (see [What lives in the process](#what-lives-in-the-process)). None of that is safe to run as several replicas at once. This page describes what works today, and why the usual ways of adding replicas don't, organized by how much traffic-splitting you want.
 
-**One instance per `DATA_DIR`, enforced.** On startup, and before `alembic upgrade` migrates, PerchTail takes an exclusive lock from the operating system on `DATA_DIR/.perchtail.lock`. A second instance on the same `DATA_DIR` refuses to start with `startup.instance_lock_held` (naming the host, PID, version and start time of the one running) before it opens the database; there is no setting to turn this off. The lock dies with the process that holds it, however it ends, so a crash or `kill -9` never leaves a stale lock behind. The same lock covers every Alembic command run in online mode (`upgrade`, `downgrade`, `stamp`, even `current`), so while the app is running any of them is refused on purpose: stop the app first. Keep `DATA_DIR` on a local disk: locks on a network share may not reach other machines. High availability with several instances at once comes with PostgreSQL (#306), not with SQLite.
+**One instance per `DATA_DIR`, enforced.** On startup, and before `alembic upgrade` migrates, PerchTail takes an exclusive lock from the operating system on `DATA_DIR/.perchtail.lock`. A second instance on the same `DATA_DIR` refuses to start with `startup.instance_lock_held` (naming the host, PID, version and start time of the one running) before it opens the database; there is no setting to turn this off. The lock dies with the process that holds it, however it ends, so a crash or `kill -9` never leaves a stale lock behind. The same lock covers every Alembic command run in online mode (`upgrade`, `downgrade`, `stamp`, even `current`), so while the app is running any of them is refused on purpose: stop the app first. Keep `DATA_DIR` on a local disk: locks on a network share may not reach other machines.
 
-Every solution below is compatible with nginx in front (see the main
-[README](../README.md#deployment-reverse-proxy-nginx--tls) for the base TLS
-config) and with running under k3s or any other Kubernetes distribution —
-what changes between them is *what kind of load balancing is actually safe*
-to put in front of PerchTail, not whether Kubernetes itself is involved.
+## What lives in the process
+
+**Background jobs.** One scheduler in the process runs these jobs (`id`, as in `/monitoring/health`; see [monitoring.md](monitoring.md)):
+
+| Job | Runs |
+|---|---|
+| `scratch_idle_sweep`, `scratch_size_guard` | every `SCRATCH_SWEEP_INTERVAL_SECONDS` (60) |
+| `alert_pass` | every 15 seconds; a pass runs once the interval in Settings → System has gone by |
+| `name_index_sweep` | every minute; lists the sources that are due |
+| `source_checks` | every minute; checks the sources that are due |
+| `agent_upgrades` | every minute; ends timed-out upgrades and runs automatic ones inside the window |
+| `backup` | every 5 minutes; backs up once the interval in Settings → System has gone by (off by default) |
+| `wal_checkpoint` | every hour |
+| `session_purge`, `update_check` | every hour |
+| `audit_purge` | every `AUDIT_PURGE_INTERVAL_SECONDS` (a day) |
+| `audit_integrity_check` | every `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` (365) |
+
+`audit_purge`, `session_purge`, `update_check` and `audit_integrity_check` catch up after a restart: when their interval has gone by since their last success, they run 30 seconds after startup. Each job's last run is stored in the database.
+
+**In memory only**, lost on restart and not shared with any other process:
+
+- the push agents' WebSocket connections: a command for an agent can only go through the process it's connected to;
+- the connector limits (Settings → System → Limits): the slots in use per source and per user, and the count of refused requests in `/monitoring/health`;
+- login throttling: failed sign-ins and lockouts per username, so a restart clears every lockout;
+- the counting of repeated failed sign-ins before they're written to the audit log;
+- which files in the scratch cache are open (the files themselves are on local disk under `SCRATCH_DIR`, and are cleared at startup);
+- the file-name index passes and source checks queued or running;
+- the result of the last live alert pass (`alerts` in `/monitoring/health`), the time of the last failed scheduled backup, and whether the log size limit deleted logs early (`logs.size_limit_deleted_early`).
+
+Everything else (sources, rules, users, roles, sessions, settings, the file-name index, alert positions and pending webhook calls, the audit log, agent upgrade history and job records) is in the database.
+
+Every solution below is compatible with nginx in front (see the main [README](../README.md#deployment-reverse-proxy-nginx--tls) for the base TLS config) and with running under k3s or any other Kubernetes distribution — what changes between them is *what kind of load balancing is actually safe* to put in front of PerchTail, not whether Kubernetes itself is involved.
 
 ## At a glance
 
@@ -26,20 +44,13 @@ to put in front of PerchTail, not whether Kubernetes itself is involved.
 | 0 — Single replica, self-healing | None (one pod; a proxy just routes to it) | Nothing in the app | None — works today |
 | 1 — Active-passive (warm standby) | Failover only, never simultaneous | Continuous DB replication (e.g. Litestream) + a promotion mechanism | Small–medium |
 | 2 — Sticky-session active-active | Client/session affinity | Nothing in the app, but doesn't fix the real problem (see below) | Low, but don't stop here |
-| 3 — True active-active | Standard round-robin / least-connections | Postgres instead of SQLite (#306), file-name search on `pg_trgm`, throttle/agent state centralized, scheduler split into its own tier | Large |
+| 3 — True active-active | Standard round-robin / least-connections | Not possible today: needs a shared database instead of SQLite, the in-memory state shared, and the scheduler in a process of its own | Large changes in PerchTail |
 
 ## Solution 0 (works today): single replica, orchestrator-level self-healing
 
-One pod, restarted automatically by Kubernetes if it crashes or the
-`/healthz` liveness probe fails. This is not high availability in the "no
-downtime" sense — a crash or a rollout still causes a gap while the pod
-restarts — but it removes the "someone has to notice and manually restart
-it" failure mode, which is most of the practical benefit smaller deployments
-actually need.
+One pod, restarted automatically by Kubernetes if it crashes or the `/healthz` liveness probe fails. This is not high availability in the "no downtime" sense — a crash or a rollout still causes a gap while the pod restarts — but it removes the "someone has to notice and manually restart it" failure mode, which is most of the practical benefit smaller deployments actually need.
 
-Load balancing here is trivial: a Kubernetes `Service` + `Ingress` route to
-whichever single pod is `Ready`. No stickiness, no distribution logic —
-there's only ever one backend.
+Load balancing here is trivial: a Kubernetes `Service` + `Ingress` route to whichever single pod is `Ready`. No stickiness, no distribution logic — there's only ever one backend.
 
 ```yaml
 apiVersion: v1
@@ -161,107 +172,39 @@ spec:
                   number: 8000
 ```
 
-Nothing here requires an application change. This is the recommended
-default for most self-hosted deployments, including a product organization
-running PerchTail as an internal tool.
+Nothing here requires an application change. This is the recommended default for most self-hosted deployments, including a product organization running PerchTail as an internal tool.
 
-**Stop grace period.** On shutdown PerchTail stops starting background jobs and gives the running ones (an audit purge, an alert pass, a file-name index pass, source checks) up to `SHUTDOWN_TIMEOUT_SECONDS` (20 by default) to finish before it exits. The orchestrator must wait longer than that before it kills the container, or a rollout still cuts that work off mid-run: Docker's default is 10 seconds, so `docker-compose.yml` sets `stop_grace_period: 30s`; Kubernetes waits `terminationGracePeriodSeconds` (30 by default, set explicitly above). Raise both together if you raise `SHUTDOWN_TIMEOUT_SECONDS`.
+**Stop grace period.** On shutdown PerchTail stops starting background jobs and gives the running ones (an audit purge, an alert pass, a file-name index pass, source checks, a scheduled backup) up to `SHUTDOWN_TIMEOUT_SECONDS` (20 by default) to finish before it exits. The orchestrator must wait longer than that before it kills the container, or a rollout still cuts that work off mid-run: Docker's default is 10 seconds, so `docker-compose.yml` sets `stop_grace_period: 30s`; Kubernetes waits `terminationGracePeriodSeconds` (30 by default, set explicitly above). Raise both together if you raise `SHUTDOWN_TIMEOUT_SECONDS`.
 
 ## Solution 1: active-passive (warm standby)
 
-**Load balancing type: failover only — the standby pod never receives live
-traffic simultaneously with the primary.**
+**Load balancing type: failover only — the standby pod never receives live traffic simultaneously with the primary.**
 
-Two flavors, in increasing order of how much downtime a failure actually
-costs:
+Two flavors, in increasing order of how much downtime a failure actually costs:
 
-- **1a — faster failover, no new infrastructure.** Tighten Solution 0's
-  probe intervals and rely on Kubernetes rescheduling the pod quickly. This
-  is really Solution 0 tuned, not a new architecture, and is worth doing
-  regardless of whether 1b is ever built.
-- **1b — real warm standby with data continuity.** Continuously replicate
-  the SQLite file to object storage (e.g. [Litestream](https://litestream.io/)),
-  and keep a second pod provisioned but not `Ready` (its readiness probe
-  deliberately fails, or its replica count is held at 0 until promotion) —
-  on primary failure, restore the latest replicated snapshot into the
-  standby and flip it to serving. This meaningfully shortens recovery time
-  compared to "wait for a fresh pod to reschedule against an empty PVC," but
-  promotion isn't instant or fully automatic without extra tooling (a
-  controller watching primary health and re-pointing the `Service`
-  selector, or a manual runbook step) — it trades some downtime for real
-  data continuity, not zero downtime.
+- **1a — faster failover, no new infrastructure.** Tighten Solution 0's probe intervals and rely on Kubernetes rescheduling the pod quickly. This is really Solution 0 tuned, not a new architecture.
+- **1b — real warm standby with data continuity.** Continuously replicate the SQLite file to object storage (e.g. [Litestream](https://litestream.io/)), and keep a second pod provisioned but not `Ready` (its readiness probe deliberately fails, or its replica count is held at 0 until promotion) — on primary failure, restore the latest replicated snapshot into the standby and flip it to serving. This meaningfully shortens recovery time compared to "wait for a fresh pod to reschedule against an empty PVC," but promotion isn't instant or fully automatic without extra tooling (a controller watching primary health and re-pointing the `Service` selector, or a manual runbook step) — it trades some downtime for real data continuity, not zero downtime. PerchTail has no built-in replication or standby: this is a setup you build and test yourself. PerchTail checkpoints and truncates SQLite's write-ahead log every hour (the `wal_checkpoint` job), and a replication tool must cope with that. The standby needs its own `DATA_DIR`, the same `CREDENTIAL_ENCRYPTION_KEY` and a copy of the credential salt, which lives in `DATA_DIR` next to the database.
 
-Neither flavor needs Postgres, a scheduler redesign, or shared in-memory
-state — the standby is never live at the same time as the primary, so none
-of Solution 3's problems apply.
+Neither flavor needs another database, a scheduler redesign, or shared in-memory state — the standby is never live at the same time as the primary, so none of Solution 3's problems apply.
 
 ## Solution 2: sticky-session active-active (partial — don't stop here)
 
-**Load balancing type: client/session affinity** (IP-hash or cookie-based
-sticky routing at the nginx/Ingress layer), the thing people usually reach
-for first when told "add a load balancer." Worth naming explicitly so it's
-clear why it isn't actually a solution on its own:
+**Load balancing type: client/session affinity** (IP-hash or cookie-based sticky routing at the nginx/Ingress layer), the thing people usually reach for first when told "add a load balancer." Worth naming explicitly so it's clear why it isn't actually a solution on its own:
 
-- Sticky routing can keep one browser session's requests landing on the
-  same pod, which would fix the agent-connection and scratch-cache
-  per-pod-state problems described in the architecture notes below.
-- It does **nothing** for SQLite's single-writer constraint. Two different
-  users' browsers, pinned to two different pods, can both attempt writes
-  (a login, a rule edit, a source change, an audit-log entry) against two
-  independent SQLite file handles at the same time — that's exactly the
-  failure mode multi-writer SQLite doesn't handle safely, sticky sessions
-  or not.
+- Sticky routing can keep one browser session's requests landing on the same pod, which would avoid some of the per-process state problems (agent connections, the scratch cache) described in Solution 3 below.
+- It does **nothing** for SQLite's single-writer constraint. Two different users' browsers, pinned to two different pods, can both attempt writes (a login, a rule edit, a source change, an audit-log entry) against two independent SQLite file handles at the same time — that's exactly the failure mode multi-writer SQLite doesn't handle safely, sticky sessions or not.
 
-Sticky sessions are a real, useful piece of Solution 3's design (for the
-agent/scratch pieces specifically) — they're just not a standalone answer,
-and shouldn't be adopted as one.
+Sticky sessions alone don't make several instances safe, so don't adopt them as an answer.
 
 ## Solution 3: true active-active horizontal scaling
 
-**Load balancing type: standard round-robin / least-connections — no
-stickiness required for anything backed by shared state.** This is the
-actual fix, and a real engineering investment, not a configuration change.
-Four independent pieces of work:
+**Load balancing type: standard round-robin / least-connections — no stickiness required for anything backed by shared state.** PerchTail can't run this way: it would take changes in PerchTail itself, not configuration. What stands in the way:
 
-1. **Replace SQLite with Postgres (#306).** The file-name index's search is built on an SQLite FTS5 trigram table (`app/name_index_store.py`), so PostgreSQL brings its own store on `pg_trgm`; the full-text content index that also depended on FTS5 was removed in 0.7.
-2. **Move login-throttle state out of process memory.** `app/login_throttle.py`
-   is explicitly in-memory today ("an accepted trade-off for a
-   single-container SQLite deployment," per its own docstring) — move
-   lockout counters into Postgres or Redis so every replica sees the same
-   state.
-3. **Split into a stateless web tier and a dedicated single-replica worker
-   tier.** The nine APScheduler jobs wired up in `app/main.py`'s lifespan
-   (scratch idle-sweep, scratch size-guard, live alerts, file-name index,
-   source checks, audit purge, audit integrity check, session purge, update
-   check) currently run in-process, once per pod — with
-   `replicas: N`, that's N independent, uncoordinated copies of each job
-   racing against the same database. The standard fix: `replicas: N` web
-   pods that serve HTTP only, plus one dedicated `replicas: 1` worker pod
-   that owns the scheduler.
-4. **Centralize (or narrowly pin) agent connections and the scratch
-   cache.** `app/agent_registry.py` keeps live push-agent WebSocket
-   connections in an in-memory dict per pod — a command for a source
-   connected to pod A can't be served by pod B. The ephemeral fetch
-   scratch cache is local disk per pod, with the same problem for an "open"
-   and its matching "download" landing on different pods. Either
-   centralize both (a shared connection broker; shared/network storage for
-   scratch), or scope Solution 2's sticky routing narrowly to just these
-   two concerns while everything else rides on Postgres's shared state.
-
-Build this once a real, measured need justifies it — a customer's uptime
-SLA, or an actual concurrent-load ceiling being hit — not preemptively.
-Building it speculatively risks a large, disruptive migration (SQLite →
-Postgres touches the credential-encryption code path, the audit hash-chain,
-and every existing Alembic migration's assumptions) for a scaling need that
-may never materialize.
+1. **The database is SQLite**, which allows one writer, on a local disk. The file-name index's search is built on an SQLite FTS5 trigram table (`app/name_index_store.py`).
+2. **Login throttling is in process memory** (`app/login_throttle.py`): each replica would count failed sign-ins on its own, so an attacker spreading attempts across replicas would get more tries.
+3. **Every replica would run every background job.** The twelve jobs in [What lives in the process](#what-lives-in-the-process) run in each process, so `replicas: N` means N uncoordinated copies of each job working on the same data.
+4. **Agent connections and the scratch cache are per process.** `app/agent_registry.py` keeps the push agents' WebSocket connections in memory — a command for a source whose agent is connected to pod A can't be served by pod B. The scratch cache is local disk per pod, with the same problem for an open and its matching download landing on different pods. The connector limits are counted per process too.
 
 ## Recommendation
 
-Start with **Solution 0** — it costs nothing, is already fully described
-above and in the README's reverse-proxy section, and covers the actual
-majority of self-hosted and internal-tool deployments this project targets.
-Treat Solutions 1–3 as scoped, gated engineering investments: pick up 1
-(warm standby) if a specific customer needs faster recovery than a pod
-reschedule provides; pick up 3 (the real fix) only once concurrent load or
-a contractual uptime commitment genuinely requires simultaneous multi-replica
-capacity. Skip 2 as a standalone target — treat it only as a component of 3.
+Use **Solution 0** — it needs no change, and is fully described above and in the README's reverse-proxy section. Consider Solution 1 only if you need faster recovery than a pod reschedule gives, and test the failover yourself. Don't use Solutions 2 or 3: PerchTail doesn't support more than one active instance.
