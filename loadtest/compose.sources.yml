@@ -1,0 +1,38 @@
+# Source servers and instance settings for a load-test run on one machine.
+# Used together with the repository's docker-compose.yml, from the
+# repository root:
+#
+#   docker compose -f docker-compose.yml -f loadtest/compose.sources.yml up -d --build
+#
+# lt-ssh, lt-smb and the local-disk sources all serve the same tree,
+# LOADTEST_LOGS_DIR/shared, written by loadtest/seed/gen_logs.py (read-only
+# everywhere). The source account's password comes from
+# loadtest/.state/sources.env, which `python loadtest/seed/seed.py init`
+# creates with a random password. Nothing here is published on the host
+# except PerchTail's own port from docker-compose.yml.
+services:
+  perchtail:
+    environment:
+      LOCAL_SOURCE_ROOTS: /srv/lt-local
+      # No release check against GitHub during a load test. MAX_FETCH_MB
+      # and SCRATCH_MAX_GB keep their defaults (2048 MB, 5 GB): the sizing
+      # guide is measured with them.
+      UPDATE_CHECK: "false"
+    volumes:
+      - ${LOADTEST_LOGS_DIR:-./loadtest/.state/logs}/shared:/srv/lt-local:ro
+
+  lt-ssh:
+    build: ./loadtest/sources/ssh
+    restart: unless-stopped
+    env_file:
+      - ./loadtest/.state/sources.env
+    volumes:
+      - ${LOADTEST_LOGS_DIR:-./loadtest/.state/logs}/shared:/srv/logs:ro
+
+  lt-smb:
+    build: ./loadtest/sources/smb
+    restart: unless-stopped
+    env_file:
+      - ./loadtest/.state/sources.env
+    volumes:
+      - ${LOADTEST_LOGS_DIR:-./loadtest/.state/logs}/shared:/srv/logs:ro
