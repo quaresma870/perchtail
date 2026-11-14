@@ -8,10 +8,13 @@ const customerName = `E2E Role Test Customer ${Date.now()}`
 // SourceEditor's inline "+ Create new customer..." flow to get a grant
 // target to work with, without saving an actual source (nothing is
 // submitted here, so no source row is created).
-async function createCustomerViaSourceEditor(page: import('@playwright/test').Page) {
+async function createCustomerViaSourceEditor(
+  page: import('@playwright/test').Page,
+  name: string = customerName,
+) {
   await page.goto('/#/settings/sources/new')
   await page.getByLabel('Customer').selectOption({ label: '+ Create new customer…' })
-  await page.getByPlaceholder('New customer name').fill(customerName)
+  await page.getByPlaceholder('New customer name').fill(name)
   await page.getByRole('button', { name: 'Create' }).click()
   await expect(page.getByPlaceholder('New customer name')).toHaveCount(0)
 }
@@ -100,6 +103,58 @@ test('roles: create, global capabilities, grants (add + remove), duplicate, dele
     .click()
   await confirmPopup(page, 'Delete')
   await expect(page.getByRole('row', { name: new RegExp(roleName) })).toHaveCount(0)
+})
+
+test('roles: a manage_source grant shows in the editor and survives duplicating the role', async ({
+  page,
+}) => {
+  const name = `E2E Manage Sources ${Date.now()}`
+  const customer = `E2E Manage Sources Customer ${Date.now()}`
+  await createCustomerViaSourceEditor(page, customer)
+
+  await page.goto('/#/settings/roles')
+  await page.getByRole('button', { name: '+ New role' }).click()
+  await page.getByLabel('Name').fill(name)
+  await page.getByRole('button', { name: 'Save' }).click()
+  await expect(page).toHaveURL(/#\/settings\/roles\/\d+$/)
+
+  const addGrantForm = page.locator('.add-grant')
+  const manageSource = addGrantForm.getByLabel('Grant manage_source', { exact: true })
+  await expect(addGrantForm.locator('label.chip', { hasText: 'manage_source' })).toHaveAttribute(
+    'title',
+    /^Manage sources:/,
+  )
+  await addGrantForm.locator('select').first().selectOption('customer')
+  await addGrantForm.locator('select').nth(1).selectOption({ label: customer })
+  await addGrantForm.getByLabel('Grant view', { exact: true }).check()
+  await manageSource.check()
+  await addGrantForm.getByRole('button', { name: 'Add grant' }).click()
+
+  const grantRow = page.getByRole('row', { name: new RegExp(customer) })
+  await expect(grantRow.getByText('manage_source', { exact: true })).toBeVisible()
+  await expect(grantRow.getByText('manage_rules', { exact: true })).toHaveCount(0)
+
+  // The duplicate carries the same grant.
+  await page.goto('/#/settings/roles')
+  await page
+    .getByRole('row', { name: new RegExp(name) })
+    .getByRole('button', { name: 'duplicate' })
+    .click()
+  await expect(page).toHaveURL(/#\/settings\/roles\/\d+$/)
+  const copiedRow = page.getByRole('row', { name: new RegExp(customer) })
+  await expect(copiedRow.getByText('manage_source', { exact: true })).toBeVisible()
+
+  // Cleanup: the original and the duplicate.
+  await page.goto('/#/settings/roles')
+  for (let left = 1; left >= 0; left--) {
+    await page
+      .getByRole('row', { name: new RegExp(name) })
+      .first()
+      .getByRole('button', { name: 'Delete' })
+      .click()
+    await confirmPopup(page, 'Delete')
+    await expect(page.getByRole('row', { name: new RegExp(name) })).toHaveCount(left)
+  }
 })
 
 test('roles: built-in roles open read-only in the editor', async ({ page }) => {

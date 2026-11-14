@@ -1,17 +1,19 @@
-"""create_source lets a role add and rename folders; moving or deleting one
-also needs manage_rules on it (and, to move it, where it goes)."""
+"""create_source lets a role rename folders; adding one also needs
+manage_source where it goes, and moving or deleting one also needs
+manage_source on it (and, to move it, where it goes)."""
 
 import uuid
 
 import pytest
 from app.api.auth import get_current_active_user
-from app.api.folders import MANAGE_FOLDER_REFUSED
+from app.api.folders import CREATE_FOLDER_REFUSED, MANAGE_FOLDER_REFUSED
 from app.api.folders import router as folders_router
 from app.auth.models import Capability, GlobalCapability, Role, RoleGrant, ScopeType, User
 from app.db import get_session
 from app.models import Customer, Folder
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlmodel import select
 
 
 def _role(session, *, is_super_admin=False, grants=()) -> Role:
@@ -66,7 +68,7 @@ def tree(session):
 
 
 VIEW = [Capability.view]
-MANAGE = [Capability.view, Capability.manage_rules]
+MANAGE = [Capability.view, Capability.manage_source]
 
 
 def _assert_refused(response):
@@ -83,7 +85,7 @@ def test_cannot_pull_a_folder_it_cannot_reach_under_one_it_can(session, tree):
     assert x.parent_folder_id is None
 
 
-def test_moving_needs_manage_rules_at_the_destination(session, tree):
+def test_moving_needs_manage_source_at_the_destination(session, tree):
     _, x, y = tree
     role = _role(session, grants=[(ScopeType.folder, x.id, MANAGE), (ScopeType.folder, y.id, VIEW)])
     client = _client(session, role)
@@ -95,7 +97,7 @@ def test_moving_needs_manage_rules_at_the_destination(session, tree):
     assert (x.parent_folder_id, x.name) == (None, "X")
 
 
-def test_manage_rules_on_folder_and_destination_allows_moving(session, tree):
+def test_manage_source_on_folder_and_destination_allows_moving(session, tree):
     _, x, y = tree
     role = _role(
         session, grants=[(ScopeType.folder, x.id, MANAGE), (ScopeType.folder, y.id, MANAGE)]
@@ -108,7 +110,7 @@ def test_manage_rules_on_folder_and_destination_allows_moving(session, tree):
     assert x.parent_folder_id == y.id
 
 
-def test_moving_to_the_root_needs_manage_rules_on_the_customer(session, tree):
+def test_moving_to_the_root_needs_manage_source_on_the_customer(session, tree):
     customer, x, y = tree
     child = _folder(session, customer, "child", parent=y)
 
@@ -132,7 +134,7 @@ def test_moving_to_the_root_needs_manage_rules_on_the_customer(session, tree):
 
 def test_destination_resolution_walks_the_target_folder_chain(session, tree):
     """The most specific grant wins: a view-only grant on a sub-folder refuses
-    a move into it even under a customer-wide manage_rules grant."""
+    a move into it even under a customer-wide manage_source grant."""
     customer, x, y = tree
     locked = _folder(session, customer, "locked", parent=y)
     open_child = _folder(session, customer, "open", parent=y)
@@ -147,18 +149,18 @@ def test_destination_resolution_walks_the_target_folder_chain(session, tree):
     assert moved.status_code == 200, moved.text
 
 
-FULL = [Capability.view, Capability.download, Capability.manage_rules]
+FULL = [Capability.view, Capability.download, Capability.manage_source]
 
 
 def test_a_move_cannot_widen_the_movers_access(session, tree):
     """With no grant of its own, a folder inherits from where it lands: a
     destination granting more than where it is now is refused, even with
-    manage_rules on both."""
+    manage_source on both."""
     customer, x, y = tree
     role = _role(
         session,
         grants=[
-            (ScopeType.customer, customer.id, [Capability.manage_rules]),
+            (ScopeType.customer, customer.id, [Capability.manage_source]),
             (ScopeType.folder, y.id, FULL),
         ],
     )
@@ -176,7 +178,7 @@ def test_a_move_to_the_same_or_less_access_is_allowed(session, tree):
         session,
         grants=[
             (ScopeType.customer, customer.id, FULL),
-            (ScopeType.folder, y.id, [Capability.manage_rules]),
+            (ScopeType.folder, y.id, [Capability.manage_source]),
             (ScopeType.folder, same.id, FULL),
         ],
     )
@@ -195,7 +197,7 @@ def test_a_folder_with_its_own_grant_can_move_to_more_access(session, tree):
     role = _role(
         session,
         grants=[
-            (ScopeType.folder, x.id, [Capability.manage_rules]),
+            (ScopeType.folder, x.id, [Capability.manage_source]),
             (ScopeType.folder, y.id, FULL),
         ],
     )
@@ -205,7 +207,7 @@ def test_a_folder_with_its_own_grant_can_move_to_more_access(session, tree):
     assert response.status_code == 200, response.text
 
 
-def test_deleting_needs_manage_rules_on_the_folder(session, tree):
+def test_deleting_needs_manage_source_on_the_folder(session, tree):
     _, x, y = tree
     role = _role(session, grants=[(ScopeType.folder, x.id, VIEW), (ScopeType.folder, y.id, MANAGE)])
     client = _client(session, role)
@@ -226,10 +228,59 @@ def test_renaming_needs_only_create_source(session, tree):
     assert same.status_code == 200, same.text
 
 
+def test_manage_rules_alone_no_longer_changes_folders(session, tree):
+    """manage_rules governs the visibility rules only: it neither moves nor
+    deletes a folder any more."""
+    customer, x, y = tree
+    rules_only = [Capability.view, Capability.manage_rules]
+    role = _role(session, grants=[(ScopeType.customer, customer.id, rules_only)])
+    client = _client(session, role)
+
+    _assert_refused(client.patch(f"/folders/{x.id}", json={"parent_folder_id": y.id}))
+    _assert_refused(client.delete(f"/folders/{x.id}"))
+    refused = client.post("/folders", json={"name": "new", "customer_id": customer.id})
+    assert refused.status_code == 403, refused.text
+
+
+def test_adding_a_folder_needs_manage_source_where_it_goes(session, tree):
+    customer, x, y = tree
+    role = _role(
+        session,
+        grants=[(ScopeType.customer, customer.id, VIEW), (ScopeType.folder, y.id, MANAGE)],
+    )
+    client = _client(session, role)
+
+    at_root = client.post("/folders", json={"name": "top", "customer_id": customer.id})
+    assert at_root.status_code == 403, at_root.text
+    assert at_root.json()["detail"] == CREATE_FOLDER_REFUSED
+    under_x = client.post(
+        "/folders", json={"name": "sub", "customer_id": customer.id, "parent_folder_id": x.id}
+    )
+    assert under_x.status_code == 403, under_x.text
+    under_y = client.post(
+        "/folders", json={"name": "sub", "customer_id": customer.id, "parent_folder_id": y.id}
+    )
+    assert under_y.status_code == 201, under_y.text
+    assert session.exec(select(Folder).where(Folder.name == "top")).first() is None
+
+    other = Customer(name="B")
+    session.add(other)
+    session.commit()
+    session.refresh(other)
+    elsewhere = client.post("/folders", json={"name": "b", "customer_id": other.id})
+    assert elsewhere.status_code == 403, elsewhere.text
+
+    allowed = _client(session, _role(session, grants=[(ScopeType.customer, customer.id, MANAGE)]))
+    top = allowed.post("/folders", json={"name": "top", "customer_id": customer.id})
+    assert top.status_code == 201, top.text
+
+
 def test_super_admin_can_still_do_everything(session, tree):
-    _, x, y = tree
+    customer, x, y = tree
     client = _client(session, _role(session, is_super_admin=True))
 
+    created = client.post("/folders", json={"name": "new", "customer_id": customer.id})
+    assert created.status_code == 201, created.text
     assert client.patch(f"/folders/{x.id}", json={"parent_folder_id": y.id}).status_code == 200
     assert client.patch(f"/folders/{x.id}", json={"parent_folder_id": None}).status_code == 200
     assert client.delete(f"/folders/{x.id}").status_code == 204

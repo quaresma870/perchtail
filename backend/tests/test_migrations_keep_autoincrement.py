@@ -96,3 +96,56 @@ def test_the_agent_upgrade_migration_goes_down_and_up(tmp_path):
     _alembic(tmp_path, "upgrade", "head")
     assert "agent_upgrade_policy" in columns("source")
     assert _autoincrement_tables(db)["source"] is True
+
+
+def test_the_manage_source_migration_keeps_what_each_role_could_do(tmp_path):
+    # b9e4d7a2c513: changing sources moved from manage_rules to manage_source.
+    # A role with create_source gets manage_source wherever it had
+    # manage_rules; a role without create_source, which couldn't change
+    # sources before, gets nothing new. Going down drops it again.
+    import json
+
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "e3a9c5f17b28")
+    roles = {
+        1: ["create_source"],
+        2: [],
+        3: ["create_source", "manage_users"],
+    }
+    grants = {
+        10: (1, ["view", "manage_rules"]),
+        11: (1, ["view", "download"]),
+        12: (2, ["view", "manage_rules"]),
+        13: (3, ["manage_rules"]),
+        14: (1, []),
+    }
+    with sqlite3.connect(db) as conn:
+        for role_id, caps in roles.items():
+            conn.execute(
+                "INSERT INTO role (id, name, is_builtin, is_super_admin, global_capabilities) "
+                "VALUES (?, ?, 0, 0, ?)",
+                (role_id, f"r{role_id}", json.dumps(caps)),
+            )
+        for grant_id, (role_id, caps) in grants.items():
+            conn.execute(
+                "INSERT INTO rolegrant (id, role_id, scope_type, scope_id, capabilities) "
+                "VALUES (?, ?, 'customer', 1, ?)",
+                (grant_id, role_id, json.dumps(caps)),
+            )
+
+    def capabilities():
+        with sqlite3.connect(db) as conn:
+            rows = conn.execute("SELECT id, capabilities FROM rolegrant").fetchall()
+        return {grant_id: json.loads(caps) for grant_id, caps in rows}
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert capabilities() == {
+        10: ["view", "manage_rules", "manage_source"],
+        11: ["view", "download"],
+        12: ["view", "manage_rules"],
+        13: ["manage_rules", "manage_source"],
+        14: [],
+    }
+
+    _alembic(tmp_path, "downgrade", "e3a9c5f17b28")
+    assert capabilities() == {grant_id: caps for grant_id, (_, caps) in grants.items()}

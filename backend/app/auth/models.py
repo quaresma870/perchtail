@@ -18,6 +18,12 @@ class Capability(StrEnum):
     download = "download"
     manage_rules = "manage_rules"
     run_now = "run_now"
+    # Changing what already exists in a scope: editing, moving and deleting
+    # its sources, moving and deleting its folders, a source's agent token,
+    # saved credential and agent upgrades -- and, with create_source, adding
+    # a source or folder there. Separate from manage_rules, which only
+    # governs the visibility rules.
+    manage_source = "manage_source"
 
 
 class GlobalCapability(StrEnum):

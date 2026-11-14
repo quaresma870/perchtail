@@ -3,7 +3,7 @@ export type RuleType = 'include' | 'exclude'
 export type PatternKind = 'glob' | 'regex'
 export type ScopeType = 'customer' | 'folder' | 'source'
 export type SeverityLevel = 'error' | 'warning' | 'info' | 'debug'
-export type Capability = 'view' | 'download' | 'manage_rules' | 'run_now'
+export type Capability = 'view' | 'download' | 'manage_rules' | 'manage_source' | 'run_now'
 export type GlobalCapability =
   | 'manage_users'
   | 'manage_roles'

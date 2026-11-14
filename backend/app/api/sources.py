@@ -128,7 +128,7 @@ class SourcePublic(BaseModel):
     name_index_files: int | None
     name_index_message: str | None
     # What the requesting user may do on this source (view, download,
-    # manage_rules, run_now), so the UI can hide actions it would refuse --
+    # manage_rules, run_now, manage_source), so the UI can hide actions it would refuse --
     # e.g. Download buttons for a view-only role (#174). Informational only:
     # every endpoint still checks on its own.
     my_capabilities: list[Capability] = []
@@ -442,19 +442,20 @@ def _validate_scope(session: Session, *, customer_id: int | None, folder_id: int
 
 
 MANAGE_EXISTING_SOURCE_REFUSED = (
-    "You need manage rules on this source (and where you're moving it) to change it."
+    "You need manage sources on this source (and where you're moving it) to change it."
 )
+CREATE_SOURCE_REFUSED = "You need manage sources where you're adding this source."
 
 
 def can_manage_existing_source(session: Session, user: User, source: Source) -> bool:
-    return resolve_capability(session, user, source, Capability.manage_rules)
+    return resolve_capability(session, user, source, Capability.manage_source)
 
 
 def require_manage_existing_source(session: Session, user: User, source: Source) -> None:
     """create_source lets a role add sources; changing an existing one
     (editing, moving, deleting it, its agent token or credential, upgrading
     its agent, or browsing with its saved credential) also needs
-    manage_rules on that source, by the usual grant resolution -- otherwise
+    manage_source on that source, by the usual grant resolution -- otherwise
     create_source alone would reach every source, including ones the role
     can't even see."""
     if not can_manage_existing_source(session, user, source):
@@ -466,7 +467,7 @@ def require_manage_existing_source(session: Session, user: User, source: Source)
 def _require_manage_destination(
     session: Session, user: User, source: Source, *, customer_id: int | None, folder_id: int | None
 ) -> None:
-    """Moving a source also needs manage_rules where it goes: the grant
+    """Moving a source also needs manage_source where it goes: the grant
     resolution as if the source were already there (the destination folder,
     its ancestors, then the customer). Nor may the move give the mover more
     on the source than they have where it is now (see
@@ -476,7 +477,7 @@ def _require_manage_destination(
         user,
         folder_id=folder_id,
         customer_id=customer_id,
-        capability=Capability.manage_rules,
+        capability=Capability.manage_source,
     ) or not move_keeps_access_within(
         session,
         user,
@@ -579,6 +580,18 @@ def create_source(
     session: Session = Depends(get_session),
 ):
     _validate_scope(session, customer_id=payload.customer_id, folder_id=payload.folder_id)
+    # Adding a source also needs manage_source where it lands, by the grant
+    # resolution it will get there: create_source alone would otherwise put
+    # a source under any customer. With no customer and no folder there is
+    # no scope to hold it at, so only a super admin adds one.
+    if not holds_capability_at(
+        session,
+        user,
+        folder_id=payload.folder_id,
+        customer_id=payload.customer_id,
+        capability=Capability.manage_source,
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=CREATE_SOURCE_REFUSED)
     roots = _validate_roots(payload.protocol, payload.roots or [], source_roots.max_roots(session))
     if roots:
         base_path = roots[0]["path"]

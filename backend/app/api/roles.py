@@ -108,6 +108,30 @@ def _require_super_admin_for_super_admin_flag(user: User, is_super_admin: bool) 
         )
 
 
+LAST_SUPER_ADMIN_ROLE_REFUSED = (
+    "Cannot remove super-admin from the last role that active super-admins hold"
+)
+
+
+def _require_not_last_super_admin_role(session: Session, role: Role) -> None:
+    """Refuses to take is_super_admin off a role while its active users are
+    the only active super admins left: the deployment must always keep one."""
+    holds_active = session.exec(
+        select(User).where(User.role_id == role.id, User.active.is_(True))
+    ).first()
+    if holds_active is None:
+        return
+    others = session.exec(
+        select(User)
+        .join(Role)
+        .where(Role.is_super_admin.is_(True), User.active.is_(True), Role.id != role.id)
+    ).first()
+    if others is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=LAST_SUPER_ADMIN_ROLE_REFUSED
+        )
+
+
 def _get_editable_role(session: Session, user: User, role_id: int) -> Role:
     """The role must exist, be within the caller's own authority (see
     rbac.role_within_authority), not be the role the caller holds (short of
@@ -191,6 +215,8 @@ def update_role(
     _require_super_admin_for_super_admin_flag(user, target_super_admin)
     if payload.global_capabilities is not None:
         require_capabilities_within_authority(user, payload.global_capabilities)
+    if role.is_super_admin and payload.is_super_admin is False:
+        _require_not_last_super_admin_role(session, role)
 
     if payload.name is not None:
         role.name = payload.name

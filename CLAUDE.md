@@ -236,7 +236,11 @@ AuthProvider (interface)
 - **Role** — id, name, is_builtin, is_super_admin, global_capabilities (manage_users,
   manage_roles, manage_sso, create_source)
 - **RoleGrant** — id, role_id, scope_type (`customer` | `folder` | `source`),
-  scope_id, capabilities (`view`, `download`, `manage_rules`, `run_now`)
+  scope_id, capabilities (`view`, `download`, `manage_rules`, `run_now`,
+  `manage_source`) — `manage_source` governs changing sources and folders in
+  the scope (edit, move, delete, agent token, saved credential, agent
+  upgrades, and with `create_source` adding them), while `manage_rules`
+  governs only the visibility rules
 - **User** — id, username/email, password_hash (nullable for SSO-only accounts),
   role_id (FK, single), active, auth_provider, external_id, last_login_at
 - **SSOProviderConfig** — id, protocol (`oidc` | `saml`), name, config

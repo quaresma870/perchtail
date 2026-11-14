@@ -15,7 +15,9 @@ require_manage_global = require_global_capability(
     GlobalCapability.manage_system_settings, get_current_active_user
 )
 require_view_source = require_capability(Capability.view, get_current_active_user)
-require_manage_source = require_capability(Capability.manage_rules, get_current_active_user)
+require_manage_rules_on_source = require_capability(
+    Capability.manage_rules, get_current_active_user
+)
 
 
 class SeverityPatternPublic(BaseModel):
@@ -170,7 +172,8 @@ def get_effective_patterns(
 
 @source_router.get("", response_model=list[SeverityPatternPublic])
 def list_source_patterns(
-    source: Source = Depends(require_manage_source), session: Session = Depends(get_session)
+    source: Source = Depends(require_manage_rules_on_source),
+    session: Session = Depends(get_session),
 ):
     return session.exec(select(SeverityPattern).where(SeverityPattern.source_id == source.id)).all()
 
@@ -178,7 +181,7 @@ def list_source_patterns(
 @source_router.post("", response_model=SeverityPatternPublic, status_code=status.HTTP_201_CREATED)
 def create_source_pattern(
     payload: SeverityPatternCreate,
-    source: Source = Depends(require_manage_source),
+    source: Source = Depends(require_manage_rules_on_source),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
@@ -211,7 +214,7 @@ def create_source_pattern(
 def update_source_pattern(
     pattern_id: int,
     payload: SeverityPatternUpdate,
-    source: Source = Depends(require_manage_source),
+    source: Source = Depends(require_manage_rules_on_source),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
@@ -237,7 +240,7 @@ def update_source_pattern(
 @source_router.delete("/{pattern_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_source_pattern(
     pattern_id: int,
-    source: Source = Depends(require_manage_source),
+    source: Source = Depends(require_manage_rules_on_source),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
