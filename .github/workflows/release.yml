@@ -9,8 +9,11 @@ name: Release
 #     key built into them. The private key is the AGENT_SIGNING_KEY
 #     secret of the `release` environment (see CONTRIBUTING.md); without it the release fails;
 #   - the Docker image, pushed to ghcr.io/<owner>/perchtail:<version>, with
-#     those signed agent binaries in /app/agent-binaries, and its SBOM
-#     (CycloneDX);
+#     those signed agent binaries in /app/agent-binaries, signed with cosign
+#     (keyless) and with GitHub build provenance, like the agent binaries
+#     (#350);
+#   - SBOMs (CycloneDX) for the image, the backend, the frontend and the
+#     agent;
 #   - perchtail-image.json, naming that image by digest, and
 #     perchtail-image.json.sig, its Ed25519 signature with the same release
 #     key: the updater (#320) only installs an image a signed manifest names;
@@ -159,6 +162,8 @@ jobs:
     environment: release
     permissions:
       contents: read
+      id-token: write # keyless signing of the build provenance (Sigstore)
+      attestations: write # store the provenance with the repository
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -227,6 +232,13 @@ jobs:
           fi
           ls -l SHA256SUMS SHA256SUMS.sig
 
+      # Build provenance for each binary (#350): signed through GitHub's
+      # OIDC identity, it says which workflow built it from which commit.
+      # `gh attestation verify` checks it (docs/verifying-releases.md).
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/perchtail-agent-*
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agent
@@ -238,7 +250,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write # push to ghcr.io
+      packages: write # push to ghcr.io, with the signature and the attestation
+      id-token: write # keyless signing (Sigstore)
+      attestations: write # store the provenance with the repository
     outputs:
       name: ${{ steps.image.outputs.name }}
       digest: ${{ steps.build.outputs.digest }}
@@ -311,6 +325,28 @@ jobs:
           fi
           echo "$IMAGE:$VERSION -> $DIGEST"
 
+      # The image is signed by digest with cosign, keyless (#350): the
+      # certificate names this workflow and the ref it ran from, and the
+      # signature is logged in Sigstore's public transparency log. Anyone
+      # can check it with `cosign verify` (docs/verifying-releases.md).
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign the image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "$IMAGE@$DIGEST"
+
+      # GitHub build provenance for the image, pushed next to it in the
+      # registry and kept with the repository (`gh attestation verify`).
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
       # Trivy doesn't create the output's directory.
       - run: mkdir -p sbom
 
@@ -325,6 +361,33 @@ jobs:
           image-ref: ${{ steps.image.outputs.name }}:${{ needs.meta.outputs.version }}
           format: cyclonedx
           output: sbom/perchtail-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
+
+      # One SBOM per component as well (#350), from its lockfile: the
+      # backend's hashed requirements.txt, the frontend's package-lock.json
+      # and the agent's go.mod/go.sum.
+      - name: Generate SBOM for the backend (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: backend/requirements.txt
+          format: cyclonedx
+          output: sbom/perchtail-backend-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
+
+      - name: Generate SBOM for the frontend (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: frontend/package-lock.json
+          format: cyclonedx
+          output: sbom/perchtail-frontend-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
+
+      - name: Generate SBOM for the push agent (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: agent
+          format: cyclonedx
+          output: sbom/perchtail-agent-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -433,6 +496,9 @@ jobs:
             echo "- Docker: \`${IMAGE,,}:${VERSION}\` (amd64, arm64); \`perchtail-image.json\` names it by digest, and \`perchtail-image.json.sig\` is its Ed25519 signature with the release key"
             echo "- Push agent: the binaries below; check them with \`sha256sum -c SHA256SUMS\` (\`SHA256SUMS.sig\` is its Ed25519 signature with the release key)"
             echo "- From source: [docs/install-from-source.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/install-from-source.md)"
+            echo
+            echo "### Verify"
+            echo "The image is signed with cosign (keyless), and the image and the agent binaries carry GitHub build provenance; the SBOMs (CycloneDX) list what is in the image, the backend, the frontend and the agent. How to check them: [docs/verifying-releases.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/verifying-releases.md)."
           } >> notes.md
           cat notes.md
 

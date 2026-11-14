@@ -1,0 +1,10 @@
+# Development and test tools, on top of the backend's own dependencies at the
+# versions requirements.txt pins. Compiled into requirements-dev.txt (see
+# CONTRIBUTING.md).
+-r requirements.in
+-c requirements.txt
+ruff>=0.17.4
+black>=26.10.1
+pytest>=9.2.0
+hypothesis>=6.170.15
+schemathesis==4.33.2

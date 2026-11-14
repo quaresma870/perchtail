@@ -25,18 +25,15 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Python dependencies: `backend/requirements.in` lists what the backend needs,
-with version ranges; `backend/requirements.txt` pins every package
-(transitive ones included) and is what the Docker image and a from-source
-install use. To add or upgrade a package, edit `requirements.in`, then
-regenerate the pins with [uv](https://docs.astral.sh/uv/) and commit both:
+Python dependencies: `backend/requirements.in` lists what the backend needs, with version ranges; `backend/requirements.txt` pins every package (transitive ones included) and is what the Docker image and a from-source install use. Every pin carries its hashes, and the Docker image installs with `pip --require-hashes`. The development and test tools are in `backend/requirements-dev.in`, compiled the same way into `requirements-dev.txt` on top of the backend's pins. To add or upgrade a package, edit the `.in` file, then regenerate both files with [uv](https://docs.astral.sh/uv/) and commit all of them:
 
 ```bash
 cd backend
-uv pip compile requirements.in --universal --python-version 3.12 -o requirements.txt
+uv pip compile requirements.in --universal --python-version 3.12 --generate-hashes -o requirements.txt
+uv pip compile requirements-dev.in --universal --python-version 3.12 --generate-hashes -o requirements-dev.txt
 ```
 
-To bump everything within the ranges, add `--upgrade`.
+To bump everything within the ranges, add `--upgrade` to the first command (the second follows the first's pins).
 
 Frontend (Vite + Svelte), in a separate terminal from the repo root:
 

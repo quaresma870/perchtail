@@ -282,6 +282,7 @@ publish in `docker-compose.yml` entirely rather than binding it to loopback.
 
 - [CLAUDE.md](CLAUDE.md) — full design/architecture reference and build plan
 - [ROADMAP.md](ROADMAP.md) — phased milestones and what's next
+- [docs/verifying-releases.md](docs/verifying-releases.md) — checking a release before you run it: the image's cosign signature, the build provenance of the image and the agent binaries, the signed checksums and the SBOMs
 - [docs/install-from-source.md](docs/install-from-source.md) — running
   PerchTail on a Linux host without Docker, with a systemd unit
 - [docs/source-setup.md](docs/source-setup.md) — how to prepare a Linux or

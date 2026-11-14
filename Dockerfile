@@ -29,7 +29,10 @@ RUN groupadd --system --gid 10001 perchtail \
     && mkdir -p /data && chown perchtail:perchtail /data
 
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Every package is pinned with its hashes, so a package that changed on the
+# index (or a dependency missing from the pins) fails the build instead of
+# ending up in the image.
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY backend/app ./app
 COPY backend/migrations ./migrations
