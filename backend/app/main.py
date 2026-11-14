@@ -129,7 +129,21 @@ _CONTENT_SECURITY_POLICY = (
     "connect-src 'self'; "
     "object-src 'none'; "
     "base-uri 'self'; "
+    # No fallback from default-src for these two: every form in the app is
+    # handled in script, and SSO starts from a link, so only same-origin
+    # form targets are ever needed.
+    "form-action 'self'; "
     "frame-ancestors 'none'"
+)
+
+# Browser features PerchTail never uses, turned off for the page and anything
+# it might load, so an injected script couldn't reach them either. The
+# clipboard isn't listed: the viewer copies lines with it.
+_PERMISSIONS_POLICY = (
+    "accelerometer=(), autoplay=(), camera=(), display-capture=(), "
+    "geolocation=(), gyroscope=(), magnetometer=(), microphone=(), "
+    "midi=(), payment=(), publickey-credentials-get=(), "
+    "screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()"
 )
 
 
@@ -146,6 +160,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = _PERMISSIONS_POLICY
+        # Keeps PerchTail's window out of reach of pages it opens or that
+        # open it (no shared browsing context group).
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         # Tells the browser this answer came from PerchTail itself, so a 502
         # about a source isn't mistaken for a proxy saying PerchTail is down
         # (#276, frontend/src/lib/server-status.ts).
