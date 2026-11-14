@@ -1,6 +1,6 @@
 # PerchTail
 
-Architecture brief for contributors and AI coding assistants working in this repository. It describes the code on this branch; when the two disagree, the code wins and this file gets fixed. Operator documentation lives in `README.md` and `docs/`; the backlog lives in `ROADMAP.md` and GitHub issues.
+Architecture brief for contributors working in this repository. It describes the code on this branch; when the two disagree, the code wins and this file gets fixed. Operator documentation lives in `README.md` and `docs/`; the backlog lives in `ROADMAP.md` and GitHub issues.
 
 ## What PerchTail is
 
@@ -114,7 +114,7 @@ Implemented in `app/auth/rbac.py`.
 
 - Each user has exactly one role (`User.role_id`).
 - A role has global capabilities: `manage_users`, `manage_roles`, `manage_sso`, `create_source`, `manage_system_settings`, `view_audit_log` and `manage_alerts`.
-- A role's grants (`RoleGrant`) give scoped capabilities on a customer, a folder or a source: `view`, `download`, `manage_rules`, `run_now` and `manage_source`. `manage_rules` covers only the visibility rules; `manage_source` covers editing, moving and deleting sources and folders, agent tokens, saved credentials and agent upgrades, and, together with `create_source`, adding sources and folders. `run_now` starts a file-name index pass.
+- A role's grants (`RoleGrant`) give scoped capabilities on a customer, a folder or a source: `view`, `download`, `manage_rules`, `run_now` and `manage_source`. `manage_rules` covers only the visibility rules; `manage_source` covers editing, moving and deleting sources, moving and deleting folders, agent tokens, saved credentials and agent upgrades, and, together with `create_source`, adding sources and folders. `run_now` starts a file-name index pass.
 - A grant applies to everything below its scope, including sources added later. The most specific grant wins: source, then the nearest folder up the tree, then the customer. With no grant, access is denied.
 - A super-admin role bypasses grants. The system log source (`is_system`) is reachable by super admins only.
 - Delegated admins can only grant or assign what they hold themselves (`grant_within_authority`, `role_within_authority`).

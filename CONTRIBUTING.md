@@ -75,7 +75,7 @@ In a separate terminal, from the repository root:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev      # dev server, proxies API calls to the backend on 127.0.0.1:8000
 npm run check    # svelte-check and the TypeScript projects
 npm test         # vitest
@@ -92,7 +92,7 @@ npx playwright install --with-deps chromium   # one-time, per machine
 npm run test:e2e
 ```
 
-This builds the frontend and starts its own isolated backend on port 8001 with a throwaway SQLite DB (`backend/scripts/run_e2e_server.sh`), so it won't touch a backend you already have running on 8000. The script activates `backend/.venv` when it exists. It also provisions real, throwaway sshd/smbd test servers on ports 2222/1445 (`backend/scripts/setup_e2e_test_servers.sh`, plain `apt-get install openssh-server samba`) so the ssh/smb source specs run against a real protocol implementation; the first run may prompt for `sudo` if those aren't already installed. Set `SKIP_E2E_TEST_SERVERS=1` to skip that step for a quick run of everything else without `sudo` or those packages (`sources-ssh.spec.ts` and `sources-smb.spec.ts` will then fail with nothing listening on those ports; everything else is unaffected). See `frontend/e2e/` and ROADMAP.md's "Frontend E2E testing (Playwright)" section for how it's wired together.
+This builds the frontend and starts its own isolated backend on port 8001 with a throwaway SQLite DB (`backend/scripts/run_e2e_server.sh`), so it won't touch a backend you already have running on 8000. The script activates `backend/.venv` when it exists. It also provisions real, throwaway sshd/smbd test servers on ports 2222/1445 (`backend/scripts/setup_e2e_test_servers.sh`, plain `apt-get install openssh-server samba`) so the ssh/smb source specs run against a real protocol implementation; the first run may prompt for `sudo` if those aren't already installed. Set `SKIP_E2E_TEST_SERVERS=1` to skip that step for a quick run of everything else without `sudo` or those packages (`sources-ssh.spec.ts`, `sources-smb.spec.ts` and `import-export.spec.ts`, which reads the fixture paths those servers write, will then fail; everything else is unaffected). See `frontend/e2e/` and ROADMAP.md's "Frontend E2E testing (Playwright)" section for how it's wired together.
 
 `frontend/e2e/accessibility.spec.ts` runs axe-core on each main page and fails on serious or critical WCAG 2.0/2.1 A and AA violations, listing each rule, its impact and the selectors of the offending nodes. A new page, or a new popup on an existing one, gets its own test in that spec: open it, wait for it to finish loading, then check it. Fix what it finds in the component; only a third-party node that can't be fixed by configuration (such as CodeMirror's scroller) is excluded, with a comment saying why.
 

@@ -97,7 +97,7 @@ On Windows: `Get-FileHash .\perchtail-agent-<version>-windows-amd64.exe` and com
 Build with Go 1.27 or later (`go.mod`), from this folder, setting the version the way the release workflow does (`.github/workflows/release.yml`): the agent reports it when it connects, and upgrades from the portal compare it with the server's.
 
 ```sh
-VERSION=0.6.4   # the release tag you checked out, without the "v"
+VERSION=X.Y.Z   # the release tag you checked out, without the "v"
 CGO_ENABLED=0 go build -trimpath \
   -ldflags "-s -w -X github.com/quaresma870/perchtail/agent/internal/agent.Version=${VERSION}" \
   -o perchtail-agent .

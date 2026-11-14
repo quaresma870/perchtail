@@ -57,7 +57,7 @@ npm run test:e2e
 
 `npm run test:e2e` starts its own server through `npm run e2e:server`: it builds the frontend and runs `backend/scripts/run_e2e_server.sh`, which starts a backend on `127.0.0.1:8001` (so it doesn't touch a development backend on 8000) with a throwaway database under `backend/data/e2e/`, deleted on every run, and a seeded admin account. That backend serves the built app itself, without the Vite proxy.
 
-The script also starts real SSH and SMB test servers on ports 2222 and 1445 (`backend/scripts/setup_e2e_test_servers.sh`); the first run installs `openssh-server` and `samba` with `apt-get` and may ask for `sudo`. Set `SKIP_E2E_TEST_SERVERS=1` to skip them: then `sources-ssh.spec.ts` and `sources-smb.spec.ts` fail and the rest runs. WinRM is faked in the e2e backend.
+The script also starts real SSH and SMB test servers on ports 2222 and 1445 (`backend/scripts/setup_e2e_test_servers.sh`); the first run installs `openssh-server` and `samba` with `apt-get` and may ask for `sudo`. Set `SKIP_E2E_TEST_SERVERS=1` to skip them: then `sources-ssh.spec.ts`, `sources-smb.spec.ts` and `import-export.spec.ts` (which reads the fixture paths those servers write) fail and the rest runs. WinRM is faked in the e2e backend.
 
 The tests run one at a time, since they change shared settings on one backend. Outside CI, a server already listening on port 8001 is reused. The HTML report is written to `playwright-report/`. `e2e/accessibility.spec.ts` runs axe-core on the main pages and fails on serious or critical WCAG 2.0/2.1 A and AA violations.
 
