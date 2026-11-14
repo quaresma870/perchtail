@@ -20,6 +20,7 @@ const apiPrefixes = [
   '/audit',
   '/sso',
   '/system-settings',
+  '/smtp-settings',
   '/severity-patterns',
   '/monitoring',
   '/healthz',

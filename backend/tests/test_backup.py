@@ -448,6 +448,35 @@ def test_restore_refuses_a_credential_key_that_doesnt_match_unless_forced(env, m
     assert marker["result"] == "forced"
 
 
+def test_the_credential_key_check_uses_the_smtp_password_when_it_is_the_only_secret(tmp_path):
+    from app.crypto import fernet_key_for_salt
+    from app.models import SmtpSettings
+    from app.timeutils import utcnow
+    from cryptography.fernet import Fernet
+
+    db = tmp_path / "only-smtp.db"
+    engine = create_engine(f"sqlite:///{db}")
+    SQLModel.metadata.create_all(engine)
+    salt = os.urandom(16)
+    token = Fernet(fernet_key_for_salt(KEY, salt)).encrypt(b"smtp-secret").decode()
+    with Session(engine) as session:
+        session.add(
+            SmtpSettings(
+                host="smtp.example.test",
+                port=587,
+                username="relay",
+                password_encrypted=token,
+                from_address="perchtail@example.test",
+                updated_at=utcnow(),
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+    assert backup.credential_key_matches(db, salt, KEY) is True
+    assert backup.credential_key_matches(db, salt, "a-rotated-key") is False
+
+
 def test_restore_puts_the_backup_back_and_keeps_the_previous_data(env, monkeypatch):
     path = backup.create_backup("manual")
     salt = Path(env.settings.credential_salt_path).read_bytes()

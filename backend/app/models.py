@@ -389,6 +389,32 @@ class SystemSetting(SQLModel, table=True):
     value: str
 
 
+class SmtpSettings(SQLModel, table=True):
+    """The system SMTP server (#244), set by a super admin from Settings ->
+    Email (app/api/smtp_settings.py) and used by app/email_delivery.py.
+    Singleton by convention, like MonitoringToken. Nothing is sent while
+    there's no row or `enabled` is false. TLS is always on: `security` is
+    "starttls" (upgrade on connect, port 587) or "tls" (implicit TLS, 465).
+    The password is Fernet-encrypted like Source.credential_ref, never
+    returned by the API and never logged or audited."""
+
+    __tablename__ = "smtp_settings"
+
+    id: int | None = Field(default=None, primary_key=True)
+    host: str
+    port: int
+    security: str = "starttls"
+    # Null for a relay that takes mail without authentication.
+    username: str | None = None
+    password_encrypted: str | None = None
+    from_address: str
+    from_name: str | None = "PerchTail"
+    # PEM CA certificates trusted on top of the system's, for an internal PKI.
+    tls_ca_pem: str | None = None
+    enabled: bool = False
+    updated_at: datetime
+
+
 class MonitoringToken(SQLModel, table=True):
     """A single, deployment-wide bearer token gating the detailed health
     endpoint (GET /monitoring/health, see app/api/monitoring.py) — a

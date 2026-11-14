@@ -60,6 +60,41 @@ def test_missing_salt_with_mfa_secret_refuses_to_start(session, salt_path):
         assert_credential_salt_present(session)
 
 
+def test_missing_salt_with_an_smtp_password_refuses_to_start(session, salt_path):
+    from app.models import SmtpSettings
+    from app.timeutils import utcnow
+
+    session.add(
+        SmtpSettings(
+            host="smtp.example.test",
+            port=587,
+            username="relay",
+            password_encrypted="blob",
+            from_address="perchtail@example.test",
+            updated_at=utcnow(),
+        )
+    )
+    session.commit()
+    with pytest.raises(CredentialSaltMissingError):
+        assert_credential_salt_present(session)
+
+
+def test_missing_salt_with_smtp_settings_but_no_password_starts(session, salt_path):
+    from app.models import SmtpSettings
+    from app.timeutils import utcnow
+
+    session.add(
+        SmtpSettings(
+            host="smtp.example.test",
+            port=587,
+            from_address="perchtail@example.test",
+            updated_at=utcnow(),
+        )
+    )
+    session.commit()
+    assert_credential_salt_present(session)
+
+
 def test_escape_hatch_allows_regenerating(session, salt_path, monkeypatch):
     monkeypatch.setattr(get_settings(), "credential_salt_allow_regenerate", True)
     _add_encrypted_source(session)

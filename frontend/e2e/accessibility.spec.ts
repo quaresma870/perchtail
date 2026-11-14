@@ -123,6 +123,13 @@ test('accessibility: Settings -> System', async ({ page }) => {
   await expectNoSeriousViolations(page)
 })
 
+test('accessibility: Settings -> Email', async ({ page }) => {
+  await page.goto('/#/settings/email')
+  await settled(page, 'Email settings')
+  await expect(page.getByLabel('SMTP server')).toBeVisible()
+  await expectNoSeriousViolations(page)
+})
+
 test('accessibility: Settings -> Audit log', async ({ page }) => {
   await page.goto('/#/settings/audit-log')
   await settled(page, 'Audit log')

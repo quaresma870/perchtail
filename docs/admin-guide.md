@@ -20,6 +20,7 @@ Related guides:
 - [Roles and capabilities](#roles-and-capabilities)
 - [Users](#users)
 - [Single sign-on](#single-sign-on)
+- [Email](#email)
 - [Audit log](#audit-log)
 - [Alerts](#alerts)
 - [File-name index](#file-name-index)
@@ -39,7 +40,7 @@ Related guides:
 | **Users** | roles with **Manage users** |
 | **SSO** | roles with **Manage SSO settings** |
 | **System**, **Severity indicators** | roles with **Manage system settings (feature toggles)** |
-| **Import / export** | super admins |
+| **Email**, **Import / export** | super admins |
 | **Audit log** | roles with **View audit log**, while the **Audit log** switch under **Settings → System** is on |
 
 A super admin sees every page (the Audit log only while its switch in **Settings → System** is on). [Configuration](configuration.md) describes each setting under **Settings → System**.
@@ -238,6 +239,27 @@ The display name and email of an SSO account are updated from the identity provi
 - A role change from a mapping takes effect at the user's next SSO sign-in. Sessions already open keep the current role until then.
 
 A delegated administrator can only map a group to a role within their own access. They also can't enable a provider or change its issuer, client ID or group claim while any mapping points at a role beyond their access.
+
+## Email
+
+**Settings → Email**, for super admins only, sets the SMTP server PerchTail sends email through. Nothing is configured by default, and nothing is sent until a server is saved with **Enabled** on. Today PerchTail only sends the test message from this page.
+
+| Field | What it is |
+|---|---|
+| **SMTP server**, **Port** | The server's host name or IP address and its port. |
+| **Security** | **STARTTLS** (usually port 587): PerchTail connects and upgrades to TLS before anything else. A server that doesn't offer STARTTLS is refused; PerchTail never sends in plain text. **Implicit TLS** (usually port 465): TLS from the first byte. There is no mode without TLS. |
+| **Username**, **Password** | The account PerchTail signs in with, after TLS is up. Leave the username blank for a relay that accepts mail without signing in; the password is then not kept. The password is encrypted with `CREDENTIAL_ENCRYPTION_KEY`, never shown again, and left as it is when the field is blank on saving. **Remove the saved password** deletes it. |
+| **Sender address**, **Sender name** | The `From` of every message. The name defaults to `PerchTail`. |
+| **CA certificate** | Optional PEM certificates trusted in addition to the system's, for a server whose certificate comes from an internal CA. The certificate is always checked, and must name the host in **SMTP server**. |
+| **Enabled** | Turns sending on or off without losing the settings. |
+
+The server can be on a private network (an internal relay is the usual case) or on the internet. It can't be PerchTail's own host (loopback), a link-local address (which includes cloud metadata services), a multicast, unspecified or reserved address. The host name is resolved and checked when the settings are saved and again before every message, and PerchTail connects to the address it checked, so a name that later resolves somewhere else is checked again rather than followed.
+
+**Send a test message** sends `Test message from PerchTail` to the address you enter, or to your own email when the field is blank, with the saved settings, and shows the result. Errors are short and never include the password or the server's reply. At most 5 test messages can be sent per minute for the whole installation.
+
+Every message is plain text and carries `Auto-Submitted: auto-generated`, so autoresponders don't answer it. It holds only what the feature sending it needs; no log content is ever sent by email.
+
+Saving, removing and testing are recorded in the audit log (`smtp_settings.*`), without the password and without the message. See [Audit log events](audit-events.md).
 
 ## Audit log
 

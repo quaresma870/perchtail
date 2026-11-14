@@ -7,7 +7,7 @@ Deterministic and bounded: a fixed seed, at most SCHEMATHESIS_MAX_EXAMPLES
 examples per operation (25 by default; raise it by hand for a longer run).
 
 No request leaves the machine: operations that talk to sources, agents,
-webhooks, the SSO provider or GitHub are excluded, and any connection to an
+webhooks, the SMTP server, the SSO provider or GitHub are excluded, and any connection to an
 address other than 127.0.0.1 fails the test while it runs."""
 
 import os
@@ -46,6 +46,8 @@ EXCLUDED_OPERATIONS = {
     ("POST", "/alerts/{alert_id}/test"),
     # Asks GitHub for the latest release.
     ("POST", "/system/update/check"),
+    # Sends a test email through the configured SMTP server.
+    ("POST", "/smtp-settings/test"),
     # Talk to the SSO provider.
     ("POST", "/sso/{provider_id}/test"),
     ("GET", "/auth/sso/login"),

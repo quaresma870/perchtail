@@ -76,6 +76,8 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 | `severity_pattern.*` | Severity highlighting patterns. |
 | `alert.create`, `alert.update`, `alert.delete` | Live alerts. |
 | `alert.delivery_failed` | An alert notification the webhook never accepted, given up after retrying for an hour (`attempts`, `error`). Each retry before it is only in the application log. |
+| `smtp_settings.create`, `smtp_settings.update`, `smtp_settings.delete` | The SMTP server under **Settings → Email** set up, changed or removed: the values before and after (`{"from": ..., "to": ...}`) of the server, port, security, username, sender and **Enabled**. The password is never recorded: a new one is recorded as `"password": "changed"`, a removed one as `"removed"`; a CA certificate as `"replaced"` or `"removed"`. |
+| `smtp_settings.test` | A test message: the `recipient` and the `result` (`sent`, `failed` with the `error`, `not_configured`, or `rate_limited`). Never the message. |
 | `system_settings.update` | System settings changed: for each setting, its value before and after (`{"old": ..., "new": ...}`); a secret value is recorded only as `"changed"`. |
 | `monitoring_token.regenerate` | The monitoring token generated or replaced. |
 | `config.export`, `config.import` | Configuration exported or imported. |

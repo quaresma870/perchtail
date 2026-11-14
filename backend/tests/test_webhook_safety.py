@@ -2,9 +2,11 @@ import socket
 
 import pytest
 from app.webhook_safety import (
+    UnsafeSmtpHostError,
     UnsafeWebhookURLError,
     assert_webhook_url_is_safe,
     resolve_pinned_webhook_target,
+    resolve_validated_smtp_ips,
 )
 
 
@@ -176,3 +178,64 @@ def test_pinned_target_survives_dns_flipping_to_private_on_a_later_lookup(monkey
     assert calls["n"] == 1
     assert target.url == "https://93.184.216.34:443/hook"
     assert target.sni_hostname == "rebinds-to-internal.example"
+
+
+# --- the SMTP server's policy (B2) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "smtp.example.com",  # resolves to a public address (conftest)
+        "10.0.0.5",
+        "172.16.0.5",
+        "192.168.1.5",
+        "100.64.0.1",
+        "fd00::25",  # unique local
+    ],
+)
+def test_smtp_allows_public_and_private_addresses(host):
+    assert resolve_validated_smtp_ips(host)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        "127.1.2.3",
+        "::1",
+        "::ffff:127.0.0.1",  # IPv4-mapped loopback
+        "169.254.169.254",  # cloud metadata endpoint
+        "fe80::1",
+        "224.0.0.1",
+        "ff02::1",
+        "0.0.0.0",
+        "::",
+        "240.0.0.1",  # reserved
+    ],
+)
+def test_smtp_refuses_loopback_link_local_multicast_unspecified_and_reserved(host):
+    with pytest.raises(UnsafeSmtpHostError, match="disallowed address"):
+        resolve_validated_smtp_ips(host)
+
+
+def test_smtp_refuses_a_name_when_any_address_is_refused(monkeypatch):
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+        ],
+    )
+    with pytest.raises(UnsafeSmtpHostError):
+        resolve_validated_smtp_ips("mixed.example")
+
+
+def test_smtp_refuses_a_name_that_doesnt_resolve(monkeypatch):
+    def fail(*args, **kwargs):
+        raise socket.gaierror("nope")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fail)
+    with pytest.raises(UnsafeSmtpHostError, match="could not be resolved"):
+        resolve_validated_smtp_ips("nowhere.example")
