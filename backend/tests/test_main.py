@@ -46,8 +46,14 @@ def test_responses_carry_security_headers():
     csp = response.headers["content-security-policy"]
     assert "default-src 'self'" in csp
     assert "frame-ancestors 'none'" in csp
+    assert "form-action 'self'" in csp
     assert "script-src 'self'" in csp
     assert "unsafe-eval" not in csp
+    permissions = response.headers["permissions-policy"]
+    for feature in ("camera=()", "microphone=()", "geolocation=()", "usb=()"):
+        assert feature in permissions
+    assert "clipboard" not in permissions
+    assert response.headers["cross-origin-opener-policy"] == "same-origin"
 
 
 def test_lifespan_refuses_to_start_with_the_default_credential_key(monkeypatch):
