@@ -13,6 +13,22 @@ from sqlmodel import Session, SQLModel, create_engine, select
 KEY = b"unit-test-key-not-a-real-secret"
 
 
+@pytest.fixture(autouse=True)
+def _same_key_for_new_entries(monkeypatch):
+    # The purge writes its own audit.purge entries through record_audit_event;
+    # they must chain under the key these tests verify with.
+    monkeypatch.setattr("app.audit.audit_chain_key", lambda: KEY)
+
+
+def _actions(session) -> list[str]:
+    """What's left, leaving out the purge's own audit.purge entries."""
+    return [
+        r.action
+        for r in session.exec(select(AuditLog).order_by(AuditLog.id)).all()
+        if r.action != "audit.purge"
+    ]
+
+
 def _engine():
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
@@ -36,8 +52,7 @@ def test_default_retention_purges_entries_older_than_365_days(monkeypatch):
     run_audit_purge_sweep()
 
     with Session(engine) as session:
-        remaining = session.exec(select(AuditLog)).all()
-        assert [r.action for r in remaining] == ["source.update"]
+        assert _actions(session) == ["source.update"]
 
 
 def test_configured_retention_is_honored(monkeypatch):
@@ -54,7 +69,7 @@ def test_configured_retention_is_honored(monkeypatch):
     run_audit_purge_sweep()
 
     with Session(engine) as session:
-        assert session.exec(select(AuditLog)).all() == []
+        assert _actions(session) == []
 
 
 def test_zero_retention_means_keep_forever(monkeypatch):
@@ -137,7 +152,8 @@ def test_verification_still_passes_for_the_surviving_chain_after_a_purge(monkeyp
         result = verify_chain(KEY, session)
         session.commit()
         assert result.ok is True
-        assert result.checked_count == 1
+        # The surviving row and the purge's own entry.
+        assert result.checked_count == 2
 
 
 def test_purge_never_creates_a_hole_when_timestamp_and_id_order_diverge(monkeypatch):
@@ -234,8 +250,8 @@ def test_the_purge_deletes_in_chunks_each_in_its_own_transaction(monkeypatch):
     chunks = []
     real_chunk = audit_purge._purge_chunk
 
-    def counting_chunk(engine, last_id):
-        deleted = real_chunk(engine, last_id)
+    def counting_chunk(engine, last_id, retention_days):
+        deleted = real_chunk(engine, last_id, retention_days)
         chunks.append(deleted)
         return deleted
 
@@ -244,10 +260,25 @@ def test_the_purge_deletes_in_chunks_each_in_its_own_transaction(monkeypatch):
 
     assert chunks == [2, 2, 1, 0]
     with Session(engine) as session:
-        assert [r.action for r in session.exec(select(AuditLog)).all()] == ["recent"]
+        assert _actions(session) == ["recent"]
         state = session.exec(select(AuditChainState)).first()
         assert (state.anchor_row_id, state.anchor_hash) == (5, newest_old_hash)
         assert verify_chain(KEY, session).ok is True
+        # One entry per chunk, each naming what went and the anchor it left.
+        purges = session.exec(
+            select(AuditLog).where(AuditLog.action == "audit.purge").order_by(AuditLog.id)
+        ).all()
+        assert [p.event_metadata["deleted"] for p in purges] == [2, 2, 1]
+        ranges = [(p.event_metadata["from_row_id"], p.event_metadata["to_row_id"]) for p in purges]
+        assert ranges == [
+            (1, 2),
+            (3, 4),
+            (5, 5),
+        ]
+        assert purges[-1].event_metadata["anchor_row_id"] == 5
+        assert purges[-1].event_metadata["anchor_hash"] == newest_old_hash
+        assert purges[-1].event_metadata["retention_days"] == 365
+        assert purges[-1].user_id is None
 
 
 def test_rows_written_after_the_purge_started_are_kept(monkeypatch):
@@ -269,8 +300,8 @@ def test_rows_written_after_the_purge_started_are_kept(monkeypatch):
     real_chunk = audit_purge._purge_chunk
     written = []
 
-    def chunk_then_write(engine, last_id):
-        deleted = real_chunk(engine, last_id)
+    def chunk_then_write(engine, last_id, retention_days):
+        deleted = real_chunk(engine, last_id, retention_days)
         if not written:
             with Session(engine) as session:
                 late = AuditLog(user_id=None, action="late")
@@ -284,7 +315,7 @@ def test_rows_written_after_the_purge_started_are_kept(monkeypatch):
     run_audit_purge_sweep()
 
     with Session(engine) as session:
-        assert [r.action for r in session.exec(select(AuditLog)).all()] == ["late"]
+        assert _actions(session) == ["late"]
 
 
 def test_a_purge_never_lands_in_the_middle_of_a_verification(monkeypatch, tmp_path):
@@ -328,5 +359,101 @@ def test_a_purge_never_lands_in_the_middle_of_a_verification(monkeypatch, tmp_pa
     monkeypatch.setattr(integrity, "_chain_rows", original)
 
     with Session(engine) as session:
-        assert len(session.exec(select(AuditLog)).all()) == 2
+        assert len(_actions(session)) == 2
         assert verify_chain(KEY, session).ok
+
+
+# --- the anchor is covered by the chain (audit.purge entries) -------------------
+
+
+def _purged_install(monkeypatch):
+    engine = _engine()
+    monkeypatch.setattr("app.db.engine", engine)
+    with Session(engine) as session:
+        for days in (400, 400, 0):
+            entry = AuditLog(user_id=None, action="source.create")
+            entry.timestamp = utcnow() - timedelta(days=days)
+            session.add(entry)
+            session.commit()
+        backfill_chain_if_needed(KEY, session)
+        session.commit()
+    run_audit_purge_sweep()
+    return engine
+
+
+def test_moving_the_anchor_by_hand_is_detected(monkeypatch):
+    engine = _purged_install(monkeypatch)
+    with Session(engine) as session:
+        assert verify_chain(KEY, session).ok
+        # Someone with write access deletes the oldest surviving row and
+        # moves the anchor to match it, as a purge would.
+        first = session.exec(select(AuditLog).order_by(AuditLog.id)).first()
+        state = session.exec(select(AuditChainState)).first()
+        state.anchor_row_id, state.anchor_hash = first.id, first.row_hash
+        session.delete(first)
+        session.commit()
+
+        result = verify_chain(KEY, session)
+        assert not result.ok
+        assert result.checked_count == 0
+        assert session.exec(select(AuditChainState)).first().status == "broken"
+
+
+def test_deleting_the_purge_entry_is_detected(monkeypatch):
+    engine = _purged_install(monkeypatch)
+    with Session(engine) as session:
+        for purge in session.exec(select(AuditLog).where(AuditLog.action == "audit.purge")).all():
+            session.delete(purge)
+        session.commit()
+        assert not verify_chain(KEY, session).ok
+
+
+def test_an_anchor_without_any_record_is_reported(monkeypatch):
+    engine = _engine()
+    monkeypatch.setattr("app.db.engine", engine)
+    with Session(engine) as session:
+        session.add(AuditChainState(anchor_row_id=7, anchor_hash="forged"))
+        session.commit()
+        result = verify_chain(KEY, session)
+        assert not result.ok
+        assert result.broken_row_id == 7
+
+
+def test_an_anchor_from_before_purges_were_recorded_is_signed_once(monkeypatch):
+    from app.audit_purge import sign_legacy_anchor
+
+    engine = _engine()
+    monkeypatch.setattr("app.db.engine", engine)
+    with Session(engine) as session:
+        # A purge from before 0.7.0 left an anchor and no entry for it.
+        old = AuditLog(user_id=None, action="source.create")
+        session.add(old)
+        session.add(AuditLog(user_id=None, action="source.update"))
+        session.commit()
+        backfill_chain_if_needed(KEY, session)
+        session.commit()
+        anchor_hash = old.row_hash
+        session.add(AuditChainState(anchor_row_id=old.id, anchor_hash=anchor_hash))
+        session.delete(old)
+        session.commit()
+        assert not verify_chain(KEY, session).ok
+
+        assert sign_legacy_anchor(session) is True
+        session.commit()
+        assert verify_chain(KEY, session).ok
+        # Only on the first start after the upgrade: never again.
+        assert sign_legacy_anchor(session) is False
+
+
+def test_a_missing_record_is_never_re_signed_after_the_upgrade(monkeypatch):
+    from app.audit import record_audit_event
+    from app.audit_purge import sign_legacy_anchor
+
+    engine = _engine()
+    monkeypatch.setattr("app.db.engine", engine)
+    with Session(engine) as session:
+        record_audit_event(session, user_id=None, action="source.create")
+        session.add(AuditChainState(anchor_row_id=99, anchor_hash="moved-by-hand"))
+        session.commit()
+        assert sign_legacy_anchor(session) is False
+        assert not verify_chain(KEY, session).ok

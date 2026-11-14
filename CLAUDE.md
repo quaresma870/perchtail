@@ -71,10 +71,10 @@ One in-process APScheduler `BackgroundScheduler` (`app/scheduler.py`; coalesce, 
 | `name_index_sweep` | 1 min | Queues the sources whose file-name index is older than its interval (15 min) for the index worker pool. |
 | `source_checks` | 1 min | Checks the reachability of sources that are due (every 10 min, with backoff after failures) on the source-check worker pool. |
 | `agent_upgrades` | 1 min | Ends upgrade attempts that timed out and, inside the window, upgrades agents set to automatic. |
-| `audit_purge` | `AUDIT_PURGE_INTERVAL_SECONDS` (1 day), catch-up | Deletes audit rows older than the retention (Settings → System, 365 days; 0 keeps everything). |
+| `audit_purge` | `AUDIT_PURGE_INTERVAL_SECONDS` (1 day), catch-up | Deletes audit rows older than the retention (Settings → System, 365 days, at least 90; 0 keeps everything). |
 | `session_purge` | 1 h, catch-up | Deletes expired sessions. |
 | `update_check` | 1 h, catch-up | Asks GitHub for the latest release, at most once a day. Off with `UPDATE_CHECK=false` or the switch in Settings → System. |
-| `audit_integrity_check` | `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` (365), catch-up | Verifies the audit hash chain. |
+| `audit_integrity_check` | `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` (1 day), catch-up | Verifies the audit hash chain. |
 | `backup` | 5 min tick | Makes an encrypted backup once the backup interval (Settings → System) has passed; 0, the default, is off. |
 | `wal_checkpoint` | 1 h | Checkpoints and truncates the SQLite WAL (`app/db.py`). |
 

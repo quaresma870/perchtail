@@ -3,6 +3,7 @@ from app.audit_hash_chain import (
     chain_new_entry,
     compute_row_hash,
     current_chain_tip,
+    unsigned_row_ids,
 )
 from app.auth.models import AuditChainState, AuditLog
 from app.timeutils import utcnow
@@ -135,17 +136,57 @@ def test_backfill_chains_rows_missing_a_hash_in_id_order(session):
     assert len({r.row_hash for r in rows}) == 3
 
 
-def test_backfill_starts_from_an_existing_anchor_if_one_exists(session):
+def test_an_unsigned_row_after_a_purge_anchor_is_not_signed(session):
+    # A purge only ever runs on a signed chain, so an anchor means the
+    # chain has started: a row without a hash is not a legacy one.
     session.add(AuditChainState(anchor_row_id=9, anchor_hash="anchor-hash"))
     row = AuditLog(user_id=None, action="legacy.0")
     session.add(row)
     session.commit()
 
-    backfill_chain_if_needed(KEY, session)
+    assert backfill_chain_if_needed(KEY, session) == 0
     session.commit()
     session.refresh(row)
+    assert row.row_hash is None
 
-    assert row.prev_hash == "anchor-hash"
+
+def test_an_unsigned_row_inserted_after_the_chain_started_is_not_signed(session):
+    first = AuditLog(user_id=None, action="a")
+    chain_new_entry(KEY, session, first)
+    session.add(first)
+    session.commit()
+    forged = AuditLog(user_id=None, action="forged")
+    session.add(forged)
+    session.commit()
+
+    assert backfill_chain_if_needed(KEY, session) == 0
+    session.commit()
+    session.refresh(forged)
+    assert forged.row_hash is None
+    assert unsigned_row_ids(session) == [forged.id]
+    # The next entry chains past it, from the last signed row.
+    after = AuditLog(user_id=None, action="b")
+    chain_new_entry(KEY, session, after)
+    assert after.prev_hash == first.row_hash
+
+
+def test_a_chain_whose_tail_lost_its_hashes_is_never_signed_again(session):
+    # Even without the marker in DATA_DIR: the first row is still signed,
+    # so the chain has started and nothing after it is signed late.
+    rows = [AuditLog(user_id=None, action=f"a.{i}") for i in range(4)]
+    for row in rows:
+        chain_new_entry(KEY, session, row)
+        session.add(row)
+        session.commit()
+    for row in rows[1:]:
+        row.prev_hash = None
+        row.row_hash = None
+        session.add(row)
+    session.commit()
+
+    assert backfill_chain_if_needed(KEY, session) == 0
+    session.commit()
+    assert unsigned_row_ids(session) == [row.id for row in rows[1:]]
 
 
 def test_backfill_is_a_no_op_when_nothing_needs_it(session):

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { detailPairs, targetHref, targetTypeLabel } from './audit-format'
+import { detailPairs, formatAuditTime, targetHref, targetTypeLabel } from './audit-format'
 import type { AuditLogEntry } from './types'
 
 const entry = (overrides: Partial<AuditLogEntry> = {}): AuditLogEntry => ({
@@ -11,6 +11,9 @@ const entry = (overrides: Partial<AuditLogEntry> = {}): AuditLogEntry => ({
   target_id: 12,
   timestamp: '2026-11-05T10:00:00Z',
   metadata: null,
+  client_ip: '198.51.100.7',
+  user_agent: 'Mozilla/5.0',
+  session_id: '0123456789abcdef',
   target_name: 'app01',
   target_context: 'Vodacom / prod',
   target_name_is_current: false,
@@ -37,6 +40,23 @@ describe('targetHref', () => {
 
   it("doesn't link types without a page", () => {
     expect(targetHref(entry({ target_type: 'rule' }))).toBeNull()
+  })
+})
+
+describe('formatAuditTime', () => {
+  it('shows the time with its zone', () => {
+    const text = formatAuditTime('2026-11-05T10:00:00Z', 'UTC')
+    expect(text).toContain('10:00:00')
+    expect(text).toContain('UTC')
+  })
+
+  it('converts to the zone shown', () => {
+    // Tokyo is UTC+9, with no daylight saving time.
+    expect(formatAuditTime('2026-11-05T10:00:00Z', 'Asia/Tokyo')).toContain('19:00:00')
+  })
+
+  it('reads a time without a zone as UTC, never as local time', () => {
+    expect(formatAuditTime('2026-11-05T10:00:00', 'Asia/Tokyo')).toContain('19:00:00')
   })
 })
 

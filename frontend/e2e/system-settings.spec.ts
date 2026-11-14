@@ -72,6 +72,56 @@ test('system settings: audit log toggle hides the nav link and redirects the rou
   ).toBeVisible()
 })
 
+test('system settings: the audit folder listings switch stays on when turning it off is refused', async ({
+  page,
+}) => {
+  await page.goto('/#/settings/system')
+  const checkbox = page.getByLabel('Audit folder listings')
+  const row = page.locator('.setting-row', { has: checkbox })
+  // audit_folder_listings defaults to true (app/system_settings.py).
+  await expect(checkbox).toBeChecked()
+  await expect(checkbox).toBeEnabled()
+
+  // A refusal (the server's answer to anyone but a super admin) puts the
+  // switch back. The request never reaches the server, so nothing changes.
+  const refused = /\/system-settings$/
+  await page.route(refused, (route) =>
+    route.request().method() === 'PATCH'
+      ? route.fulfill({
+          status: 403,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'Not allowed' }),
+        })
+      : route.continue(),
+  )
+  await row.locator('label.switch').click()
+  await expect(page.locator('.error', { hasText: 'Not allowed' })).toBeVisible()
+  await expect(checkbox).toBeChecked()
+  await page.unroute(refused)
+
+  // Whoever manages system settings without being a super admin can't turn
+  // it off: the switch is disabled while it's on, and says why.
+  await page.route(/\/auth\/me$/, async (route) => {
+    const response = await route.fetch()
+    const user = await response.json()
+    await route.fulfill({
+      response,
+      json: {
+        ...user,
+        is_super_admin: false,
+        global_capabilities: [...new Set([...user.global_capabilities, 'manage_system_settings'])],
+      },
+    })
+  })
+  await page.reload()
+  await expect(checkbox).toBeChecked()
+  await expect(checkbox).toBeDisabled()
+  await expect(row.locator('label.switch')).toHaveAttribute(
+    'title',
+    'Only a super admin can turn it off.',
+  )
+})
+
 test('system settings: server limits are saved and kept within range (#344)', async ({ page }) => {
   await page.goto('/#/settings/system')
 

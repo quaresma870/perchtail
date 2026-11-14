@@ -471,13 +471,17 @@ def test_sorting_by_action_covers_every_entry_not_just_the_page(session, client_
         _seed(session, user.id, count=1, action=action)
     client = client_for(user)
 
-    first = client.get("/audit", params={"sort": "action", "order": "asc", "limit": 2}).json()
-    second = client.get(
-        "/audit", params={"sort": "action", "order": "asc", "limit": 2, "offset": 2}
-    ).json()
+    # Each read is itself audited (audit.view, sorted first): filtered out
+    # so the pages hold only the seeded entries.
+    seeded = ["folder.*", "rule.*", "source.*", "user.*"]
+    params = {"sort": "action", "order": "asc", "limit": 2, "action": seeded}
+    first = client.get("/audit", params=params).json()
+    second = client.get("/audit", params={**params, "offset": 2}).json()
     actions = [item["action"] for item in first["items"] + second["items"]]
     assert actions == ["folder.create", "rule.create", "source.update", "user.login"]
-    descending = client.get("/audit", params={"sort": "action", "order": "desc"}).json()
+    descending = client.get(
+        "/audit", params={"sort": "action", "order": "desc", "action": seeded}
+    ).json()
     assert [item["action"] for item in descending["items"]] == list(reversed(actions))
 
 

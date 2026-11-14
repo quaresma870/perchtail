@@ -36,7 +36,13 @@ from dataclasses import dataclass, field
 
 from sqlmodel import Session, select
 
-from app.audit_hash_chain import chain_maintenance_lock, compute_row_hash
+from app.audit_hash_chain import (
+    chain_maintenance_lock,
+    chain_reset_row_id,
+    read_chain_marker,
+    row_hash_for,
+    unsigned_row_ids,
+)
 from app.auth.models import AuditChainState, AuditLog
 from app.json_values import as_int
 from app.logging_config import get_logger
@@ -71,6 +77,14 @@ class ChainVerificationResult:
     race_break_ids: list[int] = field(default_factory=list)
     # Recorded race breaks the walk accepted.
     known_break_count: int = 0
+    # Why broken_row_id was reported: "unsigned_anchor" (the purge anchor
+    # isn't the one the newest anchor entry records), "chain_reset" (the
+    # chain marker in DATA_DIR says the chain was started, but the database
+    # no longer holds it, see app.audit_hash_chain.ChainMarker),
+    # "unsigned_row" (a row
+    # with no hash), "hash_mismatch" (a row that doesn't verify or doesn't
+    # link), "race_breaks" (only unrecorded #213 race breaks); None when ok.
+    reason: str | None = None
 
 
 class NoRaceBreaksError(Exception):
@@ -92,6 +106,8 @@ class _Walk:
     rows_checked: int
     checked_up_to: dict[int, int]
     tampered_ids: list[int]
+    # The tampered rows that have no hash at all.
+    unsigned_ids: list[int]
     race_breaks: list[_RaceBreak]
     known_break_count: int
 
@@ -157,6 +173,10 @@ def _chain_rows(session: Session):
             AuditLog.target_id,
             AuditLog.timestamp,
             AuditLog.event_metadata,
+            AuditLog.hash_format,
+            AuditLog.client_ip,
+            AuditLog.user_agent,
+            AuditLog.session_id,
         )
         if after is not None:
             query = query.where(AuditLog.id > after)
@@ -210,6 +230,7 @@ def _walk(key: bytes, session: Session, state: AuditChainState | None) -> _Walk:
     count = 0
     checked_up_to: dict[int, int] = {}
     tampered: list[int] = []
+    unsigned: list[int] = []
     race_breaks: list[_RaceBreak] = []
     known = 0
 
@@ -218,16 +239,16 @@ def _walk(key: bytes, session: Session, state: AuditChainState | None) -> _Walk:
             expected_up_to[expected_ids[next_expected]] = count
             next_expected += 1
         count += 1
-        recomputed = compute_row_hash(
-            key,
-            row.prev_hash,
-            user_id=row.user_id,
-            action=row.action,
-            target_type=row.target_type,
-            target_id=row.target_id,
-            timestamp=row.timestamp,
-            metadata=row.event_metadata,
-        )
+        if row.row_hash is None:
+            # Never signed: nothing the app writes lacks a hash once the
+            # startup backfill has run (app.audit_hash_chain). The chain
+            # skips it (current_chain_tip), so the next row is checked
+            # against the row before this one.
+            tampered.append(row.id)
+            unsigned.append(row.id)
+            checked_up_to[row.id] = count
+            continue
+        recomputed = row_hash_for(key, row.prev_hash, row)
         valid = _hashes_match(row.row_hash, recomputed)
         linked = _hashes_match(row.prev_hash, expected_prev)
         recorded = recorded_breaks.get(row.id)
@@ -276,9 +297,41 @@ def _walk(key: bytes, session: Session, state: AuditChainState | None) -> _Walk:
         rows_checked=count,
         checked_up_to=checked_up_to,
         tampered_ids=sorted(tampered),
+        unsigned_ids=unsigned,
         race_breaks=race_breaks,
         known_break_count=known,
     )
+
+
+def _unsigned_anchor_row_id(session: Session, state: AuditChainState | None) -> int | None:
+    """The purge anchor is only a row in audit_chain_state, outside the
+    chain, so whoever can write to the database could move it and delete
+    the oldest rows to match. Each purge therefore records the anchor it
+    leaves in a chained `audit.purge` entry (app/audit_purge.py), and the
+    newest such entry must name the anchor that's there now. Returns the
+    row to report when it doesn't: the newest anchor entry, or, with none,
+    the first surviving row (or the anchor's own id when nothing is left);
+    None when the anchor is vouched for, or there is none and no entry
+    says there should be."""
+    # Deferred: app.audit_purge imports app.audit, which imports app.crypto,
+    # which tests reconfigure.
+    from app.audit_purge import latest_anchor_record
+
+    anchor_row_id = state.anchor_row_id if state else None
+    anchor_hash = state.anchor_hash if state else None
+    record = latest_anchor_record(session)
+    if record is None:
+        if anchor_hash is None and anchor_row_id is None:
+            return None
+        first = session.exec(select(AuditLog.id).order_by(AuditLog.id.asc()).limit(1)).first()
+        return first if first is not None else anchor_row_id
+    record_id, metadata = record
+    if as_int(metadata.get("anchor_row_id")) == anchor_row_id and _hashes_match(
+        metadata.get("anchor_hash") if isinstance(metadata.get("anchor_hash"), str) else None,
+        anchor_hash,
+    ):
+        return None
+    return record_id
 
 
 def _get_or_create_state(session: Session) -> AuditChainState:
@@ -303,18 +356,28 @@ def verify_chain(key: bytes, session: Session) -> ChainVerificationResult:
     state = session.exec(select(AuditChainState)).first()
     walk = _walk(key, session, state)
     race_ids = [race.row_id for race in walk.race_breaks]
+    unsigned_anchor = _unsigned_anchor_row_id(session, state)
+    reset_row = chain_reset_row_id(session, state, read_chain_marker())
 
-    if walk.tampered_ids:
+    if unsigned_anchor is not None:
+        status, broken_row_id, reason = "broken", unsigned_anchor, "unsigned_anchor"
+    elif reset_row is not None:
+        status, broken_row_id, reason = "broken", reset_row, "chain_reset"
+    elif walk.tampered_ids:
         status, broken_row_id = "broken", walk.tampered_ids[0]
+        reason = "unsigned_row" if broken_row_id in walk.unsigned_ids else "hash_mismatch"
     elif race_ids:
-        status, broken_row_id = "race_breaks", race_ids[0]
+        status, broken_row_id, reason = "race_breaks", race_ids[0], "race_breaks"
     else:
-        status, broken_row_id = "ok", None
+        status, broken_row_id, reason = "ok", None, None
 
     # Rows up to and including the first problem, as before #217: what
-    # comes after a break isn't vouched for by the rows before it.
+    # comes after a break isn't vouched for by the rows before it. With an
+    # anchor nothing vouches for, no row is.
     if broken_row_id is None:
         checked = walk.rows_checked
+    elif unsigned_anchor is not None or reset_row is not None:
+        checked = 0
     else:
         checked = walk.checked_up_to[broken_row_id]
 
@@ -331,6 +394,7 @@ def verify_chain(key: bytes, session: Session) -> ChainVerificationResult:
         broken_row_id=broken_row_id,
         race_break_ids=race_ids,
         known_break_count=walk.known_break_count,
+        reason=reason,
     )
 
 
@@ -395,6 +459,66 @@ def record_known_breaks(
     return verify_chain(key, session)
 
 
+FAILED_CHECK_ACTION = "audit.integrity_check_failed"
+
+
+def record_failed_check(
+    session: Session, result: ChainVerificationResult, *, user_id: int | None
+) -> None:
+    """Audits a verification that didn't pass, scheduled (user_id None) or
+    run by hand, so the log itself says when a break was seen and by whom.
+    Written after the verification, chained like any entry: it doesn't
+    change what the verification found. Does not commit."""
+    from app.audit import record_audit_event  # deferred: see _unsigned_anchor_row_id
+
+    state = session.exec(select(AuditChainState)).first()
+    record_audit_event(
+        session,
+        user_id=user_id,
+        action=FAILED_CHECK_ACTION,
+        target_type="audit_log",
+        metadata={
+            "status": state.status if state else "broken",
+            "broken_row_id": result.broken_row_id,
+            "reason": result.reason,
+            "checked": result.checked_count,
+            "race_breaks": len(result.race_break_ids),
+        },
+    )
+
+
+def report_unsigned_audit_rows(key: bytes, session: Session) -> bool:
+    """Run at startup (app/main.py), after the backfill has signed the rows
+    it may sign: a row still without a hash was written outside the app,
+    and a database without the chain the marker in DATA_DIR says was
+    started had its hashes taken away (chain_reset_row_id). Logs an ERROR
+    and verifies the chain at once, instead of at the next scheduled check,
+    so the Audit Log page and /monitoring/health show it (status "broken")
+    and the failed check is audited. Commits. Returns whether there was
+    either."""
+    marker = read_chain_marker()
+    state = session.exec(select(AuditChainState)).first()
+    reset_row = chain_reset_row_id(session, state, marker)
+    unsigned = unsigned_row_ids(session, limit=100)
+    if reset_row is None and not unsigned:
+        return False
+    if reset_row is not None:
+        logger.error(
+            "audit_hash_chain.chain_reset",
+            marker=str(marker.path),
+            marker_first_row_id=marker.first_row_id,
+            row_id=reset_row,
+        )
+    if unsigned:
+        logger.error("audit_hash_chain.unsigned_rows", row_ids=unsigned)
+    result = verify_chain(key, session)
+    session.commit()
+    if not result.ok:
+        record_failed_check(session, result, user_id=None)
+        session.commit()
+    return True
+
+
 def run_audit_integrity_check() -> None:
     """The APScheduler job (see app/main.py's lifespan)."""
     # Imported here, not at module load, so a test can monkeypatch
@@ -406,6 +530,9 @@ def run_audit_integrity_check() -> None:
     with Session(engine) as session:
         result = verify_chain(audit_chain_key(), session)
         session.commit()
+        if not result.ok:
+            record_failed_check(session, result, user_id=None)
+            session.commit()
         if result.ok:
             logger.info(
                 "audit_integrity.check_complete",

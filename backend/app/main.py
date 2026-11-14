@@ -41,9 +41,15 @@ from app.api.sso import router as sso_router
 from app.api.system_settings import router as system_settings_router
 from app.api.updates import router as updates_router
 from app.api.users import router as users_router
-from app.audit_hash_chain import backfill_chain_if_needed
-from app.audit_integrity import run_audit_integrity_check
-from app.audit_purge import run_audit_purge_sweep
+from app.audit_hash_chain import (
+    backfill_chain_if_needed,
+    ensure_chain_marker,
+    first_signed_row_id,
+    read_chain_marker,
+)
+from app.audit_integrity import report_unsigned_audit_rows, run_audit_integrity_check
+from app.audit_outbox import drain_audit_outbox
+from app.audit_purge import run_audit_purge_sweep, sign_legacy_anchor
 from app.auth.sessions import run_session_purge_sweep
 from app.backup import SCHEDULE_TICK as BACKUP_TICK
 from app.backup import record_pending_restore, run_scheduled_backup
@@ -68,6 +74,7 @@ from app.jobs import shutdown as shutdown_background_work
 from app.logging_config import configure_logging, get_logger
 from app.monitoring_access import require_probe_access
 from app.name_index import run_name_index_sweep
+from app.request_context import ClientAddressMiddleware
 from app.scheduler import scheduler
 from app.schema_version import check_database_revision
 from app.scratch import get_scratch_store
@@ -293,10 +300,22 @@ async def _started(app: FastAPI, settings):
         # Must run before anything below that could write an AuditLog row --
         # see backfill_chain_if_needed's own docstring for why order matters
         # here.
-        backfilled = backfill_chain_if_needed(audit_chain_key(), session)
+        # The chain marker in DATA_DIR says whether the chain was ever
+        # started here, whatever the database says (ChainMarker).
+        chain_marker = read_chain_marker()
+        backfilled = backfill_chain_if_needed(audit_chain_key(), session, marker=chain_marker)
         if backfilled:
             logger.info("audit_hash_chain.backfill_complete", rows=backfilled)
+        # Same moment, same reason: the first start after upgrading to 0.7.0
+        # records an anchor left by an older purge (app/audit_purge.py).
+        if sign_legacy_anchor(session, marker_present=chain_marker is not None):
+            logger.info("audit_purge.legacy_anchor_recorded")
         session.commit()
+        # Any row still without a hash was written outside the app.
+        report_unsigned_audit_rows(audit_chain_key(), session)
+        # Events a migration recorded without the chain key become ordinary
+        # entries at the end of the chain (app/audit_outbox.py).
+        drain_audit_outbox(session)
         # A restore (app/backup.py) can't audit itself in the database it
         # replaces: the first start on the restored database does.
         if record_pending_restore(session, settings):
@@ -306,6 +325,13 @@ async def _started(app: FastAPI, settings):
         seed_no_access_role(session)
         seed_severity_patterns(session)
         backfill_sso_user_issuers(session)
+        session.commit()
+        # Once the chain has started (the backfill above, or the seeding on
+        # a new install), the marker says so from outside the database.
+        if ensure_chain_marker(session):
+            logger.info(
+                "audit_hash_chain.marker_written", first_row_id=first_signed_row_id(session)
+            )
 
     store = get_scratch_store()
     # Nothing in scratch can be in use yet: whatever is there was left by a
@@ -410,6 +436,9 @@ app = FastAPI(title="PerchTail", version=APP_VERSION, lifespan=lifespan)
 app.add_middleware(OriginCheckMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
+# Outermost, so everything else sees the resolved client address and the
+# request's audit context (app/request_context.py).
+app.add_middleware(ClientAddressMiddleware)
 app.include_router(auth_router)
 app.include_router(alerts_router)
 app.include_router(files_router)

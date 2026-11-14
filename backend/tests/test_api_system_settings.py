@@ -40,6 +40,7 @@ def client_for(session):
 _DEFAULTS = {
     "audit_view_enabled": True,
     "audit_retention_days": 365,
+    "audit_folder_listings": True,
     "source_max_roots": 20,
     "connections_view_switchable": True,
     "connections_view_default": "list",
@@ -119,12 +120,121 @@ def test_audit_retention_days_can_be_updated(session, client_for):
     user = _make_user(session, is_super_admin=True)
     client = client_for(user)
 
-    response = client.patch("/system-settings", json={"audit_retention_days": 30})
+    response = client.patch("/system-settings", json={"audit_retention_days": 90})
     assert response.status_code == 200
-    assert response.json()["audit_retention_days"] == 30
+    assert response.json()["audit_retention_days"] == 90
 
     response = client.get("/system-settings")
-    assert response.json()["audit_retention_days"] == 30
+    assert response.json()["audit_retention_days"] == 90
+
+
+@pytest.mark.parametrize("days", [1, 30, 89])
+def test_audit_retention_below_the_minimum_is_refused(session, client_for, days):
+    client = client_for(_make_user(session, is_super_admin=True))
+    response = client.patch("/system-settings", json={"audit_retention_days": days})
+    assert response.status_code == 422
+    assert "90 days" in response.json()["detail"]
+    assert client.get("/system-settings").json()["audit_retention_days"] == 365
+
+
+@pytest.mark.parametrize(("current", "new"), [(365, 90), (0, 365), (0, 90)])
+def test_only_a_super_admin_shortens_the_audit_retention(session, client_for, current, new):
+    from app import system_settings
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    system_settings.set_int(session, "audit_retention_days", current)
+    session.commit()
+    delegated = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+
+    response = client_for(delegated).patch("/system-settings", json={"audit_retention_days": new})
+    assert response.status_code == 403
+    assert system_settings.get_int(session, "audit_retention_days") == current
+    assert session.exec(select(AuditLog)).all() == []
+
+    admin = _make_user(session, is_super_admin=True)
+    response = client_for(admin).patch("/system-settings", json={"audit_retention_days": new})
+    assert response.status_code == 200
+    assert response.json()["audit_retention_days"] == new
+
+
+@pytest.mark.parametrize(("current", "new"), [(365, 400), (365, 0), (90, 365)])
+def test_a_delegated_admin_may_lengthen_the_audit_retention(session, client_for, current, new):
+    from app import system_settings
+
+    system_settings.set_int(session, "audit_retention_days", current)
+    session.commit()
+    delegated = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+    response = client_for(delegated).patch("/system-settings", json={"audit_retention_days": new})
+    assert response.status_code == 200
+    assert response.json()["audit_retention_days"] == new
+
+
+def test_only_a_super_admin_turns_off_folder_listing_auditing(session, client_for):
+    from app import system_settings
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    delegated = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+    response = client_for(delegated).patch(
+        "/system-settings", json={"audit_folder_listings": False}
+    )
+    assert response.status_code == 403
+    assert system_settings.get_bool(session, "audit_folder_listings") is True
+    assert session.exec(select(AuditLog)).all() == []
+
+    admin = _make_user(session, is_super_admin=True)
+    response = client_for(admin).patch("/system-settings", json={"audit_folder_listings": False})
+    assert response.status_code == 200
+    assert response.json()["audit_folder_listings"] is False
+
+
+def test_a_delegated_admin_may_turn_folder_listing_auditing_on(session, client_for):
+    from app import system_settings
+
+    system_settings.set_bool(session, "audit_folder_listings", False)
+    session.commit()
+    delegated = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+    client = client_for(delegated)
+
+    response = client.patch("/system-settings", json={"audit_folder_listings": True})
+    assert response.status_code == 200
+    assert response.json()["audit_folder_listings"] is True
+    # Sending the value it already has changes nothing and is not refused.
+    response = client.patch("/system-settings", json={"audit_folder_listings": True})
+    assert response.status_code == 200
+
+
+def test_the_audit_entry_records_old_and_new_values(session, client_for):
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    client = client_for(_make_user(session, is_super_admin=True))
+    response = client.patch(
+        "/system-settings",
+        json={"audit_retention_days": 400, "audit_folder_listings": False},
+    )
+    assert response.status_code == 200
+    [entry] = session.exec(
+        select(AuditLog).where(AuditLog.action == "system_settings.update")
+    ).all()
+    assert entry.event_metadata["audit_retention_days"] == {"old": 365, "new": 400}
+    assert entry.event_metadata["audit_folder_listings"] == {"old": True, "new": False}
+
+
+def test_a_secret_setting_is_recorded_only_as_changed(session, client_for, monkeypatch):
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    monkeypatch.setattr(
+        "app.api.system_settings.SECRET_SETTINGS", frozenset({"audit_retention_days"})
+    )
+    client = client_for(_make_user(session, is_super_admin=True))
+    assert client.patch("/system-settings", json={"audit_retention_days": 400}).status_code == 200
+    [entry] = session.exec(
+        select(AuditLog).where(AuditLog.action == "system_settings.update")
+    ).all()
+    assert entry.event_metadata["audit_retention_days"] == "changed"
 
 
 def test_audit_retention_days_zero_means_keep_forever_and_is_accepted(session, client_for):

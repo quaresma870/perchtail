@@ -363,6 +363,13 @@ def test_a_failed_delivery_is_retried_then_given_up_after_an_hour(session, monke
     session.refresh(alert)
     assert session.exec(select(AlertDelivery)).all() == []
     assert alert.failed_deliveries == 1
+    # Only the delivery given up is audited, not each retry before it.
+    from app.auth.models import AuditLog
+
+    [entry] = session.exec(select(AuditLog).where(AuditLog.action == "alert.delivery_failed")).all()
+    assert (entry.target_type, entry.target_id) == ("alert", alert.id)
+    assert entry.event_metadata["attempts"] == 2
+    assert "refused" in entry.event_metadata["error"]
 
 
 def test_a_retry_that_works_clears_the_error(session, monkeypatch):

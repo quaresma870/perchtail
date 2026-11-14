@@ -243,12 +243,12 @@ A delegated administrator can only map a group to a role within their own access
 
 **Settings → Audit log** lists every sign-in and every change to sources, rules, roles, users, customers, folders, SSO and system settings, plus every file open, Tail start, download and folder ZIP, and every alert change.
 
-- The table has **Time**, **User**, **Action**, **Target** and **Details**. Click **Time**, **User**, **Action** or **Target** to sort; the sort covers every matching entry, not only the page on screen.
+- The table has **Time**, **User**, **Action**, **Target**, **From** (the client's address and User-Agent), **Session** (a short reference to the sign-in session, never its token) and **Details**. Times are shown in your browser's time zone, named in the **Time** header and next to each time. Click **Time**, **User**, **Action** or **Target** to sort; the sort covers every matching entry, not only the page on screen.
 - Filter by **Action**, by target (one list per target type, to pick single targets by name or every target of that type, including deleted ones) and by **Date range**. **Clear filters** resets them.
 - Targets link to the object while it exists. A deleted object shows its id.
 - Pages hold 50 entries, with **Previous** and **Next**.
 
-The **Audit log** switch under **Settings → System** hides the page for everyone. Events are still recorded while it is off.
+The **Audit log** switch under **Settings → System** hides the page for everyone. Events are still recorded while it is off. The **Audit folder listings** switch records every folder listed below a source's root; only a super admin can turn it off. Every recorded event is listed in [audit-events.md](audit-events.md).
 
 ### Integrity
 
@@ -261,11 +261,11 @@ The banner at the top of the page shows the result of the last check:
 - **Known breaks from the #213 race**: concurrent writes before 0.5.2 could fork the chain. These rows were written by PerchTail itself. A super admin clicks **Mark as known** once; verification then accepts exactly those rows. Any other break is still reported as tampering.
 - **Audit log integrity has not been checked yet**.
 
-The check runs on its own every `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` days (365 by default). **Verify now** runs it at once; a second click within 30 seconds returns the result already stored. A broken chain also turns `/monitoring/health` to `degraded` ([Monitoring](monitoring.md)).
+The check runs on its own every `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` days (every day by default). **Verify now** runs it at once; a second click within 30 seconds returns the result already stored. A broken chain also turns `/monitoring/health` to `degraded` ([Monitoring](monitoring.md)).
 
 ### Retention
 
-**Audit log retention** under **Settings → System** sets how many days entries are kept (365 by default; 0 keeps them forever). A purge runs once a day (`AUDIT_PURGE_INTERVAL_SECONDS`) and removes older entries from the oldest up. The chain keeps the hash of the last removed entry, so a purge doesn't count as a break.
+**Audit log retention** under **Settings → System** sets how many days entries are kept (365 by default; at least 90, or 0 to keep them forever). Only a super admin can shorten it. A purge runs once a day (`AUDIT_PURGE_INTERVAL_SECONDS`), removes older entries from the oldest up and is itself recorded as `audit.purge`. The chain keeps the hash of the last removed entry, so a purge doesn't count as a break.
 
 ## Alerts
 

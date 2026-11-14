@@ -24,7 +24,7 @@
 - **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
 - **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks.
 - **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults) and optional TOTP; OIDC single sign-on with group-to-role mapping.
-- **Operations:** settings in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained and verified, bulk YAML import and export, and server-side limits on listings and downloads running at once (Settings → System).
+- **Operations:** settings in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained, verified daily and records where each action came from, including refused requests, bulk YAML import and export, and server-side limits on listings and downloads running at once (Settings → System).
 - **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
 
 **What's next.** 0.7 is the last feature release before 1.0. It removes the content index and the full-text Search page, so nothing from the logs is stored, and adds a file-name index with one search across sources, folders and files, live alerts, PostgreSQL support, push-agent upgrades from the portal, user groups and temporary access, notifications and API tokens. 1.0 adds no features: load tests and a sizing guide, OWASP ZAP, OpenSSF Scorecard and provenance in CI, and an external pentest. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
@@ -278,6 +278,8 @@ way — attach it to a shared Docker network with the `perchtail` service and
 `proxy_pass` to `http://perchtail:8000` directly, and drop the host port
 publish in `docker-compose.yml` entirely rather than binding it to loopback.
 
+The audit log records each request's client address. PerchTail only believes `X-Forwarded-For` from a proxy listed in `TRUSTED_PROXIES` (loopback only by default): with nginx in its own container or on another host, set `TRUSTED_PROXIES` to its address in `.env`, or every entry records the proxy's address instead of the client's (see [docs/audit-events.md](docs/audit-events.md#client-address)).
+
 ## Documentation
 
 Installing and running PerchTail:
@@ -288,6 +290,7 @@ Installing and running PerchTail:
 - [docs/configuration.md](docs/configuration.md) — configuration reference: environment variables and Settings → System
 - [docs/backup-and-restore.md](docs/backup-and-restore.md) — encrypted backups, scheduled backups, restoring, rolling back an upgrade and testing a restore
 - [docs/monitoring.md](docs/monitoring.md) — the liveness and readiness probes and who may call them, the detailed health endpoint and its token, Prometheus `/metrics`, the Zabbix 7.0 and 8.0 templates, and the log events worth alerting on
+- [docs/audit-events.md](docs/audit-events.md) — every event the audit log records, the fields of an entry, the client address behind a proxy, retention and integrity checks
 - [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — rotating `CREDENTIAL_ENCRYPTION_KEY` without losing access to what's already encrypted
 - [docs/high-availability.md](docs/high-availability.md) — whether and how to run PerchTail behind a load balancer or on Kubernetes, and what lives in the process
 - [docs/troubleshooting.md](docs/troubleshooting.md) — troubleshooting and FAQ

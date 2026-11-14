@@ -19,6 +19,9 @@ BOOL_DEFAULTS: dict[str, str] = {
     # The file-name index (#304, app/name_index.py): names, sizes and times
     # of every source's rule-visible files, never content. On by default.
     "name_index_enabled": "true",
+    # Whether listing a folder below a source's root is audited
+    # (`source.browse`); opening a source, its root, always is. On by default.
+    "audit_folder_listings": "true",
 }
 
 # Enumerated string settings: key -> (default, allowed values). A value

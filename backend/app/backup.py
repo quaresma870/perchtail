@@ -142,6 +142,10 @@ class DatabaseDialect(Protocol):
     def clear_companions(self, path: Path) -> None:
         """Removes files the database engine keeps next to path."""
 
+    def audit_chain(self, path: Path) -> tuple[bool, int | None]:
+        """Whether the copy at path holds a started audit hash chain (a
+        signed row or a purge anchor), and its lowest signed row."""
+
 
 class SqliteDialect:
     member = "perchtail.db"
@@ -194,6 +198,23 @@ class SqliteDialect:
         finally:
             connection.close()
         return row[0] if row else None
+
+    def audit_chain(self, path: Path) -> tuple[bool, int | None]:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            first = connection.execute(
+                "SELECT MIN(id) FROM auditlog WHERE row_hash IS NOT NULL"
+            ).fetchone()[0]
+            anchor = connection.execute(
+                "SELECT 1 FROM audit_chain_state "
+                "WHERE anchor_hash IS NOT NULL OR anchor_row_id IS NOT NULL LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # A database from before the chain existed.
+            return False, None
+        finally:
+            connection.close()
+        return first is not None or anchor is not None, first
 
     def clear_companions(self, path: Path) -> None:
         for suffix in self._companions:
@@ -836,6 +857,7 @@ def _restore(path: Path, force: bool, settings: Settings) -> RestoreResult:
             )
         if key_check is False:
             logger.warning("backup.restore_forced", file=path.name)
+        chain_started, chain_first_row = dialect.audit_chain(opened.files[dialect.member])
 
         # Lay out the new DATA_DIR next to the current one, then swap.
         targets = {
@@ -863,6 +885,15 @@ def _restore(path: Path, force: bool, settings: Settings) -> RestoreResult:
             "restored_at": restored_at,
         }
         (staging / RESTORE_MARKER).write_text(json.dumps(marker), encoding="utf-8")
+        # The audit chain marker (app.audit_hash_chain.ChainMarker) belongs
+        # with the database it vouches for: put back when the restored one
+        # has a chain, so a restored chain whose hashes are taken away is
+        # still caught; left out when it has none (a backup from before the
+        # chain), so the first start signs its rows once, as on an upgrade.
+        if chain_started:
+            from app.audit_hash_chain import CHAIN_MARKER_NAME, write_chain_marker
+
+            write_chain_marker(staging / CHAIN_MARKER_NAME, chain_first_row)
         staging_lock = instance_lock.acquire(settings.model_copy(update={"data_dir": str(staging)}))
 
         previous = data_dir.with_name(f"{data_dir.name}.before-restore-{stamp}")

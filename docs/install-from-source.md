@@ -134,7 +134,7 @@ EnvironmentFile=/etc/perchtail/perchtail.env
 WorkingDirectory=/opt/perchtail/backend
 ExecStartPre=/opt/perchtail-venv/bin/python -m app.data_layout
 ExecStartPre=/opt/perchtail-venv/bin/python -m alembic upgrade head
-ExecStart=/opt/perchtail-venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/perchtail-venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 Restart=on-failure
 UMask=0077
 NoNewPrivileges=true
@@ -161,6 +161,8 @@ On the first start, PerchTail creates the break-glass super-admin and logs its g
 On every start, `python -m app.data_layout` moves a layout from before 0.5.0 into `DATA_DIR` (a fresh install has nothing to move) and tightens its permissions. `alembic upgrade head` then creates or migrates the database.
 
 Run a single uvicorn worker, as the Docker image does. The background jobs, login throttling, the connector limits, the scratch cache and push-agent connections all live in that one process (see [high-availability.md](high-availability.md)). Put a reverse proxy with TLS in front, as described in the README under "Deployment: reverse proxy (nginx) + TLS". Never expose PerchTail to the internet without authentication in front of it.
+
+`--no-proxy-headers` stops uvicorn from reading `X-Forwarded-For` itself: PerchTail resolves the client address on its own, trusting only the proxies listed in `TRUSTED_PROXIES` (loopback by default, which covers a proxy on the same host).
 
 ## Upgrading
 

@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 from starlette.types import Receive, Scope, Send
 
-from app import source_roots, system_settings
+from app import request_context, source_roots, system_settings
 from app.api.auth import get_current_active_user
 from app.archives import (
     ArchiveMember,
@@ -433,6 +433,23 @@ def browse(
     limit = _listing_max_entries(session)
     with get_limiter().connector(current_limits(session), source.id):
         entries, truncated = _browse(source, path, refresh, all_members, user, session, limit)
+    if path and not refresh and system_settings.get_bool(session, "audit_folder_listings"):
+        # A folder below the root (or inside an archive) that was listed:
+        # what someone looked through, not only what they opened. The
+        # "Audit folder listings" System setting, on by default. Like the
+        # root, the explorer's periodic refresh isn't audited again.
+        metadata: dict = {"path": path}
+        if all_members:
+            metadata["all_members"] = True
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="source.browse",
+            target_type="source",
+            target_id=source.id,
+            metadata=metadata,
+        )
+        session.commit()
     _set_listing_headers(response, truncated, limit)
     return entries
 
@@ -611,6 +628,11 @@ def _resolve_content_audited(
             metadata={"path": refused_path, "reason": _AUDIT_REFUSAL_REASON},
         )
         session.commit()
+        # Audited here, so the central access.denied handler (app/api/errors.py)
+        # doesn't write it again.
+        context = request_context.current()
+        if context is not None:
+            context.denial_handled = True
         raise
 
 

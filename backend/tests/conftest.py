@@ -79,6 +79,20 @@ def _reset_login_throttle():
 
 
 @pytest.fixture(autouse=True)
+def _own_audit_chain_marker(monkeypatch, tmp_path):
+    # The audit chain marker lives in DATA_DIR (app.audit_hash_chain), which
+    # tests share: each test gets its own, absent unless the test writes it.
+    from app import audit_hash_chain
+
+    original = audit_hash_chain.chain_marker_path
+    monkeypatch.setattr(
+        audit_hash_chain,
+        "chain_marker_path",
+        lambda data_dir=None: original(tmp_path if data_dir is None else data_dir),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_source_status_writes(monkeypatch):
     # app/source_status.py writes through app.db.engine, which tests don't
     # point at their database; tests/test_source_status.py turns it on.

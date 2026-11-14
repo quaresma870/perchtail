@@ -21,6 +21,13 @@
   let error = ''
 
   let auditViewEnabled = true
+  let auditFolderListings = true
+  // Turning folder listings off takes a super admin (the server refuses
+  // anyone else), so for others the switch stays put while it's on.
+  const AUDIT_FOLDER_LISTINGS_LOCKED_HINT = 'Only a super admin can turn it off.'
+  $: auditFolderListingsLocked = auditFolderListings && !$currentUser?.is_super_admin
+  // The shortest retention the server accepts, besides 0 (forever).
+  const AUDIT_RETENTION_MIN_DAYS = 90
   let auditRetentionDays = 365
   let retentionInput = '365'
   let connectionsViewDefault: 'list' | 'tree' = 'list'
@@ -134,6 +141,7 @@
     try {
       const settings = await api.get<SystemSettings>('/system-settings')
       auditViewEnabled = settings.audit_view_enabled
+      auditFolderListings = settings.audit_folder_listings
       auditRetentionDays = settings.audit_retention_days
       retentionInput = String(settings.audit_retention_days)
       maxRoots = settings.source_max_roots
@@ -418,10 +426,35 @@
     }
   }
 
+  async function toggleAuditFolderListings(event: Event) {
+    const input = event.currentTarget as HTMLInputElement
+    const next = !auditFolderListings
+    saving = true
+    error = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        audit_folder_listings: next,
+      })
+      auditFolderListings = settings.audit_folder_listings
+      systemSettings.set(settings)
+    } catch (err) {
+      // The switch moved before the request: put it back where the
+      // setting still is.
+      input.checked = auditFolderListings
+      error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
+    } finally {
+      saving = false
+    }
+  }
+
   async function saveRetention() {
     const parsed = Number(retentionInput)
-    if (!Number.isInteger(parsed) || parsed < 0) {
-      retentionError = 'Enter a whole number of days (0 = keep forever).'
+    if (
+      !Number.isInteger(parsed) ||
+      parsed < 0 ||
+      (parsed !== 0 && parsed < AUDIT_RETENTION_MIN_DAYS)
+    ) {
+      retentionError = `Enter at least ${AUDIT_RETENTION_MIN_DAYS} days, or 0 to keep entries forever.`
       return
     }
     retentionError = ''
@@ -914,8 +947,7 @@
         <div>
           <div class="setting-name">Audit log</div>
           <p class="hint">
-            The audit log page under Settings, listing logins and every source/rule/role/user/
-            customer/folder/SSO/system-settings change. Turning this off hides the page and
+            The audit log page under Settings: who did what, when and from where. Turning this off hides the page and
             redirects away from it for every user — it doesn't stop new events from being
             recorded, so re-enabling it later shows the full history again.
           </p>
@@ -932,12 +964,33 @@
         </label>
       </div>
 
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Audit folder listings</div>
+          <p class="hint">
+            Records every folder someone lists below a source's root, not only the sources they
+            open and the files they open or download. Only a super admin can turn it off.
+          </p>
+        </div>
+        <label class="switch" title={auditFolderListingsLocked ? AUDIT_FOLDER_LISTINGS_LOCKED_HINT : undefined}>
+          <input
+            type="checkbox"
+            aria-label="Audit folder listings"
+            checked={auditFolderListings}
+            disabled={saving || auditFolderListingsLocked}
+            on:change={toggleAuditFolderListings}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+
       <div class="setting-row column">
         <div>
           <div class="setting-name">Audit log retention</div>
           <p class="hint">
-            Entries older than this are purged automatically on a daily sweep. 0 keeps every entry
-            forever.
+            Entries older than this are purged automatically on a daily sweep, and the purge is
+            itself recorded. At least {AUDIT_RETENTION_MIN_DAYS} days, or 0 to keep every entry
+            forever. Only a super admin can shorten it.
           </p>
         </div>
         {#if retentionError}

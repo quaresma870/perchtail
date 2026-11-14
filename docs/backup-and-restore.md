@@ -180,6 +180,8 @@ sudo systemd-run --pipe --wait --uid=perchtail --gid=perchtail \
 sudo systemctl start perchtail
 ```
 
+The audit chain marker, `DATA_DIR/.audit-chain-started`, records outside the database that the audit log's hash chain has started (see [audit-events.md](audit-events.md#integrity)); it isn't part of the backup. The restore writes it again in the new `DATA_DIR` when the backup's database has a chain, so stripping the restored log's signatures is still reported; when the backup has none (made before the chain existed), it's left out and the first start signs those entries once, as on an upgrade. The previous marker stays in the `before-restore` copy with the rest of the old `DATA_DIR`. Don't delete it by hand: without it, an audit log whose signatures were all removed would be signed again on the next start.
+
 ## Rolling back an upgrade
 
 An upgraded PerchTail migrates the database on its first start, and the previous version refuses to start on it (`startup.database_newer_than_app`). Migrations aren't undone with their data: go back by restoring the backup made before the upgrade ([upgrade.md](upgrade.md#rolling-back)).

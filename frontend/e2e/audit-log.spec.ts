@@ -104,6 +104,45 @@ test('audit log: integrity banner verifies the hash chain on demand', async ({ p
   await expect(page.locator('.integrity-banner')).not.toHaveClass(/broken/)
 })
 
+test.describe('audit log times and origin', () => {
+  // A zone far from UTC, with no daylight saving time, so a UTC time read as
+  // local time can't pass by accident.
+  test.use({ timezoneId: 'Asia/Tokyo' })
+
+  test('times name their zone, and each entry says where it came from', async ({ page }) => {
+    await page.goto('/#/settings/audit-log')
+    // Opening the page is itself audited (audit.view); reload to see it.
+    await page.reload()
+    await pickAction(page, 'audit.view')
+
+    await expect(page.locator('thead')).toContainText('Time (Asia/Tokyo)')
+    await expect(page.locator('thead')).toContainText('From')
+    await expect(page.locator('thead')).toContainText('Session')
+
+    const row = page.locator('tbody tr').first()
+    await expect(row.locator('td').nth(2)).toContainText('audit.view')
+    await expect(row.locator('td').first()).toContainText('GMT+9')
+    // The test browser talks to the server directly, from loopback.
+    await expect(row.locator('td.origin .client-ip')).toHaveText(/^(127\.0\.0\.1|::1)$/)
+    await expect(row.locator('td.session code')).toHaveText(/^[0-9a-f]{16}$/)
+
+    // The row was written seconds ago: its hour is Tokyo's hour now (or a
+    // couple of minutes ago, across an hour boundary), nine hours ahead of
+    // UTC, never UTC's own.
+    const tokyoHour = (msAgo: number) =>
+      String(new Date(Date.now() - msAgo + 9 * 3600 * 1000).getUTCHours()).padStart(2, '0')
+    const hours = new Set([tokyoHour(0), tokyoHour(2 * 60 * 1000)])
+    await expect(row.locator('td').first()).toContainText(
+      new RegExp(`\\b(${[...hours].join('|')}):\\d\\d:\\d\\d`),
+    )
+
+    // The API gives the time in UTC, with its zone.
+    const response = await page.request.get('/audit?action=audit.view&limit=1')
+    const [entry] = (await response.json()).items
+    expect(entry.timestamp).toMatch(/Z$/)
+  })
+})
+
 test('audit log: opening a source names it in the Target column (#239)', async ({ page }) => {
   await page.goto('/#/viewer')
   await page.locator('.explorer').getByRole('button', { name: 'PerchTail application logs' }).click()

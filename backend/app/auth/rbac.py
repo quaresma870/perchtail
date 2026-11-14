@@ -4,10 +4,33 @@ from dataclasses import dataclass, field
 from fastapi import Depends, HTTPException, status
 from sqlmodel import Session, select
 
+from app import request_context
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, Role, RoleGrant, ScopeType, User
 from app.db import get_session
 from app.models import Folder, Source
+
+
+class PermissionDenied(HTTPException):
+    """A 403 that also says, for the audit log only, why it was refused
+    (app/api/errors.py records every 403 as `access.denied`). The detail
+    the caller sees stays neutral."""
+
+    def __init__(self, detail, *, reason: str) -> None:
+        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+        self.reason = reason
+
+
+def forbidden(detail, *, reason: str, user: User | None = None) -> PermissionDenied:
+    """The 403 to raise for a refused permission. `user`, when given, is
+    who was refused, for the access.denied entry: needed when the check
+    runs before (or without) the session cookie check that normally names
+    them."""
+    if user is not None:
+        context = request_context.current()
+        if context is not None and context.user_id is None:
+            context.user_id = user.id
+    return PermissionDenied(detail, reason=reason)
 
 
 def _find_grant(session: Session, *, role_id: int, scope_type: ScopeType, scope_id: int):
@@ -270,7 +293,7 @@ def require_capability(capability: Capability, get_current_user: Callable[..., U
         if source is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
         if not resolve_capability(session, user, source, capability):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted")
+            raise forbidden("Not permitted", reason=f"missing_capability:{capability}", user=user)
         return source
 
     return dependency
@@ -287,7 +310,9 @@ def require_global_capability(capability: GlobalCapability, get_current_user: Ca
             return user
         if capability in user.role.global_capabilities:
             return user
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted")
+        raise forbidden(
+            "Not permitted", reason=f"missing_global_capability:{capability}", user=user
+        )
 
     return dependency
 
@@ -426,7 +451,7 @@ def role_within_authority(session: Session, actor: User, role: Role) -> bool:
 
 def require_role_within_authority(session: Session, actor: User, role: Role) -> None:
     if not role_within_authority(session, actor, role):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ROLE_BEYOND_AUTHORITY)
+        raise forbidden(ROLE_BEYOND_AUTHORITY, reason="role_beyond_authority", user=actor)
 
 
 def require_changed_role_within_authority(session: Session, actor: User, role: Role) -> None:
@@ -440,7 +465,7 @@ def require_changed_role_within_authority(session: Session, actor: User, role: R
     session.flush()
     if not role_within_authority(session, actor, role):
         session.rollback()
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ROLE_BEYOND_AUTHORITY)
+        raise forbidden(ROLE_BEYOND_AUTHORITY, reason="role_beyond_authority", user=actor)
 
 
 def require_grant_within_authority(
@@ -460,7 +485,7 @@ def require_grant_within_authority(
         capabilities=capabilities,
         role_id=role_id,
     ):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ROLE_BEYOND_AUTHORITY)
+        raise forbidden(ROLE_BEYOND_AUTHORITY, reason="grant_beyond_authority", user=actor)
 
 
 OWN_ROLE_REFUSED = "You can't change your own role or the role you hold."
@@ -470,7 +495,7 @@ def require_not_own_role(actor: User, role: Role) -> None:
     """Only a super admin changes the role they hold: anyone else editing
     it would widen their own access."""
     if not actor.role.is_super_admin and role.id == actor.role_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=OWN_ROLE_REFUSED)
+        raise forbidden(OWN_ROLE_REFUSED, reason="own_role", user=actor)
 
 
 def require_capabilities_within_authority(
@@ -479,9 +504,10 @@ def require_capabilities_within_authority(
     if actor.role.is_super_admin:
         return
     if not set(global_capabilities) <= set(actor.role.global_capabilities):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not permitted: you can only grant global capabilities you hold yourself",
+        raise forbidden(
+            "Not permitted: you can only grant global capabilities you hold yourself",
+            reason="global_capability_beyond_authority",
+            user=actor,
         )
 
 

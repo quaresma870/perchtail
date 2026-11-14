@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 
 from app import system_settings
 from app.api.auth import get_current_active_user
+from app.audit import record_audit_event
 from app.auth.models import Capability, User
 from app.auth.rbac import visible_source_ids
 from app.db import get_session
@@ -95,6 +96,21 @@ def search_files(
             FileHit(source_id=sid, path=path, size=size, mtime=mtime)
             for _id, sid, path, size, mtime in rows
         ]
+
+    # What was looked for, by whom (#300): the query, not the results. Each
+    # page is its own search, so a paged one is one entry per page fetched.
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="files.search",
+        metadata={
+            "query": q,
+            "regex": regex,
+            "after": after,
+            "hits": len(hits),
+        },
+    )
+    session.commit()
 
     return FileSearchResult(
         hits=hits,

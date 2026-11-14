@@ -25,10 +25,12 @@ AGGREGATE_SECONDS = 60.0
 
 _lock = threading.Lock()
 # key -> (monotonic time of the last row written, failures folded since)
-_recent: dict[tuple[str, str, str | None, str], tuple[float, int]] = {}
+_recent: dict[tuple[str, str | None, str | None, str], tuple[float, int]] = {}
 
 
-def _user_id(session: Session, username: str) -> int | None:
+def _user_id(session: Session, username: str | None) -> int | None:
+    if username is None:
+        return None
     user = session.exec(select(User).where(User.username == username)).first()
     return user.id if user is not None else None
 
@@ -37,7 +39,7 @@ def _record(
     session: Session,
     action: str,
     *,
-    username: str,
+    username: str | None,
     client_ip: str | None,
     reason: str,
     extra: dict | None = None,
@@ -59,7 +61,9 @@ def _record(
             for stale in [k for k, (t, _) in _recent.items() if now - t >= AGGREGATE_SECONDS]:
                 del _recent[stale]
 
-    metadata = {"username": username, "client_ip": client_ip, "reason": reason, **(extra or {})}
+    metadata = {"client_ip": client_ip, "reason": reason, **(extra or {})}
+    if username is not None:
+        metadata = {"username": username, **metadata}
     if folded:
         metadata["similar_events_folded"] = folded
     record_audit_event(
@@ -92,6 +96,24 @@ def locked_out(
 def login_throttled(session: Session, *, username: str, client_ip: str | None) -> None:
     _record(
         session, "user.login_throttled", username=username, client_ip=client_ip, reason="locked"
+    )
+
+
+def sso_login_failed(
+    session: Session, *, client_ip: str | None, reason: str, error: str | None = None
+) -> None:
+    """A sign-in through the identity provider that didn't end in a session.
+    The callback is reachable without signing in, so it's folded like the
+    failures above. `error` is the provider's own error code or the kind of
+    failure, never a token or a claim."""
+    extra = {"error": error[:100]} if error else None
+    _record(
+        session,
+        "user.sso_login_failed",
+        username=None,
+        client_ip=client_ip,
+        reason=reason,
+        extra=extra,
     )
 
 

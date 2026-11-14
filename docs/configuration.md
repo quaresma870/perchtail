@@ -20,7 +20,7 @@ PerchTail reads its settings with pydantic-settings (`backend/app/config.py`, cl
 - **Values.** Booleans accept `true` or `false` (also `1`/`0`, `yes`/`no`, `on`/`off`). Sizes in MB or GB accept decimals. A value of the wrong type, or outside a fixed list, stops PerchTail at startup with an error that names the variable.
 - **Applying a change.** Restart PerchTail. With Docker Compose, run `docker compose up -d`: it recreates the container with the new `.env`, while `docker compose restart` keeps the old environment. For an install from source, `sudo systemctl restart perchtail`.
 - **The Docker image sets** `DATA_DIR=/data/db`, `LOG_DIR=/data/logs`, `SCRATCH_DIR=/data/scratch`, `BACKUP_DIR=/data/backups`, `AGENT_BINARIES_DIR=/app/agent-binaries` and `PERCHTAIL_INSTALL=docker` (`Dockerfile`). Leave these unset in `.env` unless you mount a volume somewhere else.
-- **Variables read by other programs** (`FORWARDED_ALLOW_IPS`, `HTTPS_PROXY`, `TZ`, `SMB_EXPERIMENTAL_TRANSPORT_RECEIVE_TIMEOUT`) must be in the process environment. Docker Compose and the systemd unit put them there; a `.env` file read only by PerchTail's own settings, as when you start `uvicorn` by hand in `backend/`, doesn't.
+- **Variables read by other programs** (`HTTPS_PROXY`, `TZ`, `SMB_EXPERIMENTAL_TRANSPORT_RECEIVE_TIMEOUT`) must be in the process environment. Docker Compose and the systemd unit put them there; a `.env` file read only by PerchTail's own settings, as when you start `uvicorn` by hand in `backend/`, doesn't.
 
 The defaults below are the code's defaults. Relative paths are relative to the working directory: `backend/` for a checkout, `/opt/perchtail/backend` with the install guide's paths.
 
@@ -92,7 +92,7 @@ What the audit log keeps, and whether its page is shown, are system settings (th
 | Variable | Default | Accepted values | Effect |
 |---|---|---|---|
 | `AUDIT_PURGE_INTERVAL_SECONDS` | `86400` (a day) | A whole number of seconds | How often the purge job deletes entries older than `audit_retention_days`. A job that missed its time while PerchTail was stopped runs after the next start. |
-| `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` | `365` | A whole number of days | How often the job that verifies the audit log's hash chain runs. A break logs `audit_integrity.chain_broken`. It also catches up after a restart. |
+| `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` | `1` | A whole number of days | How often the job that verifies the audit log's hash chain runs. A break logs `audit_integrity.chain_broken` and is recorded as `audit.integrity_check_failed`. It also catches up after a restart. |
 
 ## Monitoring and reverse proxy
 
@@ -102,7 +102,8 @@ Who may call `/healthz`, `/readyz`, `/monitoring/health` and `/metrics` is expla
 |---|---|---|---|
 | `PROBE_ALLOWED_NETWORKS` | empty | Comma-separated IP addresses or CIDR blocks | Callers that may use `/healthz` and `/readyz` without the monitoring token, such as a load balancer or a kubelet that can't send a header. A local caller without proxy headers (the Docker `HEALTHCHECK`) is always allowed. A malformed entry stops PerchTail at startup, naming it. |
 | `MONITORING_ALLOWED_NETWORKS` | empty | Comma-separated IP addresses or CIDR blocks | When set, `/monitoring/health` and `/metrics` also require the caller to be in one of these networks, on top of the token; others get `403`. A malformed entry stops PerchTail at startup. |
-| `FORWARDED_ALLOW_IPS` | `127.0.0.1,::1` | Comma-separated addresses of trusted proxies | Read by uvicorn, not by PerchTail's settings. uvicorn takes the client address from `X-Forwarded-For` only on a request from one of these addresses. Behind a reverse proxy in another container or on another machine, set it to the proxy's address so the allowed networks above see the real caller. Never `*`: any client could then name its own address. |
+| `TRUSTED_PROXIES` | `127.0.0.0/8, ::1` (loopback only) | Comma-separated IP addresses or CIDR blocks | The reverse proxies whose `X-Forwarded-For` PerchTail believes. On a request from one of them, the client address is the first address in `X-Forwarded-For`, read from the right, that isn't a trusted proxy; on a request from anywhere else, it is the TCP peer and `X-Forwarded-For` is ignored. That address is what the audit log records and what `PROBE_ALLOWED_NETWORKS` and `MONITORING_ALLOWED_NETWORKS` check. Behind a reverse proxy in another container or on another machine, set it to the proxy's address; never a range that holds clients, which could then name their own address. A malformed entry stops PerchTail at startup. See [audit-events.md](audit-events.md#client-address). |
+| `FORWARDED_ALLOW_IPS` | none | Not used | Has no effect on PerchTail. The Docker image and the systemd unit in [install-from-source.md](install-from-source.md) run uvicorn with `--no-proxy-headers`, so uvicorn never reads proxy headers and PerchTail resolves the client address itself, from `TRUSTED_PROXIES`. An old `.env` that sets it still starts; move its addresses to `TRUSTED_PROXIES`. |
 
 ## Backups
 
@@ -219,7 +220,8 @@ Shown to super admins only. See [upgrade.md](upgrade.md#the-updates-card) for wh
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
 | `audit_view_enabled` | **Audit log** | on | on, off | Shows the **Settings → Audit log** page to the roles allowed to see it. Off hides the page for everyone; events are still recorded. |
-| `audit_retention_days` | **Audit log retention** | `365` | `0` (keep forever), or a whole number of days | Entries older than this are deleted by the purge job (see `AUDIT_PURGE_INTERVAL_SECONDS`). |
+| `audit_folder_listings` | **Audit folder listings** | on | on, off | Records every folder someone lists below a source's root (`source.browse`), not only the sources they open and the files they open or download. Turning it on needs `manage_system_settings`; only a super admin can turn it off. |
+| `audit_retention_days` | **Audit log retention** | `365` | `0` (keep forever), or at least 90 days | Entries older than this are deleted by the purge job (see `AUDIT_PURGE_INTERVAL_SECONDS`), and each purge is recorded as `audit.purge`. Only a super admin can shorten it. See [audit-events.md](audit-events.md). |
 
 ### Password policy card
 

@@ -44,6 +44,28 @@ export function targetHref(entry: AuditLogEntry): string | null {
   }
 }
 
+// The API sends audit times in UTC, ending in Z. One without a zone (from an
+// older server) is UTC too, never local time.
+function parseUtc(iso: string): Date {
+  return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`)
+}
+
+// An audit time in the viewer's time zone, or `timeZone`, always naming the
+// zone, so a time copied out of the page can't be misread.
+export function formatAuditTime(iso: string, timeZone?: string): string {
+  return parseUtc(iso).toLocaleString(undefined, {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'short',
+  })
+}
+
 // The target's name and context are shown in their own column.
 const SHOWN_AS_TARGET = new Set(['target_name', 'target_context'])
 
