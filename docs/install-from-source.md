@@ -62,7 +62,7 @@ sudo mkdir -p /opt/perchtail
 sudo rsync -a --chown=root:root --delete --exclude .git --exclude frontend/node_modules ~/perchtail-build/ /opt/perchtail/
 
 sudo python3.12 -m venv /opt/perchtail-venv
-sudo /opt/perchtail-venv/bin/pip install -r /opt/perchtail/backend/requirements.txt
+sudo /opt/perchtail-venv/bin/pip install --require-hashes -r /opt/perchtail/backend/requirements.txt
 ```
 
 The code and the venv belong to root, and the service only reads them.
@@ -74,9 +74,7 @@ service runs. Check that nothing else owns a file there:
 sudo find /opt/perchtail /opt/perchtail-venv ! -user root   # must print nothing
 ```
 
-`backend/requirements.txt` pins every package to the same versions the
-Docker image installs. The version ranges they're generated from are in
-`backend/requirements.in`.
+`backend/requirements.txt` pins every package to the same versions the Docker image installs, each with its hashes: with `--require-hashes`, pip refuses a package that doesn't match what was pinned. The version ranges they're generated from are in `backend/requirements.in`.
 
 ## 4. Where state lives
 
@@ -213,7 +211,7 @@ sudo systemd-run --pipe --wait --uid=perchtail --gid=perchtail \
   /opt/perchtail-venv/bin/python -m app.backup create --reason pre-upgrade
 sudo systemctl stop perchtail
 sudo rsync -a --chown=root:root --delete --exclude .git --exclude frontend/node_modules ~/perchtail-build/ /opt/perchtail/
-sudo /opt/perchtail-venv/bin/pip install -r /opt/perchtail/backend/requirements.txt
+sudo /opt/perchtail-venv/bin/pip install --require-hashes -r /opt/perchtail/backend/requirements.txt
 sudo systemctl start perchtail          # migrates on start
 ```
 
