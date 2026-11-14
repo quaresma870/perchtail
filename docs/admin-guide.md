@@ -42,7 +42,7 @@ Related guides:
 | **Import / export** | super admins |
 | **Audit log** | roles with **View audit log**, while the **Audit log** switch under **Settings → System** is on |
 
-A super admin sees every page. [Configuration](configuration.md) describes each setting under **Settings → System**.
+A super admin sees every page (the Audit log only while its switch in **Settings → System** is on). [Configuration](configuration.md) describes each setting under **Settings → System**.
 
 ## Customers and folders
 
@@ -259,7 +259,7 @@ The banner at the top of the page shows the result of the last check:
 - **Audit log integrity verified** with the time of the check.
 - **Tampering detected**, with the row where the chain breaks. Everything from that row on can no longer be trusted as unaltered.
 - **Known breaks from the #213 race**: concurrent writes before 0.5.2 could fork the chain. These rows were written by PerchTail itself. A super admin clicks **Mark as known** once; verification then accepts exactly those rows. Any other break is still reported as tampering.
-- **Not checked yet**.
+- **Audit log integrity has not been checked yet**.
 
 The check runs on its own every `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` days (365 by default). **Verify now** runs it at once; a second click within 30 seconds returns the result already stored. A broken chain also turns `/monitoring/health` to `degraded` ([Monitoring](monitoring.md)).
 

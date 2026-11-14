@@ -157,7 +157,7 @@ docker compose pull && docker compose up -d
 
 They assume `docker-compose.yml` uses the published image. If yours builds from a checkout (`build: .`), follow [Upgrading with Docker](#upgrading-with-docker) instead.
 
-The steps shown for an install from source are those of [Upgrading an install from source](#upgrading-an-install-from-source), with the paths of [install-from-source.md](install-from-source.md); adjust them if your paths differ.
+The steps shown for an install from source follow [Upgrading an install from source](#upgrading-an-install-from-source), with the paths of [install-from-source.md](install-from-source.md); adjust them if your paths differ.
 
 ## Rolling back
 

@@ -165,7 +165,7 @@ The key is the setting's name in the code (`backend/app/system_settings.py`), as
 |---|---|---|---|---|
 | `connections_view_default` | **Connections view** | `list` | `list` (List), `tree` (Tree) | How the viewer's explorer lists sources for everyone who hasn't chosen: a flat list, or a tree by customer and folder. Open browsers pick it up on their next page change, within 30 seconds. |
 | `connections_view_switchable` | **Let users switch between list and tree** | on | on, off | On: each user can switch, and the choice follows them. Off: the switch is hidden and everyone sees the default view. |
-| `explorer_sort_default` | **File order** | `name_asc` (Name A→Z) | `name_asc` (Name A→Z), `name_desc` (Name Z→A), `mtime_desc` (Newest first), `mtime_asc` (Oldest first), `size_desc` (Largest first) | How the explorer orders files in a folder for users who haven't picked their own order. Folders always come first. |
+| `explorer_sort_default` | **File order** | `name_asc` (Name A→Z) | `name_asc` (Name A→Z), `name_desc` (Name Z→A), `mtime_desc` (Newest first), `mtime_asc` (Oldest first), `size_desc` (Largest first) | How the explorer orders files in a folder, for everyone. Folders always come first. |
 | `explorer_refresh_seconds` | **Refresh open folders** | `30` | `0` (off), or 5 to 3600 seconds | How often the explorer lists the folders people have open again, so rotated files show up. Only the list of files, never their content, and not while the browser tab is hidden. |
 | `tail_interval_seconds` | **Tail interval** | `2` | `1`, `2`, `5`, `10` seconds | How often Tail checks an open file for new lines, for everyone. A shorter interval is more live and asks the source more often. |
 

@@ -158,6 +158,7 @@ Docker, in the folder with `docker-compose.yml` and `.env`:
 
 ```bash
 docker compose up -d && docker compose stop perchtail   # creates the volume and the container
+docker compose run --rm --no-deps --entrypoint install perchtail -d -o perchtail -g perchtail -m 0700 /data/backups
 docker compose cp ./<file> perchtail:/data/backups/<file>
 docker compose run --rm --no-deps --entrypoint chown perchtail perchtail:perchtail /data/backups/<file>
 docker compose run --rm --no-deps -u perchtail --entrypoint python perchtail \
@@ -165,7 +166,7 @@ docker compose run --rm --no-deps -u perchtail --entrypoint python perchtail \
 docker compose up -d
 ```
 
-The first start creates an empty database and a new salt; the restore moves them aside to `/data/db.before-restore-<UTC time>`, which you can delete once the restored instance works. `docker compose cp` writes the file as root, hence the `chown`.
+The first start creates an empty database and a new salt; the restore moves them aside to `/data/db.before-restore-<UTC time>`, which you can delete once the restored instance works. A new volume has no `/data/backups` until the first backup, hence the `install -d`; `docker compose cp` writes the file as root, hence the `chown`.
 
 Install from source, after following [install-from-source.md](install-from-source.md) through the service unit:
 
