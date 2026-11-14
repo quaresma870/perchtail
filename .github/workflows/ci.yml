@@ -255,6 +255,54 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
+      # Dynamic scan of the running image (OWASP ZAP baseline): ZAP crawls
+      # the app as an anonymous visitor and checks every response for
+      # missing security headers, cookie flags, error and information
+      # disclosure. The rules in .zap/rules.tsv marked FAIL stop the merge;
+      # the rest is reported in the artifact. The instance runs with the
+      # production defaults (Secure cookies included) and throwaway secrets.
+      - name: Start the image for the ZAP scan
+        run: |
+          set -euo pipefail
+          key="$(openssl rand -base64 32)"
+          docker run -d --name perchtail -p 127.0.0.1:8080:8000 \
+            -e CREDENTIAL_ENCRYPTION_KEY="$key" \
+            -e PUBLIC_BASE_URL=http://127.0.0.1:8080 \
+            -e UPDATE_CHECK=false \
+            perchtail:ci
+          for _ in $(seq 1 60); do
+            if docker exec perchtail python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')" 2>/dev/null; then
+              echo "PerchTail is up"; exit 0
+            fi
+            sleep 2
+          done
+          docker logs perchtail | tail -50
+          exit 1
+
+      # The ZAP image is pinned by digest (2.17.0). Exit code 1 means a FAIL
+      # rule matched; warnings (2) don't fail the job (-I).
+      - name: Scan the running image (OWASP ZAP baseline)
+        run: |
+          set -euo pipefail
+          mkdir -p zap && chmod 777 zap
+          cp .zap/rules.tsv zap/rules.tsv
+          docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy@sha256:9624669db72f54d86c4b46a7064518bd9bf79d8c61a4c31befa9923489f328af \
+            zap-baseline.py -t http://127.0.0.1:8080 -c rules.tsv -I -j \
+              -r zap-report.html -J zap-report.json -w zap-report.md
+
+      - name: Upload the ZAP report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zap-baseline-report
+          path: zap/zap-report.*
+          if-no-files-found: ignore
+
+      - name: Stop the image
+        if: always()
+        run: docker rm -f perchtail >/dev/null 2>&1 || true
+
       # SBOM as a build artifact of every CI run. Releases get their own,
       # for the published multi-arch image (.github/workflows/release.yml).
       - name: Generate SBOM (CycloneDX)
