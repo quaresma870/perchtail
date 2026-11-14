@@ -33,13 +33,15 @@
     { key: 'view_audit_log', label: 'View audit log' },
     { key: 'manage_alerts', label: 'Create and edit alerts (webhooks export log content)' },
   ]
-  const ALL_CAPS: Capability[] = ['view', 'download', 'manage_rules', 'run_now']
+  const ALL_CAPS: Capability[] = ['view', 'download', 'manage_rules', 'manage_source', 'run_now']
   // Viewing a file necessarily sends its full content to the browser, so
   // `view` can read whole files; `download` gates bulk export on top of that.
   const CAP_HINTS: Record<Capability, string> = {
     view: 'Browse and open files in the viewer. Opening a file sends its full content; every open is audited.',
     download: 'Download whole files and folders as ZIP (bulk export). Every download is audited.',
     manage_rules: "Edit this scope's visibility rules.",
+    manage_source:
+      'Manage sources: edit, move and delete sources and folders here, their agent and credentials; with "Create new sources", add them here.',
     run_now: 'Reserved: not used by any feature yet.',
   }
 

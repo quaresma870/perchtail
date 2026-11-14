@@ -3,7 +3,7 @@ push agent with its version, policy and last attempt, and the actions --
 upgrade one agent, every outdated one, resume a suspended one. Only for users
 who can manage sources (the same create_source capability that edits them
 and issues their agent token); seeing an agent, its upgrades, changing its
-policy or upgrading it also needs manage rules on its source, as editing the
+policy or upgrading it also needs manage sources on its source, as editing the
 source does.
 
 The server sends an agent an `upgrade` command carrying nothing but its own
@@ -327,7 +327,7 @@ def _agent_source(
     session: Session, source_id: int, manager: User | None = None, reader: User | None = None
 ) -> Source:
     """The push-agent source. With `manager`, changing it (its policy, its
-    upgrades) also needs manage rules on it, as editing the source does.
+    upgrades) also needs manage sources on it, as editing the source does.
     With `reader`, reading its upgrades needs the same, and a source without
     it is not found, so it isn't revealed."""
     source = session.get(Source, source_id)

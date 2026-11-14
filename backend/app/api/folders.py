@@ -72,25 +72,32 @@ def _validate_parent(
 
 
 MANAGE_FOLDER_REFUSED = (
-    "You need manage rules on this folder (and where you're moving it) to change it."
+    "You need manage sources on this folder (and where you're moving it) to change it."
 )
+CREATE_FOLDER_REFUSED = "You need manage sources where you're adding this folder."
 
 
-def _require_manage_rules_at(
+def _holds_manage_source_at(
     session: Session, user: User, *, customer_id: int, folder_id: int | None
-) -> None:
-    """Moving or deleting a folder needs manage_rules on it, and moving it
-    also needs manage_rules where it goes (the new parent folder, or the
-    customer for its root): sources inherit the grants of the folders above
-    them, so create_source alone would otherwise let a role pull a folder it
-    can't reach under one it can, and read its sources."""
-    if not holds_capability_at(
+) -> bool:
+    return holds_capability_at(
         session,
         user,
         folder_id=folder_id,
         customer_id=customer_id,
-        capability=Capability.manage_rules,
-    ):
+        capability=Capability.manage_source,
+    )
+
+
+def _require_manage_source_at(
+    session: Session, user: User, *, customer_id: int, folder_id: int | None
+) -> None:
+    """Moving or deleting a folder needs manage_source on it, and moving it
+    also needs manage_source where it goes (the new parent folder, or the
+    customer for its root): sources inherit the grants of the folders above
+    them, so create_source alone would otherwise let a role pull a folder it
+    can't reach under one it can, and read its sources."""
+    if not _holds_manage_source_at(session, user, customer_id=customer_id, folder_id=folder_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=MANAGE_FOLDER_REFUSED)
 
 
@@ -119,6 +126,12 @@ def create_folder(
         parent_folder_id=payload.parent_folder_id,
         folder_id=None,
     )
+    # Adding a folder needs manage_source where it goes (its parent folder,
+    # or the customer for a top-level one), like adding a source.
+    if not _holds_manage_source_at(
+        session, user, customer_id=payload.customer_id, folder_id=payload.parent_folder_id
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=CREATE_FOLDER_REFUSED)
 
     folder = Folder(
         name=payload.name,
@@ -156,14 +169,16 @@ def update_folder(
         and payload.parent_folder_id != folder.parent_folder_id
     ):
         # Checked before anything changes: a refusal leaves the folder as it was.
-        _require_manage_rules_at(session, user, customer_id=folder.customer_id, folder_id=folder.id)
+        _require_manage_source_at(
+            session, user, customer_id=folder.customer_id, folder_id=folder.id
+        )
         _validate_parent(
             session,
             customer_id=folder.customer_id,
             parent_folder_id=payload.parent_folder_id,
             folder_id=folder.id,
         )
-        _require_manage_rules_at(
+        _require_manage_source_at(
             session, user, customer_id=folder.customer_id, folder_id=payload.parent_folder_id
         )
         # Nor may the move give the mover more on the folder than they have
@@ -206,7 +221,7 @@ def delete_folder(
     folder = session.get(Folder, folder_id)
     if folder is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
-    _require_manage_rules_at(session, user, customer_id=folder.customer_id, folder_id=folder.id)
+    _require_manage_source_at(session, user, customer_id=folder.customer_id, folder_id=folder.id)
 
     has_children = session.exec(select(Folder).where(Folder.parent_folder_id == folder_id)).first()
     has_sources = session.exec(select(Source).where(Source.folder_id == folder_id)).first()

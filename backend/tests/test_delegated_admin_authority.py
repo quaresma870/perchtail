@@ -535,3 +535,127 @@ def test_super_admin_is_never_limited(session, customers):
     wider = _role(session, grants=[(ScopeType.customer, customer_b.id, VIEW_DOWNLOAD)])
 
     assert role_within_authority(session, admin, wider)
+
+
+# --- manage_source ----------------------------------------------------------
+
+
+MANAGE_SOURCE = [Capability.view, Capability.manage_source]
+
+
+def test_manage_source_is_granted_only_where_the_admin_holds_it(session, customers):
+    """The new capability follows the same authority rule as the others: a
+    delegated admin grants manage_source only where they hold it."""
+    customer_a, customer_b = customers
+    admin = _user(
+        session,
+        _role(
+            session,
+            global_capabilities=[GlobalCapability.manage_roles],
+            grants=[
+                (ScopeType.customer, customer_a.id, MANAGE_SOURCE),
+                (ScopeType.customer, customer_b.id, VIEW),
+            ],
+        ),
+    )
+    target = _role(session)
+    client = _client(session, admin)
+
+    def grant(customer):
+        return client.post(
+            f"/roles/{target.id}/grants",
+            json={"scope_type": "customer", "scope_id": customer.id, "capabilities": MANAGE_SOURCE},
+        )
+
+    _assert_refused(grant(customer_b))
+    allowed = grant(customer_a)
+    assert allowed.status_code == 201, allowed.text
+    assert not grant_within_authority(
+        session,
+        admin,
+        scope_type=ScopeType.customer,
+        scope_id=customer_b.id,
+        capabilities=[Capability.manage_source],
+    )
+
+
+def test_manage_source_counts_when_assigning_a_role(session, customers):
+    customer_a, _ = customers
+    admin = _admin(session, customer_a, GlobalCapability.manage_users)
+    wider = _role(session, grants=[(ScopeType.customer, customer_a.id, MANAGE_SOURCE)])
+    other = _user(session, _role(session))
+    client = _client(session, admin)
+
+    _assert_refused(client.patch(f"/users/{other.id}", json={"role_id": wider.id}))
+
+
+def test_duplicating_a_role_keeps_manage_source(session, customers):
+    customer_a, _ = customers
+    admin = _user(session, _role(session, is_super_admin=True))
+    original = _role(session, grants=[(ScopeType.customer, customer_a.id, MANAGE_SOURCE)])
+    client = _client(session, admin)
+
+    response = client.post(f"/roles/{original.id}/duplicate", json={})
+    assert response.status_code == 201, response.text
+    copied = session.exec(select(RoleGrant).where(RoleGrant.role_id == response.json()["id"]))
+    assert [list(g.capabilities) for g in copied.all()] == [MANAGE_SOURCE]
+
+
+# --- the last super admin ---------------------------------------------------
+
+
+def test_the_last_super_admin_role_keeps_the_flag(session):
+    from app.api.roles import LAST_SUPER_ADMIN_ROLE_REFUSED
+
+    custom = _role(session, is_super_admin=True)
+    admin = _user(session, custom)
+    client = _client(session, admin)
+
+    response = client.patch(f"/roles/{custom.id}", json={"is_super_admin": False})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == LAST_SUPER_ADMIN_ROLE_REFUSED
+    session.refresh(custom)
+    assert custom.is_super_admin
+    # Renaming it is still fine.
+    assert client.patch(f"/roles/{custom.id}", json={"name": "renamed"}).status_code == 200
+
+
+def test_a_super_admin_role_can_drop_the_flag_while_another_has_active_users(session):
+    custom = _role(session, is_super_admin=True)
+    _user(session, custom)
+    admin = _user(session, _role(session, is_super_admin=True))
+    client = _client(session, admin)
+
+    response = client.patch(f"/roles/{custom.id}", json={"is_super_admin": False})
+    assert response.status_code == 200, response.text
+
+
+def test_inactive_super_admins_elsewhere_do_not_count(session):
+    custom = _role(session, is_super_admin=True)
+    admin = _user(session, custom)
+    inactive = _user(session, _role(session, is_super_admin=True))
+    inactive.active = False
+    session.add(inactive)
+    session.commit()
+    client = _client(session, admin)
+
+    assert client.patch(f"/roles/{custom.id}", json={"is_super_admin": False}).status_code == 409
+
+
+def test_a_super_admin_role_without_active_users_can_drop_the_flag(session):
+    unused = _role(session, is_super_admin=True)
+    admin = _user(session, _role(session, is_super_admin=True))
+    client = _client(session, admin)
+
+    response = client.patch(f"/roles/{unused.id}", json={"is_super_admin": False})
+    assert response.status_code == 200, response.text
+
+
+def test_the_last_active_super_admin_is_never_deactivated(session):
+    admin = _user(session, _role(session, is_super_admin=True))
+    client = _client(session, admin)
+
+    assert client.delete(f"/users/{admin.id}").status_code == 409
+    assert client.patch(f"/users/{admin.id}", json={"active": False}).status_code == 409
+    session.refresh(admin)
+    assert admin.active
