@@ -3,6 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import { GLOBAL_CAPABILITY_SHORT_LABELS } from '../lib/capabilities'
   import { confirmAction } from '../lib/confirm'
   import type { Role } from '../lib/types'
 
@@ -77,10 +78,13 @@
             <tr>
               <td>
                 <span class="role-name">{role.name}</span>
-                {#if role.is_super_admin}<span class="badge badge-accent">super-admin</span>{/if}
-                {#if role.is_builtin}<span class="badge badge-muted">built-in</span>{/if}
+                {#if role.is_super_admin}<span class="badge badge-accent">Super admin</span>{/if}
+                {#if role.is_builtin}<span class="badge badge-muted">Built-in</span>{/if}
               </td>
-              <td class="caps">{role.global_capabilities.join(', ') || '—'}</td>
+              <td class="caps"
+                >{role.global_capabilities.map((cap) => GLOBAL_CAPABILITY_SHORT_LABELS[cap]).join(', ') ||
+                  '—'}</td
+              >
               <td>
                 <div class="row-actions">
                   <button class="btn btn-ghost btn-sm" on:click={() => push(`/settings/roles/${role.id}`)}

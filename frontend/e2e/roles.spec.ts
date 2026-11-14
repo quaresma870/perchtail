@@ -59,15 +59,15 @@ test('roles: create, global capabilities, grants (add + remove), duplicate, dele
   const addGrantForm = page.locator('.add-grant')
   await addGrantForm.locator('select').first().selectOption('customer')
   await addGrantForm.locator('select').nth(1).selectOption({ label: customerName })
-  await addGrantForm.getByLabel('Grant view', { exact: true }).check()
-  await addGrantForm.getByLabel('Grant download', { exact: true }).check()
+  await addGrantForm.getByLabel('Grant View', { exact: true }).check()
+  await addGrantForm.getByLabel('Grant Download', { exact: true }).check()
   await addGrantForm.getByRole('button', { name: 'Add grant' }).click()
 
   const grantRow = page.getByRole('row', { name: new RegExp(customerName) })
   await expect(grantRow).toBeVisible()
-  await expect(grantRow.getByText('customer', { exact: true })).toBeVisible()
-  await expect(grantRow.getByText('view', { exact: true })).toBeVisible()
-  await expect(grantRow.getByText('download', { exact: true })).toBeVisible()
+  await expect(grantRow.getByText('Customer', { exact: true })).toBeVisible()
+  await expect(grantRow.getByText('View', { exact: true })).toBeVisible()
+  await expect(grantRow.getByText('Download', { exact: true })).toBeVisible()
 
   // Remove it -- back to the empty state.
   await grantRow.getByRole('button', { name: 'remove' }).click()
@@ -75,7 +75,10 @@ test('roles: create, global capabilities, grants (add + remove), duplicate, dele
 
   // Duplicate, from the Roles list.
   await page.goto('/#/settings/roles')
-  await expect(page.getByRole('row', { name: new RegExp(roleName) })).toBeVisible()
+  const roleRow = page.getByRole('row', { name: new RegExp(roleName) })
+  await expect(roleRow).toBeVisible()
+  // The list shows readable global capabilities, not the API keys.
+  await expect(roleRow.locator('.caps')).toHaveText('Create sources, Manage users')
   await page
     .getByRole('row', { name: new RegExp(roleName) })
     .getByRole('button', { name: 'duplicate' })
@@ -105,7 +108,7 @@ test('roles: create, global capabilities, grants (add + remove), duplicate, dele
   await expect(page.getByRole('row', { name: new RegExp(roleName) })).toHaveCount(0)
 })
 
-test('roles: a manage_source grant shows in the editor and survives duplicating the role', async ({
+test('roles: a "Manage sources" grant sends manage_source and survives duplicating the role', async ({
   page,
 }) => {
   const name = `E2E Manage Sources ${Date.now()}`
@@ -119,20 +122,44 @@ test('roles: a manage_source grant shows in the editor and survives duplicating 
   await expect(page).toHaveURL(/#\/settings\/roles\/\d+$/)
 
   const addGrantForm = page.locator('.add-grant')
-  const manageSource = addGrantForm.getByLabel('Grant manage_source', { exact: true })
-  await expect(addGrantForm.locator('label.chip', { hasText: 'manage_source' })).toHaveAttribute(
+  const manageSource = addGrantForm.getByLabel('Grant Manage sources', { exact: true })
+  await expect(addGrantForm.locator('label.chip', { hasText: 'Manage sources' })).toHaveAttribute(
     'title',
     /^Manage sources:/,
   )
+  await expect(addGrantForm.locator('label.chip', { hasText: 'manage_' })).toHaveCount(0)
   await addGrantForm.locator('select').first().selectOption('customer')
   await addGrantForm.locator('select').nth(1).selectOption({ label: customer })
-  await addGrantForm.getByLabel('Grant view', { exact: true }).check()
+  await addGrantForm.getByLabel('Grant View', { exact: true }).check()
   await manageSource.check()
+  // The API still gets the keys, not the labels.
+  const grantRequest = page.waitForRequest(
+    (req) => req.method() === 'POST' && /\/roles\/\d+\/grants$/.test(req.url()),
+  )
   await addGrantForm.getByRole('button', { name: 'Add grant' }).click()
+  const grantBody = (await grantRequest).postDataJSON()
+  expect(grantBody).toMatchObject({
+    scope_type: 'customer',
+    capabilities: ['view', 'manage_source'],
+  })
 
   const grantRow = page.getByRole('row', { name: new RegExp(customer) })
-  await expect(grantRow.getByText('manage_source', { exact: true })).toBeVisible()
-  await expect(grantRow.getByText('manage_rules', { exact: true })).toHaveCount(0)
+  await expect(grantRow.getByText('Manage sources', { exact: true })).toBeVisible()
+  await expect(grantRow.getByText('Manage rules', { exact: true })).toHaveCount(0)
+  await expect(grantRow.getByText('manage_source', { exact: true })).toHaveCount(0)
+
+  // A target the editor can't list (deleted, or out of reach of whoever
+  // edits) shows the readable scope label and the id, not the raw key.
+  await page.route(/\/customers(\?|$)/, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+  )
+  await page.reload()
+  const fallbackTarget = page.locator('td.target', {
+    hasText: new RegExp(`^Customer #${grantBody.scope_id}$`),
+  })
+  await expect(fallbackTarget).toBeVisible()
+  await expect(page.locator('td.target', { hasText: /^customer #/ })).toHaveCount(0)
+  await page.unroute(/\/customers(\?|$)/)
 
   // The duplicate carries the same grant.
   await page.goto('/#/settings/roles')
@@ -142,7 +169,7 @@ test('roles: a manage_source grant shows in the editor and survives duplicating 
     .click()
   await expect(page).toHaveURL(/#\/settings\/roles\/\d+$/)
   const copiedRow = page.getByRole('row', { name: new RegExp(customer) })
-  await expect(copiedRow.getByText('manage_source', { exact: true })).toBeVisible()
+  await expect(copiedRow.getByText('Manage sources', { exact: true })).toBeVisible()
 
   // Cleanup: the original and the duplicate.
   await page.goto('/#/settings/roles')
@@ -160,6 +187,7 @@ test('roles: a manage_source grant shows in the editor and survives duplicating 
 test('roles: built-in roles open read-only in the editor', async ({ page }) => {
   await page.goto('/#/settings/roles')
   const row = page.locator('tr', { has: page.locator('.role-name', { hasText: /^No Access$/ }) })
+  await expect(row.getByText('Built-in', { exact: true })).toBeVisible()
   await row.getByRole('button', { name: 'edit' }).click()
 
   await expect(
