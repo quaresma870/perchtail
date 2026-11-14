@@ -10,3 +10,7 @@ data/
 
 # Local Claude Code settings and session files
 .claude/
+
+# Load-test kit: secrets, generated logs and results stay local
+loadtest/.state/
+loadtest/results/

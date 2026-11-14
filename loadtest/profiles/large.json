@@ -1,0 +1,99 @@
+{
+  "name": "large",
+  "description": "An organisation of up to 200 people with about 1000 sources. Proposed; to be adjusted in a dedicated test environment.",
+  "customers": 30,
+  "folders_per_customer": 5,
+  "users": 200,
+  "sources": {
+    "ssh": 500,
+    "smb": 200,
+    "local": 10,
+    "winrm": 100
+  },
+  "agents": {
+    "running": 150,
+    "stopped": 10
+  },
+  "files": {
+    "app_folders": 4,
+    "sizes_kb": [10, 1024, 20480, 102400, 512000],
+    "agent_sizes_kb": [10, 1024, 10240],
+    "per_size": 3,
+    "gz": 4,
+    "zip": 2,
+    "large_mb": 1800,
+    "large_count": 8,
+    "growing": 16,
+    "growing_bytes_per_second": 4096,
+    "growing_rotate_mb": 256
+  },
+  "settings": {
+    "tail_interval_seconds": 2,
+    "explorer_refresh_seconds": 30,
+    "source_check_minutes": 10,
+    "name_index_enabled": true,
+    "name_index_minutes": 15
+  },
+  "scenarios": {
+    "browse": {
+      "vus": 80,
+      "think_seconds": [5, 30],
+      "files_per_visit": [1, 4],
+      "read_seconds": [10, 60],
+      "thresholds": {"p95_ms": 1000, "error_rate": 0.01}
+    },
+    "follow": {
+      "vus": 30,
+      "follow_seconds": 600,
+      "thresholds": {"p95_ms": 1000, "error_rate": 0.01}
+    },
+    "download": {
+      "vus": 15,
+      "think_seconds": [30, 120],
+      "zip_every": 4,
+      "thresholds": {"p95_ms": 30000, "error_rate": 0.01}
+    },
+    "name_search": {
+      "vus": 15,
+      "think_seconds": [10, 60],
+      "read_seconds": [10, 30],
+      "thresholds": {"p95_ms": 500, "error_rate": 0.01}
+    },
+    "agents": {
+      "vus": 20,
+      "think_seconds": [5, 30],
+      "files_per_visit": [1, 3],
+      "read_seconds": [10, 60],
+      "follow_seconds": 300,
+      "thresholds": {"p95_ms": 1500, "error_rate": 0.01}
+    },
+    "background": {},
+    "large_files": {
+      "vus": 8,
+      "hold_seconds": [60, 180],
+      "think_seconds": [10, 30],
+      "thresholds": {"p95_ms": 120000, "error_rate": 0.01}
+    },
+    "ramp": {
+      "start_vus": 20,
+      "step_vus": 20,
+      "steps": 12,
+      "step_seconds": 180,
+      "think_seconds": [3, 15],
+      "files_per_visit": [1, 3],
+      "read_seconds": [5, 30],
+      "warmup_seconds": 30,
+      "min_requests": 500,
+      "thresholds": {"p95_ms": 1000, "error_rate": 0.01}
+    }
+  },
+  "phases": [
+    {"name": "background", "duration": "15m", "scenarios": ["background"]},
+    {"name": "mixed", "duration": "30m", "scenarios": ["browse", "follow", "download", "name_search", "agents"]},
+    {"name": "mixed-index-off", "duration": "15m", "settings": {"name_index_enabled": false}, "scenarios": ["browse", "follow", "download", "agents"]},
+    {"name": "large_files", "duration": "10m", "scenarios": ["large_files"]},
+    {"name": "ramp", "scenarios": ["ramp"]},
+    {"name": "mixed-limits-2x", "duration": "30m", "settings": {"concurrency_global": 32, "concurrency_per_source": 8, "concurrency_user_transfers": 4}, "scenarios": ["browse", "follow", "download", "name_search", "agents"]},
+    {"name": "ramp-limits-2x", "settings": {"concurrency_global": 32, "concurrency_per_source": 8, "concurrency_user_transfers": 4}, "scenarios": ["ramp"]}
+  ]
+}
