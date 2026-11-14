@@ -280,26 +280,38 @@ publish in `docker-compose.yml` entirely rather than binding it to loopback.
 
 ## Documentation
 
-- [CLAUDE.md](CLAUDE.md) — full design/architecture reference and build plan
-- [ROADMAP.md](ROADMAP.md) — phased milestones and what's next
+Installing and running PerchTail:
+
+- [docs/install-from-source.md](docs/install-from-source.md) — running PerchTail on a Linux host without Docker, with a systemd unit
+- [docs/upgrade.md](docs/upgrade.md) — upgrading PerchTail
 - [docs/verifying-releases.md](docs/verifying-releases.md) — checking a release before you run it: the image's cosign signature, the build provenance of the image and the agent binaries, the signed checksums and the SBOMs
-- [docs/install-from-source.md](docs/install-from-source.md) — running
-  PerchTail on a Linux host without Docker, with a systemd unit
-- [docs/source-setup.md](docs/source-setup.md) — how to prepare a Linux or
-  Windows server so PerchTail can reach it over SSH/SFTP, SMB, or WinRM
-- [docs/examples/jea](docs/examples/jea/README.md) — the read-only JEA endpoint for WinRM sources without a remote shell or administrator account
-- [docs/sso-setup.md](docs/sso-setup.md) — registering PerchTail as an OIDC
-  client and setting up group-to-role mapping, with per-provider notes for
-  Azure AD/Entra ID, Okta, Google Workspace, and Keycloak/Authentik
+- [docs/configuration.md](docs/configuration.md) — configuration reference: environment variables and Settings → System
+- [docs/backup-and-restore.md](docs/backup-and-restore.md) — encrypted backups, scheduled backups, restoring, rolling back an upgrade and testing a restore
 - [docs/monitoring.md](docs/monitoring.md) — the liveness and readiness probes and who may call them, the detailed health endpoint and its token, Prometheus `/metrics`, the Zabbix 7.0 and 8.0 templates, and the log events worth alerting on
-- [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — how to
-  rotate `CREDENTIAL_ENCRYPTION_KEY` without losing access to already-
-  encrypted credentials
-- [docs/high-availability.md](docs/high-availability.md) — whether/how to run
-  PerchTail behind a load balancer or in a multi-replica k3s/Kubernetes
-  deployment, broken down by solution and load-balancing type
-- [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
-  submit changes
+- [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — rotating `CREDENTIAL_ENCRYPTION_KEY` without losing access to what's already encrypted
+- [docs/high-availability.md](docs/high-availability.md) — whether and how to run PerchTail behind a load balancer or on Kubernetes, and what lives in the process
+- [docs/troubleshooting.md](docs/troubleshooting.md) — troubleshooting and FAQ
+
+Connecting sources:
+
+- [docs/source-setup.md](docs/source-setup.md) — preparing a Linux or Windows server for PerchTail over SSH/SFTP, SMB or WinRM, the push agent, and local-disk sources
+- [docs/examples/jea](docs/examples/jea/README.md) — the read-only JEA endpoint for WinRM sources without a remote shell or administrator account
+- [agent/README.md](agent/README.md) — the push agent: configuration, download, upgrades from the portal and building it
+- [docs/agent-service.md](docs/agent-service.md) — running the push agent as a service
+- [docs/bulk-import.md](docs/bulk-import.md) — creating and updating customers, folders, sources and rules from a YAML file, and exporting them
+
+Administration and use:
+
+- [docs/admin-guide.md](docs/admin-guide.md) — administering PerchTail
+- [docs/sso-setup.md](docs/sso-setup.md) — registering PerchTail as an OIDC client and mapping groups to roles, with notes for Entra ID, Okta, Google Workspace and Keycloak/Authentik
+- [docs/user-guide.md](docs/user-guide.md) — using the explorer and the viewer
+
+Project:
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and submit changes
+- [CLAUDE.md](CLAUDE.md) — architecture brief for contributors
+- [frontend/README.md](frontend/README.md) — developing the web interface: dev server, checks, tests and build
+- [ROADMAP.md](ROADMAP.md) — milestones and what's next
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability, and how fast fixes ship
 - [CHANGELOG.md](CHANGELOG.md) — what's shipped, release by release
 
