@@ -717,14 +717,16 @@ def verify_backup(path: Path | str, settings: Settings | None = None) -> dict:
 
 def _first_encrypted_value(db: Path) -> str | None:
     """A Fernet token stored in the database (a source credential, an SSO
-    provider's settings or an MFA secret), or None if it holds none."""
+    provider's settings, an MFA secret or the SMTP password), or None if it
+    holds none."""
     from app.auth.models import SSOProviderConfig, User
-    from app.models import Source
+    from app.models import SmtpSettings, Source
 
     queries = (
         (Source.__tablename__, "credential_ref"),
         (SSOProviderConfig.__tablename__, "config"),
         (User.__tablename__, "mfa_secret_encrypted"),
+        (SmtpSettings.__tablename__, "password_encrypted"),
     )
     connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:

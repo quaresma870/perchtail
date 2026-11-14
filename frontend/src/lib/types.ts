@@ -201,6 +201,21 @@ export interface SSOProvider {
   group_claim: string | null
 }
 
+// Settings -> Email (GET/PUT /smtp-settings, super admins only). The
+// password is never returned: password_set says whether one is saved.
+export interface SmtpSettings {
+  host: string
+  port: number
+  security: 'starttls' | 'tls'
+  username: string | null
+  password_set: boolean
+  from_address: string
+  from_name: string | null
+  tls_ca_pem: string | null
+  enabled: boolean
+  updated_at: string
+}
+
 export interface SSOStatus {
   enabled: boolean
   name: string | null

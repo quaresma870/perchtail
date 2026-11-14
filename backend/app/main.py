@@ -36,6 +36,7 @@ from app.api.roles import router as roles_router
 from app.api.rules import router as rules_router
 from app.api.severity_patterns import global_router as severity_patterns_global_router
 from app.api.severity_patterns import source_router as severity_patterns_source_router
+from app.api.smtp_settings import router as smtp_settings_router
 from app.api.sources import router as sources_router
 from app.api.sso import router as sso_router
 from app.api.system_settings import router as system_settings_router
@@ -455,6 +456,7 @@ app.include_router(sso_router)
 app.include_router(agent_ws_router)
 app.include_router(agent_upgrades_router)
 app.include_router(system_settings_router)
+app.include_router(smtp_settings_router)
 app.include_router(updates_router)
 app.include_router(severity_patterns_global_router)
 app.include_router(severity_patterns_source_router)

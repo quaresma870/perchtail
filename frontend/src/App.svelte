@@ -20,6 +20,7 @@
   import RoleEditorPopup from './routes/RoleEditorPopup.svelte'
   import Users from './routes/Users.svelte'
   import SsoSettings from './routes/SsoSettings.svelte'
+  import EmailSettings from './routes/EmailSettings.svelte'
   import SystemSettings from './routes/SystemSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
   import Profile from './routes/Profile.svelte'
@@ -47,6 +48,7 @@
     '/settings/roles/:id': RoleEditorPopup,
     '/settings/users': Users,
     '/settings/sso': SsoSettings,
+    '/settings/email': EmailSettings,
     '/settings/system': SystemSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
     '/settings/audit-log': AuditLogSettings,

@@ -252,4 +252,4 @@ Applies to local accounts whenever a password is set: a user's own change, the c
 
 Two more rows of the `system_setting` table aren't settings: `agent_upgrade_last_window` keeps the bounds of the last automatic window for the page's summary, and `agent_remote_upgrade_enabled`, the on/off switch from before the policy existed, is read as **Manual** when it is on and no policy was saved, and is removed when the policy is next saved.
 
-Other settings pages hold configuration that isn't a system setting: **Settings → SSO** ([sso-setup.md](sso-setup.md)), **Settings → Severity indicators** and **Settings → Import / export** ([bulk-import.md](bulk-import.md)).
+Other settings pages hold configuration that isn't a system setting: **Settings → SSO** ([sso-setup.md](sso-setup.md)), **Settings → Email** (the SMTP server, super admins only, [admin-guide.md](admin-guide.md#email)), **Settings → Severity indicators** and **Settings → Import / export** ([bulk-import.md](bulk-import.md)).

@@ -10,7 +10,7 @@ from app.auth.rbac import create_role
 from app.config import get_settings
 from app.crypto import decrypt_secret
 from app.logging_config import get_logger
-from app.models import PatternKind, Protocol, Rule, RuleType, Source
+from app.models import PatternKind, Protocol, Rule, RuleType, SmtpSettings, Source
 from app.severity_patterns import seed_default_global_patterns
 
 logger = get_logger(__name__)
@@ -29,6 +29,7 @@ def _has_salt_dependent_data(session: Session) -> bool:
         select(Source.id).where(Source.credential_ref.is_not(None)),
         select(SSOProviderConfig.id),
         select(User.id).where(User.mfa_secret_encrypted.is_not(None)),
+        select(SmtpSettings.id).where(SmtpSettings.password_encrypted.is_not(None)),
         select(AuditLog.id).where(AuditLog.row_hash.is_not(None)),
     )
     return any(session.exec(query).first() is not None for query in checks)

@@ -202,6 +202,60 @@ def test_rotate_re_encrypts_mfa_secrets_and_re_signs_the_audit_chain(rotation_en
         assert last.event_metadata["audit_rows_resigned"] == 3
 
 
+def _smtp_settings(session, old_fernet):
+    from app.models import SmtpSettings
+    from app.timeutils import utcnow
+
+    row = SmtpSettings(
+        host="smtp.example.test",
+        port=587,
+        username="relay",
+        password_encrypted=old_fernet.encrypt(b"smtp-secret").decode("utf-8"),
+        from_address="perchtail@example.test",
+        updated_at=utcnow(),
+    )
+    session.add(row)
+    session.commit()
+    return row.id
+
+
+def test_rotate_re_encrypts_the_smtp_password(rotation_engine):
+    from app.auth.models import AuditLog
+    from app.models import SmtpSettings
+
+    old_fernet = build_fernet("old-key")
+    with Session(rotation_engine) as session:
+        row_id = _smtp_settings(session, old_fernet)
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 0
+
+    with Session(rotation_engine) as session:
+        secret = session.get(SmtpSettings, row_id).password_encrypted
+        assert build_fernet("new-key").decrypt(secret.encode("utf-8")) == b"smtp-secret"
+        with pytest.raises(InvalidToken):
+            old_fernet.decrypt(secret.encode("utf-8"))
+        last = session.exec(select(AuditLog).order_by(AuditLog.id.desc())).first()
+        assert last.event_metadata["smtp_passwords"] == 1
+
+
+def test_an_smtp_password_under_another_key_stops_the_rotation(rotation_engine):
+    from app.models import SmtpSettings
+
+    with Session(rotation_engine) as session:
+        source = _make_source(
+            session, build_fernet("old-key"), credential={"username": "u", "password": "p"}
+        )
+        source_id, before = source.id, source.credential_ref
+        row_id = _smtp_settings(session, build_fernet("some-other-key"))
+        smtp_before = session.get(SmtpSettings, row_id).password_encrypted
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 1
+
+    with Session(rotation_engine) as session:
+        assert session.get(Source, source_id).credential_ref == before
+        assert session.get(SmtpSettings, row_id).password_encrypted == smtp_before
+
+
 def test_a_broken_audit_chain_stops_the_rotation_with_nothing_written(rotation_engine):
     from app.auth.models import AuditLog
     from app.crypto import build_audit_chain_key
