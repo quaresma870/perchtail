@@ -7,6 +7,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from app.config import get_settings
@@ -94,6 +95,38 @@ def build_audit_chain_key(secret: str) -> bytes:
     """The audit chain key for a given CREDENTIAL_ENCRYPTION_KEY, for
     app/rotate_credential_key.py, which needs the old and the new one."""
     return _derive_audit_chain_key(secret)
+
+
+def _derive_follow_head_root_key(secret: str) -> bytes:
+    """The root of the per-source keys that identify a file's start for the
+    Tail and the alerts (follow_head_key): derived like the audit chain key,
+    from CREDENTIAL_ENCRYPTION_KEY and the per-install salt, with its own
+    label so it is independent of the other keys."""
+    salt = _load_or_create_salt(Path(get_settings().credential_salt_path))
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=_KEY_LENGTH_BYTES,
+        salt=salt,
+        iterations=_PBKDF2_ITERATIONS,
+    )
+    return kdf.derive(f"perchtail-follow-head-hmac:{secret}".encode())
+
+
+@lru_cache
+def follow_head_root_key() -> bytes:
+    return _derive_follow_head_root_key(get_settings().credential_encryption_key)
+
+
+def follow_head_key(source_id: int) -> bytes:
+    """The HMAC key of app.redaction.head_digest for one source. One key
+    per source, so the key a source's agent receives (to compute the digest
+    on the host when it redacts there) is no use for any other source."""
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=_KEY_LENGTH_BYTES,
+        salt=None,
+        info=f"perchtail-follow-head:{source_id}".encode(),
+    ).derive(follow_head_root_key())
 
 
 def build_fernet(secret: str) -> Fernet:
