@@ -1,5 +1,6 @@
 from sqlmodel import Session
 
+from app import request_context
 from app.audit_hash_chain import chain_new_entry
 from app.audit_labels import audit_labels
 from app.auth.models import AuditLog
@@ -34,14 +35,26 @@ def record_audit_event(
     labels = audit_labels(session, target_type, target_id, metadata)
     if labels:
         metadata = {**labels, **(metadata or {})}
+    # Where it came from (app/request_context.py): empty outside a request.
+    context = request_context.current()
     entry = AuditLog(
         user_id=user_id,
         action=action,
         target_type=target_type,
         target_id=target_id,
         event_metadata=metadata,
+        client_ip=context.client_ip if context else None,
+        user_agent=context.user_agent if context else None,
+        session_id=context.session_id if context else None,
     )
     chain_new_entry(audit_chain_key(), session, entry)
     session.add(entry)
-    logger.info(action, user_id=user_id, target_type=target_type, target_id=target_id)
+    logger.info(
+        action,
+        user_id=user_id,
+        target_type=target_type,
+        target_id=target_id,
+        client_ip=entry.client_ip,
+        session_id=entry.session_id,
+    )
     return entry

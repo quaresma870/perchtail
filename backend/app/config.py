@@ -168,7 +168,15 @@ class Settings(BaseSettings):
     # tampering gets caught. In days, not seconds, since a year expressed in
     # seconds (31536000) is unreadable at a glance and APScheduler's
     # IntervalTrigger accepts a `days=` kwarg directly.
-    audit_integrity_check_interval_days: int = 365
+    audit_integrity_check_interval_days: int = 1
+
+    # Reverse proxies whose X-Forwarded-For is believed (app/request_context.py):
+    # comma-separated addresses or CIDR blocks. The client address recorded
+    # in the audit log, and checked by the monitoring allowlists below, is
+    # the first address in X-Forwarded-For, read from the right, that isn't
+    # one of these; a request from anywhere else keeps its socket address
+    # and its X-Forwarded-For is ignored. Loopback only by default.
+    trusted_proxies: str = "127.0.0.0/8, ::1"
 
     # Who may call the monitoring endpoints without the monitoring token
     # (#366, app/monitoring_access.py): comma-separated addresses or CIDR
@@ -216,7 +224,7 @@ class Settings(BaseSettings):
     def _check_networks(self) -> "Settings":
         # Refuse to start on a typo rather than silently allow no one (or
         # everyone) through.
-        for name in ("probe_allowed_networks", "monitoring_allowed_networks"):
+        for name in ("probe_allowed_networks", "monitoring_allowed_networks", "trusted_proxies"):
             try:
                 parse_networks(getattr(self, name))
             except ValueError as exc:

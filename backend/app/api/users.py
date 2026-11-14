@@ -206,7 +206,7 @@ def reset_password(
     set_password(session, target, temporary_password, policy)
     target.must_change_password = True
     session.add(target)
-    revoke_all_sessions(session, target.id)
+    revoked = revoke_all_sessions(session, target.id)
     record_audit_event(
         session,
         user_id=user.id,
@@ -214,6 +214,15 @@ def reset_password(
         target_type="user",
         target_id=target.id,
     )
+    if revoked:
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="session.revoke",
+            target_type="user",
+            target_id=target.id,
+            metadata={"count": revoked, "reason": "password_reset"},
+        )
     session.commit()
     return ResetPasswordResponse(temporary_password=temporary_password)
 

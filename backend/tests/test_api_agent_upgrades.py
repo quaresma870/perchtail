@@ -537,8 +537,11 @@ def test_the_settings_are_saved_and_audited(session, admin):
     assert body["window_start"] == "22:30"
     assert (body["window_hours"], body["failure_limit"], body["concurrency"]) == (8, 5, 10)
     [audit] = _audits(session, "system_settings.update")
-    assert audit.event_metadata["agent_upgrade_policy"] == "automatic"
-    assert audit.event_metadata["agent_upgrade_window_days"] == [4, 5]
+    assert audit.event_metadata["agent_upgrade_policy"] == {"old": "off", "new": "automatic"}
+    assert audit.event_metadata["agent_upgrade_window_days"] == {
+        "old": [0, 1, 2, 3, 4, 5, 6],
+        "new": [4, 5],
+    }
 
 
 @pytest.mark.parametrize(

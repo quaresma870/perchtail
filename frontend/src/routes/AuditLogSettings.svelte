@@ -4,7 +4,7 @@
   import { nextSort, type SortState } from '../lib/table-view'
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
-  import { detailPairs, targetHref, targetTypeLabel } from '../lib/audit-format'
+  import { detailPairs, formatAuditTime, targetHref, targetTypeLabel } from '../lib/audit-format'
   import { currentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import { confirmAction } from '../lib/confirm'
@@ -205,7 +205,10 @@
     }
   }
 
-  const formatTimestamp = (iso: string) => new Date(iso).toLocaleString()
+  // Times come from the server in UTC and are shown in this browser's zone,
+  // always naming it (and the zone is in the Time header too).
+  const formatTimestamp = (iso: string) => formatAuditTime(iso)
+  const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 
   onMount(async () => {
     await Promise.all([loadFilterOptions(), loadIntegrityStatus(), load()])
@@ -217,8 +220,10 @@
 <div class="page">
   <h1>Audit log</h1>
   <p class="hint">
-    Every login, and every source/rule/role/user/customer/folder/SSO/system-settings change --
-    see Settings → System for how long entries are kept before being purged automatically.
+    Who did what, when and from where: sign-ins and sign-outs, every file opened or downloaded,
+    searches, refused requests, and every source/rule/role/user/customer/folder/SSO/system-settings
+    change. Times are shown in your time zone ({browserZone}). See Settings → System for how long
+    entries are kept before being purged automatically.
   </p>
 
   <div
@@ -338,10 +343,17 @@
       <table>
         <thead>
           <tr>
-            <SortableHeader label="Time" key="time" {sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader
+              label={`Time (${browserZone})`}
+              key="time"
+              {sort}
+              on:sort={(e) => sortBy(e.detail)}
+            />
             <SortableHeader label="User" key="user" {sort} on:sort={(e) => sortBy(e.detail)} />
             <SortableHeader label="Action" key="action" {sort} on:sort={(e) => sortBy(e.detail)} />
             <SortableHeader label="Target" key="target" {sort} on:sort={(e) => sortBy(e.detail)} />
+            <th>From</th>
+            <th>Session</th>
             <th>Details</th>
           </tr>
         </thead>
@@ -379,6 +391,17 @@
                   —
                 {/if}
               </td>
+              <td class="origin" title={entry.user_agent ?? ''}>
+                {#if entry.client_ip}
+                  <span class="client-ip">{entry.client_ip}</span>
+                  {#if entry.user_agent}
+                    <span class="user-agent">{entry.user_agent}</span>
+                  {/if}
+                {:else}
+                  —
+                {/if}
+              </td>
+              <td class="session"><code>{entry.session_id ?? '—'}</code></td>
               <td class="details">
                 {#each detailPairs(entry.metadata) as [key, value] (key)}
                   <span class="detail"><span class="detail-key">{key}</span> {value}</span>
@@ -519,6 +542,26 @@
     font-size: 0.75rem;
     color: var(--text-muted);
   }
+  .origin {
+    max-width: 12rem;
+  }
+  .client-ip {
+    display: block;
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+  .user-agent {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session code {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+  }
   .target-note {
     font-size: 0.7rem;
     color: var(--text-faint);
@@ -527,7 +570,7 @@
   /* max-width 0 with a width lets the cell take the rest of the row and
      still cut long details with an ellipsis. */
   .details {
-    width: 45%;
+    width: 35%;
     max-width: 0;
     font-size: 0.75rem;
     color: var(--text-muted);

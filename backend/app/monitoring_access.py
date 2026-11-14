@@ -9,9 +9,10 @@
   (app/api/monitoring.py); when MONITORING_ALLOWED_NETWORKS is set, the
   caller's address must be in it too.
 
-The caller's address is the TCP peer as uvicorn reports it: uvicorn only
-replaces it with a proxy header's value when the request came from an
-address in FORWARDED_ALLOW_IPS, so a client can't choose it."""
+The caller's address is the one app/request_context.py resolves: the TCP
+peer, or, when the peer is in TRUSTED_PROXIES, the first address in
+X-Forwarded-For read from the right that isn't a trusted proxy, so a client
+can't choose it. The audit log records the same address."""
 
 import hashlib
 import ipaddress

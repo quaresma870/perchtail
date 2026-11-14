@@ -9,6 +9,7 @@ import type { SystemSettings } from './types'
 export const systemSettings = writable<SystemSettings>({
   audit_view_enabled: true,
   audit_retention_days: 365,
+  audit_folder_listings: true,
   source_max_roots: 20,
   connections_view_switchable: true,
   connections_view_default: 'list',

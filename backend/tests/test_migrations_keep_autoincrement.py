@@ -3,14 +3,17 @@ tables whose ids must never be reused (see app.models.NO_ID_REUSE and
 migration 47c9d392f28f): a rebuild through Alembic's batch mode drops it
 unless it's asked for, as e4b7c2d91a05 once did for `source`."""
 
+import json
 import os
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 BACKEND = Path(__file__).resolve().parents[1]
-NO_ID_REUSE_TABLES = ("customer", "folder", "source", "role")
+NO_ID_REUSE_TABLES = ("customer", "folder", "source", "role", "auditlog")
 
 
 def _autoincrement_tables(db: Path) -> dict[str, bool]:
@@ -149,3 +152,211 @@ def test_the_manage_source_migration_keeps_what_each_role_could_do(tmp_path):
 
     _alembic(tmp_path, "downgrade", "e3a9c5f17b28")
     assert capabilities() == {grant_id: caps for grant_id, (_, caps) in grants.items()}
+
+
+# --- c7f2a9e4d136: auditlog rebuilt with AUTOINCREMENT, minimum retention ---------
+
+BEFORE_AUDIT_ORIGIN = "b9e4d7a2c513"
+CHAIN_KEY = b"m" * 32
+
+
+def _audit_engine(db: Path):
+    from sqlalchemy import create_engine
+
+    return create_engine(f"sqlite:///{db}")
+
+
+def _write_old_chain(db: Path, count: int) -> None:
+    """`count` entries written by a version before c7f2a9e4d136: format-1
+    hashes, chained from the start."""
+    from datetime import datetime, timedelta
+
+    import sqlalchemy as sa
+    from app.audit_hash_chain import compute_row_hash
+
+    table = sa.table(
+        "auditlog",
+        sa.column("id", sa.Integer),
+        sa.column("user_id", sa.Integer),
+        sa.column("action", sa.String),
+        sa.column("target_type", sa.String),
+        sa.column("target_id", sa.Integer),
+        sa.column("timestamp", sa.DateTime),
+        sa.column("metadata", sa.JSON),
+        sa.column("prev_hash", sa.String),
+        sa.column("row_hash", sa.String),
+    )
+    prev = None
+    start = datetime(2026, 11, 1, 9, 0, 0, 123456)
+    engine = _audit_engine(db)
+    with engine.begin() as conn:
+        for i in range(1, count + 1):
+            fields = {
+                "user_id": None,
+                "action": "source.update",
+                "target_type": "source",
+                "target_id": i,
+                "timestamp": start + timedelta(minutes=i),
+            }
+            metadata = {"n": i}
+            row_hash = compute_row_hash(CHAIN_KEY, prev, metadata=metadata, **fields)
+            conn.execute(
+                table.insert().values(
+                    id=i, prev_hash=prev, row_hash=row_hash, metadata=metadata, **fields
+                )
+            )
+            prev = row_hash
+    engine.dispose()
+
+
+def _set_retention(db: Path, value: str) -> None:
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO system_setting (key, value) VALUES ('audit_retention_days', ?)", (value,)
+        )
+
+
+def _retention(db: Path) -> str:
+    with sqlite3.connect(db) as conn:
+        return conn.execute(
+            "SELECT value FROM system_setting WHERE key = 'audit_retention_days'"
+        ).fetchone()[0]
+
+
+def test_the_audit_chain_still_verifies_after_the_rebuild(tmp_path, monkeypatch):
+    from app.audit import record_audit_event
+    from app.audit_hash_chain import backfill_chain_if_needed
+    from app.audit_integrity import verify_chain
+    from app.audit_outbox import drain_audit_outbox
+    from app.auth.models import AuditLog
+    from sqlmodel import Session, select
+
+    monkeypatch.setattr("app.audit.audit_chain_key", lambda: CHAIN_KEY)
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_AUDIT_ORIGIN)
+    _write_old_chain(db, 3)
+    _set_retention(db, "30")
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert _autoincrement_tables(db)["auditlog"] is True
+    assert _retention(db) == "90"
+
+    # Nothing in the audit log itself: the change waits in the outbox.
+    assert _audit_actions(db) == ["source.update"] * 3
+    assert _outbox(db) == [
+        ("system_settings.update", {"audit_retention_days": {"old": 30, "new": 90}})
+    ]
+
+    engine = _audit_engine(db)
+    with Session(engine) as session:
+        # What the next start does (app.main's lifespan).
+        assert backfill_chain_if_needed(CHAIN_KEY, session) == 0
+        assert drain_audit_outbox(session) == (1, 0)
+        assert drain_audit_outbox(session) == (0, 0)
+        raised = session.exec(select(AuditLog).order_by(AuditLog.id.desc())).first()
+        assert raised.id == 4
+        assert raised.action == "system_settings.update"
+        assert raised.target_type == "system_settings"
+        assert raised.user_id is None
+        assert raised.event_metadata == {"audit_retention_days": {"old": 30, "new": 90}}
+        assert raised.hash_format == 2
+        assert raised.prev_hash == session.get(AuditLog, 3).row_hash
+        assert verify_chain(CHAIN_KEY, session).ok
+
+        record_audit_event(session, user_id=None, action="user.logout", target_type="user")
+        session.commit()
+        assert verify_chain(CHAIN_KEY, session).ok
+
+        # A new-format row changed afterwards is still caught.
+        newest = session.exec(select(AuditLog).order_by(AuditLog.id.desc())).first()
+        assert newest.hash_format == 2
+        newest.client_ip = "203.0.113.66"
+        session.add(newest)
+        session.commit()
+        assert not verify_chain(CHAIN_KEY, session).ok
+    engine.dispose()
+    assert _outbox(db) == []
+
+
+def _audit_actions(db: Path) -> list[str]:
+    with sqlite3.connect(db) as conn:
+        return [row[0] for row in conn.execute("SELECT action FROM auditlog ORDER BY id")]
+
+
+def _outbox(db: Path) -> list[tuple[str, dict]]:
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute("SELECT action, metadata FROM audit_outbox ORDER BY id").fetchall()
+    return [(action, json.loads(metadata)) for action, metadata in rows]
+
+
+def test_a_forged_row_is_not_signed_and_the_migration_entry_lands_at_the_end(tmp_path, monkeypatch):
+    from app.audit_hash_chain import backfill_chain_if_needed
+    from app.audit_integrity import verify_chain
+    from app.audit_outbox import drain_audit_outbox
+    from app.auth.models import AuditLog
+    from sqlmodel import Session, select
+
+    monkeypatch.setattr("app.audit.audit_chain_key", lambda: CHAIN_KEY)
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_AUDIT_ORIGIN)
+    _write_old_chain(db, 3)
+    with sqlite3.connect(db) as conn:
+        # Someone with write access to the file, before the upgrade.
+        conn.execute(
+            "INSERT INTO auditlog (id, action, timestamp) "
+            "VALUES (4, 'forged', '2026-11-13 00:00:00')"
+        )
+    _set_retention(db, "30")
+
+    _alembic(tmp_path, "upgrade", "head")
+
+    engine = _audit_engine(db)
+    with Session(engine) as session:
+        assert backfill_chain_if_needed(CHAIN_KEY, session) == 0
+        assert drain_audit_outbox(session) == (1, 0)
+        rows = {row.id: row for row in session.exec(select(AuditLog)).all()}
+        assert rows[4].row_hash is None
+        assert rows[5].action == "system_settings.update"
+        assert rows[5].prev_hash == rows[3].row_hash
+        result = verify_chain(CHAIN_KEY, session)
+        assert result.broken_row_id == 4
+        assert result.reason == "unsigned_row"
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [("1", "90"), ("89", "90"), ("0", "0"), ("90", "90"), ("400", "400")],
+)
+def test_only_a_retention_below_the_minimum_is_raised(tmp_path, stored, expected):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_AUDIT_ORIGIN)
+    _set_retention(db, stored)
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert _retention(db) == expected
+    assert _audit_actions(db) == []
+    assert len(_outbox(db)) == (1 if stored != expected else 0)
+
+
+def test_audit_ids_are_never_reused_after_the_upgrade(tmp_path):
+    # A purge before the upgrade left its anchor at row 50 and every row
+    # after it went too: the next entry must still get an id above 50.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_AUDIT_ORIGIN)
+    _write_old_chain(db, 3)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO audit_chain_state (id, anchor_row_id, anchor_hash, status) "
+            "VALUES (1, 50, 'h', 'unknown')"
+        )
+
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM auditlog")
+        conn.execute(
+            "INSERT INTO auditlog (action, timestamp) "
+            "VALUES ('user.logout', '2026-11-14 00:00:00')"
+        )
+        [new_id] = conn.execute("SELECT id FROM auditlog").fetchone()
+    assert new_id == 51

@@ -9,7 +9,7 @@ from app import backup, password_policy, system_settings
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import GlobalCapability, User
-from app.auth.rbac import require_global_capability
+from app.auth.rbac import forbidden, require_global_capability
 from app.db import get_session
 from app.source_roots import HARD_MAX_ROOTS, max_roots
 
@@ -29,6 +29,8 @@ TailIntervalSeconds = Literal[1, 2, 5, 10]
 class SystemSettingsPublic(BaseModel):
     audit_view_enabled: bool
     audit_retention_days: int
+    # Whether listing a folder below a source's root is audited.
+    audit_folder_listings: bool
     source_max_roots: int
     connections_view_switchable: bool
     connections_view_default: Literal["list", "tree"]
@@ -82,10 +84,22 @@ LISTING_MAX_ENTRIES_MIN = 100
 LISTING_MAX_ENTRIES_MAX = 20000
 
 
+# The shortest audit retention allowed, in days; 0 (keep forever) is also
+# accepted. Lowering the retention, which deletes evidence sooner, is for
+# super admins only.
+AUDIT_RETENTION_MIN_DAYS = 90
+# Settings whose value is a secret: the audit entry says they changed,
+# never what to.
+SECRET_SETTINGS: frozenset[str] = frozenset()
+
+
 class SystemSettingsUpdate(BaseModel):
     audit_view_enabled: bool | None = None
     # 0 means "keep forever" -- see system_settings.INT_DEFAULTS's docstring.
+    # Otherwise at least AUDIT_RETENTION_MIN_DAYS (checked in the endpoint,
+    # so the message can say 0 is allowed too).
     audit_retention_days: int | None = Field(default=None, ge=0)
+    audit_folder_listings: bool | None = None
     # Folders per source (#161): 1 turns several folders off; 100 is the
     # hard cap (source_roots.HARD_MAX_ROOTS).
     source_max_roots: int | None = Field(default=None, ge=1, le=HARD_MAX_ROOTS)
@@ -202,6 +216,9 @@ def update_system_settings(
     # set_int/set_bool, which would stringify it into a value the getters
     # can't parse back (int("None") raises) on every read after this.
     changed = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    before = _read_all(session).model_dump()
+    _check_audit_retention(user, before["audit_retention_days"], changed)
+    _check_audit_folder_listings(user, before["audit_folder_listings"], changed)
     min_length = changed.get(
         "password_min_length", system_settings.get_int(session, "password_min_length")
     )
@@ -250,7 +267,60 @@ def update_system_settings(
         user_id=user.id,
         action="system_settings.update",
         target_type="system_settings",
-        metadata=changed,
+        metadata=_changes(changed, before),
     )
     session.commit()
     return _read_all(session)
+
+
+def _changes(changed: dict, before: dict) -> dict:
+    """What the audit entry records for each setting sent: its value before
+    and after ({"old": ..., "new": ...}), or "changed" for a secret."""
+    out: dict = {}
+    for key, value in changed.items():
+        if key in SECRET_SETTINGS:
+            out[key] = "changed"
+        else:
+            out[key] = {"old": before.get(key), "new": value}
+    return out
+
+
+def _retention_rank(days: int) -> float:
+    # 0 keeps entries forever: longer than any number of days.
+    return float("inf") if days == 0 else days
+
+
+def _check_audit_retention(user: User, current: int, changed: dict) -> None:
+    """At least AUDIT_RETENTION_MIN_DAYS, or 0 for forever; and only a super
+    admin may lower it, since that deletes evidence sooner. Raising it is
+    open to whoever manages system settings."""
+    if "audit_retention_days" not in changed:
+        return
+    days = changed["audit_retention_days"]
+    if days != 0 and days < AUDIT_RETENTION_MIN_DAYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Keep audit entries for at least {AUDIT_RETENTION_MIN_DAYS} days, "
+                "or 0 to keep them forever"
+            ),
+        )
+    if _retention_rank(days) < _retention_rank(current) and not user.role.is_super_admin:
+        raise forbidden(
+            "Only a super admin can shorten how long audit entries are kept",
+            reason="audit_retention_lowered",
+            user=user,
+        )
+
+
+def _check_audit_folder_listings(user: User, current: bool, changed: dict) -> None:
+    """Turning folder-listing auditing off records less evidence, so only a
+    super admin may do it, like shortening the retention. Turning it on is
+    open to whoever manages system settings."""
+    turning_off = current and changed.get("audit_folder_listings") is False
+    if turning_off and not user.role.is_super_admin:
+        raise forbidden(
+            "Only a super admin can turn off auditing of folder listings",
+            reason="audit_folder_listings_disabled",
+            user=user,
+        )

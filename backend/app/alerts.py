@@ -30,6 +30,7 @@ from sqlmodel import Session, col, delete, select
 
 from app import system_settings
 from app.archives import is_archive, is_transparent_gzip
+from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, User
 from app.auth.rbac import visible_source_ids
 from app.logging_config import get_logger
@@ -389,6 +390,17 @@ def deliver_due(session: Session) -> None:
             alert.failed_deliveries += 1
             alert.last_error = error
             session.delete(delivery)
+            # A delivery that never got through is in the audit log: matched
+            # log lines that were meant to leave and didn't. Each retry
+            # before it is only in the app log.
+            record_audit_event(
+                session,
+                user_id=None,
+                action="alert.delivery_failed",
+                target_type="alert",
+                target_id=alert.id,
+                metadata={"attempts": delivery.attempts, "error": error},
+            )
         else:
             logger.warning("alert.webhook_failed", alert_id=alert.id, error=error)
             alert.last_error = error

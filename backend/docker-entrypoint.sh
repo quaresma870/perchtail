@@ -17,4 +17,6 @@ fi
 # database (app/data_layout.py).
 python -m app.data_layout
 python -m alembic upgrade head
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+# --no-proxy-headers: the app's own ClientAddressMiddleware (TRUSTED_PROXIES,
+# app/request_context.py) is the only thing that reads X-Forwarded-For.
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers

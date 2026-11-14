@@ -248,6 +248,12 @@ class AuthSession(SQLModel, table=True):
 
 
 class AuditLog(SQLModel, table=True):
+    # AUTOINCREMENT (see app.models.NO_ID_REUSE): an entry's id is never
+    # handed out again after the purge deletes it, so an id always names one
+    # entry, and the purge's own `audit.purge` entry always lands above the
+    # rows it deleted.
+    __table_args__ = {"sqlite_autoincrement": True}
+
     id: int | None = Field(default=None, primary_key=True)
     user_id: int | None = Field(default=None, foreign_key="user.id")
     action: str
@@ -262,6 +268,17 @@ class AuditLog(SQLModel, table=True):
     # audit_hash_chain.backfill_chain_if_needed runs once at startup.
     prev_hash: str | None = None
     row_hash: str | None = None
+    # Where the action came from (app/request_context.py): the client's
+    # address, its User-Agent (truncated), and a short reference to the
+    # session (a prefix of the token's SHA-256). Empty for entries written
+    # by background jobs, the CLI, or before 0.7.0.
+    client_ip: str | None = None
+    user_agent: str | None = None
+    session_id: str | None = None
+    # Which fields row_hash covers (app/audit_hash_chain.py): null for rows
+    # written before 0.7.0 (format 1), 2 for rows that also cover the three
+    # fields above. Verification hashes each row by its own format.
+    hash_format: int | None = None
 
 
 class AuditChainState(SQLModel, table=True):
@@ -299,3 +316,19 @@ class AuditChainState(SQLModel, table=True):
     race_break_count: int = 0
     known_break_count: int = 0
     known_breaks_recorded_at: datetime | None = None
+
+
+class AuditOutbox(SQLModel, table=True):
+    """An audit event a migration had to record without the chain key (it
+    has no access to it). The next start turns each one into an ordinary,
+    signed AuditLog entry at the end of the chain and deletes it, in one
+    transaction; only the actions app.audit_outbox accepts are recorded,
+    any other is refused and audited as such (app/audit_outbox.py). Never
+    a way into the existing chain: AuditLog rows are signed when written."""
+
+    __tablename__ = "audit_outbox"
+
+    id: int | None = Field(default=None, primary_key=True)
+    action: str
+    event_metadata: dict | None = Field(default=None, sa_column=Column("metadata", JSON))
+    created_at: datetime = Field(default_factory=utcnow)

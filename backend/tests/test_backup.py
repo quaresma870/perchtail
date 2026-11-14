@@ -496,6 +496,42 @@ def test_restore_puts_the_backup_back_and_keeps_the_previous_data(env, monkeypat
         engine.dispose()
 
 
+def test_restore_puts_the_audit_chain_marker_back_when_the_backup_has_a_chain(env):
+    from app.audit import record_audit_event
+    from app.audit_hash_chain import CHAIN_MARKER_NAME, read_chain_marker
+
+    with Session(env.engine) as session:
+        first = record_audit_event(session, user_id=None, action="role.create")
+        session.commit()
+        first_id = first.id
+    path = backup.create_backup("manual")
+    env.engine.dispose()
+
+    backup.restore_backup(path)
+
+    marker = read_chain_marker(env.data)
+    assert marker is not None
+    assert marker.first_row_id == first_id
+    if os.name == "posix":
+        assert stat.S_IMODE((env.data / CHAIN_MARKER_NAME).stat().st_mode) == 0o600
+
+
+def test_restore_leaves_the_audit_chain_marker_out_when_the_backup_has_no_chain(env):
+    from app.audit_hash_chain import CHAIN_MARKER_NAME, write_chain_marker
+
+    # The current data has a chain marker; the backup has no audit row (its
+    # own backup.create entry is written after the snapshot).
+    write_chain_marker(env.data / CHAIN_MARKER_NAME, 1)
+    path = backup.create_backup("manual")
+    env.engine.dispose()
+
+    result = backup.restore_backup(path)
+
+    assert not (env.data / CHAIN_MARKER_NAME).exists()
+    # The previous one was moved aside with the rest, not deleted.
+    assert (result.previous / CHAIN_MARKER_NAME).exists()
+
+
 def test_restore_into_a_missing_data_dir(env):
     path = backup.create_backup("manual")
     env.engine.dispose()

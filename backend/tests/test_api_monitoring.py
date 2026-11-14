@@ -389,6 +389,26 @@ def test_health_reports_degraded_when_the_audit_chain_is_broken(session, admin_c
     assert body["status"] == "degraded"
 
 
+def test_health_reports_degraded_for_an_unsigned_audit_row_found_at_startup(session, admin_client):
+    from app.audit import record_audit_event
+    from app.audit_integrity import report_unsigned_audit_rows
+    from app.auth.models import AuditLog
+    from app.crypto import audit_chain_key
+
+    record_audit_event(session, user_id=None, action="a")
+    session.commit()
+    forged = AuditLog(user_id=None, action="forged")
+    session.add(forged)
+    session.commit()
+
+    assert report_unsigned_audit_rows(audit_chain_key(), session) is True
+
+    body = _health(admin_client)
+    assert body["audit_integrity"]["status"] == "broken"
+    assert body["audit_integrity"]["broken_row_id"] == forged.id
+    assert body["status"] == "degraded"
+
+
 def test_race_breaks_waiting_to_be_recorded_do_not_degrade(session, admin_client):
     from app.auth.models import AuditChainState
 

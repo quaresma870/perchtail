@@ -366,3 +366,52 @@ def test_regenerate_backup_codes_requires_mfa_enabled(client, session):
 
     response = client.post("/auth/mfa/backup-codes/regenerate", json={"password": "new-password!"})
     assert response.status_code == 400
+
+
+# --- failed password reconfirmation -----------------------------------------
+
+
+def _reauth_failures(session) -> list[AuditLog]:
+    session.expire_all()
+    return list(session.exec(select(AuditLog).where(AuditLog.action == "user.reauth_failed")).all())
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "action", "mfa_on"),
+    [
+        (
+            "/auth/change-password",
+            {"current_password": "wrong-guess", "new_password": "another-password!"},
+            "change_password",
+            False,
+        ),
+        ("/auth/mfa/enroll", {"password": "wrong-guess"}, "mfa_enroll", False),
+        ("/auth/mfa/disable", {"password": "wrong-guess"}, "mfa_disable", True),
+        (
+            "/auth/mfa/backup-codes/regenerate",
+            {"password": "wrong-guess"},
+            "mfa_regenerate_backup_codes",
+            True,
+        ),
+    ],
+)
+def test_a_wrong_reconfirmation_password_is_audited(client, session, path, body, action, mfa_on):
+    _login_and_change_password(client, session)
+    if mfa_on:
+        _enroll_and_confirm(client)
+    user = session.exec(select(User).where(User.username == USERNAME)).one()
+
+    response = client.post(path, json=body)
+    assert response.status_code == 401
+
+    [entry] = _reauth_failures(session)
+    assert entry.user_id == user.id
+    assert (entry.target_type, entry.target_id) == ("user", user.id)
+    assert entry.event_metadata == {"action": action, "target_name": USERNAME}
+    assert "wrong-guess" not in str(entry.event_metadata)
+
+
+def test_a_right_reconfirmation_password_writes_no_reauth_failure(client, session):
+    _login_and_change_password(client, session)
+    assert client.post("/auth/mfa/enroll", json={"password": "new-password!"}).status_code == 200
+    assert _reauth_failures(session) == []

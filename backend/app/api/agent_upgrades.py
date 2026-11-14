@@ -226,6 +226,15 @@ def update_agent_upgrade_settings(
     session: Session = Depends(get_session),
 ):
     changed = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    current = policies.read_settings(session)
+    before = {
+        "policy": current.policy,
+        "window_days": sorted(current.window.days),
+        "window_start": current.window.start_text,
+        "window_hours": current.window.hours,
+        "failure_limit": current.failure_limit,
+        "concurrency": current.concurrency,
+    }
     if "policy" in changed:
         policies.set_system_policy(session, changed["policy"])
     if "window_days" in changed:
@@ -251,7 +260,10 @@ def update_agent_upgrade_settings(
             user_id=user.id,
             action="system_settings.update",
             target_type="system_settings",
-            metadata={f"agent_upgrade_{k}": v for k, v in changed.items()},
+            # Before and after, like every system_settings.update.
+            metadata={
+                f"agent_upgrade_{k}": {"old": before.get(k), "new": v} for k, v in changed.items()
+            },
         )
     session.commit()
     return _overview(session)

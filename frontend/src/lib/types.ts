@@ -217,6 +217,8 @@ export interface GroupRoleMapping {
 export interface SystemSettings {
   audit_view_enabled: boolean
   audit_retention_days: number
+  // Whether listing a folder below a source's root is audited.
+  audit_folder_listings: boolean
   // Folders one source may read (#161): 1 = feature off, 100 at most.
   source_max_roots: number
   connections_view_switchable: boolean
@@ -300,8 +302,13 @@ export interface AuditLogEntry {
   action: string
   target_type: string | null
   target_id: number | null
+  // UTC, ending in Z.
   timestamp: string
   metadata: Record<string, unknown> | null
+  // Where it came from; null for background jobs and entries before 0.7.0.
+  client_ip: string | null
+  user_agent: string | null
+  session_id: string | null
   // #239: the target by name, as recorded, or its current name for entries
   // older than 0.5.3 (target_name_is_current).
   target_name: string | null

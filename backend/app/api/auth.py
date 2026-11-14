@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
-from app import auth_events, password_policy, preferences, profile
+from app import auth_events, password_policy, preferences, profile, request_context
 from app.audit import record_audit_event
 from app.auth import mfa
 from app.auth.models import (
@@ -31,6 +31,7 @@ from app.auth.providers.oidc import (
     encode_state,
     parse_oidc_settings,
 )
+from app.auth.rbac import forbidden
 from app.auth.sessions import (
     create_session,
     delete_session,
@@ -174,6 +175,12 @@ def get_current_user(
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
+    # Every audit entry this request writes names its session, and a
+    # refusal names its user (app/request_context.py).
+    context = request_context.current()
+    if context is not None:
+        context.session_id = request_context.session_ref(hash_token(session_token))
+        context.user_id = user.id
     return user
 
 
@@ -181,6 +188,11 @@ def get_current_active_user(user: User = Depends(get_current_user)) -> User:
     """Blocks every endpoint except login/me/change-password until an
     admin-created account's forced password change is done."""
     if user.must_change_password:
+        # Not a refused permission (app/api/errors.py): the account just has
+        # to pick a password first, and every screen asks until it does.
+        context = request_context.current()
+        if context is not None:
+            context.denial_handled = True
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Password change required"
         )
@@ -191,7 +203,7 @@ def require_super_admin(user: User = Depends(get_current_active_user)) -> User:
     """For endpoints only a super admin may use (config import/export,
     recording known audit-chain breaks)."""
     if not user.role.is_super_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admins only")
+        raise forbidden("Super admins only", reason="super_admin_required", user=user)
     return user
 
 
@@ -297,6 +309,21 @@ def logout(
     session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ):
     if session_token is not None:
+        # Audited only for a session that was still valid: a stale cookie
+        # signs no one out.
+        user = get_user_by_token(session, session_token)
+        if user is not None:
+            context = request_context.current()
+            if context is not None:
+                context.session_id = request_context.session_ref(hash_token(session_token))
+            record_audit_event(
+                session,
+                user_id=user.id,
+                action="user.logout",
+                target_type="user",
+                target_id=user.id,
+            )
+            session.commit()
         delete_session(session, session_token)
     response.delete_cookie(SESSION_COOKIE_NAME)
 
@@ -315,7 +342,9 @@ def change_password_endpoint(
 ):
     # Throttled like /auth/login, so a stolen session can't be used to
     # brute-force the account password at argon2 speed.
-    _require_password_reconfirmation(user, payload.current_password)
+    _require_password_reconfirmation(
+        session, user, payload.current_password, action="change_password"
+    )
 
     try:
         change_password(session, user, payload.new_password)
@@ -325,7 +354,16 @@ def change_password_endpoint(
     # Every other session was opened with the old password; it shouldn't
     # outlive it. This session (the one that just proved the password) stays.
     # One commit, so the new password never lands without the revocation.
-    revoke_all_sessions(session, user.id, except_token=session_token)
+    revoked = revoke_all_sessions(session, user.id, except_token=session_token)
+    if revoked:
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="session.revoke",
+            target_type="user",
+            target_id=user.id,
+            metadata={"count": revoked, "reason": "password_change"},
+        )
     session.commit()
     session.refresh(user)
     return UserPublic.from_user(user)
@@ -409,12 +447,17 @@ class MfaPasswordConfirmRequest(BaseModel):
     password: str
 
 
-def _require_password_reconfirmation(user: User, password: str) -> None:
+def _require_password_reconfirmation(
+    session: Session, user: User, password: str, *, action: str
+) -> None:
     """Shared by every /mfa/* endpoint that re-proves account ownership via
     password -- throttled exactly like /auth/login itself (keyed by
     username, via app.login_throttle), since without a lockout here a
     stolen session token would let an attacker brute-force the account
-    password at argon2-timing speed with no cap on attempts."""
+    password at argon2-timing speed with no cap on attempts.
+
+    A wrong password is audited as user.reauth_failed, naming what it was
+    meant to allow (`action`) and nothing about the password itself."""
     remaining = seconds_until_unlocked(user.username)
     if remaining is not None:
         retry_after = math.ceil(remaining)
@@ -425,6 +468,15 @@ def _require_password_reconfirmation(user: User, password: str) -> None:
         )
     if not verify_password(user, password):
         record_failure(user.username)
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="user.reauth_failed",
+            target_type="user",
+            target_id=user.id,
+            metadata={"action": action},
+        )
+        session.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect"
         )
@@ -444,7 +496,7 @@ def mfa_enroll(
     is already enabled -- re-enrolling over an active secret would silently
     replace it before a replacement is confirmed to actually work, bricking
     the account's current second factor. Disable first to re-enroll."""
-    _require_password_reconfirmation(user, payload.password)
+    _require_password_reconfirmation(session, user, payload.password, action="mfa_enroll")
     if user.mfa_enabled:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -480,7 +532,7 @@ def mfa_disable(
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
-    _require_password_reconfirmation(user, payload.password)
+    _require_password_reconfirmation(session, user, payload.password, action="mfa_disable")
 
     mfa.disable_mfa(session, user)
     record_audit_event(
@@ -497,7 +549,9 @@ def mfa_regenerate_backup_codes(
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
-    _require_password_reconfirmation(user, payload.password)
+    _require_password_reconfirmation(
+        session, user, payload.password, action="mfa_regenerate_backup_codes"
+    )
 
     try:
         codes = mfa.regenerate_backup_codes(session, user)
@@ -570,9 +624,20 @@ def revoke_session_endpoint(
     -- the next request on that browser simply finds no matching
     AuthSession and gets redirected to /login by the existing auth guard,
     no special-casing needed here."""
+    target = session.get(AuthSession, session_id)
+    revoked_ref = request_context.session_ref(target.token_hash) if target is not None else None
     found = revoke_session(session, user_id=user.id, session_id=session_id)
     if not found:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="session.revoke",
+        target_type="user",
+        target_id=user.id,
+        metadata={"count": 1, "revoked_session_id": revoked_ref, "reason": "user_revoked"},
+    )
+    session.commit()
 
 
 class SSOStatus(BaseModel):
@@ -652,10 +717,20 @@ def sso_callback(
     # sitting around for a retry to reuse, and a successful one is about to
     # get its own real session cookie instead.
     _clear_sso_state_cookie(login_error_redirect)
+    client_ip = request.client.host if request.client else None
+
+    def failed(reason: str, error_detail: str | None = None) -> RedirectResponse:
+        # Every way the callback can fail is audited (folded like failed
+        # logins, since it needs no session); the browser only learns that
+        # it failed.
+        auth_events.sso_login_failed(
+            session, client_ip=client_ip, reason=reason, error=error_detail
+        )
+        return login_error_redirect
 
     if error is not None or code is None or state is None:
         logger.warning("sso.callback.idp_error", error=error)
-        return login_error_redirect
+        return failed("idp_error", error)
 
     # Login-CSRF / state-fixation guard (issue #61): `state` must match the
     # cookie /sso/login set in THIS browser. Without this, an attacker who
@@ -668,17 +743,17 @@ def sso_callback(
     # /sso/login itself.
     if sso_state_cookie is None or not secrets.compare_digest(sso_state_cookie, state):
         logger.warning("sso.callback.state_cookie_mismatch")
-        return login_error_redirect
+        return failed("state_cookie_mismatch")
 
     try:
         nonce = decode_state(state)
     except Exception:  # noqa: BLE001 - any decode failure means "start the login over"
         logger.warning("sso.callback.invalid_state")
-        return login_error_redirect
+        return failed("invalid_state")
 
     provider = _get_enabled_provider(session)
     if provider is None:
-        return login_error_redirect
+        return failed("sso_disabled")
 
     oidc_settings = parse_oidc_settings(json.loads(decrypt_secret(provider.config)))
     no_access_role = session.exec(select(Role).where(Role.name == NO_ACCESS_ROLE_NAME)).first()
@@ -686,7 +761,7 @@ def sso_callback(
         # Seeded at startup (app.bootstrap.seed_no_access_role) — missing only
         # if the app never finished starting up, which shouldn't reach here.
         logger.error("sso.callback.no_access_role_missing")
-        return login_error_redirect
+        return failed("no_access_role_missing")
 
     redirect_uri = f"{app_settings.public_base_url}/auth/sso/callback"
     try:
@@ -699,7 +774,12 @@ def sso_callback(
         )
     except Exception as exc:  # noqa: BLE001 - any failure here means "login didn't succeed"
         logger.warning("sso.callback.login_failed", error=str(exc))
-        return login_error_redirect
+        # Rolled back first: whatever the provider got half way through
+        # (a provisioned account, a role change) must not be committed with
+        # the audit entry. Only the kind of error is recorded, not its text,
+        # which can quote claims from the token.
+        session.rollback()
+        return failed("login_failed", type(exc).__name__)
 
     _, token = create_session(session, user, user_agent=request.headers.get("user-agent"))
     response = RedirectResponse(

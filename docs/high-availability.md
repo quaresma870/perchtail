@@ -19,7 +19,7 @@
 | `wal_checkpoint` | every hour |
 | `session_purge`, `update_check` | every hour |
 | `audit_purge` | every `AUDIT_PURGE_INTERVAL_SECONDS` (a day) |
-| `audit_integrity_check` | every `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` (365) |
+| `audit_integrity_check` | every `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` (a day) |
 
 `audit_purge`, `session_purge`, `update_check` and `audit_integrity_check` catch up after a restart: when their interval has gone by since their last success, they run 30 seconds after startup. Each job's last run is stored in the database.
 
