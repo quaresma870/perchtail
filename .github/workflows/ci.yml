@@ -40,6 +40,13 @@ jobs:
       - name: Test
         run: pytest -v
 
+      # The load-test kit (loadtest/) is standard-library Python: lint it
+      # and run its unit tests here, so it can't drift from the API.
+      - name: Load-test kit (lint and unit tests)
+        run: |
+          ruff check loadtest
+          python -m unittest discover -s loadtest/tests
+
       - name: Dependency vulnerability scan (pip-audit)
         run: |
           pip install pip-audit
