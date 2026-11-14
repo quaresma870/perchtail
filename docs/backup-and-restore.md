@@ -1,13 +1,20 @@
 # Backup and restore
 
-PerchTail keeps three things that can't be rebuilt: the SQLite database, the credential salt (`credential_salt`) and SSH `known_hosts`, all in `DATA_DIR` (`/data/db` in the Docker image). The database holds the sources, rules, users, roles, settings and audit log; the salt and your `CREDENTIAL_ENCRYPTION_KEY` together decrypt every stored credential, SSO secret and MFA secret, so each is useless without the other. Logs and scratch don't need a backup.
+This guide explains, for the administrators who run PerchTail, how to back it up, check a backup, restore it on the same or a new machine, and what the keys protect.
+
+Related guides: [admin-guide.md](admin-guide.md), [configuration.md](configuration.md) (every setting, including `BACKUP_DIR`, `BACKUP_KEEP` and `BACKUP_ENCRYPTION_KEY`), [upgrade.md](upgrade.md), [troubleshooting.md](troubleshooting.md), [monitoring.md](monitoring.md), [credential-key-rotation.md](credential-key-rotation.md), [install-from-source.md](install-from-source.md) and [agent-service.md](agent-service.md).
+
+PerchTail keeps three things that can't be rebuilt: the SQLite database, the credential salt (`credential_salt`) and SSH `known_hosts`, all in `DATA_DIR` (`/data/db` in the Docker image). The database holds the sources, rules, users, roles, settings and audit log; the salt and your `CREDENTIAL_ENCRYPTION_KEY` together decrypt every stored credential, SSO secret and MFA secret and key the audit log's hash chain, so each is useless without the other. Logs and scratch don't need a backup.
 
 `python -m app.backup` backs these up while PerchTail runs, into one encrypted file, checks a backup, and restores one. The sections below cover:
 
 - [Making a backup](#making-a-backup): by hand, on a schedule, and before an upgrade.
+- [What a backup holds](#what-a-backup-holds), and what you keep yourself.
 - [The key](#the-key): which key encrypts a backup, and what a key rotation means for older backups.
+- [What the keys and the salt protect](#what-the-keys-and-the-salt-protect): what is lost without each of them.
 - [Checking a backup](#checking-a-backup).
 - [Restoring](#restoring), step by step.
+- [Restoring on a new machine](#restoring-on-a-new-machine).
 - [Rolling back an upgrade](#rolling-back-an-upgrade).
 - [Keeping a copy off the host](#keeping-a-copy-off-the-host).
 - [Testing a restore](#testing-a-restore).
@@ -30,21 +37,34 @@ sudo systemd-run --pipe --wait --uid=perchtail --gid=perchtail \
   /opt/perchtail-venv/bin/python -m app.backup create
 ```
 
-The backup is taken online: SQLite's backup API copies the database in one consistent snapshot while PerchTail keeps writing, and the copy is checked with `PRAGMA quick_check` before it's packed. The file lands in `BACKUP_DIR` (`/data/backups` in the image; by default `backups` next to `DATA_DIR`, so `/var/lib/perchtail/backups` with the install guide's paths), named `perchtail-<version>-<UTC time>-<reason>.ptbackup`, readable by PerchTail's user only. `python -m app.backup list` lists them.
+The backup is taken online: SQLite's backup API copies the database in one consistent snapshot while PerchTail keeps writing, and the copy is checked with `PRAGMA quick_check` before it's packed. The file lands in `BACKUP_DIR` (`/data/backups` in the image; by default `backups` next to `DATA_DIR`, so `/var/lib/perchtail/backups` with the install guide's paths), named `perchtail-<version>-<UTC time>-<reason>.ptbackup`, readable by PerchTail's user only. The command prints the path of the file it wrote.
+
+`python -m app.backup list` lists the backups in `BACKUP_DIR`, newest first, with their name, UTC time, size and reason (`manual`, `scheduled` or `pre-upgrade`).
 
 PerchTail keeps the last `BACKUP_KEEP` (7) manual and scheduled backups and the last 3 pre-upgrade ones, and deletes only the oldest of the same kind when a new one is made.
 
 ### On a schedule
 
-Settings → System → Backups → **Back up every** sets an interval from 1 hour to a week; 0 (the default) turns scheduled backups off. The same section lists the backups on the server, with their date, size and reason, for whoever manages the system settings. Backups are never downloadable from the web interface or the API: copy them off the host yourself (see below).
+**Settings → System**, card **Backups**, **Back up every** sets an interval from 1 hour to a week; 0 (the default) turns scheduled backups off. The same card lists the backups on the server, with their date, size and reason, for whoever manages the system settings. Backups are never downloadable from the web interface or the API: copy them off the host yourself (see below).
 
-A scheduled backup that fails logs `backup.create_failed` and fails the `backup` job in `/monitoring/health` ([monitoring.md](monitoring.md)). After a failed attempt, the next one waits an hour (or the interval, if that's shorter), so a full disk doesn't fill the audit log with an entry every few minutes; a restart of PerchTail tries again straight away, and a backup that works brings back the normal interval.
+A scheduled backup that fails logs `backup.create_failed` and fails the `backup` job in `/monitoring/health` ([monitoring.md](monitoring.md)). After a failed attempt, the next one waits an hour (or the interval, if that's shorter), so a full disk doesn't fill the audit log with an entry every few minutes. That wait is kept in memory: after a restart, the job tries again at its first run, within 5 minutes, and a backup that works brings back the normal interval.
 
 ### Before an upgrade
 
-The upgrade steps (the README, [install-from-source.md](install-from-source.md#upgrading) and the Updates card under Settings → System) start with a backup made with `--reason pre-upgrade`, while the old version still runs. Those are kept apart from the others, so a burst of scheduled backups never deletes the one you need to roll back.
+The upgrade steps (the README, [upgrade.md](upgrade.md), [install-from-source.md](install-from-source.md#upgrading) and the **Updates** card under **Settings → System**) start with a backup made with `--reason pre-upgrade`, while the old version still runs. Those are kept apart from the others, so a burst of scheduled backups never deletes the one you need to roll back.
 
 Upgrading from a release before 0.7.0: the command doesn't exist there yet, so stop PerchTail and copy `DATA_DIR` (and, for a source install, the database and salt files if they live outside it) as before.
+
+## What a backup holds
+
+A backup holds the database, the credential salt and, when it exists, SSH `known_hosts`, with a manifest: the backup format, the PerchTail version and Alembic revision that made it, the UTC time, the reason and each file's SHA-256. The database carries everything set in the web interface, system settings included, and the hashes of the push-agent tokens and of the monitoring token, so those keep working after a restore.
+
+A backup doesn't hold, and you keep yourself:
+
+- the keys: `CREDENTIAL_ENCRYPTION_KEY` and, if you set it, `BACKUP_ENCRYPTION_KEY`;
+- the rest of the environment: `.env` (Docker) or `/etc/perchtail/perchtail.env` (install from source), with `PUBLIC_BASE_URL`, `LOCAL_SOURCE_ROOTS`, the paths and the limits ([configuration.md](configuration.md));
+- `docker-compose.yml` or the systemd unit, the reverse proxy and its TLS certificates;
+- PerchTail's own logs, and each push agent's environment file on its host.
 
 ## The key
 
@@ -59,13 +79,36 @@ Without `BACKUP_ENCRYPTION_KEY`, the key you already guard for the credentials a
 
 **After a key rotation** ([credential-key-rotation.md](credential-key-rotation.md)), backups made before it still hold credentials encrypted under the old `CREDENTIAL_ENCRYPTION_KEY`, and, without `BACKUP_ENCRYPTION_KEY`, are themselves encrypted under it. Keep the old key for as long as you keep those backups, and make a new backup right after the rotation.
 
+## What the keys and the salt protect
+
+`CREDENTIAL_ENCRYPTION_KEY` and the salt are combined (PBKDF2-HMAC-SHA256) into the key that encrypts source credentials, SSO provider settings and MFA secrets, and into a second key that signs the audit log's hash chain. Neither can be recovered from the database or from the other. Local passwords, MFA backup codes, push-agent tokens, the monitoring token and sessions are stored as hashes and don't depend on them.
+
+| What is lost | What stops working | What still works |
+|---|---|---|
+| `CREDENTIAL_ENCRYPTION_KEY` | Every source that uses a stored credential (SSH, SMB, WinRM) fails until its credential is entered again in **Settings → Sources** (one by one, or with **Update credentials** on several). SSO sign-in fails, and the provider's settings can't be read. Users with MFA turned on can't finish signing in, even with a backup code. Every audit entry from before fails the integrity check. Backups made without `BACKUP_ENCRYPTION_KEY` can't be opened at all. | Local accounts without MFA, roles, customers, folders, sources and their rules, push-agent sources (they use their own token), local-disk sources, system settings and the content of the audit log. |
+| The salt (`credential_salt`) | The same as losing the key: everything derived from the key and the salt can't be read. PerchTail refuses to start while the database holds encrypted data (`startup.credential_salt_missing`), so that you can put the salt back. | Backups: each one contains the salt, and its own encryption doesn't depend on it. Restore the latest backup, or take `credential_salt` from it, to get everything back. |
+| `BACKUP_ENCRYPTION_KEY` | Backups made with it can't be opened. | The running installation, which doesn't use this key. Set a new `BACKUP_ENCRYPTION_KEY` and make a new backup at once. |
+| SSH `known_hosts` | Host-key pinning starts over: with `SSH_HOST_KEY_POLICY=tofu` each server's key is trusted again on its next connection; with `strict`, SSH sources fail until their keys are added. | Everything else. |
+
+`CREDENTIAL_SALT_ALLOW_REGENERATE=true` lets PerchTail start with a new salt when the old one is lost for good, with the losses in the first row. Don't start PerchTail with a guessed or different `CREDENTIAL_ENCRYPTION_KEY` to try it: it starts, but every audit entry written meanwhile is signed with the wrong key and fails the integrity check later.
+
 ## Checking a backup
 
 ```bash
+# Docker:
 docker compose exec -u perchtail perchtail python -m app.backup verify /data/backups/<file>
+
+# Install from source:
+sudo systemd-run --pipe --wait --uid=perchtail --gid=perchtail \
+  -p EnvironmentFile=/etc/perchtail/perchtail.env -p WorkingDirectory=/opt/perchtail/backend \
+  /opt/perchtail-venv/bin/python -m app.backup verify /var/lib/perchtail/backups/<file>
 ```
 
-`verify` decrypts the whole file and checks every block, the manifest (format, app version, Alembic revision, time, reason), each file's SHA-256 and the database's `quick_check`, without restoring anything. It works while PerchTail runs. Each `create`, `verify` and `restore` is recorded in the audit log as `backup.create`, `backup.verify` and `backup.restore`, with the file name, the reason and the result.
+`verify` decrypts the whole file and checks every block, the manifest's format and file list, each file's SHA-256 against the manifest, that the database and the salt are there, and the database's `quick_check`, without restoring anything. On success it prints the version, Alembic revision, time and reason from the manifest. It works while PerchTail runs. It decrypts into a temporary folder in `BACKUP_DIR`, removed afterwards, so `BACKUP_DIR` needs free space for about the size of the database.
+
+`verify` proves the file is intact and opens with the backup key you have. Two checks only `restore` makes: that the current `CREDENTIAL_ENCRYPTION_KEY` decrypts the credentials inside, and that this PerchTail version knows the database's revision. To check those without touching production, restore the backup on a test instance ([Testing a restore](#testing-a-restore)).
+
+Each `create`, `verify` and `restore` is recorded in the audit log as `backup.create`, `backup.verify` and `backup.restore`, with the file name, the reason and the result.
 
 ## Restoring
 
@@ -99,11 +142,46 @@ sudo systemctl start perchtail
 
 The current `DATA_DIR` is moved, whole, to `<DATA_DIR>.before-restore-<UTC time>` (for example `/data/db.before-restore-20261112T101500Z`), and the backup's files are written to a fresh `DATA_DIR`, without the old `-wal` and `-shm` files. When `DATA_DIR` is its own volume, which can't be renamed, its contents are moved instead. A database, salt or `known_hosts` that `DATABASE_URL`, `CREDENTIAL_SALT_PATH` or `SSH_KNOWN_HOSTS_PATH` puts outside `DATA_DIR` is renamed to `<file>.before-restore-<UTC time>` next to itself. Delete the `before-restore` copies once the restored instance works.
 
-The restored database can't hold the record of its own restore, so the restore is logged (`backup.restore`, [monitoring.md](monitoring.md#log-events-worth-alerting-on)) and the first start on it writes the `backup.restore` audit entry. On start, PerchTail migrates the restored database to its own version, as after any upgrade.
+The restored database can't hold the record of its own restore, so the restore is logged (`backup.restore`, [monitoring.md](monitoring.md#log-events-worth-alerting-on)) and the first start on it writes the `backup.restore` audit entry. On start, the container's entrypoint (or the unit's `ExecStartPre` for an install from source) runs `alembic upgrade head`, which migrates the restored database to the running version, as after any upgrade.
+
+## Restoring on a new machine
+
+To move PerchTail to another host, or to rebuild one that was lost:
+
+1. **Install the same PerchTail version as the backup, or a newer one.** The version is in the backup's name. An older version refuses the backup; a newer one restores it and migrates it at start.
+2. **Set the environment** as on the old host: the same `CREDENTIAL_ENCRYPTION_KEY`, `BACKUP_ENCRYPTION_KEY` if the backup was made with it, and the rest of `.env` or `perchtail.env` ([What a backup holds](#what-a-backup-holds)). Keep `LOG_DIR` the same: the built-in application-log source keeps the path it was created with. The directories listed in `LOCAL_SOURCE_ROOTS` must exist on the new host.
+3. **Put the backup where PerchTail's user can read it**, and restore it with PerchTail stopped (commands below).
+4. **Check the new instance**: `startup.complete` in its log, sign in with an account from the backup, and open a file on a source that uses a stored credential, which proves the key and the salt match.
+5. **If the address changed**: set `PUBLIC_BASE_URL` and update the redirect URI at the identity provider ([sso-setup.md](sso-setup.md)); set each push agent's `PERCHTAIL_SERVER_URL` to the new address and restart the agent ([agent-service.md](agent-service.md)). Agent tokens and the monitoring token are in the database and keep working.
+
+Docker, in the folder with `docker-compose.yml` and `.env`:
+
+```bash
+docker compose up -d && docker compose stop perchtail   # creates the volume and the container
+docker compose cp ./<file> perchtail:/data/backups/<file>
+docker compose run --rm --no-deps --entrypoint chown perchtail perchtail:perchtail /data/backups/<file>
+docker compose run --rm --no-deps -u perchtail --entrypoint python perchtail \
+  -m app.backup restore /data/backups/<file>
+docker compose up -d
+```
+
+The first start creates an empty database and a new salt; the restore moves them aside to `/data/db.before-restore-<UTC time>`, which you can delete once the restored instance works. `docker compose cp` writes the file as root, hence the `chown`.
+
+Install from source, after following [install-from-source.md](install-from-source.md) through the service unit:
+
+```bash
+sudo install -d -o perchtail -g perchtail -m 0700 /var/lib/perchtail/backups
+sudo install -o perchtail -g perchtail -m 0600 ./<file> /var/lib/perchtail/backups/<file>
+sudo systemctl stop perchtail      # if it was started
+sudo systemd-run --pipe --wait --uid=perchtail --gid=perchtail \
+  -p EnvironmentFile=/etc/perchtail/perchtail.env -p WorkingDirectory=/opt/perchtail/backend \
+  /opt/perchtail-venv/bin/python -m app.backup restore /var/lib/perchtail/backups/<file>
+sudo systemctl start perchtail
+```
 
 ## Rolling back an upgrade
 
-An upgraded PerchTail migrates the database on its first start, and the previous version refuses to start on it (`startup.database_newer_than_app`). To go back:
+An upgraded PerchTail migrates the database on its first start, and the previous version refuses to start on it (`startup.database_newer_than_app`). Migrations aren't undone with their data: go back by restoring the backup made before the upgrade ([upgrade.md](upgrade.md#rolling-back)).
 
 1. Stop PerchTail.
 2. Put the previous version back: the previous image tag in `docker-compose.yml`, or the previous tag checked out and installed as in [install-from-source.md](install-from-source.md#upgrading).
@@ -112,10 +190,14 @@ An upgraded PerchTail migrates the database on its first start, and the previous
 
 Anything changed between the upgrade and the rollback (new sources, rules, users, audit entries) is lost with it; it stays in the `before-restore` copy.
 
+Going back to a release before 0.7.0, which has no `app.backup` command: stop PerchTail, put the copy of `DATA_DIR` made before the upgrade back in place of the current one, and start the previous version.
+
 ## Keeping a copy off the host
 
 A backup on the same disk as the database doesn't survive the loss of that disk or host. Copy the files in `BACKUP_DIR` somewhere else on a schedule: another server, object storage, your existing backup system. They're encrypted, so the copy doesn't need to be trusted with their content, but keep the keys out of that place: a backup is only as safe as the key stored next to it. Keep a copy of the keys themselves somewhere you can reach when the host is gone: without `CREDENTIAL_ENCRYPTION_KEY` (and `BACKUP_ENCRYPTION_KEY`, when it's set), no backup can be restored.
 
 ## Testing a restore
 
-A backup that has never been restored is a guess. Every few months, and after changing keys, restore a recent backup on a separate test instance (its own host or containers, its own `DATA_DIR`, the same keys) and check that it starts, that you can sign in, and that a source opens: that last step proves the credentials decrypt. `verify` proves the file is intact and readable with the current keys; only a restore proves the whole procedure, keys included, works.
+A backup that has never been restored is a guess. Every few months, and after changing keys, restore a recent backup on a separate test instance (its own host or containers, its own `DATA_DIR`, the same keys) as in [Restoring on a new machine](#restoring-on-a-new-machine), and check that it starts, that you can sign in, and that a source opens: that last step proves the credentials decrypt. `verify` proves the file is intact and readable with the current keys; only a restore proves the whole procedure, keys included, works.
+
+A test instance holds the same sources and alerts as production: while it runs, it checks those sources in the background and its alerts call the same webhooks. Stop it once the test is done.
