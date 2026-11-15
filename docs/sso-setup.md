@@ -9,7 +9,7 @@ PerchTail supports single sign-on with OpenID Connect (OIDC); SAML isn't support
 | Field | What it is | Where it comes from |
 |---|---|---|
 | **Display name** | The name on the login page's **Sign in with …** button | Your choice |
-| **Issuer URL** | The IdP's OIDC issuer URL | Your IdP — see the per-provider notes below |
+| **Issuer URL** | The IdP's OIDC issuer URL, `https://` only | Your IdP — see the per-provider notes below |
 | **Client ID** / **Client secret** | The OAuth client credentials of PerchTail at the IdP | Created when you register PerchTail as a client at your IdP |
 | **Scopes** | OAuth scopes requested at login | Default `openid email profile` — leave as-is unless your IdP needs more to emit a group claim |
 | **Group claim** (optional) | Name of the ID token claim carrying group membership (e.g. `groups`, `roles`) | Only needed for group-to-role mapping; see below |
@@ -25,6 +25,10 @@ Whatever your IdP calls it ("application," "OAuth client," "OIDC integration"), 
 - **Redirect URI**: `{PUBLIC_BASE_URL}/auth/sso/callback` — must match exactly, including scheme (see the [reverse proxy + TLS](../README.md#deployment-reverse-proxy-nginx--tls) section — this needs to already be the real `https://` URL users will reach PerchTail at, not `http://localhost`).
 - **Token endpoint authentication**: PerchTail sends `client_id` and `client_secret` in the token request's POST body (`client_secret_post`), not in an `Authorization: Basic` header. If your IdP lets you pick a token endpoint auth method, choose that one — some (Okta, Auth0-style configurations) default to Basic and need this changed explicitly.
 - **Scopes**: at minimum `openid` (required by the protocol) plus whatever yields an `email` claim — the default `openid email profile` covers this for every provider below.
+- **PKCE**: PerchTail sends a PKCE challenge (`code_challenge_method=S256`) with every sign-in and the matching `code_verifier` with the token request, as well as the client secret. IdPs that offer a "require PKCE" option for confidential clients can have it switched on.
+- **HTTPS**: the issuer URL, and the authorization, token and JWKS endpoints its discovery document names, must be `https://`. PerchTail refuses an `http://` issuer when you save the provider, and checks the endpoints before every request to the IdP. For a local test IdP only, `SSO_ALLOW_HTTP_LOCALHOST=true` also accepts `http://` on `localhost`, `127.0.0.1` and `::1` ([configuration.md](configuration.md)).
+- **Issuer check**: the discovery document's `issuer` must be the **Issuer URL** exactly (a trailing slash aside, so copy it with the same case and path as the IdP publishes it). Otherwise PerchTail refuses the sign-in and the test, and audits it (`user.sso_login_failed` with reason `issuer_mismatch`, or `sso_provider.issuer_mismatch` for **Test connection**).
+- **ID token**: it must carry `exp` and `iat`, besides `iss`, `aud`, `sub` and the `nonce` PerchTail sent; a token without them is refused.
 
 ### How a sign-in maps to an account
 
@@ -32,7 +36,7 @@ Whatever your IdP calls it ("application," "OAuth client," "OIDC integration"), 
 - On the first sign-in, PerchTail creates the account. Its username is the `email` claim, or `preferred_username` when there's no email, or `sub` when there's neither. The username doesn't change on later sign-ins.
 - On every sign-in, the `name` claim (or `given_name` and `family_name`) and the `email` claim set the account's name and email under **My profile**, where SSO users see them read-only. An email the IdP marks as unverified (`email_verified: false`), or one another account already has, is left out.
 - **Usernames are shared by local and SSO accounts.** PerchTail doesn't link an SSO sign-in to an existing local account. If the new account's username is already taken (by a local account, or by an SSO account from another issuer), the first sign-in fails and redirects to the login page with an error; the log has `sso.callback.login_failed`. Give local accounts usernames your IdP will never send, for example not an email address.
-- **MFA is for local accounts only.** The TOTP second factor under **My profile** exists only for local accounts. SSO users get their second factor, if any, from the IdP. Changing the password in PerchTail is also for local accounts only.
+- **MFA is for local accounts only.** The TOTP second factor under **My profile** exists only for local accounts. SSO users get their second factor, if any, from the IdP. Changing the password in PerchTail is also for local accounts only: an SSO account can't sign in with the local form, and an admin can't give it a password.
 - A deactivated account can't sign in with SSO either.
 
 ## 2. Group-claim to role mapping (optional)
@@ -55,7 +59,7 @@ An admin with **Manage SSO settings** who isn't a super admin can only map a gro
 ## 3. Test before enabling
 
 1. Fill in the form with **Enabled** off and click **Save**.
-2. Click **Test connection**. It appears once the provider is saved, and tests the saved settings: it fetches the IdP's discovery document (`{Issuer URL}/.well-known/openid-configuration`), checks that it names the authorization, token and JWKS endpoints, and fetches the JWKS. It doesn't attempt a real login, so it can't catch a wrong client ID or secret.
+2. Click **Test connection**. It appears once the provider is saved, and tests the saved settings: it fetches the IdP's discovery document (`{Issuer URL}/.well-known/openid-configuration`), checks that it names the configured issuer and the authorization, token and JWKS endpoints, and fetches the JWKS. It doesn't attempt a real login, so it can't catch a wrong client ID or secret.
 3. Switch on **Enabled** and click **Save**. The login page now shows **Sign in with** and the display name.
 
 Test the whole flow with a test user before you tell anyone; keep a local super admin session open in another browser while you do.
@@ -89,6 +93,6 @@ Test the whole flow with a test user before you tell anyone; keep a local super 
 ## Troubleshooting
 
 - **The login page says "SSO sign-in failed"** (the address ends in `#/login?sso_error=1`) — the browser gets no detail on purpose: a detailed OIDC error is diagnostic information, not something to hand to an unauthenticated browser. The application log has the reason, at `WARNING`: `sso.callback.idp_error` (the IdP returned an error), `sso.callback.state_cookie_mismatch` or `sso.callback.invalid_state` (the sign-in took longer than 10 minutes, or the browser lost the state cookie), or `sso.callback.login_failed` with an `error` field (token exchange failed, invalid ID token, deactivated account, or a username already taken). Read it with `docker compose logs perchtail` or in `LOG_DIR`. A super admin who can still sign in with a local account can also open the **PerchTail application logs** source (marked **system**) in the **Viewer**: it reads `LOG_DIR`.
-- **The SSO button answers "Could not reach the identity provider"** — PerchTail couldn't fetch the discovery document; the log has `sso.login.discovery_failed`. Check the **Issuer URL** and that the PerchTail host can reach the IdP.
+- **The SSO button answers "Could not reach the identity provider"** — PerchTail couldn't fetch the discovery document; the log has `sso.login.discovery_failed`. Check the **Issuer URL** and that the PerchTail host can reach the IdP. With `sso.login.issuer_mismatch` instead, the discovery document names another issuer: copy the IdP's `issuer` value into **Issuer URL** exactly.
 - **`unexpected audience in ID token` in the log** — the **Client ID** in Settings → SSO doesn't match the `aud` claim the IdP issued; check you copied the right client ID, not a related one (e.g. Okta's API Access Management client vs. the web app's).
 - **A returning user's role keeps reverting after you change it manually** — expected if a group mapping matches them (see above); change the mapping, or remove the user from the matching IdP group, rather than changing the role in PerchTail.

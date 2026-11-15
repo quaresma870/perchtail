@@ -23,8 +23,10 @@ import time
 import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
+from cryptography.fernet import InvalidToken
 from sqlmodel import Session, select
 
+from app.audit import record_audit_event
 from app.auth.models import MfaBackupCode, User
 from app.crypto import decrypt_secret, encrypt_secret
 from app.timeutils import utcnow
@@ -197,17 +199,39 @@ def _consume_backup_code(session: Session, user: User, code: str) -> bool:
     return False
 
 
+def _looks_like_totp(code: str) -> bool:
+    normalized = code.strip().replace(" ", "")
+    return normalized.isdigit() and len(normalized) == 6
+
+
 def verify_mfa_code(session: Session, user: User, code: str) -> bool:
-    """Used at login time only -- tries the code as a live, not-yet-used TOTP
-    code first, then as a one-time backup code (consuming it on match).
+    """Used at login time and to re-prove the second factor when disabling
+    MFA (POST /auth/mfa/disable) -- tries the code as a one-time backup code
+    (consuming it on match), then as a live, not-yet-used TOTP code.
     Enrollment itself calls _consume_totp_code directly against the
     still-pending secret, since a backup code can't exist yet at that point.
-    Does not commit -- the caller (POST /auth/login) bundles this with its
-    own login-finalization commit via complete_login."""
+
+    Backup codes come first because they don't need the TOTP secret: with
+    the encryption key or salt lost, a valid backup code still signs in. A
+    TOTP secret that can't be decrypted is a refusal like a wrong code,
+    audited as user.mfa_secret_unreadable (never a 500). Does not commit --
+    the caller commits with the login's or the disable's outcome."""
     if not user.mfa_enabled or user.mfa_secret_encrypted is None:
         return False
 
-    secret = decrypt_secret(user.mfa_secret_encrypted)
-    if _consume_totp_code(session, user, secret, code):
+    # A 6-digit code can't be a backup code (10 hex characters), so the
+    # argon2 checks of every backup code are spared on the common path.
+    if not _looks_like_totp(code) and _consume_backup_code(session, user, code):
         return True
-    return _consume_backup_code(session, user, code)
+    try:
+        secret = decrypt_secret(user.mfa_secret_encrypted)
+    except (InvalidToken, ValueError, OSError):
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="user.mfa_secret_unreadable",
+            target_type="user",
+            target_id=user.id,
+        )
+        return False
+    return _consume_totp_code(session, user, secret, code)

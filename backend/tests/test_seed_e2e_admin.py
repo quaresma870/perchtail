@@ -1,6 +1,7 @@
 from app.auth.models import Role, User
 from app.auth.providers.local import verify_password
-from app.seed_e2e_admin import seed
+from app.crypto import decrypt_secret
+from app.seed_e2e_admin import DEFAULT_TOTP_SECRET, seed
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -24,6 +25,9 @@ def test_seed_creates_a_working_super_admin(monkeypatch):
         assert user.username == "e2e-admin"
         assert user.must_change_password is False
         assert verify_password(user, "e2e-test-password-123!")
+        # Super admins must use MFA: seeded with it on, with the known secret.
+        assert user.mfa_enabled is True
+        assert decrypt_secret(user.mfa_secret_encrypted) == DEFAULT_TOTP_SECRET
 
         role = session.get(Role, user.role_id)
         assert role is not None

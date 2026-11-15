@@ -1,13 +1,21 @@
 <script lang="ts">
   import Router, { push } from 'svelte-spa-router'
   import { onMount } from 'svelte'
-  import { authChecked, currentUser, hasCapability, logout, refreshCurrentUser } from './lib/auth'
+  import {
+    authChecked,
+    currentUser,
+    hasCapability,
+    logout,
+    mfaSetupRequired,
+    refreshCurrentUser,
+  } from './lib/auth'
   import { currentHash } from './lib/hash'
   import { serverReachable } from './lib/server-status'
   import { closeAllTabs } from './lib/viewer-tabs'
   import { refreshSystemSettings, refreshSystemSettingsIfStale, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
+  import SetupMfa from './routes/SetupMfa.svelte'
   import Sources from './routes/Sources.svelte'
   import SourceEditorPopup from './routes/SourceEditorPopup.svelte'
   import SourceOverview from './routes/SourceOverview.svelte'
@@ -32,6 +40,7 @@
   const routes = {
     '/login': Login,
     '/change-password': ChangePassword,
+    '/setup-mfa': SetupMfa,
     '/profile': Profile,
     '/viewer': Viewer,
     '/viewer/:sourceId': Viewer,
@@ -78,6 +87,17 @@
     $currentHash !== '/change-password'
   ) {
     push('/change-password')
+  }
+  // After the password: an account that must use MFA sets it up before
+  // anything else (the API refuses everything else until it does).
+  $: if (
+    $authChecked &&
+    $currentUser &&
+    !$currentUser.must_change_password &&
+    mfaSetupRequired($currentUser) &&
+    $currentHash !== '/setup-mfa'
+  ) {
+    push('/setup-mfa')
   }
   // The bare address has no page of its own: it opens the Viewer, as
   // signing in does.

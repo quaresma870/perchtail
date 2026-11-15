@@ -42,7 +42,7 @@ python -m alembic upgrade head
 uvicorn app.main:app --port 8000
 ```
 
-On the first start with an empty database, the backend creates the `admin` super admin with a temporary password and logs it once, as the `initial_super_admin.seeded` warning. Sign in with it and choose a new password.
+On the first start with an empty database, the backend creates the `admin` super admin with a temporary password in `DATA_DIR/initial-admin-password` (`backend/data/db/initial-admin-password` with the defaults); the `initial_super_admin.seeded` warning names the file. Sign in with it, choose a new password, and set up two-factor authentication, which super admins must use.
 
 Run the checks CI runs from the repository root:
 

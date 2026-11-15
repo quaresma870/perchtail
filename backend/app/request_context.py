@@ -16,13 +16,23 @@ address, the User-Agent, and, once the session cookie has been checked
 (app/api/auth.py), the session and the user. app.audit.record_audit_event
 reads it, so every entry written while handling a request says where it
 came from without each caller passing it. Background jobs and the CLI run
-outside any request, so their entries leave these fields empty."""
+outside any request, so their entries leave these fields empty.
+
+A request that carries X-Forwarded-For or Forwarded from a peer outside
+TRUSTED_PROXIES usually means PerchTail sits behind a proxy that isn't
+listed there: every client then shows up with the proxy's address and
+shares its per-address login lockout (app/login_throttle.py). The first such
+request after startup logs a WARNING, and /monitoring/health reports
+trusted_proxies_suspect until the next restart."""
 
 import ipaddress
 from contextvars import ContextVar
 from dataclasses import dataclass
 
 from app.config import Network, get_settings, parse_networks
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # User-Agent values are recorded up to this many characters.
 USER_AGENT_MAX = 256
@@ -49,6 +59,29 @@ class RequestContext:
 
 
 _current: ContextVar[RequestContext | None] = ContextVar("perchtail_request_context", default=None)
+
+# Set by the first request since startup that carried a forwarding header
+# from a peer outside TRUSTED_PROXIES (see the module docstring).
+_untrusted_forwarded_seen = False
+
+
+def trusted_proxies_suspect() -> bool:
+    """Whether a forwarding header has arrived from an untrusted peer since
+    startup."""
+    return _untrusted_forwarded_seen
+
+
+def reset_for_tests() -> None:
+    global _untrusted_forwarded_seen
+    _untrusted_forwarded_seen = False
+
+
+def _note_untrusted_forwarded(peer: str) -> None:
+    global _untrusted_forwarded_seen
+    if _untrusted_forwarded_seen:
+        return
+    _untrusted_forwarded_seen = True
+    logger.warning("client_address.untrusted_forwarded_header", peer=peer)
 
 
 def current() -> RequestContext | None:
@@ -131,6 +164,11 @@ class ClientAddressMiddleware:
         client = scope.get("client")
         peer = client[0] if client else None
         trusted = parse_networks(get_settings().trusted_proxies)
+        if peer is not None and not _untrusted_forwarded_seen:
+            forwarded = forwarded_for or any(name == b"forwarded" for name, _ in headers)
+            peer_address = _address(peer)
+            if forwarded and (peer_address is None or not _trusted(peer_address, trusted)):
+                _note_untrusted_forwarded(peer)
         resolved = resolve_client(peer, forwarded_for, trusted)
         if client and resolved != peer:
             scope = {**scope, "client": (resolved, 0)}

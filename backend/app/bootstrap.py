@@ -9,6 +9,7 @@ from app.auth.providers.local import create_local_user
 from app.auth.providers.oidc import read_provider_config
 from app.auth.rbac import create_role
 from app.config import get_settings
+from app.initial_admin_password import write_initial_admin_password
 from app.logging_config import get_logger
 from app.models import PatternKind, Protocol, Rule, RuleType, SmtpSettings, Source
 from app.redaction_rules import seed_builtin_redaction_rules
@@ -138,9 +139,11 @@ def seed_initial_super_admin(session: Session) -> User | None:
     is strictly a first-run bootstrap, not something that should ever touch
     an existing deployment). Generates a random password rather than
     reading one from config — same reasoning as the admin-driven
-    reset-password endpoint (api/users.py): a temporary credential logged
-    once and forced to change beats a long-lived secret sitting in a .env
-    file. Logged at WARNING so it isn't lost in routine INFO noise."""
+    reset-password endpoint (api/users.py): a temporary credential forced
+    to change beats a long-lived secret sitting in a .env file. The
+    password goes to a 0600 file in DATA_DIR, never to the log
+    (app/initial_admin_password.py); the WARNING line only says where it
+    is."""
     if session.exec(select(User)).first() is not None:
         return None
 
@@ -155,6 +158,10 @@ def seed_initial_super_admin(session: Session) -> User | None:
     temporary_password = password_policy.generate_password(
         password_policy.get_policy(session), user_identifiers=[settings.initial_admin_username]
     )
+    # Written before the account exists: if the file can't be written, the
+    # start fails and the next one tries again, instead of leaving an
+    # account nobody can sign in to.
+    password_file = write_initial_admin_password(temporary_password)
     user = create_local_user(
         session,
         actor_user_id=None,
@@ -166,8 +173,11 @@ def seed_initial_super_admin(session: Session) -> User | None:
     logger.warning(
         "initial_super_admin.seeded",
         username=user.username,
-        temporary_password=temporary_password,
-        note="Log in and change this password immediately — it will not be shown again.",
+        password_file=str(password_file),
+        note=(
+            "The temporary password is in this file, readable only by the PerchTail user. "
+            "Sign in and change it; the file is deleted when you do."
+        ),
     )
     return user
 

@@ -15,10 +15,14 @@ from app.auth.models import (
     User,
 )
 from app.auth.providers.oidc import (
+    DISCOVERY_ENDPOINTS,
+    InsecureIdPURLError,
+    IssuerMismatchError,
     fetch_discovery_document,
     fetch_jwks,
     parse_oidc_settings,
     read_provider_config,
+    require_https,
 )
 from app.auth.rbac import (
     require_global_capability,
@@ -170,6 +174,16 @@ def _require_trust_change_within_authority(session: Session, user: User) -> None
             )
 
 
+def _require_https_issuer(issuer: str) -> None:
+    """The issuer must be https:// (app/auth/providers/oidc.py,
+    require_https); the endpoints its discovery document names are checked
+    before each request to the IdP."""
+    try:
+        require_https(issuer, "issuer URL")
+    except InsecureIdPURLError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("", response_model=list[SSOProviderPublic])
 def list_providers(user: User = Depends(require_manage), session: Session = Depends(get_session)):
     configs = session.exec(select(SSOProviderConfig)).all()
@@ -184,6 +198,7 @@ def create_provider(
 ):
     _assert_single_enabled(session, enabled=payload.enabled)
     _require_trust_change_within_authority(session, user)
+    _require_https_issuer(payload.issuer)
 
     config = SSOProviderConfig(
         protocol=SSOProtocol.oidc,
@@ -416,6 +431,7 @@ def update_provider(
     if payload.name is not None:
         config.name = payload.name
     if payload.issuer is not None:
+        _require_https_issuer(payload.issuer)
         raw["issuer"] = payload.issuer
     if payload.client_id is not None:
         raw["client_id"] = payload.client_id
@@ -476,12 +492,25 @@ def test_provider(
     settings = parse_oidc_settings(raw)
     try:
         discovery = fetch_discovery_document(settings.issuer)
-        for required in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
+        for required in DISCOVERY_ENDPOINTS:
             if required not in discovery:
                 return ConnectionCheckResult(
                     ok=False, detail=f"discovery document is missing {required}"
                 )
         fetch_jwks(discovery["jwks_uri"])
+    except IssuerMismatchError as exc:
+        # Sign-ins through this provider are refused the same way
+        # (api/auth.py); recorded here too, since it can mean the issuer URL
+        # points at someone else's discovery document.
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="sso_provider.issuer_mismatch",
+            target_type="sso_provider",
+            target_id=config.id,
+        )
+        session.commit()
+        return ConnectionCheckResult(ok=False, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 - surfaced to the caller, not swallowed
         return ConnectionCheckResult(ok=False, detail=str(exc))
 

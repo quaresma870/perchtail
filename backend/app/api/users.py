@@ -16,6 +16,7 @@ from app.auth.rbac import (
 )
 from app.auth.sessions import revoke_all_sessions
 from app.db import get_session
+from app.initial_admin_password import remove_initial_admin_password
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -89,6 +90,22 @@ def _require_not_last_super_admin(session: Session, target: User) -> None:
         )
 
 
+def _end_sessions_of_deactivated(session: Session, *, actor: User, target: User) -> None:
+    """A deactivated account's sessions are deleted at once, so reactivating
+    it later never brings an old session back. Doesn't commit: the caller
+    commits it with the deactivation."""
+    revoked = revoke_all_sessions(session, target.id)
+    if revoked:
+        record_audit_event(
+            session,
+            user_id=actor.id,
+            action="session.revoke",
+            target_type="user",
+            target_id=target.id,
+            metadata={"count": revoked, "reason": "deactivated"},
+        )
+
+
 @router.get("", response_model=list[UserPublic])
 def list_users(user: User = Depends(require_manage), session: Session = Depends(get_session)):
     return session.exec(select(User)).all()
@@ -156,6 +173,7 @@ def update_user(
         target.role_id = payload.role_id
     if payload.active is False:
         _require_not_last_super_admin(session, target)
+    deactivating = payload.active is False and target.active
     if payload.active is not None:
         target.active = payload.active
     profile_changes = payload.model_dump(exclude_unset=True, include={"display_name", "email"})
@@ -182,6 +200,8 @@ def update_user(
             target_id=target.id,
             metadata={"role_id": target.role_id, "active": target.active},
         )
+    if deactivating:
+        _end_sessions_of_deactivated(session, actor=user, target=target)
     session.commit()
     session.refresh(target)
     return target
@@ -197,6 +217,25 @@ def reset_password(
     same as account creation) and forces a change on next login — same
     Security-notes rule as admin-created accounts."""
     target = _get_manageable_user(session, user, user_id)
+    if target.auth_provider != AuthProviderType.local:
+        # A password would give an SSO account a way in that skips the
+        # identity provider and its MFA. Audited like any other refusal.
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="access.denied",
+            target_type="user",
+            target_id=target.id,
+            metadata={
+                "attempted": "POST /users/{user_id}/reset-password",
+                "reason": "sso_account",
+            },
+        )
+        session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This account signs in through the identity provider and has no password here",
+        )
 
     # Random, but within the policy (#245): long enough, every character class.
     policy = password_policy.get_policy(session)
@@ -224,6 +263,7 @@ def reset_password(
             metadata={"count": revoked, "reason": "password_reset"},
         )
     session.commit()
+    remove_initial_admin_password(target)
     return ResetPasswordResponse(temporary_password=temporary_password)
 
 
@@ -248,4 +288,5 @@ def deactivate_user(
         target_type="user",
         target_id=target.id,
     )
+    _end_sessions_of_deactivated(session, actor=user, target=target)
     session.commit()

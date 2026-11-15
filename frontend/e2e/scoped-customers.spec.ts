@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type Page } from '@playwright/test'
+import { setUpMfa } from './totp'
 
 // Customers and folders only within a role's grants: the source editor and
 // a delegated admin's role editor list only what the role's grants reach.
@@ -54,7 +55,8 @@ async function tearDown(page: Page, made: Awaited<ReturnType<typeof setUp>>, ext
 }
 
 /** Signs in as `username` in its own browser context (the shared page keeps
- * the super admin's session) and clears the forced password change. */
+ * the super admin's session), clears the forced password change and, since
+ * a role with a global capability must use MFA, sets it up. */
 async function signIn(browser: Browser, username: string): Promise<Page> {
   const context = await browser.newContext({ storageState: { cookies: [], origins: [] } })
   const page = await context.newPage()
@@ -66,6 +68,8 @@ async function signIn(browser: Browser, username: string): Promise<Page> {
   await page.getByLabel('Current (temporary) password').fill(tempPassword)
   await page.getByLabel('New password').fill(newPassword)
   await page.getByRole('button', { name: 'Save' }).click()
+  await expect(page).toHaveURL(/#\/setup-mfa$/)
+  await setUpMfa(page, newPassword)
   await expect(page).toHaveURL(/#\/viewer$/)
   return page
 }

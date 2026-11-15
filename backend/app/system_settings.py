@@ -33,6 +33,9 @@ BOOL_DEFAULTS: dict[str, str] = {
     # Whether a redacted download's file name says so (`app.redacted.log`);
     # only counts while downloads are redacted.
     "redaction_download_suffix": "true",
+    # MFA for every local account, not only the administrators who always
+    # need it (app/auth/mfa_policy.py). Off by default; super admins only.
+    "require_mfa_local_accounts": "false",
 }
 
 # The settings above that only a super admin may change (app/api/system_settings.py).

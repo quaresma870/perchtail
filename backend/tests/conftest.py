@@ -33,6 +33,7 @@ from app import (  # noqa: E402
     auth_events,
     login_throttle,
     models,  # noqa: F401  registers tables on SQLModel.metadata
+    request_context,
 )
 from app.auth import models as auth_models  # noqa: E402, F401  registers tables
 from app.name_index_store import ensure_name_index_schema  # noqa: E402
@@ -98,11 +99,14 @@ def _reset_login_throttle():
     # app.login_throttle keeps its state in a module-level dict (see its
     # docstring), so one test's failed-login attempts would otherwise bleed
     # into the next test that reuses the same username.
+    # The same for app.request_context's untrusted-forwarded-header flag.
     login_throttle.reset_for_tests()
     auth_events.reset_for_tests()
+    request_context.reset_for_tests()
     yield
     login_throttle.reset_for_tests()
     auth_events.reset_for_tests()
+    request_context.reset_for_tests()
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +120,22 @@ def _own_audit_chain_marker(monkeypatch, tmp_path):
         audit_hash_chain,
         "chain_marker_path",
         lambda data_dir=None: original(tmp_path if data_dir is None else data_dir),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mfa_not_enforced(monkeypatch):
+    # Admin accounts must use MFA (app/auth/mfa_policy.py); most tests sign
+    # in as one without it. Tests of the requirement turn it back on.
+    monkeypatch.setattr("app.auth.mfa_policy.ENFORCED", False)
+
+
+@pytest.fixture(autouse=True)
+def _initial_admin_password_in_tmp(monkeypatch, tmp_path):
+    # The first-run password file goes to DATA_DIR, which tests share.
+    monkeypatch.setattr(
+        "app.initial_admin_password.initial_admin_password_path",
+        lambda: tmp_path / "initial-admin-password",
     )
 
 

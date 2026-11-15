@@ -37,6 +37,7 @@ export const systemSettings = writable<SystemSettings>({
   redaction_enabled: false,
   redaction_downloads: true,
   redaction_download_suffix: true,
+  require_mfa_local_accounts: false,
 })
 
 let loadedAt = 0

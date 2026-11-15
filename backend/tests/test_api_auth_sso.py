@@ -146,6 +146,51 @@ def test_sso_login_returns_502_when_idp_is_unreachable(client, session, monkeypa
     assert response.status_code == 502
 
 
+def _issuer_mismatch(issuer):
+    raise oidc.IssuerMismatchError(
+        "The identity provider's discovery document names a different issuer"
+    )
+
+
+def _sso_login_failures(session) -> list[AuditLog]:
+    session.expire_all()
+    return list(
+        session.exec(select(AuditLog).where(AuditLog.action == "user.sso_login_failed")).all()
+    )
+
+
+def test_sso_login_refuses_a_discovery_document_for_another_issuer(client, session, monkeypatch):
+    _make_enabled_provider(session)
+    monkeypatch.setattr(oidc, "fetch_discovery_document", _issuer_mismatch)
+
+    response = client.get("/auth/sso/login")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Could not reach the identity provider"
+    assert "location" not in response.headers
+    [entry] = _sso_login_failures(session)
+    assert entry.event_metadata["reason"] == "issuer_mismatch"
+
+
+def test_callback_refuses_a_discovery_document_for_another_issuer(client, session, monkeypatch):
+    seed_no_access_role(session)
+    _make_enabled_provider(session)
+    state, _ = _get_state_and_nonce(client, session, monkeypatch)
+    monkeypatch.setattr(oidc, "fetch_discovery_document", _issuer_mismatch)
+    monkeypatch.setattr(
+        oidc, "exchange_code_for_tokens", lambda **kwargs: pytest.fail("no code exchange")
+    )
+
+    response = client.get("/auth/sso/callback", params={"code": "the-code", "state": state})
+
+    assert response.status_code == 302
+    assert response.headers["location"].endswith("/#/login?sso_error=1")
+    assert "perchtail_session" not in response.cookies
+    assert session.exec(select(User).where(User.auth_provider == AuthProviderType.oidc)).all() == []
+    [entry] = _sso_login_failures(session)
+    assert entry.event_metadata["reason"] == "issuer_mismatch"
+
+
 # --- /auth/sso/callback --------------------------------------------------------------
 
 
@@ -184,6 +229,44 @@ def test_callback_provisions_a_new_user_and_sets_a_session_cookie(client, sessio
     assert user.username == "jdoe@example.com"
     no_access = session.exec(select(Role).where(Role.name == "No Access")).first()
     assert user.role_id == no_access.id
+
+
+def test_the_flow_uses_pkce_s256_end_to_end(client, session, monkeypatch):
+    seed_no_access_role(session)
+    _make_enabled_provider(session)
+    monkeypatch.setattr(oidc, "fetch_discovery_document", lambda issuer: DISCOVERY)
+    location = client.get("/auth/sso/login").headers["location"]
+    params = parse_qs(urlparse(location).query)
+    assert params["code_challenge_method"] == ["S256"]
+    challenge = params["code_challenge"][0]
+
+    sent = {}
+
+    def exchange(**kwargs):
+        sent.update(kwargs)
+        return {"id_token": id_token}
+
+    key_set, id_token = _key_set_and_token(nonce=params["nonce"][0])
+    monkeypatch.setattr(oidc, "exchange_code_for_tokens", exchange)
+    monkeypatch.setattr(oidc, "fetch_jwks", lambda jwks_uri: key_set.as_dict())
+    response = client.get(
+        "/auth/sso/callback", params={"code": "the-code", "state": params["state"][0]}
+    )
+
+    assert response.status_code == 302
+    assert "perchtail_session" in response.cookies
+    # The token request proves it holds the verifier behind the challenge.
+    assert oidc.code_challenge_s256(sent["code_verifier"]) == challenge
+    assert sent["code_verifier"] not in location
+
+
+def test_sso_login_refuses_an_http_issuer_stored_before_https_was_required(client, session):
+    _make_enabled_provider(session, issuer="http://idp.example.com")
+
+    response = client.get("/auth/sso/login")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Could not reach the identity provider"
 
 
 def test_callback_reuses_the_same_user_on_a_second_login(client, session, monkeypatch):

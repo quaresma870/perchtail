@@ -1,4 +1,5 @@
 import { expect, test as setup } from '@playwright/test'
+import { ADMIN_TOTP_SECRET, totp } from './totp'
 
 // Must match backend/scripts/run_e2e_server.sh's defaults (and whatever it
 // was invoked with, if overridden).
@@ -12,6 +13,9 @@ setup('authenticate as the seeded e2e super-admin', async ({ page }) => {
   await page.getByLabel('Username').fill(ADMIN_USERNAME)
   await page.getByLabel('Password').fill(ADMIN_PASSWORD)
   await page.getByRole('button', { name: 'Sign in' }).click()
+  // Super admins must use MFA; the seeded admin has it on.
+  await page.getByLabel('Authentication code').fill(totp(ADMIN_TOTP_SECRET))
+  await page.getByRole('button', { name: 'Verify' }).click()
   await expect(page).toHaveURL(/#\/viewer$/)
 
   await page.context().storageState({ path: authFile })

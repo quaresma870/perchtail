@@ -845,3 +845,88 @@ def test_an_interrupted_redaction_migration_runs_again(tmp_path):
     )
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT name FROM redaction_rule").fetchall() == [("card",)]
+
+
+# --- e5c1b7a94d26: SSO accounts lose any password -------------------------------------
+
+BEFORE_SSO_PASSWORDS_CLEARED = "e5c1b7a93d24"
+
+
+def test_passwords_left_on_sso_accounts_are_cleared_and_audited(tmp_path, monkeypatch):
+    from app.audit_hash_chain import backfill_chain_if_needed
+    from app.audit_integrity import verify_chain
+    from app.audit_outbox import drain_audit_outbox
+    from app.auth.models import AuditLog
+    from sqlmodel import Session, select
+
+    monkeypatch.setattr("app.audit.audit_chain_key", lambda: CHAIN_KEY)
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_SSO_PASSWORDS_CLEARED)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO role (id, name, is_builtin, is_super_admin, global_capabilities) "
+            "VALUES (1, 'r', 0, 0, '[]')"
+        )
+        for user_id, username, provider, password_hash, must_change in (
+            (1, "local-admin", "local", "argon-local", 0),
+            (2, "reset@example.com", "oidc", "argon-sso", 1),
+            (3, "never-reset@example.com", "oidc", None, 0),
+        ):
+            conn.execute(
+                'INSERT INTO "user" (id, username, role_id, active, auth_provider, '
+                "must_change_password, mfa_enabled, password_hash, password_changed_at) "
+                "VALUES (?, ?, 1, 1, ?, ?, 0, ?, '2026-11-01 00:00:00')",
+                (user_id, username, provider, must_change, password_hash),
+            )
+        conn.execute(
+            "INSERT INTO password_history (user_id, password_hash, created_at) "
+            "VALUES (2, 'argon-old', '2026-10-01 00:00:00')"
+        )
+
+    _alembic(tmp_path, "upgrade", "head")
+
+    with sqlite3.connect(db) as conn:
+        users = conn.execute(
+            'SELECT id, password_hash, password_changed_at, must_change_password FROM "user" '
+            "ORDER BY id"
+        ).fetchall()
+        history = conn.execute("SELECT user_id FROM password_history").fetchall()
+    assert users == [
+        (1, "argon-local", "2026-11-01 00:00:00", 0),
+        (2, None, None, 0),
+        (3, None, "2026-11-01 00:00:00", 0),
+    ]
+    assert history == []
+    assert _audit_actions(db) == []
+    assert _outbox(db) == [
+        (
+            "user.password_cleared",
+            {
+                "reason": "sso_account",
+                "user_id": 2,
+                "username": "reset@example.com",
+                "auth_provider": "oidc",
+            },
+        )
+    ]
+
+    # The next start records it as a signed entry with no user.
+    engine = _audit_engine(db)
+    with Session(engine) as session:
+        assert backfill_chain_if_needed(CHAIN_KEY, session) == 0
+        assert drain_audit_outbox(session) == (1, 0)
+        [entry] = session.exec(select(AuditLog)).all()
+        assert (entry.action, entry.target_type, entry.target_id, entry.user_id) == (
+            "user.password_cleared",
+            "user",
+            2,
+            None,
+        )
+        assert entry.event_metadata["reason"] == "sso_account"
+        assert verify_chain(CHAIN_KEY, session).ok
+    engine.dispose()
+
+    # Down changes nothing; up again finds nothing left to clear.
+    _alembic(tmp_path, "downgrade", BEFORE_SSO_PASSWORDS_CLEARED)
+    _alembic(tmp_path, "upgrade", "head")
+    assert _outbox(db) == []

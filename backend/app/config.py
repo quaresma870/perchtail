@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     # Cookie's Secure flag — disable only for local HTTP development; a
     # browser silently drops Secure cookies over plain HTTP.
     session_cookie_secure: bool = True
+    # The OIDC issuer and every endpoint its discovery document names must be
+    # https:// (app/auth/providers/oidc.py). For local development only, this
+    # also accepts http:// on localhost, 127.0.0.1 and ::1; never elsewhere.
+    sso_allow_http_localhost: bool = False
 
     # Login brute-force lockout (app/login_throttle.py) — consecutive failed
     # attempts against one username before it's locked out, and how long the

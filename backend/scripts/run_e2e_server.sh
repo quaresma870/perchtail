@@ -36,6 +36,9 @@ export SCRATCH_DIR="./data/e2e/scratch"
 export SESSION_COOKIE_SECURE="false"
 export E2E_ADMIN_USERNAME="${E2E_ADMIN_USERNAME:-e2e-admin}"
 export E2E_ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-e2e-test-password-123!}"
+# Super admins must use MFA: the seeded admin has it on with this secret, and
+# frontend/e2e computes its codes from the same value.
+export E2E_ADMIN_TOTP_SECRET="${E2E_ADMIN_TOTP_SECRET:-JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP}"
 # See app/testing/fake_winrm.py -- there's no real WinRM target available in
 # CI or a dev sandbox, unlike ssh/smb below, which run against real local
 # test servers.

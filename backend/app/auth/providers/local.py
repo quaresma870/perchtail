@@ -136,7 +136,15 @@ class LocalPasswordProvider:
         last_login_at or a user.login audit event here would misrepresent
         an only-half-completed attempt as a real one."""
         user = session.exec(select(User).where(User.username == username)).first()
-        if user is None or not user.active or user.password_hash is None:
+        # An SSO account never signs in locally, even with a password hash
+        # left from before that was refused: it would bypass the IdP and its
+        # MFA. Same answer and the same argon2 work as a wrong password.
+        if (
+            user is None
+            or not user.active
+            or user.auth_provider != AuthProviderType.local
+            or user.password_hash is None
+        ):
             _burn_a_verify(password)
             return None
 

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlmodel import Session, col, func, select
 
+from app import request_context
 from app.agent_registry import get_agent_registry
 from app.alerts import interval as alerts_interval
 from app.alerts import last_pass as alerts_last_pass
@@ -268,6 +269,11 @@ class DetailedHealth(BaseModel):
     scheduler: SchedulerHealth
     audit_integrity: AuditIntegrityHealth
     logs: LogsHealth
+    # True once a request since startup carried X-Forwarded-For or Forwarded
+    # from a peer outside TRUSTED_PROXIES (app/request_context.py): likely a
+    # proxy missing from TRUSTED_PROXIES, so every client shares its login
+    # lockout. Doesn't change the overall status.
+    trusted_proxies_suspect: bool
 
 
 # Scratch use at or above this share of SCRATCH_MAX_GB makes the status
@@ -439,6 +445,7 @@ def compute_health(session: Session) -> DetailedHealth:
         scheduler=SchedulerHealth(running=scheduler.running, failed_jobs=failed_jobs, jobs=jobs),
         audit_integrity=audit_integrity,
         logs=_logs_health(settings),
+        trusted_proxies_suspect=request_context.trusted_proxies_suspect(),
     )
 
 
