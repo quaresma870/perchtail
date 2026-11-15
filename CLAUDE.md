@@ -238,7 +238,7 @@ CI (`.github/workflows/ci.yml`) runs these on every push and pull request:
 - Backend, from the repository root: `ruff check backend`, `black --check backend`, `python -m alembic upgrade head` (from `backend/`), `pytest -v`, then `pip-audit` and `bandit -q -r backend/app`.
 - Frontend, from `frontend/`: `npm run check` (svelte-check and the TypeScript projects), `npm test` (vitest), `npm run build`, `npm audit --audit-level=high`.
 - End-to-end, from `frontend/`: `npm run test:e2e` (Playwright). It starts its own backend on port 8001 with a throwaway database and real local sshd and smbd test servers; WinRM uses the fake in `app/testing/fake_winrm.py`. `e2e/accessibility.spec.ts` runs axe-core on every main page.
-- Agent, from `agent/`: `go vet ./...`, `gofmt -l .` (must print nothing), `go test ./... -v`, 30 seconds of fuzzing for each of `FuzzIsSafeRelativePath` and `FuzzFetchStaysInBase`, cross-compilation for linux/amd64, linux/arm64 and windows/amd64, `gosec` and `govulncheck`.
+- Agent, from `agent/`: `go vet ./...`, `gofmt -l .` (must print nothing), `go test ./... -v`, 30 seconds of fuzzing for each of `FuzzIsSafeRelativePath` and `FuzzFetchStaysInBase` (path checks) and of `FuzzRedactBlockCuts`, `FuzzRedactUTF16`, `FuzzRedactWindow` and `FuzzCustomRule` (redaction engine), cross-compilation for linux/amd64, linux/arm64 and windows/amd64, `gosec` and `govulncheck`.
 - The Docker image is built and scanned with Trivy, and the workflows are audited with zizmor.
 
 Two backend tests cover every endpoint: `tests/test_every_endpoint_needs_auth.py` (each operation needs authentication unless it is listed in `PUBLIC_OPERATIONS`) and `tests/test_api_properties.py` (Schemathesis, no 5xx, no outbound connections).

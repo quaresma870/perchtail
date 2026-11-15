@@ -4,7 +4,9 @@
     "vectors": "rules (the agent's redact block format: a custom rule has name, pattern, secret_group and max_length, the longest match it can make in bytes; the guard before the cut of a long line is the largest of cut_guard_bytes and the max_length of every custom rule), input or input_b64 (input_encoding encodes input: utf-8 by default, utf-16-le or utf-16-be), source_encoding (none: bytes; auto: detected from the first 64 bytes; utf-16-le; utf-16-be; utf-16-unsure: served as bytes, the detectors run on the bytes and on the UTF-16 LE and BE readings aligned on even file offsets, and the union is replaced), output_encoding (utf-8 by default, or source), final (true by default), max_line_bytes, pem_max_lines; expected or expected_b64 (expected_encoding like input_encoding), counts, source_offset, trailing_partial, or error. A vector with window redacts input[window.start:] of a read that began window.base_offset bytes into the file, and expects begin, end and aligned. Every vector without window must give the same result whatever block sizes the input is fed in.",
     "long_line_cuts": "for every k from 0 to the length of value, the line kept + ' ' + '~' * n + ' ' + value + ' end\\n', with n such that max_line_bytes falls right after the first k bytes of value, is redacted with rules and max_line_bytes and must give expected_kept (followed by ' ' and the '~' filler when the blank just before value is at or before max_line_bytes - cut_guard_bytes), the long-line marker and '\\n', with counts, whatever block sizes it is fed in: the kept start of a long line ends at the last blank at or before max_line_bytes - cut_guard_bytes (detectors.json), or earlier at the start of a replacement that blank would cut, so nothing of a value cut by the limit is kept. With source_encoding utf-16-unsure, the line is encoded with input_encoding (utf-16-le or utf-16-be) and redacted as utf-16-unsure from file offset 0: k and n count characters, the guard is 2 * cut_guard_bytes source bytes (a character of the UTF-16 readings takes two), the blanks are found byte by byte (the 0x20 of '20 00' and of '00 20'), and the kept start ends at the blank's 0x20 byte; the expected output is expected_kept encoded with input_encoding except its markers, which stay ASCII, then the ' ' and '~' filler encoded likewise when kept, then for utf-16-be the 00 byte before the blank's 0x20, then the long-line marker and '\\n' in ASCII, then for utf-16-le the 00 byte that follows the line's 0x0A.",
     "head_digests": "HMAC-SHA256 with key_b64 of the first min(64, offset) bytes of data, hex, first 32 characters.",
-    "detect": "the encoding decided from head_b64: utf-16-le, utf-16-be, utf-16-unsure, null (bytes) or error."
+    "detect": "the encoding decided from head_b64: utf-16-le, utf-16-be, utf-16-unsure, null (bytes) or error.",
+    "rule_digests": "rules_digest of rules: the SHA-256 of their canonical JSON (keys sorted, no spaces, non-ASCII characters as they are), hex.",
+    "generated": "vectors named generated come from random content redacted by the Python engine (reviewed when they change); vectors named parity pin where RE2, in Latin-1 or UTF-8, and Go's regexp could part."
   },
   "vectors": [
     {
@@ -397,6 +399,723 @@
       "max_line_bytes": 256,
       "expected": "wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww[redacted: line over 256 bytes]\n[redacted: acct]\n",
       "counts": {"acct": 1}
+    },
+    {
+      "name": "parity: (?i) keys never fold KELVIN SIGN or LONG S into k and s",
+      "rules": [{"id": 3, "name": "secret_kv", "detector": "secret_kv"}, {"id": 1, "name": "bearer", "detector": "bearer"}],
+      "input": "toKen=abc1 paſſword=x1 token=abc2 BKARER x Bearer abcdefgh1\n",
+      "expected": "toKen=abc1 paſſword=x1 token=[redacted: token] BKARER x Bearer [redacted: token]\n",
+      "counts": {"secret_kv": 1, "bearer": 1}
+    },
+    {
+      "name": "parity: a non-ASCII byte is one character for bounded repetitions (Latin-1)",
+      "rules": [{"name": "x3y", "pattern": "X.{3}Y"}],
+      "input": "Xé1Y XééY Xab1Y XaéY\n",
+      "expected": "[redacted: x3y] XééY [redacted: x3y] [redacted: x3y]\n",
+      "counts": {"x3y": 3}
+    },
+    {
+      "name": "parity: invalid UTF-8 inside a value is matched by Latin-1 detectors",
+      "rules": [{"id": 3, "name": "secret_kv", "detector": "secret_kv"}, {"id": 7, "name": "email", "detector": "email"}],
+      "input_b64": "cGFzc3dvcmQ9YWL/Y2QgdG9rZW49w6l0w6kgaulAZXhhbXBsZS5jb20K",
+      "expected_b64": "cGFzc3dvcmQ9W3JlZGFjdGVkOiBwYXNzd29yZF0gdG9rZW49W3JlZGFjdGVkOiB0b2tlbl0gaulAZXhhbXBsZS5jb20K",
+      "counts": {"secret_kv": 2}
+    },
+    {
+      "name": "parity: \\p{L} in an ASCII rule matches Latin-1 letters",
+      "rules": [{"name": "nome", "pattern": "Nome: (\\p{L}+(?: \\p{L}+)*)", "secret_group": 1}],
+      "input_b64": "Tm9tZTogSm/jbyBTaWx2YTsgb2sK",
+      "expected_b64": "Tm9tZTogW3JlZGFjdGVkOiBub21lXTsgb2sK",
+      "counts": {"nome": 1}
+    },
+    {
+      "name": "parity: \\p{L} in an ASCII rule reads UTF-8 content byte by byte as Latin-1",
+      "rules": [{"name": "nome", "pattern": "Nome: (\\p{L}+(?: \\p{L}+)*)", "secret_group": 1}],
+      "input": "Nome: João Silva; ok\n",
+      "expected_b64": "Tm9tZTogW3JlZGFjdGVkOiBub21lXaNvIFNpbHZhOyBvawo=",
+      "counts": {"nome": 1}
+    },
+    {
+      "name": "parity: \\xE9 in an ASCII rule is the Latin-1 byte, and (?i) folds only ASCII letters",
+      "rules": [{"name": "cafe", "pattern": "(?i)caf\\xE9=(\\w+)", "secret_group": 1}],
+      "input_b64": "Q0FGyT1hYmMgY2Fm6D1kZWYgY2Fm6T1naGkK",
+      "expected_b64": "Q0FGyT1hYmMgY2Fm6D1kZWYgY2Fm6T1bcmVkYWN0ZWQ6IGNhZmVdCg==",
+      "counts": {"cafe": 1}
+    },
+    {
+      "name": "parity: (?i) doesn't fold a Unicode class beyond ASCII (Latin-1)",
+      "rules": [{"name": "u", "pattern": "(?i)\\p{Lu}+"}],
+      "input_b64": "QckgySDpIGHpIHgK",
+      "expected_b64": "W3JlZGFjdGVkOiB1XSBbcmVkYWN0ZWQ6IHVdIOkgW3JlZGFjdGVkOiB1XekgW3JlZGFjdGVkOiB1XQo=",
+      "counts": {"u": 4}
+    },
+    {
+      "name": "parity: (?i) with a negated class leaves the other case of a Latin-1 byte in",
+      "rules": [{"name": "p", "pattern": "(?i)x[^\\xc9]y"}],
+      "input_b64": "eOl5IHjJeQo=",
+      "expected_b64": "W3JlZGFjdGVkOiBwXSB4yXkK",
+      "counts": {"p": 1}
+    },
+    {
+      "name": "parity: (?i) with a class range from ASCII into Latin-1 adds no ASCII letter",
+      "rules": [{"name": "r", "pattern": "(?i)x[~-\\xff]y"}],
+      "input_b64": "eGt5IHjpeSBYS1kK",
+      "expected_b64": "eGt5IFtyZWRhY3RlZDogcl0gWEtZCg==",
+      "counts": {"r": 1}
+    },
+    {
+      "name": "parity: [\\x80-\\xff] and [\\x00-\\xff] in an ASCII rule match the Latin-1 bytes",
+      "rules": [{"name": "hi", "pattern": "id=([\\x80-\\xff]+)", "secret_group": 1}, {"name": "all", "pattern": "all=([\\x00-\\xff]+);", "secret_group": 1}],
+      "input_b64": "aWQ96f+AOyBpZD1hYmM7IGFsbD1h6WI7IHgK",
+      "expected_b64": "aWQ9W3JlZGFjdGVkOiBoaV07IGlkPWFiYzsgYWxsPVtyZWRhY3RlZDogYWxsXTsgeAo=",
+      "counts": {"hi": 1, "all": 1}
+    },
+    {
+      "name": "parity: a negated class that leaves out a Latin-1 byte",
+      "rules": [{"name": "neg", "pattern": "v=([^\\xe9 ]+)", "secret_group": 1}],
+      "input_b64": "dj1hYuljZCB2PXj/eQo=",
+      "expected_b64": "dj1bcmVkYWN0ZWQ6IG5lZ13pY2Qgdj1bcmVkYWN0ZWQ6IG5lZ10K",
+      "counts": {"neg": 2}
+    },
+    {
+      "name": "parity: (?i) on a Latin-1 class or literal string folds only ASCII letters",
+      "rules": [{"name": "p", "pattern": "(?i)a[\\xe9-\\xea]"}],
+      "input_b64": "QckgYekK",
+      "expected_b64": "QckgW3JlZGFjdGVkOiBwXQo=",
+      "counts": {"p": 1}
+    },
+    {
+      "name": "parity: a non-ASCII custom rule stops at invalid UTF-8",
+      "rules": [{"name": "senha", "pattern": "senhá=(\\S+)", "secret_group": 1}],
+      "input_b64": "c2VuaMOhPWFi/2NkIHNlbmjDoT1hw6liIG9rCg==",
+      "expected_b64": "c2VuaMOhPVtyZWRhY3RlZDogc2VuaGFd/2NkIHNlbmjDoT1bcmVkYWN0ZWQ6IHNlbmhhXSBvawo=",
+      "counts": {"senha": 2}
+    },
+    {
+      "name": "parity: ^ in a non-ASCII custom rule doesn't match after invalid UTF-8",
+      "rules": [{"name": "ete", "pattern": "^été"}],
+      "input_b64": "w6l0w6kgeP/DqXTDqSB5CsOpdMOpCg==",
+      "expected_b64": "W3JlZGFjdGVkOiBldGVdIHj/w6l0w6kgeQpbcmVkYWN0ZWQ6IGV0ZV0K",
+      "counts": {"ete": 2}
+    },
+    {
+      "name": "parity: IPv6 as Python's ipaddress accepts it",
+      "rules": [{"id": 9, "name": "ipv6", "detector": "ipv6"}],
+      "input": "a fe80::1%eth0 b fe80::1% c 1::2:3:4:5:6:7:8 d 1:2:3:4:5:6:7:: e :: f 1:2 g 12:30:45 h fe80::1: err i ::Class j 2001:db8::1:\n",
+      "expected": "a [redacted: ip] b [redacted: ip]% c [redacted: ip]:8 d 1:2:3:4:5:6:7:: e [redacted: ip] f 1:2 g 12:30:45 h [redacted: ip]: err i ::Class j [redacted: ip]:\n",
+      "counts": {"ipv6": 6}
+    },
+    {
+      "name": "parity: IPv6 groups, zones and the byte after the address",
+      "rules": [{"id": 9, "name": "ipv6", "detector": "ipv6"}],
+      "input": "a 2001:0db8:0000:0000:0000:ff00:0042:8329 b 1:2:3:4:5:6:7:8:9 c fe80::1%en0_x d ::1_ e de:ad:be:ef:00:01 f ::ffff:0:1\n",
+      "expected": "a [redacted: ip] b [redacted: ip]:9 c [redacted: ip] d ::1_ e de:ad:be:ef:00:01 f [redacted: ip]\n",
+      "counts": {"ipv6": 4}
+    },
+    {
+      "name": "parity: IBAN search with overlap, lengths and mod 97",
+      "rules": [{"id": 10, "name": "iban", "detector": "iban"}],
+      "input": "AB12 GB82 WEST 1234 5698 7654 32 x GB82WEST12345698765432 y GB82 WEST 1234 5698 7654 33 z PT50 0002 0123 1234 5678 9015 4 DE89370400440532013000x\n",
+      "expected": "AB12 [redacted: iban] x [redacted: iban] y GB82 WEST 1234 5698 7654 33 z [redacted: iban] DE89370400440532013000x\n",
+      "counts": {"iban": 3}
+    },
+    {
+      "name": "parity: card windows, brands and runs",
+      "rules": [{"id": 0, "name": "card", "detector": "card"}],
+      "input": "12 4111 1111 1111 1111 2 x 6011111111111117 y 4111 1111 1111 1111 5555 5555 5555 4444 z 0000 4111 1111 1111 1111\n",
+      "expected": "12 [redacted: card ****1111] 2 x [redacted: card ****1117] y [redacted: card ****1111] [redacted: card ****4444] z 0000 [redacted: card ****1111]\n",
+      "counts": {"card": 5}
+    },
+    {
+      "name": "parity: private key with CR, inline and unclosed",
+      "rules": [{"id": 5, "name": "private_key", "detector": "private_key"}],
+      "input": "a -----BEGIN EC PRIVATE KEY----- in -----END EC PRIVATE KEY----- b\r\n-----BEGIN PRIVATE KEY-----\r\nAAAA\r\n-----END PRIVATE KEY----- after\r\n-----BEGIN RSA PRIVATE KEY-----\nX\nY\n",
+      "pem_max_lines": 2,
+      "expected": "a [redacted: private key] b\r\n[redacted: private key]\r\n\r\n-----END PRIVATE KEY----- after\r\n[redacted: private key]\n\nY\n",
+      "counts": {"private_key": 3}
+    },
+    {
+      "name": "parity: UTF-16 BE with a surrogate pair, a lone surrogate and output in the source encoding",
+      "rules": [{"id": 3, "name": "secret_kv", "detector": "secret_kv"}],
+      "input_b64": "AHQAbwBrAGUAbgA92D3eAAB4ACDYAAAgAHAAYQBzAHMAdwBvAHIAZAA9AHkACg==",
+      "source_encoding": "utf-16-be",
+      "output_encoding": "source",
+      "expected_b64": "AHQAbwBrAGUAbgA9AFsAcgBlAGQAYQBjAHQAZQBkADoAIAB0AG8AawBlAG4AXQAg//0AIABwAGEAcwBzAHcAbwByAGQAPQBbAHIAZQBkAGEAYwB0AGUAZAA6ACAAcABhAHMAcwB3AG8AcgBkAF0ACg==",
+      "counts": {"secret_kv": 2}
+    },
+    {
+      "name": "parity: UTF-16 unsure, a unit with a newline byte is a newline",
+      "rules": [{"id": 3, "name": "secret_kv", "detector": "secret_kv"}, {"id": 7, "name": "email", "detector": "email"}],
+      "input_b64": "Cth0AG8AawBlAG4APQBhAAoAYQBAAGUAeABhAG0AcABsAGUALgBjAG8AbQAKAAB0AG8AawBlAG4APQBiACAAeA==",
+      "source_encoding": "utf-16-unsure",
+      "expected_b64": "Cth0AG8AawBlAG4APQBbcmVkYWN0ZWQ6IHRva2VuXQoAW3JlZGFjdGVkOiBlbWFpbF0KAAB0AG8AawBlAG4APVtyZWRhY3RlZDogdG9rZW5dACAAeA==",
+      "counts": {"secret_kv": 2, "email": 1}
+    },
+    {
+      "name": "parity: back to UTF-16, what a replacement leaves of a character becomes one U+FFFD",
+      "rules": [{"name": "dot-y", "pattern": ".Y"}],
+      "input_b64": "YQCsIFkAIABiAKwgWQBjAAoA",
+      "source_encoding": "utf-16-le",
+      "output_encoding": "source",
+      "expected_b64": "YQD9/1sAcgBlAGQAYQBjAHQAZQBkADoAIABkAG8AdAAtAHkAXQAgAGIA/f9bAHIAZQBkAGEAYwB0AGUAZAA6ACAAZABvAHQALQB5AF0AYwAKAA==",
+      "counts": {"dot-y": 2}
+    },
+    {
+      "name": "parity: the same served as UTF-8 keeps the bytes left",
+      "rules": [{"name": "dot-y", "pattern": ".Y"}],
+      "input_b64": "AGEgrABZAAo=",
+      "source_encoding": "utf-16-be",
+      "expected_b64": "YeKCW3JlZGFjdGVkOiBkb3QteV0K",
+      "counts": {"dot-y": 1}
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-0",
+      "rules": [{"name": "custom-neg", "pattern": "tag:([^ ]+)", "secret_group": 1}, {"id": 0, "name": "ipv6", "detector": "ipv6"}],
+      "input_b64": "ICAgMToyOjM6NDo1OjY6Nzo4Ojkgfn5+fn5+fn5+fiB4PTE=",
+      "final": false,
+      "expected_b64": "W3JlZGFjdGVkOiBpbmNvbXBsZXRlIGxpbmVd",
+      "counts": {},
+      "source_offset": 0,
+      "trailing_partial": 27
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-1",
+      "rules": [{"id": 0, "name": "private_key", "detector": "private_key"}, {"id": 1, "name": "email", "detector": "email"}, {"id": 2, "name": "secret_kv", "detector": "secret_kv"}, {"id": 3, "name": "card", "detector": "card"}, {"id": 4, "name": "ipv4", "detector": "ipv4"}, {"id": 5, "name": "url_password", "detector": "url_password"}, {"id": 6, "name": "bearer", "detector": "bearer"}],
+      "input_b64": "/v8AZABlADoAYQBkADoAYgBlADoAZQBmADoAMAAwADoAMAAxACAAMwA3ADMA6QAzADoANQBhACAAaAB0AHQAcABzADoALwAvAHUAOgBwAGEANQA1AHcAbwByAGQAQABoAG8AcwB0ACAACwAgAFAAQQBTAFMAVwBPAFIARAA6ACAAIgBoAHUAbgB0AGUAcgAyADIAIgAgADUAIAA2AC0AOQAtAOkAMgA1ADUACgAuAC0AIABwAHIAbwB4AHkALQBhAHUAdABoAG8AcgBpAHoAYQB0AGkAbwBuAD0AYQBiAGMAIABkAGUAZgAgADEAOQAyAC4AMQA2ADgALgAwAC4AMQA6ADgAMAA4ADAAIAAAACAAYQAuAGIAKwBjAEAAcwB1AGIALgBlAHgAYQBtAHAAbABlAC4AYwBvAC4AdQBrACAAQgBlAGEAcgBlAHIAIABhAGIAYwBkAGUAZgBnAGgAMQAyADMANAA1ADYANwA4ACAADAAgACAAIAAgAEcAQgA4ADIAIABXAEUAUwBUACAAMQAyADMANAAgADUANgA5ADgAIAA3ADYANQA0ACAAMwAyACAAdQBzAGUAcgBAAGUAeADkAG0AcABsAGUALgBjAG8AbQAgAAA=",
+      "source_encoding": "auto",
+      "final": true,
+      "expected_b64": "77u/ZGU6YWQ6YmU6ZWY6MDA6MDEgMzczw6kzOjVhIGh0dHBzOi8vdTpbcmVkYWN0ZWQ6IHBhc3N3b3JkXUBob3N0IAsgUEFTU1dPUkQ6ICJbcmVkYWN0ZWQ6IHBhc3N3b3JkXSIgNSA2LTktw6kyNTUKLi0gcHJveHktYXV0aG9yaXphdGlvbj1hYmMgZGVmIFtyZWRhY3RlZDogaXBdOjgwODAgACBbcmVkYWN0ZWQ6IGVtYWlsXSBCZWFyZXIgW3JlZGFjdGVkOiB0b2tlbl0gDCAgICBHQjgyIFdFU1QgMTIzNCA1Njk4IDc2NTQgMzIgdXNlckBleMOkbXBsZS5jb20gAA==",
+      "counts": {"url_password": 1, "secret_kv": 1, "ipv4": 1, "email": 1, "bearer": 1},
+      "source_offset": 470,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-2",
+      "rules": [{"id": 0, "name": "url_password", "detector": "url_password"}, {"id": 1, "name": "private_key", "detector": "private_key"}, {"id": 2, "name": "jwt", "detector": "jwt"}, {"id": 3, "name": "ipv4", "detector": "ipv4"}, {"name": "custom-id", "pattern": "id=(\\d+)", "secret_group": 1}, {"id": 4, "name": "authorization", "detector": "authorization"}, {"id": 5, "name": "email", "detector": "email"}, {"id": 6, "name": "secret_kv", "detector": "secret_kv"}, {"id": 7, "name": "card", "detector": "card"}, {"id": 8, "name": "ipv6", "detector": "ipv6"}, {"id": 9, "name": "bearer", "detector": "bearer"}],
+      "input_b64": "AAAgAHAAcgBpAHYAYQB0AGUAXwBrAGUAeQA9AHgAeQB6ACDYAAAgAC0ALQAtAC0ALQBCAEUARwBJAE4AIABQAFIASQBWAEEAVABFACAASwBFAFkALQAtAC0ALQAtAAoAQQBBAEEAQQANAAoAQgBCAEIAQgAKACAALQAtAC0ALQAtAEIARQBHAEkATgAgAFAAVQBCAEwASQBDACAASwBFAFkALQAtAC0ALQAtAAoAQQBBAEEAQQAKAC0ALQAtAC0ALQBFAE4ARAAgAFAAVQBCAEwASQBDACAASwBFAFkALQAtAC0ALQAtACAAeAA9ADEAJgBzAGUAYwByAGUAdAA9AHMAMwA7AG4AZQB4AHQAIABhAHUAdABoAG8AcgBpAHoAYQB0AGkAbwBuADoAIABQAFQANQAwACAAMAAwADAAMgAgADAAMQAyADMAIAAxADIAMwA0ACAANQA2ADcAOAAgADkAMAAxADUAIAA0ACAARwBCADgAMgAgAFcARQBTAFQAIAAxADIAMwA0ACAANQA2ADkAOAAgADcANgA1ADQAIAAzADIAIAB0AG8AawDpAG4APQAxACAAMQA6ADIAOgAzADoANAA6ADUAOgA2ADoANwA6ADoAIABBAEIAMQAyACAARwBCADgAMgAgAFcARQBTAFQAIAAxADIAMwA0ACAANQA2ADkAOAAgADcANgA1ADQAIAAzADIAIAAlACAAZQB5AEoAaABiAEcAYwBpAE8AaQBKAEkAVQB6AEkAMQBOAGkASgA5AC4AZQB5AEoAegBkAFcASQBpAE8AaQBJAHgATQBqAE0AMABOAFQAWQAzAE8ARABrAHcASQBuADAALgBjADIAbABuAGIAbQBGADAAZABYAEoAbAAgADEALgAyAC4AMwAuADAANAAgADoAIAAgACA=",
+      "source_encoding": "utf-16-unsure",
+      "max_line_bytes": 64,
+      "final": true,
+      "expected_b64": "W3JlZGFjdGVkOiBsaW5lIG92ZXIgNjQgYnl0ZXNdCgANAAoACgAKAApbcmVkYWN0ZWQ6IGxpbmUgb3ZlciA2NCBieXRlc10=",
+      "counts": {},
+      "source_offset": 689,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-3",
+      "rules": [{"id": 0, "name": "private_key", "detector": "private_key"}, {"id": 1, "name": "url_password", "detector": "url_password"}, {"id": 2, "name": "authorization", "detector": "authorization"}, {"id": 3, "name": "ipv6", "detector": "ipv6"}, {"id": 4, "name": "email", "detector": "email"}, {"id": 5, "name": "ipv4", "detector": "ipv4"}, {"id": 6, "name": "bearer", "detector": "bearer"}, {"id": 7, "name": "jwt", "detector": "jwt"}, {"id": 8, "name": "iban", "detector": "iban"}],
+      "input_b64": "w6kgeCAtLS0tLUJFR0lOIEVDIFBSSVZBVEUgS0VZLS0tLS0gaW5saW5lIC0tLS0tRU5EIEVDIFBSSVZBVEUgS0VZLS0tLS0geSAtLS0tLUJFR0lOIFJTQSBQUklWQVRFIEtFWS0tLS0tCk1JSUJPZ0lCQUFKQkFLajM0R2t4RmhEOTB2Y05MWUxJbkZFWDZQcHkxdFBmOUNuemo0cDRXR2UKLS0tLS1FTkQgUlNBIFBSSVZBVEUgS0VZLS0tLS0gYTpiOmM6ZDplOmY6MToyIHByaXZhdGVfa2V5PXh5eiAxNzAwMDAwMDAwMDAwIHBhxb/Fv3dvcmQ9aHVudGVyMiAtLS0tLUJFR0lOIFBSSVZBVEUgS0VZLS0tLS0KQUFBQQ0KQkJCQgo=",
+      "final": true,
+      "expected_b64": "w6kgeCBbcmVkYWN0ZWQ6IHByaXZhdGUga2V5XSB5IFtyZWRhY3RlZDogcHJpdmF0ZSBrZXldCgogW3JlZGFjdGVkOiBpcF0gcHJpdmF0ZV9rZXk9eHl6IDE3MDAwMDAwMDAwMDAgcGHFv8W/d29yZD1odW50ZXIyIFtyZWRhY3RlZDogcHJpdmF0ZSBrZXldCg0KCg==",
+      "counts": {"private_key": 3, "ipv6": 1},
+      "source_offset": 296,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-4",
+      "rules": [{"id": 0, "name": "url_password", "detector": "url_password"}, {"name": "custom-anchor", "pattern": "^ok", "secret_group": 0}, {"id": 1, "name": "private_key", "detector": "private_key"}, {"id": 2, "name": "jwt", "detector": "jwt"}, {"id": 3, "name": "email", "detector": "email"}, {"id": 4, "name": "iban", "detector": "iban"}, {"id": 5, "name": "bearer", "detector": "bearer"}, {"id": 6, "name": "secret_kv", "detector": "secret_kv"}, {"id": 7, "name": "card", "detector": "card"}, {"id": 8, "name": "ipv4", "detector": "ipv4"}, {"id": 9, "name": "ipv6", "detector": "ipv6"}],
+      "input_b64": "ZGJfcGFzc3dvcmQ9J3ggeScgcGFzc3dvcmQ9KioqKiAJIOS4gCA6OiAyNTYuMS4xLjEgw6kgMTIgNDExMSAxMTExIDExMTEgMTExMSAyIHg9MSZzZWNyZXQ9czM7bmV4dCB1c2VyQGV4w6RtcGxlLmNvbSAyMDAxOmRiODo6NDIgUFQ1MCAwMDAyIDAxMjMgMTIzNCA1Njc4IDkwMTUgNCAgIHg9MQ==",
+      "final": true,
+      "expected_b64": "ZGJfcGFzc3dvcmQ9J1tyZWRhY3RlZDogcGFzc3dvcmRdIHknIHBhc3N3b3JkPSoqKiogCSDkuIAgW3JlZGFjdGVkOiBpcF0gMjU2LjEuMS4xIMOpIDEyIFtyZWRhY3RlZDogY2FyZCAqKioqMTExMV0gMiB4PTEmc2VjcmV0PVtyZWRhY3RlZDogc2VjcmV0XTtuZXh0IHVzZXJAZXjDpG1wbGUuY29tIFtyZWRhY3RlZDogaXBdIFtyZWRhY3RlZDogaWJhbl0gICB4PTE=",
+      "counts": {"secret_kv": 2, "ipv6": 2, "card": 1, "iban": 1},
+      "source_offset": 166,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-5",
+      "rules": [{"id": 0, "name": "ipv6", "detector": "ipv6"}, {"id": 1, "name": "jwt", "detector": "jwt"}, {"id": 2, "name": "email", "detector": "email"}, {"id": 3, "name": "ipv4", "detector": "ipv4"}, {"id": 4, "name": "card", "detector": "card"}, {"id": 5, "name": "authorization", "detector": "authorization"}, {"id": 6, "name": "secret_kv", "detector": "secret_kv"}, {"id": 7, "name": "bearer", "detector": "bearer"}, {"id": 8, "name": "iban", "detector": "iban"}, {"id": 9, "name": "private_key", "detector": "private_key"}],
+      "input_b64": "w6kgMTAuMjAuMzAuNDAgOjogCSBmZTgwOjoxJWV0aDAgACDDqUAuQDMgMzc4MjgyMjQ2MzEwMDA1IHVzZXJAZXjDpG1wbGUuY29tIEFCMTIgR0I4MiBXRVNUIDEyMzQgNTY5OCA3NjU0IDMyIFgtQXBpLUtleTogenp6IEdCODIgV0VTVCAxMjM0IDU2OTggNzY1NCAzMiDDvyA2MDExMTExMTExMTExMTE3IGF1dGhvcml6YXRpb246IC4wCkAgNmI5YzgwMCBwYXNzd29yZD1odW50ZXIyMiAAIFBUNTAgMDAwMiAwMTIzIDEyMzQgNTY3OCA5MDE1IDQ=",
+      "max_line_bytes": 16,
+      "final": false,
+      "expected_b64": "W3JlZGFjdGVkOiBsaW5lIG92ZXIgMTYgYnl0ZXNdCltyZWRhY3RlZDogbGluZSBvdmVyIDE2IGJ5dGVzXQ==",
+      "counts": {},
+      "source_offset": 190,
+      "trailing_partial": 30
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-6",
+      "rules": [{"id": 0, "name": "ipv6", "detector": "ipv6"}, {"id": 1, "name": "iban", "detector": "iban"}, {"id": 2, "name": "email", "detector": "email"}, {"id": 3, "name": "card", "detector": "card"}, {"id": 4, "name": "secret_kv", "detector": "secret_kv"}, {"id": 5, "name": "url_password", "detector": "url_password"}, {"id": 6, "name": "authorization", "detector": "authorization"}, {"id": 7, "name": "ipv4", "detector": "ipv4"}, {"id": 8, "name": "bearer", "detector": "bearer"}, {"id": 9, "name": "jwt", "detector": "jwt"}],
+      "input_b64": "/v8ARwBCADgAMgAgAFcARQBTAFQAIAAxADIAMwA0ACAANQA2ADkAOAAgADcANgA1ADQAIAAzADMAIAA2ADAAMQAxADEAMQAxADEAMQAxADEAMQAxADEAMQA3ACAALQAtAC0ALQAtAEIARQBHAEkATgAgAFAAUgBJAFYAQQBUAEUAIABLAEUAWQAtAC0ALQAtAC0ACgBBAEEAQQBBAA0ACgBCAEIAQgBCAAoAIABwAHIAbwB4AHkALQBhAHUAdABoAG8AcgBpAHoAYQB0AGkAbwBuAD0AYQBiAGMAIABkAGUAZgAgAGgAdAB0AHAAcwA6AC8ALwB1ADoAcABhADUANQB3AG8AcgBkAEAAaABvAHMAdAAgAEAANQBAADQALgA2ACAAMgAlADYAYgBhACAAfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4=",
+      "source_encoding": "auto",
+      "final": true,
+      "expected_b64": "77u/R0I4MiBXRVNUIDEyMzQgNTY5OCA3NjU0IDMzIFtyZWRhY3RlZDogY2FyZCAqKioqMTExN10gLS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCkFBQUENCkJCQkIKIHByb3h5LWF1dGhvcml6YXRpb249W3JlZGFjdGVkOiBwYXNzd29yZF0=",
+      "counts": {"card": 1, "url_password": 1},
+      "source_offset": 704,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-7",
+      "rules": [{"id": 0, "name": "iban", "detector": "iban"}, {"id": 1, "name": "private_key", "detector": "private_key"}],
+      "input_b64": "w6kgMTI6MzA6NDUgZmU4MDo6MSVldGgwIFgtQXBpLUtleTogenp6IGRiX3Bhc3N3b3JkPSd4IHkn",
+      "final": true,
+      "expected_b64": "w6kgMTI6MzA6NDUgZmU4MDo6MSVldGgwIFgtQXBpLUtleTogenp6IGRiX3Bhc3N3b3JkPSd4IHkn",
+      "counts": {},
+      "source_offset": 57,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-8",
+      "rules": [{"id": 0, "name": "iban", "detector": "iban"}, {"id": 1, "name": "secret_kv", "detector": "secret_kv"}, {"id": 2, "name": "email", "detector": "email"}, {"id": 3, "name": "authorization", "detector": "authorization"}, {"id": 4, "name": "jwt", "detector": "jwt"}, {"id": 5, "name": "private_key", "detector": "private_key"}, {"id": 6, "name": "card", "detector": "card"}, {"id": 7, "name": "ipv6", "detector": "ipv6"}],
+      "input_b64": "",
+      "max_line_bytes": 128,
+      "final": true,
+      "expected_b64": "",
+      "counts": {},
+      "source_offset": 0,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-10",
+      "rules": [{"id": 0, "name": "authorization", "detector": "authorization"}, {"id": 1, "name": "secret_kv", "detector": "secret_kv"}, {"id": 2, "name": "email", "detector": "email"}, {"id": 3, "name": "jwt", "detector": "jwt"}, {"id": 4, "name": "ipv4", "detector": "ipv4"}, {"id": 5, "name": "card", "detector": "card"}, {"id": 6, "name": "private_key", "detector": "private_key"}],
+      "input_b64": "6QAlADMAMwA2AC4A6QAuADMAOQA2AEAAPQAlACAAZABiAF8AcABhAHMAcwB3AG8AcgBkAD0AJwB4ACAAeQAnACAAaAB0AHQAcABzADoALwAvAHUAOgBwAGEANQA1AHcAbwByAGQAQABoAG8AcwB0ACAARwBCADgAMgAgAFcARQBTAFQAIAAxADIAMwA0ACAANQA2ADkAOAAgADcANgA1ADQAIAAzADIAIAD/ACAAYwBsAGkAZQBuAHQAXwBzAGUAYwByAGUAdAA9AGEAYgBjACAAeAA9ADEAIABwAGEAcwBzAHcAbwByAGQAPQBbAHIAZQBkAGEAYwB0AGUAZAA6ACAAeABdACAAUABUADUAMAAgADAAMAAwADIAIAAwADEAMgAzACAAMQAyADMANAAgADUANgA3ADgAIAA5ADAAMQA1ACAANAAgAHAAYQBzAHMAdwBvAHIAZAA9AFsAcgBlAGQAYQBjAHQAZQBkADoAIAB4AF0AIAAAMCAACgAgAHcAbwByAGQAIABvAGsAIAA6ADoAQwBsAGEAcwBzACAARABFADgAOQAgADMANwAwADQAIAAwADAANAA0ACAAMAA1ADMAMgAgADAAMQAzADAAIAAwADAAIAAgACAALQAtAC0ALQAtAEUATgBEACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAgAP8AIABwAHIAbwB4AHkALQBhAHUAdABoAG8AcgBpAHoAYQB0AGkAbwBuAD0AYQBiAGMAIABkAGUAZgA=",
+      "source_encoding": "auto",
+      "final": true,
+      "expected_b64": "w6klMzM2LsOpLjM5NkA9JSBkYl9wYXNzd29yZD0nW3JlZGFjdGVkOiBwYXNzd29yZF0geScgaHR0cHM6Ly91OnBhNTV3b3JkQGhvc3QgR0I4MiBXRVNUIDEyMzQgNTY5OCA3NjU0IDMyIMO/IGNsaWVudF9zZWNyZXQ9W3JlZGFjdGVkOiBjbGllbnQgc2VjcmV0XSB4PTEgcGFzc3dvcmQ9W3JlZGFjdGVkOiB4XSBQVDUwIDAwMDIgMDEyMyAxMjM0IDU2NzggOTAxNSA0IHBhc3N3b3JkPVtyZWRhY3RlZDogeF0g44CAIAogd29yZCBvayA6OkNsYXNzIERFODkgMzcwNCAwMDQ0IDA1MzIgMDEzMCAwMCAgIC0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0gw78gcHJveHktYXV0aG9yaXphdGlvbj1bcmVkYWN0ZWQ6IGF1dGhvcml6YXRpb25d",
+      "counts": {"secret_kv": 2, "authorization": 1},
+      "source_offset": 584,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-11",
+      "rules": [{"id": 0, "name": "card", "detector": "card"}, {"name": "custom-dot8", "pattern": "X.{3}Y"}],
+      "input_b64": "ACAAOQA9ACAACgAgAGkAZAAgADQAMgAgAGEAcABpAF8AawBlAHkAPQBBAEsASQBBADEAMgAzADQAIAB4AD0AMQAgADoAOgAgAFAAQQBTAFMAVwBPAFIARAA6ACAAIgBoAHUAbgB0AGUAcgAyADIAIgAgADQAMgAxACAAQQBCADEAMgAgAEcAQgA4ADIAIABXAEUAUwBUACAAMQAyADMANAAgADUANgA5ADgAIAA3ADYANQA0ACAAMwAyACAAOgA6ACAAaQBkACAANAAyACAwAAAgAG8AawAgAH4AfgB+AH4AfgB+AH4AfgB+AH4AIAA2ADAAMQAxADEAMQAxADEAMQAxADEAMQAxADEAMQA3ACAAOgA6ACAAeAA9ADEAIAAxADcAMAAwADAAMAAwADAAMAAwADAAMAAwACA=",
+      "source_encoding": "auto",
+      "final": true,
+      "expected_b64": "IDk9IAogaWQgNDIgYXBpX2tleT1BS0lBMTIzNCB4PTEgOjogUEFTU1dPUkQ6ICJodW50ZXIyMiIgNDIxIEFCMTIgR0I4MiBXRVNUIDEyMzQgNTY5OCA3NjU0IDMyIDo6IGlkIDQyIOOAgCBvayB+fn5+fn5+fn5+IFtyZWRhY3RlZDogY2FyZCAqKioqMTExN10gOjogeD0xIDE3MDAwMDAwMDAwMDAg",
+      "counts": {"card": 1},
+      "source_offset": 314,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-12",
+      "rules": [{"id": 0, "name": "authorization", "detector": "authorization"}, {"id": 1, "name": "ipv4", "detector": "ipv4"}],
+      "input_b64": "//5oAHQAdABwAHMAOgAvAC8AdQA6AHAAYQA1ADUAdwBvAHIAZABAAGgAbwBzAHQAIAAyADUANgAuADEALgAxAC4AMQAgAGkAZAAgADQAMgAgAADYIAAA2CAALQAtAC0ALQAtAEUATgBEACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAgAHcAbwByAGQAIABhAHAAaQBfAGsAZQB5AD0AQQBLAEkAQQAxADIAMwA0ACAA6QAgAAAwIAB3AG8AcgBkACAARwBCADgAMgBXAEUAUwBUADEAMgAzADQANQA2ADkAOAA3ADYANQA0ADMAMgAgAGEAOgBiADoAYwA6AGQAOgBlADoAZgA6ADEAOgAyACAAAAAgAHAAYQBzAHMAdwBvAHIAZAA9AGgAdQBuAHQAZQByADIAMgA=",
+      "source_encoding": "auto",
+      "output_encoding": "source",
+      "final": false,
+      "expected_b64": "WwByAGUAZABhAGMAdABlAGQAOgAgAGkAbgBjAG8AbQBwAGwAZQB0AGUAIABsAGkAbgBlAF0A",
+      "counts": {},
+      "source_offset": 0,
+      "trailing_partial": 54
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-13",
+      "rules": [{"id": 0, "name": "private_key", "detector": "private_key"}, {"id": 1, "name": "card", "detector": "card"}, {"id": 2, "name": "secret_kv", "detector": "secret_kv"}, {"id": 3, "name": "bearer", "detector": "bearer"}, {"id": 4, "name": "ipv6", "detector": "ipv6"}, {"id": 5, "name": "ipv4", "detector": "ipv4"}, {"id": 6, "name": "iban", "detector": "iban"}, {"id": 7, "name": "url_password", "detector": "url_password"}, {"id": 8, "name": "email", "detector": "email"}, {"name": "custom-neg", "pattern": "tag:([^ ]+)", "secret_group": 1}, {"id": 9, "name": "authorization", "detector": "authorization"}, {"id": 10, "name": "jwt", "detector": "jwt"}],
+      "input_b64": "DQogeCAtLS0tLUJFR0lOIEVDIFBSSVZBVEUgS0VZLS0tLS0gaW5saW5lIC0tLS0tRU5EIEVDIFBSSVZBVEUgS0VZLS0tLS0geSAtLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tIHggLS0tLS1CRUdJTiBFQyBQUklWQVRFIEtFWS0tLS0tIGlubGluZSAtLS0tLUVORCBFQyBQUklWQVRFIEtFWS0tLS0tIHkgLS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KQUFBQQotLS0tLUVORCBQVUJMSUMgS0VZLS0tLS0gMToyOjM6NDo1OjY6Nzo6IGRlOmFkOmJlOmVmOjAwOjAxIEdCODIgV0VTVCAxMjM0IDU2OTggNzY1NCAzMiBvayAAIGlkIDQyIHg9MSB2MS4yIGlkIDQyIHBhc3N3b3JkPVtyZWRhY3RlZDogeF0gd29yZCDjgIAgLS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlCT2dJQkFBSkJBS2ozNEdreEZoRDkwdmNOTFlMSW5GRVg2UHB5MXRQZjlDbnpqNHA0V0dlCi0tLS0tRU5EIFJTQSBQUklWQVRFIEtFWS0tLS0tIGRiX3Bhc3N3b3JkPSd4IHknIDogcGFzc3dvcmQ9aHVudGVyMjI=",
+      "final": false,
+      "expected_b64": "DQogeCBbcmVkYWN0ZWQ6IHByaXZhdGUga2V5XSB5IC0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0geCBbcmVkYWN0ZWQ6IHByaXZhdGUga2V5XSB5IC0tLS0tQkVHSU4gUFVCTElDIEtFWS0tLS0tCkFBQUEKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tIDE6MjozOjQ6NTo2Ojc6OiBkZTphZDpiZTplZjowMDowMSBbcmVkYWN0ZWQ6IGliYW5dIG9rIAAgaWQgNDIgeD0xIHYxLjIgaWQgNDIgcGFzc3dvcmQ9W3JlZGFjdGVkOiB4XSB3b3JkIOOAgCBbcmVkYWN0ZWQ6IHByaXZhdGUga2V5XQoKW3JlZGFjdGVkOiBpbmNvbXBsZXRlIGxpbmVd",
+      "counts": {"private_key": 3, "iban": 1},
+      "source_offset": 436,
+      "trailing_partial": 27
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-14",
+      "rules": [{"id": 0, "name": "authorization", "detector": "authorization"}, {"id": 1, "name": "jwt", "detector": "jwt"}, {"id": 2, "name": "secret_kv", "detector": "secret_kv"}, {"id": 3, "name": "iban", "detector": "iban"}, {"id": 4, "name": "ipv6", "detector": "ipv6"}, {"id": 5, "name": "card", "detector": "card"}],
+      "input_b64": "MTIgNDExMSAxMTExIDExMTEgMTExMSAyIG9rIDo6IGh0dHBzOi8vdTpwYTU1d29yZEBob3N0ID00IC0tLS0tQkVHSU4gUFJJVkFURSBLRVktLS0tLQpBQUFBDQpCQkJCCiBhbGljZUBleGFtcGxlLmNvbSDjgIAgWC1BcGktS2V5OiB6enogNjAxMTExMTExMTExMTExNyBL4oSqICAgIDIwMDE6ZGI4OjoxOiBmdHA6Ly9hOmJAYyBhLmIrY0BzdWIuZXhhbXBsZS5jby51ayBhY2Nlc3Mta2V5PTEgeD0xIH5+fn5+fn5+fn4g7aCAIDo2w6k0ID0xIDMgMToyOjM6NDo1OjY6Nzo4OjkgWC1BcGktS2V5OiB6enogMS4yLjMuMDQgZmU4MDo6MSUgLS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KQUFBQQotLS0tLUVORCBQVUJMSUMgS0VZLS0tLS0=",
+      "final": true,
+      "expected_b64": "MTIgW3JlZGFjdGVkOiBjYXJkICoqKioxMTExXSAyIG9rIFtyZWRhY3RlZDogaXBdIGh0dHBzOi8vdTpwYTU1d29yZEBob3N0ID00IC0tLS0tQkVHSU4gUFJJVkFURSBLRVktLS0tLQpBQUFBDQpCQkJCCiBhbGljZUBleGFtcGxlLmNvbSDjgIAgWC1BcGktS2V5OiBbcmVkYWN0ZWQ6IGFwaSBrZXldIFtyZWRhY3RlZDogY2FyZCAqKioqMTExN10gS+KEqiAgICBbcmVkYWN0ZWQ6IGlwXTogZnRwOi8vYTpiQGMgYS5iK2NAc3ViLmV4YW1wbGUuY28udWsgYWNjZXNzLWtleT1bcmVkYWN0ZWQ6IGFjY2VzcyBrZXldIHg9MSB+fn5+fn5+fn5+IO2ggCA6NsOpNCA9MSAzIFtyZWRhY3RlZDogaXBdOjkgWC1BcGktS2V5OiBbcmVkYWN0ZWQ6IGFwaSBrZXldIDEuMi4zLjA0IFtyZWRhY3RlZDogaXBdJSAtLS0tLUJFR0lOIFBVQkxJQyBLRVktLS0tLQpBQUFBCi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLQ==",
+      "counts": {"card": 2, "ipv6": 4, "secret_kv": 3},
+      "source_offset": 359,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-16",
+      "rules": [{"id": 0, "name": "iban", "detector": "iban"}, {"id": 1, "name": "ipv4", "detector": "ipv4"}, {"id": 2, "name": "ipv6", "detector": "ipv6"}, {"id": 3, "name": "authorization", "detector": "authorization"}, {"id": 4, "name": "email", "detector": "email"}],
+      "input_b64": "eD0xIAAgZmU4MDo6MSVldGgwICUzM2IKCjE3OT0gCyAgIDlAMkA5w6ljNCDtoIAgNCAxNzAwMDAwMDAwMDAwIGh0dHBzOi8vdTpwYTU1d29yZEBob3N0IDo6Q2xhc3MgICB3b3JkIHggLS0tLS1CRUdJTiBFQyBQUklWQVRFIEtFWS0tLS0tIGlubGluZSAtLS0tLUVORCBFQyBQUklWQVRFIEtFWS0tLS0tIHkgOjoxIEFCMTIgR0I4MiBXRVNUIDEyMzQgNTY5OCA3NjU0IDMyIHBhc3N3b3JkPW51bGwgMjAwMTpkYjg6OjE6IOOAgCBHQjgyV0VTVDEyMzQ1Njk4NzY1NDMy",
+      "final": true,
+      "expected_b64": "eD0xIAAgW3JlZGFjdGVkOiBpcF0gJTMzYgoKMTc5PSALICAgOUAyQDnDqWM0IO2ggCA0IDE3MDAwMDAwMDAwMDAgaHR0cHM6Ly91OnBhNTV3b3JkQGhvc3QgOjpDbGFzcyAgIHdvcmQgeCAtLS0tLUJFR0lOIEVDIFBSSVZBVEUgS0VZLS0tLS0gaW5saW5lIC0tLS0tRU5EIEVDIFBSSVZBVEUgS0VZLS0tLS0geSBbcmVkYWN0ZWQ6IGlwXSBBQjEyIFtyZWRhY3RlZDogaWJhbl0gcGFzc3dvcmQ9bnVsbCBbcmVkYWN0ZWQ6IGlwXTog44CAIFtyZWRhY3RlZDogaWJhbl0=",
+      "counts": {"ipv6": 3, "iban": 2},
+      "source_offset": 264,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-17",
+      "rules": [{"id": 0, "name": "bearer", "detector": "bearer"}, {"id": 1, "name": "ipv6", "detector": "ipv6"}, {"id": 2, "name": "jwt", "detector": "jwt"}, {"name": "custom-utf8", "pattern": "senhá=(\\S+)", "secret_group": 1}],
+      "input_b64": "AHcAbwByAGQAIAAJACAAOAAKAC4AIAAwACUAOgAtACAACgAtAEAAYQA1ADEAMgA3ADgALQA2ACAAMQA6ADIAOgAzADoANAA6ADUAOgA2ADoANwA6ADoAIAAxADIAIAA0ADEAMQAxACAAMQAxADEAMQAgADEAMQAxADEAIAAxADEAMQAxACAAMgAgAHQAbwBrAOkAbgA9ADEAIAA6ACAAOgA6ACAAZgBlADgAMAA6ADoAMQAlAGUAdABoADAAIABhAHAAaQBfAGsAZQB5AD0AQQBLAEkAQQAxADIAMwA0ACAAIAANAAo=",
+      "source_encoding": "auto",
+      "output_encoding": "source",
+      "final": true,
+      "expected_b64": "AHcAbwByAGQAIAAJACAAOAAKAC4AIAAwACUAOgAtACAACgAtAEAAYQA1ADEAMgA3ADgALQA2ACAAMQA6ADIAOgAzADoANAA6ADUAOgA2ADoANwA6ADoAIAAxADIAIAA0ADEAMQAxACAAMQAxADEAMQAgADEAMQAxADEAIAAxADEAMQAxACAAMgAgAHQAbwBrAOkAbgA9ADEAIAA6ACAAWwByAGUAZABhAGMAdABlAGQAOgAgAGkAcABdACAAWwByAGUAZABhAGMAdABlAGQAOgAgAGkAcABdACAAYQBwAGkAXwBrAGUAeQA9AEEASwBJAEEAMQAyADMANAAgACAADQAK",
+      "counts": {"ipv6": 2},
+      "source_offset": 230,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-19",
+      "rules": [{"id": 0, "name": "card", "detector": "card"}, {"id": 1, "name": "bearer", "detector": "bearer"}, {"id": 2, "name": "authorization", "detector": "authorization"}, {"id": 3, "name": "ipv6", "detector": "ipv6"}, {"id": 4, "name": "jwt", "detector": "jwt"}, {"id": 5, "name": "secret_kv", "detector": "secret_kv"}, {"id": 6, "name": "email", "detector": "email"}, {"id": 7, "name": "iban", "detector": "iban"}],
+      "input_b64": "eCAtLS0tLUJFR0lOIEVDIFBSSVZBVEUgS0VZLS0tLS0gaW5saW5lIC0tLS0tRU5EIEVDIFBSSVZBVEUgS0VZLS0tLS0geSB4PTEg7aCAIEF1dGhvcml6YXRpb246IEJhc2ljIFptOXZPbUpoY2c9PSA5MmFAIHdvcmQgICAgQmVhcmVyIGFiY2RlZmdoMTIzNDU2NzggLS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KQUFBQQotLS0tLUVORCBQVUJMSUMgS0VZLS0tLS0gICAyMDAxOjBkYjg6MDAwMDowMDAwOjAwMDA6ZmYwMDowMDQyOjgzMjkgeyJ0b2tlbiI6ImFiYyJ9IHBhc3N3b3JkPVtyZWRhY3RlZDogeF0=",
+      "final": true,
+      "expected_b64": "eCAtLS0tLUJFR0lOIEVDIFBSSVZBVEUgS0VZLS0tLS0gaW5saW5lIC0tLS0tRU5EIEVDIFBSSVZBVEUgS0VZLS0tLS0geSB4PTEg7aCAIEF1dGhvcml6YXRpb246IFtyZWRhY3RlZDogdG9rZW5dCkFBQUEKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tICAgW3JlZGFjdGVkOiBpcF0geyJ0b2tlbiI6IltyZWRhY3RlZDogdG9rZW5dIn0gcGFzc3dvcmQ9W3JlZGFjdGVkOiB4XQ==",
+      "counts": {"bearer": 1, "ipv6": 1, "secret_kv": 1},
+      "source_offset": 287,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-20",
+      "rules": [{"id": 0, "name": "card", "detector": "card"}, {"id": 1, "name": "bearer", "detector": "bearer"}, {"id": 2, "name": "private_key", "detector": "private_key"}, {"id": 3, "name": "secret_kv", "detector": "secret_kv"}, {"id": 4, "name": "email", "detector": "email"}, {"id": 5, "name": "ipv4", "detector": "ipv4"}, {"id": 6, "name": "iban", "detector": "iban"}],
+      "input_b64": "NDExMSAxMTExIDExMTEgMTExMSDDqQpiNzk4NcOpw6lhYyBhODQ6NDclLjY4OiAuIGZlODA6OjE6IGVycm9yIGEuYitjQHN1Yi5leGFtcGxlLmNvLnVr",
+      "final": false,
+      "expected_b64": "W3JlZGFjdGVkOiBjYXJkICoqKioxMTExXSDDqQpbcmVkYWN0ZWQ6IGluY29tcGxldGUgbGluZV0=",
+      "counts": {"card": 1},
+      "source_offset": 23,
+      "trailing_partial": 27
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-22",
+      "rules": [{"id": 0, "name": "secret_kv", "detector": "secret_kv"}, {"name": "custom-kelvin", "pattern": "(?i)k\\w+"}, {"id": 1, "name": "url_password", "detector": "url_password"}, {"id": 2, "name": "card", "detector": "card"}, {"id": 3, "name": "ipv4", "detector": "ipv4"}, {"id": 4, "name": "authorization", "detector": "authorization"}, {"id": 5, "name": "jwt", "detector": "jwt"}, {"id": 6, "name": "ipv6", "detector": "ipv6"}, {"id": 7, "name": "bearer", "detector": "bearer"}, {"id": 8, "name": "private_key", "detector": "private_key"}, {"id": 9, "name": "iban", "detector": "iban"}],
+      "input_b64": "//46ACAAPQA2AC4AIABhAOkANwA0AGIAQAAlADoAIABiAGUAYQByAGUAcgAgAHMAaABvAHIAdAAgAHYAMQAuADIAIAB4ACAALQAtAC0ALQAtAEIARQBHAEkATgAgAEUAQwAgAFAAUgBJAFYAQQBUAEUAIABLAEUAWQAtAC0ALQAtAC0AIABpAG4AbABpAG4AZQAgAC0ALQAtAC0ALQBFAE4ARAAgAEUAQwAgAFAAUgBJAFYAQQBUAEUAIABLAEUAWQAtAC0ALQAtAC0AIAB5ACAAAE4gADIAMAAwADEAOgBkAGIAOAA6ADoANAAyACAAUABUADUAMAAgADAAMAAwADIAIAAwADEAMgAzACAAMQAyADMANAAgADUANgA3ADgAIAA5ADAAMQA1ACAANAAgACAAIAAlACAALQAtAC0ALQAtAEUATgBEACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAgADoAOgBmAGYAZgBmADoAMQAuADIALgAzAC4ANAAgAGkAZAAgADQAMgAgAC0ALQAtAC0ALQBFAE4ARAAgAFAAUgBJAFYAQQBUAEUAIABLAEUAWQAtAC0ALQAtAC0AIAA6ADoAZgBmAGYAZgA6ADEALgAyAC4AMwAuADQAIABhAC4AYgArAGMAQABzAHUAYgAuAGUAeABhAG0AcABsAGUALgBjAG8ALgB1AGsAIABvAGsAIAA6ADoAIAA6ACAARwBCADgAMgAgAFcARQBTAFQAIAAxADIAMwA0ACAANQA2ADkAOAAgADcANgA1ADQAIAAzADIA",
+      "source_encoding": "auto",
+      "final": true,
+      "expected_b64": "77u/OiA9Ni4gYcOpNzRiQCU6IGJlYXJlciBzaG9ydCB2MS4yIHggW3JlZGFjdGVkOiBjdXN0b20ta2VsdmluXSB5IOS4gCBbcmVkYWN0ZWQ6IGlwXSBbcmVkYWN0ZWQ6IGliYW5dICAgJSAtLS0tLUVORCBQUklWQVRFIFtyZWRhY3RlZDogY3VzdG9tLWtlbHZpbl0tLS0tLSBbcmVkYWN0ZWQ6IGlwXSBpZCA0MiAtLS0tLUVORCBQUklWQVRFIFtyZWRhY3RlZDogY3VzdG9tLWtlbHZpbl0tLS0tLSBbcmVkYWN0ZWQ6IGlwXSBhLmIrY0BzdWIuZXhhbXBsZS5jby51ayBvayBbcmVkYWN0ZWQ6IGlwXSA6IFtyZWRhY3RlZDogaWJhbl0=",
+      "counts": {"custom-kelvin": 3, "ipv6": 2, "iban": 2, "ipv4": 2},
+      "source_offset": 606,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-23",
+      "rules": [{"id": 0, "name": "email", "detector": "email"}, {"name": "custom-dot8", "pattern": "X.{3}Y"}, {"id": 1, "name": "secret_kv", "detector": "secret_kv"}],
+      "input_b64": "NTU1NS01NTU1LTU1NTUtNDQ0NCAlIGFwaV9rZXk9QUtJQTEyMzQgcGFzc3dvcmQ9KioqKiAJIHBhxb/Fv3dvcmQ9aHVudGVyMiAtLS0tLUJFR0lOIFJTQSBQUklWQVRFIEtFWS0tLS0tCk1JSUJPZ0lCQUFKQkFLajM0R2t4RmhEOTB2Y05MWUxJbkZFWDZQcHkxdFBmOUNuemo0cDRXR2UKLS0tLS1FTkQgUlNBIFBSSVZBVEUgS0VZLS0tLS0gMToyOjM6NDo1OjY6Nzo6IDIwMDE6ZGI4Ojo0MiANCg==",
+      "final": true,
+      "expected_b64": "NTU1NS01NTU1LTU1NTUtNDQ0NCAlIGFwaV9rZXk9W3JlZGFjdGVkOiBhcGkga2V5XSBwYXNzd29yZD0qKioqIAkgcGHFv8W/d29yZD1odW50ZXIyIC0tLS0tQkVHSU4gUlNBIFBSSVZBVEUgS0VZLS0tLS0KTUlJQk9nSUJBQUpCQUtqMzRHa3hGaEQ5MHZjTkxZTEluRkVYNlBweTF0UGY5Q256ajRwNFdHZQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLSAxOjI6Mzo0OjU6Njo3OjogMjAwMTpkYjg6OjQyIA0K",
+      "counts": {"secret_kv": 1},
+      "source_offset": 223,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-24",
+      "rules": [{"id": 0, "name": "iban", "detector": "iban"}, {"id": 1, "name": "jwt", "detector": "jwt"}, {"id": 2, "name": "card", "detector": "card"}, {"id": 3, "name": "url_password", "detector": "url_password"}, {"id": 4, "name": "private_key", "detector": "private_key"}, {"id": 5, "name": "ipv4", "detector": "ipv4"}, {"id": 6, "name": "email", "detector": "email"}],
+      "input_b64": "NDExMSAxMTExIDExMTEgMTExMSB4IC0tLS0tQkVHSU4gRUMgUFJJVkFURSBLRVktLS0tLSBpbmxpbmUgLS0tLS1FTkQgRUMgUFJJVkFURSBLRVktLS0tLSB5IDcgJTA9NDhjw6kKPS0uCiBmdHA6Ly9hOmJAYyBiZWFyZXIgc2hvcnQgOjogICAKIDI1Ni4xLjEuMSBpZCA0MiBpZCA0MiB3b3JkIGFsaWNlQGV4YW1wbGUuY29tIDE3MDAwMDAwMDAwMDAgICAgOiBQVDUwIDAwMDIgMDEyMyAxMjM0IDU2NzggOTAxNSA0IO2ggCAtLS0tLUJFR0lOIFBVQkxJQyBLRVktLS0tLQpBQUFBCi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLSA6Og==",
+      "final": true,
+      "expected_b64": "W3JlZGFjdGVkOiBjYXJkICoqKioxMTExXSB4IFtyZWRhY3RlZDogcHJpdmF0ZSBrZXldIHkgNyAlMD00OGPDqQo9LS4KIGZ0cDovL2E6W3JlZGFjdGVkOiBwYXNzd29yZF1AYyBiZWFyZXIgc2hvcnQgOjogICAKIDI1Ni4xLjEuMSBpZCA0MiBpZCA0MiB3b3JkIFtyZWRhY3RlZDogZW1haWxdIDE3MDAwMDAwMDAwMDAgICAgOiBbcmVkYWN0ZWQ6IGliYW5dIO2ggCAtLS0tLUJFR0lOIFBVQkxJQyBLRVktLS0tLQpBQUFBCi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLSA6Og==",
+      "counts": {"card": 1, "private_key": 1, "url_password": 1, "email": 1, "iban": 1},
+      "source_offset": 298,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-25",
+      "rules": [{"name": "custom-anchor", "pattern": "^ok", "secret_group": 0}, {"id": 0, "name": "authorization", "detector": "authorization"}, {"id": 1, "name": "email", "detector": "email"}, {"id": 2, "name": "card", "detector": "card"}],
+      "input_b64": "CwAgACAAIAAwADgAQAAgADoAYQA5AD0A6QA5ACAAMQAyADoAMwAwADoANAA1ACAAZQB5AEoAaABiAEcAYwBpAE8AaQBKAEkAVQB6AEkAMQBOAGkASgA5AC4AZQB5AEoAegBkAFcASQBpAE8AaQBJAHgATQBqAE0AMABOAFQAWQAzAE8ARABrAHcASQBuADAALgBjADIAbABuAGIAbQBGADAAZABYAEoAbAAgAC0ALQAtAC0ALQBCAEUARwBJAE4AIABSAFMAQQAgAFAAUgBJAFYAQQBUAEUAIABLAEUAWQAtAC0ALQAtAC0ACgBNAEkASQBCAE8AZwBJAEIAQQBBAEoAQgBBAEsAagAzADQARwBrAHgARgBoAEQAOQAwAHYAYwBOAEwAWQBMAEkAbgBGAEUAWAA2AFAAcAB5ADEAdABQAGYAOQBDAG4AegBqADQAcAA0AFcARwBlAAoALQAtAC0ALQAtAEUATgBEACAAUgBTAEEAIABQAFIASQBWAEEAVABFACAASwBFAFkALQAtAC0ALQAtACAALQAtAC0ALQAtAEIARQBHAEkATgAgAFIAUwBBACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAKAE0ASQBJAEIATwBnAEkAQgBBAEEASgBCAEEASwBqADMANABHAGsAeABGAGgARAA5ADAAdgBjAE4ATABZAEwASQBuAEYARQBYADYAUABwAHkAMQB0AFAAZgA5AEMAbgB6AGoANABwADQAVwBHAGUACgAtAC0ALQAtAC0ARQBOAEQAIABSAFMAQQAgAFAAUgBJAFYAQQBUAEUAIABLAEUAWQAtAC0ALQAtAC0AIABLACohIAB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4A",
+      "source_encoding": "utf-16-unsure",
+      "final": true,
+      "expected_b64": "CwAgACAAIAAwADgAQAAgADoAYQA5AD0A6QA5ACAAMQAyADoAMwAwADoANAA1ACAAZQB5AEoAaABiAEcAYwBpAE8AaQBKAEkAVQB6AEkAMQBOAGkASgA5AC4AZQB5AEoAegBkAFcASQBpAE8AaQBJAHgATQBqAE0AMABOAFQAWQAzAE8ARABrAHcASQBuADAALgBjADIAbABuAGIAbQBGADAAZABYAEoAbAAgAC0ALQAtAC0ALQBCAEUARwBJAE4AIABSAFMAQQAgAFAAUgBJAFYAQQBUAEUAIABLAEUAWQAtAC0ALQAtAC0ACgBNAEkASQBCAE8AZwBJAEIAQQBBAEoAQgBBAEsAagAzADQARwBrAHgARgBoAEQAOQAwAHYAYwBOAEwAWQBMAEkAbgBGAEUAWAA2AFAAcAB5ADEAdABQAGYAOQBDAG4AegBqADQAcAA0AFcARwBlAAoALQAtAC0ALQAtAEUATgBEACAAUgBTAEEAIABQAFIASQBWAEEAVABFACAASwBFAFkALQAtAC0ALQAtACAALQAtAC0ALQAtAEIARQBHAEkATgAgAFIAUwBBACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAKAE0ASQBJAEIATwBnAEkAQgBBAEEASgBCAEEASwBqADMANABHAGsAeABGAGgARAA5ADAAdgBjAE4ATABZAEwASQBuAEYARQBYADYAUABwAHkAMQB0AFAAZgA5AEMAbgB6AGoANABwADQAVwBHAGUACgAtAC0ALQAtAC0ARQBOAEQAIABSAFMAQQAgAFAAUgBJAFYAQQBUAEUAIABLAEUAWQAtAC0ALQAtAC0AIABLACohIAB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4AfgB+AH4A",
+      "counts": {},
+      "source_offset": 792,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-26",
+      "rules": [{"id": 0, "name": "iban", "detector": "iban"}, {"id": 1, "name": "url_password", "detector": "url_password"}, {"id": 2, "name": "ipv4", "detector": "ipv4"}, {"id": 3, "name": "authorization", "detector": "authorization"}, {"id": 4, "name": "private_key", "detector": "private_key"}, {"id": 5, "name": "secret_kv", "detector": "secret_kv"}, {"id": 6, "name": "email", "detector": "email"}, {"id": 7, "name": "ipv6", "detector": "ipv6"}, {"id": 8, "name": "card", "detector": "card"}],
+      "input_b64": "ACAAAE4gAGYAZQA4ADAAOgA6ADEAJQAgAAkAIABwAGEAcwBzAHcAbwByAGQAPQBbAHIAZQBkAGEAYwB0AGUAZAA6ACAAeABdACAAcABhAHMAcwB3AG8AcgBkAD0AaAB1AG4AdABlAHIAMgAyACAALQAtAC0ALQAtAEIARQBHAEkATgAgAFIAUwBBACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAKAE0ASQBJAEIATwBnAEkAQgBBAEEASgBCAEEASwBqADMANABHAGsAeABGAGgARAA5ADAAdgBjAE4ATABZAEwASQBuAEYARQBYADYAUABwAHkAMQB0AFAAZgA5AEMAbgB6AGoANABwADQAVwBHAGUACgAtAC0ALQAtAC0ARQBOAEQAIABSAFMAQQAgAFAAUgBJAFYAQQBUAEUAIABLAEUAWQAtAC0ALQAtAC0AIAA2ADAAMQAxADEAMQAxADEAMQAxADEAMQAxADEAMQA3ACAAbwBrACAACwAgAHgAIAAtAC0ALQAtAC0AQgBFAEcASQBOACAARQBDACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAgAGkAbgBsAGkAbgBlACAALQAtAC0ALQAtAEUATgBEACAARQBDACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAgAHkAIAAKACAAIAAtAC0ALQAtAC0AQgBFAEcASQBOACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAKAEEAQQBBAEEADQAKAEIAQgBCAEIACgAgAEEAdQB0AGgAbwByAGkAegBhAHQAaQBvAG4AOgAgAEIAYQBzAGkAYwAgAFoAbQA5AHYATwBtAEoAaABjAGcAPQA9ACAAMwAgADMANgA2AOkAIABwAGEAcwBzAHcAbwByAGQAPQAqACoAKgAqACAALQAtAC0ALQAtAEUATgBEACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAgAGQAYgBfAHAAYQBzAHMAdwBvAHIAZAA9ACcAeAAgAHkAJwAgAADYIAA6ADgAQAAgAAoALgA=",
+      "source_encoding": "utf-16-unsure",
+      "pem_max_lines": 2,
+      "final": false,
+      "expected_b64": "ACAAAE4gW3JlZGFjdGVkOiBpcF0AJQAgAAkAIABwAGEAcwBzAHcAbwByAGQAPQBbAHIAZQBkAGEAYwB0AGUAZAA6ACAAeABdACAAcABhAHMAcwB3AG8AcgBkAD1bcmVkYWN0ZWQ6IHBhc3N3b3JkXQAgW3JlZGFjdGVkOiBwcml2YXRlIGtleV0ACgAKAC0ALQAtAC0ALQBFAE4ARAAgAFIAUwBBACAAUABSAEkAVgBBAFQARQAgAEsARQBZAC0ALQAtAC0ALQAgW3JlZGFjdGVkOiBjYXJkICoqKioxMTE3XQAgAG8AawAgAAsAIAB4ACBbcmVkYWN0ZWQ6IHByaXZhdGUga2V5XQAgAHkAIAAKACAAIFtyZWRhY3RlZDogcHJpdmF0ZSBrZXldAAoADQAKAEIAQgBCAEIACgAgAEEAdQB0AGgAbwByAGkAegBhAHQAaQBvAG4AOgAgW3JlZGFjdGVkOiBhdXRob3JpemF0aW9uXQAnW3JlZGFjdGVkOiBwYXNzd29yZF0AIAB5ACcAIAAA2CAAOgA4AEAAIAAKW3JlZGFjdGVkOiBpbmNvbXBsZXRlIGxpbmVd",
+      "counts": {"ipv6": 1, "secret_kv": 2, "private_key": 3, "card": 1, "authorization": 1},
+      "source_offset": 830,
+      "trailing_partial": 27
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-27",
+      "rules": [{"id": 0, "name": "authorization", "detector": "authorization"}, {"id": 1, "name": "private_key", "detector": "private_key"}, {"id": 2, "name": "card", "detector": "card"}, {"id": 3, "name": "ipv6", "detector": "ipv6"}, {"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input_b64": "djEuMiAAIDM5McOpMTbDqTMgQUIxMiBHQjgyIFdFU1QgMTIzNCA1Njk4IDc2NTQgMzIgMTggd29yZCAxOTIuMTY4LjAuMTo4MDgwIHdvcmQgS+KEqiAtLS0tLUJFR0lOIFBVQkxJQyBLRVktLS0tLQpBQUFBCi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLSA6IDIwMDE6ZGI4OjoxOiAKICAgUFQ1MCAwMDAyIDAxMjMgMTIzNCA1Njc4IDkwMTUgNCB0b2vDqW49MSAtLS0tLUJFR0lOIFBVQkxJQyBLRVktLS0tLQpBQUFBCi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLSA0MTExIDExMTEgMTExMSAxMTExIHByb3h5LWF1dGhvcml6YXRpb249YWJjIGRlZiBmZTgwOjoxJWV0aDAgb2sgOg==",
+      "max_line_bytes": 128,
+      "final": true,
+      "expected_b64": "djEuMiAAIDM5McOpMTbDqTMgQUIxMiBHQjgyIFdFU1QgMTIzNCA1Njk4IDc2NTQgMzIgMTggd29yZCAxOTIuMTY4LjAuMTo4MDgwIHdvcmQgS+KEqiAtLS0tLUJFR0lOIFBVQkxJQyBLRVktLS0tLQpBQUFBCi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLSA6IFtyZWRhY3RlZDogaXBdOiAKICAgUFQ1MCAwMDAyIDAxMjMgMTIzNCA1Njc4IDkwMTUgNCB0b2vDqW49MSAtLS0tLUJFR0lOIFBVQkxJQyBLRVktLS0tLQpBQUFBCi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLSBbcmVkYWN0ZWQ6IGNhcmQgKioqKjExMTFdIHByb3h5LWF1dGhvcml6YXRpb249W3JlZGFjdGVkOiBhdXRob3JpemF0aW9uXQ==",
+      "counts": {"ipv6": 1, "card": 1, "authorization": 1},
+      "source_offset": 325,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-29",
+      "rules": [{"id": 0, "name": "private_key", "detector": "private_key"}, {"id": 1, "name": "card", "detector": "card"}, {"id": 2, "name": "ipv6", "detector": "ipv6"}, {"id": 3, "name": "email", "detector": "email"}, {"id": 4, "name": "bearer", "detector": "bearer"}, {"id": 5, "name": "authorization", "detector": "authorization"}],
+      "input_b64": "CiALIO2ggCBHQjgyIFdFU1QgMTIzNCA1Njk4IDc2NTQgMzIgaHR0cHM6Ly91OnBhNTV3b3JkQGhvc3QgMjjDqS0wCjRhIDIKIDo6ZmZmZjoxLjIuMy40IHYxLjIgUEFTU1dPUkQ6ICJodW50ZXIyMiIgcGFzc3dvcmQ9bnVsbCAzOTTDqTk4NC4gQXV0aG9yaXphdGlvbjogQmFzaWMgWm05dk9tSmhjZz09IG9rIOOAgCB+fn5+fn5+fn5+IHRva8Opbj0xIAkgYyAgIOOAgA==",
+      "final": true,
+      "expected_b64": "CiALIO2ggCBHQjgyIFdFU1QgMTIzNCA1Njk4IDc2NTQgMzIgaHR0cHM6Ly91OnBhNTV3b3JkQGhvc3QgMjjDqS0wCjRhIDIKIFtyZWRhY3RlZDogaXBdLjIuMy40IHYxLjIgUEFTU1dPUkQ6ICJodW50ZXIyMiIgcGFzc3dvcmQ9bnVsbCAzOTTDqTk4NC4gQXV0aG9yaXphdGlvbjogW3JlZGFjdGVkOiBhdXRob3JpemF0aW9uXQ==",
+      "counts": {"ipv6": 1, "authorization": 1},
+      "source_offset": 208,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-32",
+      "rules": [{"id": 0, "name": "url_password", "detector": "url_password"}, {"id": 1, "name": "ipv6", "detector": "ipv6"}, {"id": 2, "name": "authorization", "detector": "authorization"}, {"id": 3, "name": "ipv4", "detector": "ipv4"}, {"id": 4, "name": "jwt", "detector": "jwt"}, {"id": 5, "name": "email", "detector": "email"}, {"id": 6, "name": "iban", "detector": "iban"}],
+      "input_b64": "CSBmZTgwOjoxOiBlcnJvciBHQjgyIFdFU1QgMTIzNCA1Njk4IDc2NTQgMzIgJSA6IC49w6kKOj0uMTTDqS01CiAAIGlkIDQyIDQxMTEgMTExMSAxMTExIDExMTEgICDjgIAgdjEuMiAtLS0tLUJFR0lOIFBSSVZBVEUgS0VZLS0tLS0KQUFBQQ0KQkJCQgogCSALIGF1dGhvcml6YXRpb246IGRiX3Bhc3N3b3JkPSd4IHknIGF1dGhvcml6YXRpb246ICBBQjEyIEdCODIgV0VTVCAxMjM0IDU2OTggNzY1NCAzMiDDqSA6OjE=",
+      "max_line_bytes": 200,
+      "final": true,
+      "expected_b64": "CSBbcmVkYWN0ZWQ6IGlwXTogZXJyb3IgW3JlZGFjdGVkOiBpYmFuXSAlIDogLj3DqQo6PS4xNMOpLTUKIAAgaWQgNDIgNDExMSAxMTExIDExMTEgMTExMSAgIOOAgCB2MS4yIC0tLS0tQkVHSU4gUFJJVkFURSBLRVktLS0tLQpBQUFBDQpCQkJCCiAJIAsgYXV0aG9yaXphdGlvbjogW3JlZGFjdGVkOiBhdXRob3JpemF0aW9uXSd4IHknIGF1dGhvcml6YXRpb246ICBbcmVkYWN0ZWQ6IGlwXQ==",
+      "counts": {"ipv6": 2, "iban": 1, "authorization": 1},
+      "source_offset": 236,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-33",
+      "rules": [{"id": 0, "name": "secret_kv", "detector": "secret_kv"}, {"id": 1, "name": "bearer", "detector": "bearer"}, {"id": 2, "name": "authorization", "detector": "authorization"}, {"id": 3, "name": "url_password", "detector": "url_password"}, {"id": 4, "name": "private_key", "detector": "private_key"}, {"id": 5, "name": "ipv4", "detector": "ipv4"}],
+      "input_b64": "7aCAIMO/IGE6YjpjOmQ6ZTpmOjE6MiBHQjgyV0VTVDEyMzQ1Njk4NzY1NDMyIGMyOTM9Yj0zJTMzOCBwYXNzd29yZD1odW50ZXIyMiA6OiDDvyB0b+KEqmVuPWFiY2RlZiDjgIAgLS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCkFBQUENCkJCQkIKIDEyOjMwOjQ1IDE6OjI6Mzo0OjU6Njo3Ojggd29yZCAtLS0tLUJFR0lOIFBVQkxJQyBLRVktLS0tLQpBQUFBCi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLSBkYl9wYXNzd29yZD0neCB5JyBQVDUwIDAwMDIgMDEyMyAxMjM0IDU2NzggOTAxNSA0IOS4gCA6OiALIC0tLS0tQkVHSU4gUFVCTElDIEtFWS0tLS0tCkFBQUEKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tIGV5SmhiR2NpT2lKSVV6STFOaUo5LmV5SnpkV0lpT2lJeE1qTTBOVFkzT0Rrd0luMC5jMmxuYm1GMGRYSmwg7aCAIDQ5NzNiID0tLS0xMDVi",
+      "final": true,
+      "expected_b64": "7aCAIMO/IGE6YjpjOmQ6ZTpmOjE6MiBHQjgyV0VTVDEyMzQ1Njk4NzY1NDMyIGMyOTM9Yj0zJTMzOCBwYXNzd29yZD1bcmVkYWN0ZWQ6IHBhc3N3b3JkXSA6OiDDvyB0b+KEqmVuPWFiY2RlZiDjgIAgW3JlZGFjdGVkOiBwcml2YXRlIGtleV0KDQoKCgoKCg==",
+      "counts": {"secret_kv": 1, "private_key": 1},
+      "source_offset": 426,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-34",
+      "rules": [{"id": 0, "name": "bearer", "detector": "bearer"}, {"id": 1, "name": "ipv4", "detector": "ipv4"}, {"id": 2, "name": "url_password", "detector": "url_password"}, {"name": "custom-anchor", "pattern": "^ok", "secret_group": 0}, {"id": 3, "name": "iban", "detector": "iban"}, {"id": 4, "name": "jwt", "detector": "jwt"}, {"id": 5, "name": "ipv6", "detector": "ipv6"}, {"id": 6, "name": "private_key", "detector": "private_key"}, {"id": 7, "name": "card", "detector": "card"}],
+      "input_b64": "AFQANQAwACAAMAAwADAAMgAgADAAMQAyADMAIAAxADIAMwA0ACAANQA2ADcAOAAgADkAMAAxADUAIAA0ACAAdgAxAC4AMgAgADIAMAAwADEAOgBkAGIAOAA6ADoAMQA6ACAAdgAxAC4AMgAgADoAYgA2ADYAOQAgAGEACgAxAC0AJQAgAGEALgBiACsAYwBAAHMAdQBiAC4AZQB4AGEAbQBwAGwAZQAuAGMAbwAuAHUAawAgAGEALgBiACsAYwBAAHMAdQBiAC4AZQB4AGEAbQBwAGwAZQAuAGMAbwAuAHUAawAgAGEAYwBjAGUAcwBzAC0AawBlAHkAPQAxAA==",
+      "source_encoding": "utf-16-unsure",
+      "max_line_bytes": 16,
+      "final": false,
+      "expected_b64": "W3JlZGFjdGVkOiBsaW5lIG92ZXIgMTYgYnl0ZXNdCltyZWRhY3RlZDogbGluZSBvdmVyIDE2IGJ5dGVzXQ==",
+      "counts": {},
+      "source_offset": 124,
+      "trailing_partial": 30
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-36",
+      "rules": [{"id": 0, "name": "url_password", "detector": "url_password"}, {"id": 1, "name": "email", "detector": "email"}, {"id": 2, "name": "authorization", "detector": "authorization"}, {"id": 3, "name": "ipv4", "detector": "ipv4"}, {"id": 4, "name": "jwt", "detector": "jwt"}, {"id": 5, "name": "ipv6", "detector": "ipv6"}],
+      "input_b64": "MToyOjM6NDo1OjY6Nzo6IDE6MjozOjQ6NTo2Ojc6OiA6OiB4PTEgZGU6YWQ6YmU6ZWY6MDA6MDE=",
+      "final": true,
+      "expected_b64": "MToyOjM6NDo1OjY6Nzo6IDE6MjozOjQ6NTo2Ojc6OiBbcmVkYWN0ZWQ6IGlwXSB4PTEgZGU6YWQ6YmU6ZWY6MDA6MDE=",
+      "counts": {"ipv6": 1},
+      "source_offset": 56,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-41",
+      "rules": [{"id": 0, "name": "iban", "detector": "iban"}, {"id": 1, "name": "url_password", "detector": "url_password"}, {"id": 2, "name": "ipv4", "detector": "ipv4"}, {"id": 3, "name": "bearer", "detector": "bearer"}, {"id": 4, "name": "email", "detector": "email"}, {"id": 5, "name": "secret_kv", "detector": "secret_kv"}, {"id": 6, "name": "card", "detector": "card"}, {"id": 7, "name": "authorization", "detector": "authorization"}, {"id": 8, "name": "ipv6", "detector": "ipv6"}, {"id": 9, "name": "jwt", "detector": "jwt"}],
+      "input_b64": "AAkAIADpACAAMQA6ADIAOgAzADoANAA6ADUAOgA2ADoANwA6ADgAOgA5ACAAagDpAEAAZQB4AGEAbQBwAGwAZQAuAGMAbwBtACAALQAtAC0ALQAtAEIARQBHAEkATgAgAFAAVQBCAEwASQBDACAASwBFAFkALQAtAC0ALQAtAAoAQQBBAEEAQQAKAC0ALQAtAC0ALQBFAE4ARAAgAFAAVQBCAEwASQBDACAASwBFAFkALQAtAC0ALQAtACAAOgA6ADEAIAB0AG8AawDpAG4APQAxACAALQAtAC0ALQAtAEIARQBHAEkATgAgAFAAVQBCAEwASQBDACAASwBFAFkALQAtAC0ALQAtAAoAQQBBAEEAQQAKAC0ALQAtAC0ALQBFAE4ARAAgAFAAVQBCAEwASQBDACAASwBFAFkALQAtAC0ALQAtACAACgA2AEAACgA6ACAAcABhAHMAcwB3AG8AcgBkAD0AWwByAGUAZABhAGMAdABlAGQAOgAgAHgAXQAgAEEAQgAxADIAIABHAEIAOAAyACAAVwBFAFMAVAAgADEAMgAzADQAIAA1ADYAOQA4ACAANwA2ADUANAAgADMAMgAgADMAQAAgAGUAeQBKAGgAYgBHAGMAaQBPAGkASgBJAFUAegBJADEATgBpAEoAOQAuAGUAeQBKAHoAZABXAEkAaQBPAGkASQB4AE0AagBNADAATgBUAFkAMwBPAEQAawB3AEkAbgAwAC4AYwAyAGwAbgBiAG0ARgAwAGQAWABKAGwAIAAgACUAIAAJACAANQA1ADUANQAtADUANQA1ADUALQA1ADUANQA1AC0ANAA0ADQANAAgADEAMgA6ADMAMAA6ADQANQAgAAwAIAB4AD0AMQ==",
+      "source_encoding": "utf-16-unsure",
+      "max_line_bytes": 64,
+      "pem_max_lines": 1,
+      "final": false,
+      "expected_b64": "W3JlZGFjdGVkOiBsaW5lIG92ZXIgNjQgYnl0ZXNdCgBBAEEAQQBBAApbcmVkYWN0ZWQ6IGxpbmUgb3ZlciA2NCBieXRlc10KAEEAQQBBAEEACgAtAC0ALQAtAC0ARQBOAEQAIABQAFUAQgBMAEkAQwAgAEsARQBZAC0ALQAtAC0ALQAgAAoANgBAAApbcmVkYWN0ZWQ6IGxpbmUgb3ZlciA2NCBieXRlc10=",
+      "counts": {},
+      "source_offset": 334,
+      "trailing_partial": 30
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-43",
+      "rules": [{"id": 0, "name": "private_key", "detector": "private_key"}, {"id": 1, "name": "authorization", "detector": "authorization"}, {"id": 2, "name": "ipv4", "detector": "ipv4"}, {"id": 3, "name": "bearer", "detector": "bearer"}, {"id": 4, "name": "iban", "detector": "iban"}, {"id": 5, "name": "ipv6", "detector": "ipv6"}, {"id": 6, "name": "secret_kv", "detector": "secret_kv"}, {"id": 7, "name": "email", "detector": "email"}, {"id": 8, "name": "url_password", "detector": "url_password"}, {"id": 9, "name": "jwt", "detector": "jwt"}, {"id": 10, "name": "card", "detector": "card"}],
+      "input_b64": "MQA6ADIAOgAzADoANAA6ADUAOgA2ADoANwA6ADgAOgA5ACAAOgA6ACAAIAAgADQAMQAxADEAIAAxADEAMQAxAC0AMQAxADEAMQAgADEAMQAxADEAIAAgACAARwBCADgAMgBXAEUAUwBUADEAMgAzADQANQA2ADkAOAA3ADYANQA0ADMAMgAgAHAAcgBpAHYAYQB0AGUAXwBrAGUAeQA9AHgAeQB6ACAAQQBCADEAMgAgAEcAQgA4ADIAIABXAEUAUwBUACAAMQAyADMANAAgADUANgA5ADgAIAA3ADYANQA0ACAAMwAyACAAYQB1AHQAaABvAHIAaQB6AGEAdABpAG8AbgA6ACAARwBCADgAMgAgAFcARQBTAFQAIAAxADIAMwA0ACAANQA2ADkAOAAgADcANgA1ADQAIAAzADIAIABwAGEAcwBzAHcAbwByAGQAPQBbAHIAZQBkAGEAYwB0AGUAZAA6ACAAeABdACBOAAAgAGEAbABpAGMAZQBAAGUAeABhAG0AcABsAGUALgBjAG8AbQAgAGEAYwBjAGUAcwBzAC0AawBlAHkAPQAx",
+      "source_encoding": "utf-16-unsure",
+      "final": true,
+      "expected_b64": "W3JlZGFjdGVkOiBpcF06ADkAIABbcmVkYWN0ZWQ6IGlwXSAAIAAgADQAMQAxADEAIAAxADEAMQAxAC0AMQAxADEAMQAgADEAMQAxADEAIAAgACAAW3JlZGFjdGVkOiBpYmFuXSAAcAByAGkAdgBhAHQAZQBfAGsAZQB5AD0AW3JlZGFjdGVkOiBwcml2YXRlIGtleV0gAEEAQgAxADIAIABbcmVkYWN0ZWQ6IGliYW5dIABhAHUAdABoAG8AcgBpAHoAYQB0AGkAbwBuADoAIABbcmVkYWN0ZWQ6IGF1dGhvcml6YXRpb25d",
+      "counts": {"ipv6": 2, "iban": 2, "secret_kv": 1, "authorization": 1},
+      "source_offset": 429,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-44",
+      "rules": [{"id": 0, "name": "iban", "detector": "iban"}, {"id": 1, "name": "private_key", "detector": "private_key"}, {"id": 2, "name": "secret_kv", "detector": "secret_kv"}, {"id": 3, "name": "card", "detector": "card"}, {"id": 4, "name": "authorization", "detector": "authorization"}, {"id": 5, "name": "ipv4", "detector": "ipv4"}, {"id": 6, "name": "ipv6", "detector": "ipv6"}, {"id": 7, "name": "jwt", "detector": "jwt"}],
+      "input_b64": "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCkFBQUENCkJCQkIKIDMzYjdjOjYyMzQwLSA6OmZmZmY6MS4yLjMuNCAlIDo6IHByaXZhdGVfa2V5PXh5eiB4PTEgS+KEqiAMIGNsaWVudF9zZWNyZXQ9YWJjIEFCMTIgR0I4MiBXRVNUIDEyMzQgNTY5OCA3NjU0IDMy",
+      "max_line_bytes": 64,
+      "final": false,
+      "expected_b64": "W3JlZGFjdGVkOiBwcml2YXRlIGtleV0KDQoKW3JlZGFjdGVkOiBsaW5lIG92ZXIgNjQgYnl0ZXNd",
+      "counts": {"private_key": 1},
+      "source_offset": 39,
+      "trailing_partial": 30
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-45",
+      "rules": [{"id": 0, "name": "url_password", "detector": "url_password"}, {"id": 1, "name": "secret_kv", "detector": "secret_kv"}],
+      "input_b64": "5LiAIGZlODA6OjE6IGVycm9yICANCiA0MTExIDExMTEtMTExMSAxMTExIHBhc3N3b3JkPWh1bnRlcjIyIDE3MDAwMDAwMDAwMDAgZmU4MDo6MSVldGgwIC0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0gQXV0aG9yaXphdGlvbjogQmFzaWMgWm05dk9tSmhjZz09IAkgDQogOiAMICDtoIAgNzo0IDUwYzk4YS4KIDogMy1hOGI5PSBwYXNzd29yZD0qKioqIH5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fg==",
+      "final": false,
+      "expected_b64": "5LiAIGZlODA6OjE6IGVycm9yICANCiA0MTExIDExMTEtMTExMSAxMTExIHBhc3N3b3JkPVtyZWRhY3RlZDogcGFzc3dvcmRdIDE3MDAwMDAwMDAwMDAgZmU4MDo6MSVldGgwIC0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0gQXV0aG9yaXphdGlvbjogQmFzaWMgWm05dk9tSmhjZz09IAkgDQogOiAMICDtoIAgNzo0IDUwYzk4YS4KW3JlZGFjdGVkOiBpbmNvbXBsZXRlIGxpbmVd",
+      "counts": {"secret_kv": 1},
+      "source_offset": 174,
+      "trailing_partial": 27
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-47",
+      "rules": [{"id": 0, "name": "authorization", "detector": "authorization"}, {"id": 1, "name": "jwt", "detector": "jwt"}, {"id": 2, "name": "iban", "detector": "iban"}, {"id": 3, "name": "bearer", "detector": "bearer"}, {"id": 4, "name": "email", "detector": "email"}, {"id": 5, "name": "secret_kv", "detector": "secret_kv"}, {"id": 6, "name": "private_key", "detector": "private_key"}, {"id": 7, "name": "ipv4", "detector": "ipv4"}],
+      "input_b64": "S+KEqiB2MS4yIMOpIC0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0gMTIgNDExMSAxMTExIDExMTEgMTExMSAyIDEuMi4zLjA0IDIwMDE6MGRiODowMDAwOjAwMDA6MDAwMDpmZjAwOjAwNDI6ODMyOSA6IC0tLS0tQkVHSU4gUFVCTElDIEtFWS0tLS0tCkFBQUEKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tIDlAIDJhMzUgZXlKaGJHY2lPaUpJVXpJMU5pSjkuZXlKemRXSWlPaUl4TWpNME5UWTNPRGt3SW4wLmMybG5ibUYwZFhKbCA6Og==",
+      "max_line_bytes": 200,
+      "final": true,
+      "expected_b64": "S+KEqiB2MS4yIMOpIC0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0gMTIgNDExMSAxMTExIDExMTEgMTExMSAyIDEuMi4zLjA0IDIwMDE6MGRiODowMDAwOjAwMDA6MDAwMDpmZjAwOjAwNDI6ODMyOSA6IC0tLS0tQkVHSU4gUFVCTElDIEtFWS0tLS0tCkFBQUEKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tIDlAIDJhMzUgW3JlZGFjdGVkOiBqd3RdIDo6",
+      "counts": {"jwt": 1},
+      "source_offset": 244,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-49",
+      "rules": [{"id": 0, "name": "ipv6", "detector": "ipv6"}, {"id": 1, "name": "email", "detector": "email"}, {"id": 2, "name": "private_key", "detector": "private_key"}, {"id": 3, "name": "secret_kv", "detector": "secret_kv"}, {"id": 4, "name": "authorization", "detector": "authorization"}, {"id": 5, "name": "iban", "detector": "iban"}, {"id": 6, "name": "bearer", "detector": "bearer"}, {"id": 7, "name": "card", "detector": "card"}, {"name": "custom-utf8", "pattern": "senhá=(\\S+)", "secret_group": 1}, {"id": 8, "name": "url_password", "detector": "url_password"}, {"id": 9, "name": "ipv4", "detector": "ipv4"}],
+      "input_b64": "OiAtLS0tLUJFR0lOIFJTQSBQUklWQVRFIEtFWS0tLS0tCk1JSUJPZ0lCQUFKQkFLajM0R2t4RmhEOTB2Y05MWUxJbkZFWDZQcHkxdFBmOUNuemo0cDRXR2UKLS0tLS1FTkQgUlNBIFBSSVZBVEUgS0VZLS0tLS0gOjpmZmZmOjEuMi4zLjQgDQogLWEtIDo6MSA6OjEgQmVhcmVyIGFiY2RlZmdoMTIzNDU2NzggQXV0aG9yaXphdGlvbjogQmFzaWMgWm05dk9tSmhjZz09IHdvcmQgICAgIA==",
+      "final": true,
+      "expected_b64": "OiBbcmVkYWN0ZWQ6IHByaXZhdGUga2V5XQoKIFtyZWRhY3RlZDogaXBdIA0KIC1hLSBbcmVkYWN0ZWQ6IGlwXSBbcmVkYWN0ZWQ6IGlwXSBCZWFyZXIgW3JlZGFjdGVkOiB0b2tlbl0gQXV0aG9yaXphdGlvbjogW3JlZGFjdGVkOiBhdXRob3JpemF0aW9uXQ==",
+      "counts": {"private_key": 1, "ipv6": 3, "bearer": 1, "authorization": 1},
+      "source_offset": 217,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-50",
+      "rules": [{"id": 0, "name": "url_password", "detector": "url_password"}, {"id": 1, "name": "authorization", "detector": "authorization"}, {"id": 2, "name": "card", "detector": "card"}, {"id": 3, "name": "ipv4", "detector": "ipv4"}, {"id": 4, "name": "iban", "detector": "iban"}, {"id": 5, "name": "private_key", "detector": "private_key"}],
+      "input_b64": "LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlCT2dJQkFBSkJBS2ozNEdreEZoRDkwdmNOTFlMSW5GRVg2UHB5MXRQZjlDbnpqNHA0V0dlCi0tLS0tRU5EIFJTQSBQUklWQVRFIEtFWS0tLS0tIAAgIDE3MDAwMDAwMDAwMDAgICDkuIA=",
+      "final": true,
+      "expected_b64": "W3JlZGFjdGVkOiBwcml2YXRlIGtleV0KCiAAICAxNzAwMDAwMDAwMDAwICAg5LiA",
+      "counts": {"private_key": 1},
+      "source_offset": 140,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-53",
+      "rules": [{"id": 0, "name": "url_password", "detector": "url_password"}, {"id": 1, "name": "ipv4", "detector": "ipv4"}, {"id": 2, "name": "iban", "detector": "iban"}, {"id": 3, "name": "email", "detector": "email"}, {"id": 4, "name": "secret_kv", "detector": "secret_kv"}, {"id": 5, "name": "jwt", "detector": "jwt"}, {"id": 6, "name": "ipv6", "detector": "ipv6"}, {"id": 7, "name": "card", "detector": "card"}, {"id": 8, "name": "authorization", "detector": "authorization"}, {"id": 9, "name": "private_key", "detector": "private_key"}, {"id": 10, "name": "bearer", "detector": "bearer"}],
+      "input_b64": "ADoAOgAgAGoA6QBAAGUAeABhAG0AcABsAGUALgBjAG8AbQAgAAkAIABjACUACgA2AAoAMQAgAHAAYQF/AX8AdwBvAHIAZAA9AGgAdQBuAHQAZQByADIAIAAgAEAAMgAuADMANwA9AC0AJQAxACAA6QAgAGEAcABpAF8AawBlAHkAPQBBAEsASQBBADEAMgAzADQAIAAyADAAMAAxADoAZABiADgAOgA6ADEAOgAgADEAOgAyADoAMwA6ADQAOgA1ADoANgA6ADcAOgA6ACAAIAAgACAAagDpAEAAZQB4AGEAbQBwAGwAZQAuAGMAbwBtACAAMgAwADAAMQA6AGQAYgA4ADoAOgAxADoAIABHAEIAOAAyACAAVwBFAFMAVAAgADEAMgAzADQAIAA1ADYAOQA4ACAANwA2ADUANAAgADMAMwAgAGUAeQBKAGgAYgBHAGMAaQBPAGkASgBJAFUAegBJADEATgBpAEoAOQAuAGUAeQBKAHoAZABXAEkAaQBPAGkASQB4AE0AagBNADAATgBUAFkAMwBPAEQAawB3AEkAbgAwAC4AYwAyAGwAbgBiAG0ARgAwAGQAWABKAGwAIAB+AH4AfgB+AH4AfgB+AH4AfgB+ACAACgAgAA0ACgAgAC4AMQBjAGEAYwBhADEANAAgADIAMAAwADEAOgAwAGQAYgA4ADoAMAAwADAAMAA6ADAAMAAwADAAOgAwADAAMAAwADoAZgBmADAAMAA6ADAAMAA0ADIAOgA4ADMAMgA5ACAAQQBCADEAMgAgAEcAQgA4ADIAIABXAEUAUwBUACAAMQAyADMANAAgADUANgA5ADgAIAA3ADYANQA0ACAAMwAyACAAeAAgAC0ALQAtAC0ALQBCAEUARwBJAE4AIABFAEMAIABQAFIASQBWAEEAVABFACAASwBFAFkALQAtAC0ALQAtACAAaQBuAGwAaQBuAGUAIAAtAC0ALQAtAC0ARQBOAEQAIABFAEMAIABQAFIASQBWAEEAVABFACAASwBFAFkALQAtAC0ALQAtACAAeQ==",
+      "source_encoding": "utf-16-unsure",
+      "final": true,
+      "expected_b64": "W3JlZGFjdGVkOiBpcF0AIABqAOkAQABlAHgAYQBtAHAAbABlAC4AYwBvAG0AIAAJACAAYwAlAAoANgAKADEAIABwAGEBfwF/AHcAbwByAGQAPQBoAHUAbgB0AGUAcgAyACAAIABAADIALgAzADcAPQAtACUAMQAgAOkAIABhAHAAaQBfAGsAZQB5AD1bcmVkYWN0ZWQ6IGFwaSBrZXldACBbcmVkYWN0ZWQ6IGlwXQA6ACAAMQA6ADIAOgAzADoANAA6ADUAOgA2ADoANwA6ADoAIAAgACAAIABqAOkAQABlAHgAYQBtAHAAbABlAC4AYwBvAG0AIFtyZWRhY3RlZDogaXBdADoAIABHAEIAOAAyACAAVwBFAFMAVAAgADEAMgAzADQAIAA1ADYAOQA4ACAANwA2ADUANAAgADMAMwAgW3JlZGFjdGVkOiBqd3RdACAAfgB+AH4AfgB+AH4AfgB+AH4AfgAgAAoAIAANAAoAIAAuADEAYwBhAGMAYQAxADQAIFtyZWRhY3RlZDogaXBdACAAQQBCADEAMgAgW3JlZGFjdGVkOiBpYmFuXQAgAHgAIFtyZWRhY3RlZDogcHJpdmF0ZSBrZXldACAAeQ==",
+      "counts": {"ipv6": 4, "secret_kv": 1, "jwt": 1, "iban": 1, "private_key": 1},
+      "source_offset": 784,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-55",
+      "rules": [{"id": 0, "name": "card", "detector": "card"}, {"id": 1, "name": "authorization", "detector": "authorization"}, {"id": 2, "name": "secret_kv", "detector": "secret_kv"}, {"id": 3, "name": "ipv6", "detector": "ipv6"}, {"id": 4, "name": "email", "detector": "email"}],
+      "input_b64": "eD0xIHBhc3N3b3JkPWh1bnRlcjIyIDEuMi4zLjA0ICBBdXRob3JpemF0aW9uOiBCYXNpYyBabTl2T21KaGNnPT0gLS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCkFBQUENCkJCQkIKIDE6OjI6Mzo0OjU6Njo3OjggcGFzc3dvcmQ9aHVudGVyMjI=",
+      "final": true,
+      "expected_b64": "eD0xIHBhc3N3b3JkPVtyZWRhY3RlZDogcGFzc3dvcmRdIDEuMi4zLjA0ICBBdXRob3JpemF0aW9uOiBbcmVkYWN0ZWQ6IGF1dGhvcml6YXRpb25dCkFBQUENCkJCQkIKIFtyZWRhY3RlZDogaXBdOjggcGFzc3dvcmQ9W3JlZGFjdGVkOiBwYXNzd29yZF0=",
+      "counts": {"secret_kv": 2, "authorization": 1, "ipv6": 1},
+      "source_offset": 140,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-56",
+      "rules": [{"id": 0, "name": "iban", "detector": "iban"}, {"id": 1, "name": "ipv4", "detector": "ipv4"}, {"name": "custom-anchor", "pattern": "^ok", "secret_group": 0}, {"id": 2, "name": "email", "detector": "email"}, {"id": 3, "name": "secret_kv", "detector": "secret_kv"}, {"id": 4, "name": "ipv6", "detector": "ipv6"}, {"id": 5, "name": "url_password", "detector": "url_password"}, {"id": 6, "name": "private_key", "detector": "private_key"}, {"id": 7, "name": "authorization", "detector": "authorization"}],
+      "input_b64": "AC0ALQAtAC0ALQBCAEUARwBJAE4AIABQAFUAQgBMAEkAQwAgAEsARQBZAC0ALQAtAC0ALQAKAEEAQQBBAEEACgAtAC0ALQAtAC0ARQBOAEQAIABQAFUAQgBMAEkAQwAgAEsARQBZAC0ALQAtAC0ALQAgAGkAZAAgADQAMgAgADEANwAwADAAMAAwADAAMAAwADAAMAAwADAAIABqAOkAQABlAHgAYQBtAHAAbABlAC4AYwBvAG0AIABkAGUAOgBhAGQAOgBiAGUAOgBlAGYAOgAwADAAOgAwADEAIAAMACAAMQAyADQAIAB0AG8hKgBlAG4APQBhAGIAYwBkAGUAZgAgAGEAcABpAF8AawBlAHkAPQBBAEsASQBBADEAMgAzADQAIABYAC0AQQBwAGkALQBLAGUAeQA6ACAAegB6AHoAIAAxAC4AMgAuADMALgAwADQAIAA6ADoAZgBmAGYAZgA6ADEALgAyAC4AMwAuADQAIABAAGEANgBhADEAMgA0ACUAMwAgAHAAYQBzAHMAdwBvAHIAZAA9AFsAcgBlAGQAYQBjAHQAZQBkADoAIAB4AF0AIAAxADIAOgAzADAAOgA0ADUAIAB4AD0AMQAgADQAMQAxADEAIAAxADEAMQAxACAAMQAxADEAMQAgADEAMQAxADEAIAAKADYA6QA5ADYAIAA0ADgAPQA0ADcAPQBjADkAMwA9AC4ANwAgAEshKgAgAGUAeQBKAGgAYgBHAGMAaQBPAGkASgBJAFUAegBJADEATgBpAEoAOQAuAGUAeQBKAHoAZABXAEkAaQBPAGkASQB4AE0AagBNADAATgBUAFkAMwBPAEQAawB3AEkAbgAwAC4AYwAyAGwAbgBiAG0ARgAwAGQAWABKAGwAIAAgACAAWAAtAEEAcABpAC0ASwBlAHkAOgAgAHoAegB6ACAAQgBlAGEAcgBlAHIAIABhAGIAYwBkAGUAZgBnAGgAMQAyADMANAA1ADYANwA4",
+      "source_encoding": "utf-16-unsure",
+      "final": true,
+      "expected_b64": "AC0ALQAtAC0ALQBCAEUARwBJAE4AIABQAFUAQgBMAEkAQwAgAEsARQBZAC0ALQAtAC0ALQAKAEEAQQBBAEEACgAtAC0ALQAtAC0ARQBOAEQAIABQAFUAQgBMAEkAQwAgAEsARQBZAC0ALQAtAC0ALQAgAGkAZAAgADQAMgAgADEANwAwADAAMAAwADAAMAAwADAAMAAwADAAIABqAOkAQABlAHgAYQBtAHAAbABlAC4AYwBvAG0AIABkAGUAOgBhAGQAOgBiAGUAOgBlAGYAOgAwADAAOgAwADEAIAAMACAAMQAyADQAIAB0AG8hKgBlAG4APQBhAGIAYwBkAGUAZgAgAGEAcABpAF8AawBlAHkAPVtyZWRhY3RlZDogYXBpIGtleV0AIABYAC0AQQBwAGkALQBLAGUAeQA6ACBbcmVkYWN0ZWQ6IGFwaSBrZXldACAAMQAuADIALgAzAC4AMAA0ACBbcmVkYWN0ZWQ6IGlwXQAgAEAAYQA2AGEAMQAyADQAJQAzACAAcABhAHMAcwB3AG8AcgBkAD0AWwByAGUAZABhAGMAdABlAGQAOgAgAHgAXQAgADEAMgA6ADMAMAA6ADQANQAgAHgAPQAxACAANAAxADEAMQAgADEAMQAxADEAIAAxADEAMQAxACAAMQAxADEAMQAgAAoANgDpADkANgAgADQAOAA9ADQANwA9AGMAOQAzAD0ALgA3ACAASyEqACAAZQB5AEoAaABiAEcAYwBpAE8AaQBKAEkAVQB6AEkAMQBOAGkASgA5AC4AZQB5AEoAegBkAFcASQBpAE8AaQBJAHgATQBqAE0AMABOAFQAWQAzAE8ARABrAHcASQBuADAALgBjADIAbABuAGIAbQBGADAAZABYAEoAbAAgACAAIABYAC0AQQBwAGkALQBLAGUAeQA6ACBbcmVkYWN0ZWQ6IGFwaSBrZXldACAAQgBlAGEAcgBlAHIAIABhAGIAYwBkAGUAZgBnAGgAMQAyADMANAA1ADYANwA4",
+      "counts": {"secret_kv": 3, "ipv4": 1},
+      "source_offset": 750,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, seed 277) 1-58",
+      "rules": [{"id": 0, "name": "secret_kv", "detector": "secret_kv"}, {"name": "custom-utf8", "pattern": "senhá=(\\S+)", "secret_group": 1}, {"id": 1, "name": "bearer", "detector": "bearer"}, {"id": 2, "name": "private_key", "detector": "private_key"}, {"id": 3, "name": "email", "detector": "email"}, {"id": 4, "name": "authorization", "detector": "authorization"}, {"id": 5, "name": "ipv6", "detector": "ipv6"}],
+      "input_b64": "ZmU4MDo6MSUgaHR0cHM6Ly91OnBhNTV3b3JkQGhvc3QgMS4yLjMuMDQgR0I4MiBXRVNUIDEyMzQgNTY5OCA3NjU0IDMzICUgR0I4MiBXRVNUIDEyMzQgNTY5OCA3NjU0IDMyIAkgACBvayB2MS4yIC0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0gCyAyMDAxOmRiODo6MTogY2xpZW50X3NlY3JldD1hYmMgMzc4MjgyMjQ2MzEwMDA1IDQ5MDE1NDIwMzIzNzUxOCAyMDAxOmRiODo6NDIgS+KEqiAxNzAwMDAwMDAwMDAwIDQxMTEgMTExMS0xMTExIDExMTEgeCAtLS0tLUJFR0lOIEVDIFBSSVZBVEUgS0VZLS0tLS0gaW5saW5lIC0tLS0tRU5EIEVDIFBSSVZBVEUgS0VZLS0tLS0geQ==",
+      "pem_max_lines": 3,
+      "final": true,
+      "expected_b64": "W3JlZGFjdGVkOiBpcF0lIGh0dHBzOi8vdTpwYTU1d29yZEBob3N0IDEuMi4zLjA0IEdCODIgV0VTVCAxMjM0IDU2OTggNzY1NCAzMyAlIEdCODIgV0VTVCAxMjM0IDU2OTggNzY1NCAzMiAJIAAgb2sgdjEuMiAtLS0tLUVORCBQUklWQVRFIEtFWS0tLS0tIAsgW3JlZGFjdGVkOiBpcF06IGNsaWVudF9zZWNyZXQ9W3JlZGFjdGVkOiBjbGllbnQgc2VjcmV0XSAzNzgyODIyNDYzMTAwMDUgNDkwMTU0MjAzMjM3NTE4IFtyZWRhY3RlZDogaXBdIEvihKogMTcwMDAwMDAwMDAwMCA0MTExIDExMTEtMTExMSAxMTExIHggW3JlZGFjdGVkOiBwcml2YXRlIGtleV0geQ==",
+      "counts": {"ipv6": 3, "secret_kv": 1, "private_key": 1},
+      "source_offset": 325,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 0",
+      "rules": [{"name": "u7", "pattern": "é\b"}],
+      "input_b64": "5Lgg77+9c2VuaMOhPcOpdMOpw2Nsw6kgQ0FGw4nkuIAgX8MK5LiAw3NlbmjDoT3/eMOpdMOp5Lg=",
+      "expected_b64": "5Lgg77+9c2VuaMOhPcOpdMOpw2Nsw6kgQ0FGw4nkuIAgX8MK5LiAw3NlbmjDoT3/eMOpdMOp5Lg=",
+      "counts": {},
+      "final": true,
+      "source_offset": 56,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 3",
+      "rules": [{"name": "u7", "pattern": "é\b"}, {"name": "u4", "pattern": "(?i)café\\w*"}, {"name": "u3", "pattern": "é.{2,5}é"}],
+      "input_b64": "Q0FGw4lfX0NBRsOJY2zDqSDkuHNlbmjDoT0gCnNlbmjDoT0=",
+      "expected_b64": "W3JlZGFjdGVkOiB1NF3DiWNsw6kg5LhzZW5ow6E9IApzZW5ow6E9",
+      "counts": {"u4": 1},
+      "final": true,
+      "source_offset": 35,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 9",
+      "rules": [{"name": "u3", "pattern": "é.{2,5}é"}, {"name": "u7", "pattern": "é\b"}],
+      "input_b64": "Y2Fmw6ljbMOpIHjDqXTDqYBjYWbDqcOpdMOpQ0FGw4nvv73DqXTDqV9hYmM=",
+      "expected_b64": "Y2FmW3JlZGFjdGVkOiB1M110w6mAY2FmW3JlZGFjdGVkOiB1M11DQUbDie+/vcOpdMOpX2FiYw==",
+      "counts": {"u3": 2},
+      "final": true,
+      "source_offset": 44,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 10",
+      "rules": [{"name": "u6", "pattern": "^été"}, {"name": "u5", "pattern": "一+"}],
+      "input_b64": "CmNhZsOp5LiACkNBRsOJX2FiY0NBRsOJw6lf5Ljvv73vv70gw6k=",
+      "expected_b64": "CmNhZsOpW3JlZGFjdGVkOiB1NV0KQ0FGw4lfYWJjQ0FGw4nDqV/kuO+/ve+/vSDDqQ==",
+      "counts": {"u5": 1},
+      "final": true,
+      "source_offset": 38,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 15",
+      "rules": [{"name": "u3", "pattern": "é.{2,5}é"}, {"name": "u4", "pattern": "(?i)café\\w*"}],
+      "input_b64": "Y2Fmw6lhYmMKeMOpdMOpeMOpdMOpw1+AXwoKQ0FGw4nkuIBf5Lh4w6l0w6lzZW5ow6E9",
+      "expected_b64": "W3JlZGFjdGVkOiB1NF0KeFtyZWRhY3RlZDogdTNdw1+AXwoKW3JlZGFjdGVkOiB1NF3kuIBf5Lh4w6l0w6lzZW5ow6E9",
+      "counts": {"u4": 2, "u3": 1},
+      "final": true,
+      "source_offset": 51,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 16",
+      "rules": [{"name": "u3", "pattern": "é.{2,5}é"}, {"name": "u5", "pattern": "一+"}],
+      "input_b64": "gGNhZsOpX3NlbmjDoT3kuIDDqXTDqcOAY2zDqSBjYWbDqQpzZW5ow6E9X+S4w19jbMOpIMNf5LhjYWbDqYCAX1/vv73kuIBzZW5ow6E9Y2Fmw6k=",
+      "expected_b64": "gGNhZsOpX3NlbmjDoT1bcmVkYWN0ZWQ6IHU1XVtyZWRhY3RlZDogdTNdIGNhZsOpCnNlbmjDoT1f5LjDX2Nsw6kgw1/kuGNhZsOpgIBfX++/vVtyZWRhY3RlZDogdTVdc2VuaMOhPWNhZsOp",
+      "counts": {"u5": 2, "u3": 1},
+      "final": true,
+      "source_offset": 83,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 17",
+      "rules": [{"name": "u4", "pattern": "(?i)café\\w*"}, {"name": "u1", "pattern": "senhá=(\\S+)", "secret_group": 1}],
+      "input_b64": "YWJjgO+/vXNlbmjDoT3DqXTDqSAgY2Fmw6ljbMOpIHNlbmjDoT3kuMOpdMOp5LiA/3NlbmjDoT14w6l0w6l4w6l0w6lfCl8K/w==",
+      "expected_b64": "YWJjgO+/vXNlbmjDoT1bcmVkYWN0ZWQ6IHUxXSAgW3JlZGFjdGVkOiB1NF3DqSBzZW5ow6E95LjDqXTDqeS4gP9zZW5ow6E9W3JlZGFjdGVkOiB1MV0KXwr/",
+      "counts": {"u1": 2, "u4": 1},
+      "final": true,
+      "source_offset": 73,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 25",
+      "rules": [{"name": "u2", "pattern": "clé ([^ ]+)", "secret_group": 1}],
+      "input_b64": "Y2zDqSDDqeS4gO+/vcOpdMOpwwrDqXTDqV9hYmPkuIDvv71zZW5ow6E9CmNsw6kgY2Fmw6l4w6l0w6nD5LiAw6lf",
+      "expected_b64": "Y2zDqSBbcmVkYWN0ZWQ6IHUyXcMKw6l0w6lfYWJj5LiA77+9c2VuaMOhPQpjbMOpIFtyZWRhY3RlZDogdTJdw+S4gMOpXw==",
+      "counts": {"u2": 2},
+      "final": true,
+      "source_offset": 66,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 28",
+      "rules": [{"name": "u1", "pattern": "senhá=(\\S+)", "secret_group": 1}],
+      "input_b64": "eMOpdMOpYWJjw6l0w6nDqXTDqeS4gP9jYWbDqUNBRsOJw6kgCl9jYWbDqeS45LiA5LhDQUbDiYDDY2zDqSBfY2zDqSAgIGFiY2Nsw6kgc2VuaMOhPcOpdMOpXw==",
+      "expected_b64": "eMOpdMOpYWJjw6l0w6nDqXTDqeS4gP9jYWbDqUNBRsOJw6kgCl9jYWbDqeS45LiA5LhDQUbDiYDDY2zDqSBfY2zDqSAgIGFiY2Nsw6kgc2VuaMOhPVtyZWRhY3RlZDogdTFd",
+      "counts": {"u1": 1},
+      "final": true,
+      "source_offset": 91,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 34",
+      "rules": [{"name": "u7", "pattern": "é\b"}, {"name": "u4", "pattern": "(?i)café\\w*"}, {"name": "u5", "pattern": "一+"}],
+      "input_b64": "Y2zDqSBjbMOpIP9DQUbDie+/vQr/w8OpYWJj5LiAw6lDQUbDicOp/3NlbmjDoT3DqXTDqSBfeMOpdMOp",
+      "expected_b64": "Y2zDqSBjbMOpIP9bcmVkYWN0ZWQ6IHU0Xe+/vQr/w8OpYWJjW3JlZGFjdGVkOiB1NV3DqVtyZWRhY3RlZDogdTRdw6n/c2VuaMOhPcOpdMOpIF94w6l0w6k=",
+      "counts": {"u4": 2, "u5": 1},
+      "final": true,
+      "source_offset": 60,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 62",
+      "rules": [{"name": "u4", "pattern": "(?i)café\\w*"}, {"name": "u3", "pattern": "é.{2,5}é"}, {"name": "u5", "pattern": "一+"}],
+      "input_b64": "w+S4w6l0w6lDQUbDiWNhZsOpY2zDqSAg5LiAc2VuaMOhPcOpdMOpY2zDqSBfY2zDqSBzZW5ow6E9eMOpdMOp5LiAeMOpdMOp77+9w6l0w6nD5LiAw6nDqWNsw6kgw6k=",
+      "expected_b64": "w+S4w6l0w6lbcmVkYWN0ZWQ6IHU0XVtyZWRhY3RlZDogdTNdICBbcmVkYWN0ZWQ6IHU1XXNlbmjDoT1bcmVkYWN0ZWQ6IHUzXSBfY2zDqSBzZW5ow6E9eFtyZWRhY3RlZDogdTNddFtyZWRhY3RlZDogdTNdw1tyZWRhY3RlZDogdTVdW3JlZGFjdGVkOiB1M10=",
+      "counts": {"u4": 1, "u3": 5, "u5": 2},
+      "final": true,
+      "source_offset": 95,
+      "trailing_partial": 0
+    },
+    {
+      "name": "generated (Python engine, utf-8 rules) 72",
+      "rules": [{"name": "u4", "pattern": "(?i)café\\w*"}, {"name": "u6", "pattern": "^été"}, {"name": "u2", "pattern": "clé ([^ ]+)", "secret_group": 1}],
+      "input_b64": "w6l0w6nkuA==",
+      "expected_b64": "W3JlZGFjdGVkOiB1Nl3kuA==",
+      "counts": {"u6": 1},
+      "final": true,
+      "source_offset": 7,
+      "trailing_partial": 0
     }
   ],
   "long_line_cuts": [
@@ -429,5 +1148,21 @@
     {"head_b64": "AE4gAHAAYQBzAHMAdwBvAHIAZAA9AGgAdQBuAHQAZQByADIAIABhAG4AZAAgAG0AbwByAGUAIAB0AGUAeAB0AA==", "detected": "utf-16-unsure"},
     {"head_b64": "AEkATgBGAE8wAABwAGEAcwBzAHcAbwByAGQAPQBoAHUAbgB0AGUAcgAyACAAYQBuAGQAIABtAG8AcgBlACAAdA==", "detected": "utf-16-unsure"},
     {"head_b64": "5WUsZ56KbjDtMLAwAE6MTglOIAB1AHMAZQByAD0AYgBvAGIAIAB4AA==", "detected": "utf-16-unsure"}
+  ],
+  "rule_digests": [
+    {"rules": [{"id": 0, "name": "card", "detector": "card"}, {"id": 3, "name": "secret_kv", "detector": "secret_kv"}], "expected": "ca7ef1c2abcaaebeea5d85c8cfc4cd2ec91c531d6767a57ea64c462367cefef3"},
+    {"rules": [{"name": "senhá", "pattern": "senhá=\"(\\S+)\"\t", "secret_group": 1, "id": 7}], "expected": "ec015c981c9495fb344f5e1cbd5bfb1e182f8c1decedfa8c14150cde49ed18d9"},
+    {"rules": [{"id": 31, "name": "acct", "pattern": "ACCT(?: \\d{4}){20}", "secret_group": 0, "max_length": 104}], "expected": "ead1caf2d442d7c18df85f0be1bde99ab322bcc2f284efae8b9221e4f989f188"}
+  ],
+  "rule_errors": [
+    {"name": "max_length zero", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": 0}]},
+    {"name": "max_length negative", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": -1}]},
+    {"name": "max_length true", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": true}]},
+    {"name": "max_length false", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": false}]},
+    {"name": "max_length a string", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": "104"}]},
+    {"name": "max_length a fraction", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": 104.5}]},
+    {"name": "max_length in exponent form", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": 1e2}]},
+    {"name": "max_length a list", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": [104]}]},
+    {"name": "max_length on the second rule", "rules": [{"id": 1, "name": "card", "detector": "card"}, {"id": 2, "name": "acct", "pattern": "ACCT \\d+", "max_length": 0}]}
   ]
 }
