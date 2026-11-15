@@ -12,7 +12,8 @@ How it works:
   result, and memory stays O(block + MAX_LINE_BYTES).
 - Rules come in the same shape as the agent's `redact` block: a built-in
   `{"name", "detector"}` from detectors.json, or a custom
-  `{"name", "pattern", "secret_group"}` RE2 pattern. Built-ins and custom
+  `{"name", "pattern", "secret_group", "max_length"}` RE2 pattern, where
+  max_length is the longest match it can make, in bytes. Built-ins and custom
   patterns that are pure ASCII run in Latin-1, byte for byte, so invalid
   UTF-8 never stops a match; a custom pattern with non-ASCII literals runs
   in UTF-8.
@@ -26,10 +27,11 @@ How it works:
 - A line longer than max_line_bytes keeps the start of its first
   max_line_bytes (redacted) and the rest becomes `[redacted: line over 1
   MiB]`. Nothing of a value cut by the limit may stay before the marker,
-  so the kept start ends at least cut_guard_bytes (detectors.json, longer
-  than any built-in value that can contain a blank; twice that for
+  so the kept start ends at least a guard before the limit: the largest of
+  cut_guard_bytes (detectors.json, longer than any built-in value that can
+  contain a blank) and the max_length of every custom rule; twice that for
   UTF16_UNSURE content, whose UTF-16 readings take two source bytes per
-  character) before the limit, then
+  character. Then it
   goes back to the last blank (space, tab, CR, VT, FF) before that point
   (nothing is kept when there is none) and back to the start of any
   replacement that the point would cut.
@@ -152,6 +154,11 @@ class CompiledRules:
     # (BEGIN regex, END regex, index of the private_key rule) when a
     # private_key rule is on.
     pem: tuple[object, object, int] | None = None
+    # How far before max_line_bytes the kept start of a long line ends at
+    # least (see Redactor._cut_point): the longest value any rule can
+    # match with a blank in it, i.e. the largest of CUT_GUARD_BYTES (the
+    # built-ins) and the max_length of every custom rule.
+    cut_guard: int = CUT_GUARD_BYTES
 
 
 def canonical_rules(rules: Sequence[Mapping]) -> str:
@@ -175,6 +182,7 @@ def compile_rules(rules: Sequence[Mapping]) -> CompiledRules:
 def _compile_canonical(canonical: str) -> CompiledRules:
     compiled: list[_Rule] = []
     pem = None
+    cut_guard = CUT_GUARD_BYTES
     for index, rule in enumerate(json.loads(canonical)):
         name = rule.get("name")
         if not isinstance(name, str) or not name:
@@ -213,8 +221,15 @@ def _compile_canonical(canonical: str) -> CompiledRules:
             raise RedactionRuleError(
                 f"redaction rule {name!r}: secret_group {group} isn't a group of the pattern"
             )
+        max_length = rule.get("max_length")
+        if max_length is not None:
+            if isinstance(max_length, bool) or not isinstance(max_length, int) or max_length < 1:
+                raise RedactionRuleError(
+                    f"redaction rule {name!r}: max_length must be a positive number of bytes"
+                )
+            cut_guard = max(cut_guard, max_length)
         compiled.append(_Rule(name=name, regex=regex, group=group, label=name))
-    return CompiledRules(rules=tuple(compiled), pem=pem)
+    return CompiledRules(rules=tuple(compiled), pem=pem, cut_guard=cut_guard)
 
 
 # A replacement candidate: (start, end, priority, rule index, replacement,
@@ -517,7 +532,7 @@ class Redactor:
             self._scan(piece, at, collect=False)
             return b""
         base, merged = self._scan(piece, at)
-        cut = self._cut_point(base, merged, CUT_GUARD_BYTES * (2 if self._union else 1))
+        cut = self._cut_point(base, merged, self._rules.cut_guard * (2 if self._union else 1))
         out = self._from_work(self._apply(base[:cut], [m for m in merged if m[1] <= cut], counts))
         if counts is not self.counts:
             for name, count in counts.items():
@@ -530,13 +545,14 @@ class Redactor:
         before the limit, then back to the last blank (or to the start of
         the line when there is none), then back to the start of a
         replacement the point would cut. A value cut by the limit has no
-        blank in its last CUT_GUARD_BYTES characters (no built-in value with
-        a blank is that long, and the `authorization` value is replaced
-        from its key), so nothing of it is kept.
+        blank in its last `guard` characters (no built-in value with a
+        blank is longer than CUT_GUARD_BYTES, the `authorization` value is
+        replaced from its key, and no custom value is longer than its
+        rule's max_length), so nothing of it is kept.
 
         The guard counts characters of every reading: `base` is the
         work text (bytes, or UTF-8 for clear UTF-16), so it is
-        CUT_GUARD_BYTES, except for UTF16_UNSURE content, where `base` is
+        CompiledRules.cut_guard, except for UTF16_UNSURE content, where `base` is
         the source bytes and a character of the UTF-16 readings takes two
         of them, so it is twice that. The blanks are looked for byte by
         byte, which finds those of every reading: `20 00` (LE) and `00 20`

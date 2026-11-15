@@ -32,6 +32,8 @@ from app.api.files import router as files_router
 from app.api.folders import router as folders_router
 from app.api.monitoring import metrics_router
 from app.api.monitoring import router as monitoring_router
+from app.api.redaction_rules import global_router as redaction_rules_global_router
+from app.api.redaction_rules import source_router as redaction_rules_source_router
 from app.api.roles import router as roles_router
 from app.api.rules import router as rules_router
 from app.api.severity_patterns import global_router as severity_patterns_global_router
@@ -59,6 +61,7 @@ from app.bootstrap import (
     backfill_sso_user_issuers,
     seed_initial_super_admin,
     seed_no_access_role,
+    seed_redaction_rules,
     seed_severity_patterns,
     seed_system_log_source,
 )
@@ -325,6 +328,7 @@ async def _started(app: FastAPI, settings):
         seed_initial_super_admin(session)
         seed_no_access_role(session)
         seed_severity_patterns(session)
+        seed_redaction_rules(session)
         backfill_sso_user_issuers(session)
         session.commit()
         # Once the chain has started (the backfill above, or the seeding on
@@ -460,6 +464,8 @@ app.include_router(smtp_settings_router)
 app.include_router(updates_router)
 app.include_router(severity_patterns_global_router)
 app.include_router(severity_patterns_source_router)
+app.include_router(redaction_rules_global_router)
+app.include_router(redaction_rules_source_router)
 app.include_router(monitoring_router)
 app.include_router(metrics_router)
 

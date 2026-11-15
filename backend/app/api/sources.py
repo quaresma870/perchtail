@@ -55,6 +55,7 @@ from app.models import (
     Source,
 )
 from app.name_index import drop_source_names, index_in_background
+from app.redaction_rules import delete_source_redaction
 from app.timeutils import utcnow
 from app.version import APP_VERSION
 from app.versions import is_newer
@@ -821,6 +822,7 @@ def delete_source(
         select(SeverityPattern).where(SeverityPattern.source_id == source_id)
     ).all():
         session.delete(row)
+    delete_source_redaction(session, source_id)
     if source.protocol == Protocol.agent:
         disconnect_after_commit(session, source_id, "source deleted")
     session.delete(source)

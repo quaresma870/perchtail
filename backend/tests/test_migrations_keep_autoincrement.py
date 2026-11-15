@@ -339,6 +339,59 @@ def test_only_a_retention_below_the_minimum_is_raised(tmp_path, stored, expected
     assert len(_outbox(db)) == (1 if stored != expected else 0)
 
 
+def test_the_redaction_migration_adds_its_tables_and_clears_alert_heads(tmp_path):
+    # d4a8f2c61e35 (#382): redaction_rule (with AUTOINCREMENT, so an override
+    # never points at a reused id) and source_redaction_override; the stored
+    # alert heads are cleared, the offsets kept.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "a8d3f5c27e14")
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source (id, name, protocol, host, base_path, enabled, is_system, "
+            "check_failures, name_index_enabled, agent_upgrade_policy, agent_upgrade_failures) "
+            "VALUES (1, 'a', 'ssh', 'h', '/', 1, 0, 0, 1, 'inherit', 0)"
+        )
+        conn.execute(
+            "INSERT INTO role (id, name, is_builtin, is_super_admin, global_capabilities) "
+            "VALUES (1, 'r', 0, 0, '[]')"
+        )
+        conn.execute(
+            "INSERT INTO user (id, username, role_id, auth_provider, active, "
+            "must_change_password) VALUES (1, 'u', 1, 'local', 1, 0)"
+        )
+        conn.execute(
+            "INSERT INTO alert (id, user_id, name, query, regex, file_glob, webhook_url, "
+            "enabled, failed_deliveries, created_at) "
+            "VALUES (1, 1, 'x', 'q', 0, '**/*.log', 'https://example.com', 1, 0, "
+            "'2026-11-14 00:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO alert_file_state (alert_id, source_id, file_path, offset, head) "
+            "VALUES (1, 1, 'app.log', 1234, 'abcd')"
+        )
+
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT offset, head FROM alert_file_state").fetchone() == (1234, None)
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'redaction_rule'"
+        ).fetchone()[0]
+        assert "AUTOINCREMENT" in sql.upper()
+        conn.execute(
+            'INSERT INTO redaction_rule (name, detector, enabled, "order") '
+            "VALUES ('card', 'card', 0, 0)"
+        )
+        conn.execute(
+            "INSERT INTO source_redaction_override (source_id, rule_id, disabled) VALUES (1, 1, 1)"
+        )
+
+    _alembic(tmp_path, "downgrade", "a8d3f5c27e14")
+    with sqlite3.connect(db) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+    assert not {"redaction_rule", "source_redaction_override"} & tables
+    _alembic(tmp_path, "upgrade", "head")
+
+
 def test_audit_ids_are_never_reused_after_the_upgrade(tmp_path):
     # A purge before the upgrade left its anchor at row 50 and every row
     # after it went too: the next entry must still get an id above 50.

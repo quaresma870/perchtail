@@ -218,6 +218,50 @@ class SeverityPattern(SQLModel, table=True):
     include_in_navigation: bool = True
 
 
+class RedactionRule(SQLModel, table=True):
+    """A redaction rule (#382, #249, app/redaction_rules.py): what the
+    redaction engine (app/redaction) replaces in file content before it
+    leaves the server, when redaction is on (the `redaction_enabled` system
+    setting). Only super admins configure them, and they apply to everyone.
+
+    `source_id` null is a system rule, which applies to every source; set,
+    a source's own rule. A built-in rule has a `detector` (one of
+    app.redaction.DETECTOR_NAMES; seeded once, disabled, never deleted); a
+    custom rule has an RE2 `pattern`, the capture group to replace
+    (`secret_group`, null for the whole match) and the longest match it can
+    make in bytes (`max_length`). A source can turn a system rule off with a
+    SourceRedactionOverride.
+
+    The engine labels each replacement `[redacted: <name>]`, so names are
+    short and unique in their scope."""
+
+    __tablename__ = "redaction_rule"
+    __table_args__ = NO_ID_REUSE
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_id: int | None = Field(default=None, foreign_key="source.id", index=True)
+    name: str
+    detector: str | None = None
+    pattern: str | None = None
+    secret_group: int | None = None
+    max_length: int | None = None
+    enabled: bool = False
+    order: int = 0
+    notes: str | None = None
+
+
+class SourceRedactionOverride(SQLModel, table=True):
+    """A source turning one system redaction rule off (#382): the source's
+    effective rules are the enabled system rules it doesn't turn off, then
+    its own enabled rules."""
+
+    __tablename__ = "source_redaction_override"
+
+    source_id: int = Field(foreign_key="source.id", primary_key=True)
+    rule_id: int = Field(foreign_key="redaction_rule.id", primary_key=True)
+    disabled: bool = True
+
+
 class FileNameEntry(SQLModel, table=True):
     """One rule-visible file of a source, in the file-name index (#304): its
     path, size and modification time as the last listing saw them. Never any

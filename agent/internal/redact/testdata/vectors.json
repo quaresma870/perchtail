@@ -1,7 +1,7 @@
 {
   "engine": 1,
   "format": {
-    "vectors": "rules (the agent's redact block format), input or input_b64 (input_encoding encodes input: utf-8 by default, utf-16-le or utf-16-be), source_encoding (none: bytes; auto: detected from the first 64 bytes; utf-16-le; utf-16-be; utf-16-unsure: served as bytes, the detectors run on the bytes and on the UTF-16 LE and BE readings aligned on even file offsets, and the union is replaced), output_encoding (utf-8 by default, or source), final (true by default), max_line_bytes, pem_max_lines; expected or expected_b64 (expected_encoding like input_encoding), counts, source_offset, trailing_partial, or error. A vector with window redacts input[window.start:] of a read that began window.base_offset bytes into the file, and expects begin, end and aligned. Every vector without window must give the same result whatever block sizes the input is fed in.",
+    "vectors": "rules (the agent's redact block format: a custom rule has name, pattern, secret_group and max_length, the longest match it can make in bytes; the guard before the cut of a long line is the largest of cut_guard_bytes and the max_length of every custom rule), input or input_b64 (input_encoding encodes input: utf-8 by default, utf-16-le or utf-16-be), source_encoding (none: bytes; auto: detected from the first 64 bytes; utf-16-le; utf-16-be; utf-16-unsure: served as bytes, the detectors run on the bytes and on the UTF-16 LE and BE readings aligned on even file offsets, and the union is replaced), output_encoding (utf-8 by default, or source), final (true by default), max_line_bytes, pem_max_lines; expected or expected_b64 (expected_encoding like input_encoding), counts, source_offset, trailing_partial, or error. A vector with window redacts input[window.start:] of a read that began window.base_offset bytes into the file, and expects begin, end and aligned. Every vector without window must give the same result whatever block sizes the input is fed in.",
     "long_line_cuts": "for every k from 0 to the length of value, the line kept + ' ' + '~' * n + ' ' + value + ' end\\n', with n such that max_line_bytes falls right after the first k bytes of value, is redacted with rules and max_line_bytes and must give expected_kept (followed by ' ' and the '~' filler when the blank just before value is at or before max_line_bytes - cut_guard_bytes), the long-line marker and '\\n', with counts, whatever block sizes it is fed in: the kept start of a long line ends at the last blank at or before max_line_bytes - cut_guard_bytes (detectors.json), or earlier at the start of a replacement that blank would cut, so nothing of a value cut by the limit is kept. With source_encoding utf-16-unsure, the line is encoded with input_encoding (utf-16-le or utf-16-be) and redacted as utf-16-unsure from file offset 0: k and n count characters, the guard is 2 * cut_guard_bytes source bytes (a character of the UTF-16 readings takes two), the blanks are found byte by byte (the 0x20 of '20 00' and of '00 20'), and the kept start ends at the blank's 0x20 byte; the expected output is expected_kept encoded with input_encoding except its markers, which stay ASCII, then the ' ' and '~' filler encoded likewise when kept, then for utf-16-be the 00 byte before the blank's 0x20, then the long-line marker and '\\n' in ASCII, then for utf-16-le the 00 byte that follows the line's 0x0A.",
     "head_digests": "HMAC-SHA256 with key_b64 of the first min(64, offset) bytes of data, hex, first 32 characters.",
     "detect": "the encoding decided from head_b64: utf-16-le, utf-16-be, utf-16-unsure, null (bytes) or error."
@@ -389,6 +389,14 @@
       "end": 8,
       "aligned": false,
       "trailing_partial": 0
+    },
+    {
+      "name": "long line: a custom rule's max_length widens the guard before the cut, so a value with blanks cut by the limit leaves nothing",
+      "rules": [{"id": 31, "name": "acct", "pattern": "ACCT(?: \\d{4}){20}", "secret_group": 0, "max_length": 104}],
+      "input": "wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww ACCT 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 end\nACCT 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234 1234\n",
+      "max_line_bytes": 256,
+      "expected": "wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww wwwwwwwww[redacted: line over 256 bytes]\n[redacted: acct]\n",
+      "counts": {"acct": 1}
     }
   ],
   "long_line_cuts": [

@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.crypto import decrypt_secret
 from app.logging_config import get_logger
 from app.models import PatternKind, Protocol, Rule, RuleType, SmtpSettings, Source
+from app.redaction_rules import seed_builtin_redaction_rules
 from app.severity_patterns import seed_default_global_patterns
 
 logger = get_logger(__name__)
@@ -211,3 +212,9 @@ def seed_severity_patterns(session: Session) -> None:
     actual idempotent seed logic is in app.severity_patterns, next to the
     effective-set resolution it's paired with."""
     seed_default_global_patterns(session)
+
+
+def seed_redaction_rules(session: Session) -> None:
+    """The built-in redaction rules (#382, #249), disabled; the idempotent
+    seed is in app.redaction_rules, next to the effective-rule resolution."""
+    seed_builtin_redaction_rules(session)
