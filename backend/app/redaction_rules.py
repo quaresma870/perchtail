@@ -41,9 +41,6 @@ MAX_NAME_CHARS = 48
 # leaves nothing behind.
 MAX_RULE_LENGTH = 4096
 
-# `\C` (any byte) is RE2 C++ only: the agent's Go engine refuses it. An odd
-# number of backslashes before the C makes it the escape.
-_BYTE_ESCAPE = re.compile(r"(?<!\\)(?:\\\\)*\\C")
 _NAME_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f\[\]]")
 
 
@@ -93,6 +90,22 @@ def pattern_max_bytes(pattern: str) -> int | None:
     return high if pattern.isascii() else high * 4
 
 
+def _has_byte_escape(pattern: str) -> bool:
+    """True when the pattern uses `\\C` (any byte), which is RE2 C++ only:
+    the agent's Go engine refuses it. Walks the escapes one by one (an odd
+    number of backslashes before the C makes it the escape), so a long run
+    of backslashes in a user's pattern can't make the check slow."""
+    i = 0
+    while i < len(pattern):
+        if pattern[i] == "\\":
+            if i + 1 < len(pattern) and pattern[i + 1] == "C":
+                return True
+            i += 2
+            continue
+        i += 1
+    return False
+
+
 def check_custom_rule(pattern: str, secret_group: int | None, max_length: int) -> None:
     """Refuses a custom pattern the engine can't run, or that would cost too
     much: it must compile with RE2 within the limits above, not use what
@@ -103,7 +116,7 @@ def check_custom_rule(pattern: str, secret_group: int | None, max_length: int) -
         raise RedactionRuleInvalid("The rule needs a pattern")
     if len(pattern) > MAX_PATTERN_CHARS:
         raise RedactionRuleInvalid(f"The pattern is longer than {MAX_PATTERN_CHARS} characters")
-    if _BYTE_ESCAPE.search(pattern):
+    if _has_byte_escape(pattern):
         raise RedactionRuleInvalid("\\C (any byte) isn't supported")
     try:
         regex, empty = compile_checked(pattern)
