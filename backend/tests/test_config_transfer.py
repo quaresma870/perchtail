@@ -111,6 +111,62 @@ def test_dry_run_plans_without_writing(session, client):
     assert session.exec(select(Customer)).all() == []
 
 
+def _encrypted_private_key() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    return (
+        ed25519.Ed25519PrivateKey.generate()
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.OpenSSH,
+            serialization.BestAvailableEncryption(b"secret"),
+        )
+        .decode()
+    )
+
+
+ENCRYPTED_KEY_DETAIL = (
+    "Encrypted SSH private keys aren't supported; provide the key without a passphrase"
+)
+
+
+def test_import_refuses_an_encrypted_private_key_given_with_the_request(session, client):
+    response = client.post(
+        "/admin/config/import",
+        json={
+            "yaml": TEMPLATE,
+            "credentials": {
+                "Acme / fs01": {"username": "fs", "private_key": _encrypted_private_key()}
+            },
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == ENCRYPTED_KEY_DETAIL
+    assert session.exec(select(Source)).all() == []
+
+
+def test_import_refuses_an_encrypted_private_key_in_the_file(session, client, monkeypatch):
+    monkeypatch.setenv("PERCHTAIL_IMPORT_KEY", _encrypted_private_key())
+    text = textwrap.dedent("""
+        version: 1
+        customers:
+          - name: Acme
+            sources:
+              - name: web02
+                protocol: ssh
+                host: web02.acme.example
+                base_path: /var/log
+                credential:
+                  username: svc
+                  private_key: ${env:PERCHTAIL_IMPORT_KEY}
+        """)
+    result = _import(client, text)
+    assert result["applied"] is False
+    assert any(p["message"] == ENCRYPTED_KEY_DETAIL for p in result["problems"])
+    assert session.exec(select(Source)).all() == []
+
+
 def test_apply_creates_everything_and_is_idempotent(session, client):
     result = _import(client, credentials={"Acme / fs01": {"username": "fs", "password": "pw"}})
     assert result["applied"] is True, result

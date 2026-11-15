@@ -39,6 +39,12 @@ describe('capability labels', () => {
     expect(CAPABILITY_LABELS.manage_source).toBe('Manage sources')
   })
 
+  it('says what Run now does', () => {
+    expect(CAPABILITY_HINTS.run_now).toBe(
+      "Index this source's file names now (Index now on the source's page).",
+    )
+  })
+
   it('labels every scope type', () => {
     for (const scope of SCOPE_TYPES) expect(SCOPE_TYPE_LABELS[scope].trim()).not.toBe('')
   })

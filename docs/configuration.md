@@ -79,7 +79,7 @@ PerchTail logs JSON lines to standard output and to `LOG_DIR/perchtail.log`. The
 
 | Variable | Default | Accepted values | Effect |
 |---|---|---|---|
-| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (any case); anything else counts as `INFO` | The lowest level logged. `DEBUG` can write gigabytes a day, mostly SMB and SSH packet dumps. |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (any case); anything else counts as `INFO` | The lowest level logged. At `INFO` and above, the SMB and SSH libraries (`smbprotocol`, `spnego`, `paramiko`) log only warnings and errors, since at `INFO` they log every SMB message and SSH session. `DEBUG` can write gigabytes a day, mostly SMB and SSH packet dumps. |
 | `LOG_RETENTION_DAYS` | `30` | A whole number of days; `0` keeps archives regardless of age | Rotated archives older than this are deleted. |
 | `LOG_MAX_FILE_MB` | `100` | A number of MB; `0` rotates at midnight only | The size at which the active file rotates. |
 | `LOG_MAX_TOTAL_MB` | `2048` | A number of MB; `0` for no limit | The most all logs together may take. The oldest archives are deleted first; when this deletes archives `LOG_RETENTION_DAYS` would still have kept, PerchTail logs `logs.retention.size_limit` and reports it in `/monitoring/health`. |

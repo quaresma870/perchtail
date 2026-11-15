@@ -7,8 +7,10 @@ is derived from the same secret. The chain is verified under the old key
 first and the rotation stops if it's broken -- re-signing a tampered chain
 would vouch for the tampering -- then every row is re-signed under the new
 key and the rotation itself is recorded in the audit log. All of it in one
-transaction: either everything moves to the new key or nothing does. Run with the app stopped: this
-reads/writes credentials directly against the DB, and a live app process
+transaction: either everything moves to the new key or nothing does. It refuses
+to run as root, and refuses to run while PerchTail holds the DATA_DIR
+instance lock (app/instance_lock.py): this reads/writes credentials
+directly against the DB, and a live app process
 would keep using the old key (cached via crypto.py's _fernet()) for any
 request that touches credentials during the window, which could leave rows
 re-encrypted under the old key after this script already moved on.
@@ -34,9 +36,11 @@ import sys
 from cryptography.fernet import InvalidToken
 from sqlmodel import Session, select
 
+from app import instance_lock
 from app.audit_hash_chain import chain_new_entry, resign_chain
 from app.audit_integrity import verify_chain
 from app.auth.models import AuditLog, SSOProviderConfig, User
+from app.backup import ROOT_REFUSAL
 from app.config import get_settings
 from app.crypto import build_audit_chain_key, build_fernet
 from app.models import SmtpSettings, Source
@@ -51,8 +55,7 @@ def _read_new_key() -> str:
 
 
 def rotate(*, old_key: str, new_key: str, dry_run: bool) -> int:
-    # Deferred: lets tests patch app.db.engine, same as
-    # app.search_index.run_indexing_sweep/app.alerts.evaluate_alerts do.
+    # Deferred: lets tests patch app.db.engine.
     from app.db import engine
 
     old_fernet = build_fernet(old_key)
@@ -190,7 +193,12 @@ def rotate(*, old_key: str, new_key: str, dry_run: bool) -> int:
         return 0
 
 
-def main() -> int:
+def _is_root() -> bool:
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dry-run",
@@ -198,22 +206,42 @@ def main() -> int:
         help="Decrypt everything under the old key and report what would be rotated, "
         "without writing anything.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    old_key = get_settings().credential_encryption_key
-    new_key = _read_new_key()
-
-    if not new_key:
-        print("ERROR: no new key provided.", file=sys.stderr)
-        return 1
-    if new_key == old_key:
+    # Same guards as `python -m app.backup restore`: files written as root
+    # would be unreadable to the app, and a running app keeps using the old
+    # key while this moves everything to the new one.
+    if _is_root():
+        print(f"ERROR: refusing to run as root: {ROOT_REFUSAL}", file=sys.stderr)
+        return 2
+    settings = get_settings()
+    try:
+        lock = instance_lock.acquire(settings)
+    except instance_lock.InstanceLockHeldError as exc:
         print(
-            "ERROR: new key is the same as the current key -- nothing to rotate.",
+            f"ERROR: PerchTail is running on this DATA_DIR ({exc.holder or exc.content}); "
+            "stop it before rotating the key",
             file=sys.stderr,
         )
         return 1
 
-    return rotate(old_key=old_key, new_key=new_key, dry_run=args.dry_run)
+    try:
+        old_key = settings.credential_encryption_key
+        new_key = _read_new_key()
+
+        if not new_key:
+            print("ERROR: no new key provided.", file=sys.stderr)
+            return 1
+        if new_key == old_key:
+            print(
+                "ERROR: new key is the same as the current key -- nothing to rotate.",
+                file=sys.stderr,
+            )
+            return 1
+
+        return rotate(old_key=old_key, new_key=new_key, dry_run=args.dry_run)
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

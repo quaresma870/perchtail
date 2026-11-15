@@ -1,6 +1,8 @@
 import json
 
 import pytest
+from app import backup, instance_lock
+from app import rotate_credential_key as rotation_module
 from app.auth.models import SSOProtocol, SSOProviderConfig
 from app.config import get_settings
 from app.crypto import build_fernet
@@ -64,6 +66,65 @@ def _make_sso_config(session, old_fernet, *, name="Okta", config=None) -> SSOPro
     session.commit()
     session.refresh(row)
     return row
+
+
+@pytest.fixture()
+def cli_env(monkeypatch, tmp_path):
+    """main() with its own DATA_DIR and `rotate` replaced by a recorder."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("NEW_CREDENTIAL_ENCRYPTION_KEY", "brand-new-key")
+    get_settings.cache_clear()
+    calls: list[dict] = []
+
+    def fake_rotate(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(rotation_module, "rotate", fake_rotate)
+    # Not root, whoever runs the tests.
+    monkeypatch.setattr(rotation_module.os, "geteuid", lambda: 1000, raising=False)
+    yield calls
+    get_settings.cache_clear()
+
+
+def test_the_cli_refuses_while_perchtail_runs(cli_env, capsys):
+    lock = instance_lock.acquire(get_settings())
+    try:
+        assert rotation_module.main([]) == 1
+    finally:
+        lock.release()
+    assert cli_env == []
+    assert "PerchTail is running on this DATA_DIR" in capsys.readouterr().err
+
+
+def test_the_cli_refuses_to_run_as_root(cli_env, capsys, monkeypatch):
+    monkeypatch.setattr(rotation_module.os, "geteuid", lambda: 0, raising=False)
+
+    assert rotation_module.main([]) == 2
+    assert cli_env == []
+    assert capsys.readouterr().err.strip() == (
+        f"ERROR: refusing to run as root: {backup.ROOT_REFUSAL}"
+    )
+
+
+def test_the_cli_holds_the_lock_while_rotating_and_releases_it(cli_env, monkeypatch):
+    def rotate_while_locked(**kwargs):
+        with pytest.raises(instance_lock.InstanceLockHeldError):
+            instance_lock.acquire(get_settings())
+        cli_env.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(rotation_module, "rotate", rotate_while_locked)
+
+    assert rotation_module.main(["--dry-run"]) == 0
+    assert cli_env == [
+        {
+            "old_key": get_settings().credential_encryption_key,
+            "new_key": "brand-new-key",
+            "dry_run": True,
+        }
+    ]
+    instance_lock.acquire(get_settings()).release()
 
 
 def test_rotate_re_encrypts_source_credentials_under_the_new_key(rotation_engine):

@@ -5,6 +5,7 @@ unless it's asked for, as e4b7c2d91a05 once did for `source`."""
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -392,6 +393,208 @@ def test_the_redaction_migration_adds_its_tables_and_clears_alert_heads(tmp_path
     _alembic(tmp_path, "upgrade", "head")
 
 
+def _alembic_run(data_dir: Path, *args: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "DATA_DIR": str(data_dir)}
+    env.pop("DATABASE_URL", None)
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", *args],
+        cwd=BACKEND,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _interrupt_rebuild(db: Path, table: str, *, after_drop: bool) -> None:
+    """Replays the steps of Alembic's batch rebuild up to an interruption:
+    the temporary copy is created and filled, and with after_drop the
+    original table is dropped too, so the copy is the only one with the rows."""
+    temporary = f"_alembic_tmp_{table}"
+    with sqlite3.connect(db) as conn:
+        [sql] = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+        conn.execute(re.sub(rf'^CREATE TABLE "?{table}"?', f'CREATE TABLE "{temporary}"', sql))
+        conn.execute(f'INSERT INTO "{temporary}" SELECT * FROM "{table}"')
+        if after_drop:
+            conn.execute(f'DROP TABLE "{table}"')
+
+
+def _tables(db: Path) -> set[str]:
+    with sqlite3.connect(db) as conn:
+        return {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+
+
+def _version(db: Path) -> str:
+    with sqlite3.connect(db) as conn:
+        return conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+
+
+def test_an_interrupted_audit_rebuild_runs_again(tmp_path):
+    # SQLite DDL isn't transactional: an upgrade stopped half way through the
+    # batch rebuild leaves Alembic's temporary table, and the audit_outbox
+    # may already exist. With auditlog still there, the copy is a leftover.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_AUDIT_ORIGIN)
+    _write_old_chain(db, 3)
+    _interrupt_rebuild(db, "auditlog", after_drop=False)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE audit_outbox (id INTEGER NOT NULL PRIMARY KEY, "
+            "action VARCHAR NOT NULL, metadata JSON, created_at DATETIME NOT NULL)"
+        )
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert _audit_actions(db) == ["source.update"] * 3
+    assert _autoincrement_tables(db)["auditlog"] is True
+    with sqlite3.connect(db) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(auditlog)")}
+    assert not {name for name in tables if name.startswith("_alembic_tmp_")}
+    assert {"client_ip", "user_agent", "session_id", "hash_format"} <= columns
+
+
+def test_an_audit_rebuild_interrupted_after_the_drop_is_finished(tmp_path):
+    # Stopped between DROP TABLE auditlog and the rename: the copy holds the
+    # only audit log there is, and must become auditlog again.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_AUDIT_ORIGIN)
+    _write_old_chain(db, 3)
+    _interrupt_rebuild(db, "auditlog", after_drop=True)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    assert "interrupted rebuild of table auditlog was finished" in result.stderr
+    assert _audit_actions(db) == ["source.update"] * 3
+    assert _autoincrement_tables(db)["auditlog"] is True
+    assert "_alembic_tmp_auditlog" not in _tables(db)
+    assert {"client_ip", "user_agent", "session_id", "hash_format"} <= _columns(db, "auditlog")
+
+
+def test_an_audit_rebuild_with_nothing_to_recover_stops(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_AUDIT_ORIGIN)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE auditlog")
+    before = _tables(db)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode != 0
+    assert "Table auditlog is missing" in result.stderr
+    assert "pre-upgrade backup" in result.stderr
+    assert _tables(db) == before
+    assert _version(db) == BEFORE_AUDIT_ORIGIN
+
+
+def test_an_audit_rebuild_that_finished_before_the_interruption_runs_again(tmp_path):
+    # Interrupted after the rebuild, before the version was recorded: the
+    # columns are already there.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "c7f2a9e4d136")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = ?", (BEFORE_AUDIT_ORIGIN,))
+
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(db) as conn:
+        [version] = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+    assert version != BEFORE_AUDIT_ORIGIN
+
+
+# --- e5c1b7a93d24: source.schedule_cron dropped ------------------------------------
+
+
+def _columns(db: Path, table: str) -> set[str]:
+    with sqlite3.connect(db) as conn:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def test_schedule_cron_goes_down_and_up(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "head")
+    assert "schedule_cron" not in _columns(db, "source")
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source (name, protocol, host, base_path, enabled, is_system, "
+            "check_failures, name_index_enabled) VALUES ('a', 'ssh', 'h', '/', 1, 0, 0, 1)"
+        )
+        conn.execute("UPDATE sqlite_sequence SET seq = 41 WHERE name = 'source'")
+
+    def sequence() -> int:
+        with sqlite3.connect(db) as conn:
+            return conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'source'").fetchone()[
+                0
+            ]
+
+    _alembic(tmp_path, "downgrade", "d4a8f2c61e35")
+    assert "schedule_cron" in _columns(db, "source")
+    assert _autoincrement_tables(db)["source"] is True
+    assert sequence() == 41
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert "schedule_cron" not in _columns(db, "source")
+    assert _autoincrement_tables(db)["source"] is True
+    assert sequence() == 41
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT name FROM source").fetchall() == [("a",)]
+
+
+def _add_source(db: Path, name: str) -> None:
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source (name, protocol, host, base_path, enabled, is_system, "
+            "check_failures, name_index_enabled) VALUES (?, 'ssh', 'h', '/', 1, 0, 0, 1)",
+            (name,),
+        )
+
+
+def _source_names(db: Path) -> list[str]:
+    with sqlite3.connect(db) as conn:
+        return [row[0] for row in conn.execute("SELECT name FROM source ORDER BY id")]
+
+
+def test_the_schedule_cron_drop_runs_again_after_an_interruption(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "d4a8f2c61e35")
+    _add_source(db, "a")
+    _interrupt_rebuild(db, "source", after_drop=False)
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert "schedule_cron" not in _columns(db, "source")
+    assert _source_names(db) == ["a"]
+    assert "_alembic_tmp_source" not in _tables(db)
+
+
+def test_a_schedule_cron_drop_interrupted_after_the_drop_is_finished(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "d4a8f2c61e35")
+    _add_source(db, "a")
+    _add_source(db, "b")
+    _interrupt_rebuild(db, "source", after_drop=True)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    assert "interrupted rebuild of table source was finished" in result.stderr
+    assert _source_names(db) == ["a", "b"]
+    assert "schedule_cron" not in _columns(db, "source")
+    assert _autoincrement_tables(db)["source"] is True
+    assert "_alembic_tmp_source" not in _tables(db)
+
+
+def test_a_schedule_cron_drop_with_nothing_to_recover_stops(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "d4a8f2c61e35")
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE source")
+    before = _tables(db)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode != 0
+    assert "Table source is missing" in result.stderr
+    assert "pre-upgrade backup" in result.stderr
+    assert _tables(db) == before
+    assert _version(db) == "d4a8f2c61e35"
+
+
 def test_audit_ids_are_never_reused_after_the_upgrade(tmp_path):
     # A purge before the upgrade left its anchor at row 50 and every row
     # after it went too: the next entry must still get an id above 50.
@@ -526,3 +729,119 @@ def test_duplicate_grants_are_merged_into_the_one_resolution_used(tmp_path, monk
     assert set(_grants(db)) == {10, 12, 13, 15}
     with sqlite3.connect(db) as conn, pytest.raises(sqlite3.IntegrityError):
         _insert_grant(conn, 21, 1, "customer", 5, ["view"])
+
+
+ONE_GRANT_PER_SCOPE_GRANTS = {
+    10: (1, "customer", 5, ["view"]),
+    11: (1, "folder", 5, ["view", "download"]),
+    12: (2, "source", 7, ["view"]),
+}
+
+
+def _grants_before_one_per_scope(tmp_path: Path) -> Path:
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_ONE_GRANT_PER_SCOPE)
+    with sqlite3.connect(db) as conn:
+        for role_id in (1, 2):
+            conn.execute(
+                "INSERT INTO role (id, name, is_builtin, is_super_admin, global_capabilities) "
+                "VALUES (?, ?, 0, 0, '[]')",
+                (role_id, f"r{role_id}"),
+            )
+        for grant_id, (role_id, scope_type, scope_id, caps) in ONE_GRANT_PER_SCOPE_GRANTS.items():
+            _insert_grant(conn, grant_id, role_id, scope_type, scope_id, caps)
+    return db
+
+
+def _has_grant_scope_constraint(db: Path) -> bool:
+    with sqlite3.connect(db) as conn:
+        [sql] = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rolegrant'"
+        ).fetchone()
+    return "uq_rolegrant_scope" in sql
+
+
+def test_an_interrupted_grant_rebuild_runs_again(tmp_path):
+    # Stopped before the DROP: rolegrant is still there, the copy is a leftover.
+    db = _grants_before_one_per_scope(tmp_path)
+    _interrupt_rebuild(db, "rolegrant", after_drop=False)
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert _grants(db) == ONE_GRANT_PER_SCOPE_GRANTS
+    assert _has_grant_scope_constraint(db)
+    assert "_alembic_tmp_rolegrant" not in _tables(db)
+
+
+def test_a_grant_rebuild_interrupted_after_the_drop_is_finished(tmp_path):
+    # Stopped between DROP TABLE rolegrant and the rename: the copy holds the
+    # only grants there are, and must become rolegrant again.
+    db = _grants_before_one_per_scope(tmp_path)
+    _interrupt_rebuild(db, "rolegrant", after_drop=True)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    assert "interrupted rebuild of table rolegrant was finished" in result.stderr
+    assert _grants(db) == ONE_GRANT_PER_SCOPE_GRANTS
+    assert _has_grant_scope_constraint(db)
+    assert "_alembic_tmp_rolegrant" not in _tables(db)
+
+
+def test_a_grant_rebuild_with_nothing_to_recover_stops(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_ONE_GRANT_PER_SCOPE)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE rolegrant")
+    before = _tables(db)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode != 0
+    assert "Table rolegrant is missing" in result.stderr
+    assert "pre-upgrade backup" in result.stderr
+    assert _tables(db) == before
+    assert _version(db) == BEFORE_ONE_GRANT_PER_SCOPE
+
+
+def test_a_grant_rebuild_that_finished_before_the_interruption_runs_again(tmp_path):
+    # Interrupted after the rebuild, before the version was recorded: the
+    # constraint is already there, so the rebuild is skipped, both ways.
+    db = _grants_before_one_per_scope(tmp_path)
+    _alembic(tmp_path, "upgrade", "a8d3f5c27e14")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = ?", (BEFORE_ONE_GRANT_PER_SCOPE,))
+
+    _alembic(tmp_path, "upgrade", "a8d3f5c27e14")
+    assert _grants(db) == ONE_GRANT_PER_SCOPE_GRANTS
+    assert _has_grant_scope_constraint(db)
+
+    _alembic(tmp_path, "downgrade", BEFORE_ONE_GRANT_PER_SCOPE)
+    assert not _has_grant_scope_constraint(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = 'a8d3f5c27e14'")
+    _alembic(tmp_path, "downgrade", BEFORE_ONE_GRANT_PER_SCOPE)
+    assert not _has_grant_scope_constraint(db)
+    assert _grants(db) == ONE_GRANT_PER_SCOPE_GRANTS
+
+
+# --- d4a8f2c61e35: redaction rules -------------------------------------------------
+
+
+def test_an_interrupted_redaction_migration_runs_again(tmp_path):
+    # Stopped after CREATE TABLE redaction_rule, before its index, the
+    # override table and the version were written.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "d4a8f2c61e35")
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE source_redaction_override")
+        conn.execute("DROP INDEX ix_redaction_rule_source_id")
+        conn.execute(
+            'INSERT INTO redaction_rule (name, detector, enabled, "order") '
+            "VALUES ('card', 'card', 0, 0)"
+        )
+        conn.execute("UPDATE alembic_version SET version_num = 'a8d3f5c27e14'")
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert {"redaction_rule", "source_redaction_override", "ix_redaction_rule_source_id"} <= (
+        _tables(db)
+    )
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT name FROM redaction_rule").fetchall() == [("card",)]

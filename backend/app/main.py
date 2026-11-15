@@ -121,7 +121,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 # CSP: everything the frontend needs is same-origin (see frontend/index.html --
 # no third-party scripts/styles/fonts anywhere). style-src needs
-# 'unsafe-inline' because CodeMirror 6 (app/CLAUDE.md's chosen viewer) injects
+# 'unsafe-inline' because CodeMirror 6 (the viewer's editor) injects
 # its editor styles via a runtime <style> element (the style-mod package), not
 # a static stylesheet -- there's no nonce to hand a static SPA build, so this
 # is the standard, accepted trade-off for CodeMirror-based apps. script-src
@@ -129,8 +129,8 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 # directive that actually matters against XSS. frame-ancestors 'none' is the
 # modern equivalent of X-Frame-Options: DENY, kept alongside it for older
 # browsers/embedded webviews that don't honor CSP framing directives. HSTS is
-# deliberately not set here -- it's a deployment-level concern wherever TLS
-# actually terminates, per CLAUDE.md's "sit behind a reverse proxy" note.
+# deliberately not set here -- PerchTail sits behind a TLS-terminating
+# reverse proxy, and HSTS belongs wherever TLS actually terminates.
 _CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
     "script-src 'self'; "
@@ -224,10 +224,11 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
     Origin/Referer on the way through so this falls to the no-header case
     below rather than comparing two ports that are legitimately different).
 
-    Host-only, deliberately not scheme+host: uvicorn runs with no
-    --proxy-headers/--forwarded-allow-ips trust configured (see
-    docker-entrypoint.sh), so request.url.scheme is always "http" as seen
-    from nginx's plain-HTTP proxy connection, even when the real client
+    Host-only, deliberately not scheme+host: uvicorn runs with
+    --no-proxy-headers (see docker-entrypoint.sh; only the app's own
+    ClientAddressMiddleware reads X-Forwarded-For, for the client address),
+    so request.url.scheme is always "http" as seen from the reverse proxy's
+    plain-HTTP connection, even when the real client
     connected over https and its Origin header correctly says so. Comparing
     scheme too would 403 every state-changing request -- including
     login -- on exactly the TLS-terminating-reverse-proxy setup this

@@ -95,6 +95,8 @@
   let indexing = false
   let indexNote = ''
   $: canIndexNow = source?.my_capabilities.includes('run_now') ?? false
+  // Without manage_rules the rules are shown, not edited.
+  $: canManageRules = source?.my_capabilities.includes('manage_rules') ?? false
 
   async function indexNow() {
     if (!source) return
@@ -317,7 +319,10 @@
     {#key sourceId}
       <RuleEditor
         {sourceId}
-        readOnly={source.is_system}
+        readOnly={source.is_system || !canManageRules}
+        readOnlyNote={source.is_system
+          ? "This source's rules are managed by the system and cannot be edited."
+          : "You can't change this source's rules."}
         on:change={(e) => (ruleCount = e.detail.count)}
       />
     {/key}

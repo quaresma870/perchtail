@@ -1,4 +1,3 @@
-import json
 import math
 import secrets
 
@@ -30,6 +29,7 @@ from app.auth.providers.oidc import (
     decode_state,
     encode_state,
     parse_oidc_settings,
+    read_provider_config,
 )
 from app.auth.rbac import forbidden
 from app.auth.sessions import (
@@ -43,7 +43,6 @@ from app.auth.sessions import (
 )
 from app.bootstrap import NO_ACCESS_ROLE_NAME
 from app.config import get_settings
-from app.crypto import decrypt_secret
 from app.db import get_session
 from app.logging_config import get_logger
 from app.login_throttle import record_failure, record_success, seconds_until_unlocked
@@ -662,15 +661,30 @@ def sso_status(session: Session = Depends(get_session)):
 
 
 @router.get("/sso/login")
-def sso_login(session: Session = Depends(get_session)):
+def sso_login(request: Request, session: Session = Depends(get_session)):
     provider = _get_enabled_provider(session)
     if provider is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSO is not enabled")
 
-    oidc_settings = parse_oidc_settings(json.loads(decrypt_secret(provider.config)))
+    app_settings = get_settings()
+    raw_config = read_provider_config(provider.config)
+    if raw_config is None:
+        # The provider's settings can't be decrypted with the current key:
+        # audited, and the browser gets the same neutral SSO error as any
+        # other failed sign-in.
+        logger.error("sso.login.config_unreadable", provider_id=provider.id)
+        auth_events.sso_login_failed(
+            session,
+            client_ip=request.client.host if request.client else None,
+            reason="secret_unreadable",
+        )
+        return RedirectResponse(
+            f"{app_settings.public_base_url}/#/login?sso_error=1",
+            status_code=status.HTTP_302_FOUND,
+        )
+    oidc_settings = parse_oidc_settings(raw_config)
     nonce = secrets.token_urlsafe(32)
     state = encode_state(nonce)
-    app_settings = get_settings()
     redirect_uri = f"{app_settings.public_base_url}/auth/sso/callback"
 
     try:
@@ -755,7 +769,11 @@ def sso_callback(
     if provider is None:
         return failed("sso_disabled")
 
-    oidc_settings = parse_oidc_settings(json.loads(decrypt_secret(provider.config)))
+    raw_config = read_provider_config(provider.config)
+    if raw_config is None:
+        logger.error("sso.callback.config_unreadable", provider_id=provider.id)
+        return failed("secret_unreadable")
+    oidc_settings = parse_oidc_settings(raw_config)
     no_access_role = session.exec(select(Role).where(Role.name == NO_ACCESS_ROLE_NAME)).first()
     if no_access_role is None:
         # Seeded at startup (app.bootstrap.seed_no_access_role) — missing only

@@ -11,6 +11,7 @@ from app.models import Customer, Folder, PatternKind, Protocol, Rule, RuleType, 
 from app.timeutils import utcnow
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlmodel import select
 
 
 def _make_user(session, *, is_super_admin=False, global_capabilities=None) -> User:
@@ -1010,6 +1011,54 @@ def test_bulk_update_needs_a_secret_and_the_manage_capability(session, admin_cli
         json={"source_ids": [source_id], "credential": {"username": "svc", "password": "x"}},
     )
     assert forbidden.status_code == 403
+
+
+def _encrypted_private_key() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    return (
+        ed25519.Ed25519PrivateKey.generate()
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.OpenSSH,
+            serialization.BestAvailableEncryption(b"secret"),
+        )
+        .decode()
+    )
+
+
+ENCRYPTED_KEY_DETAIL = (
+    "Encrypted SSH private keys aren't supported; provide the key without a passphrase"
+)
+
+
+def test_saving_an_encrypted_private_key_is_refused(session, admin_client):
+    customer = _make_customer(session)
+    credential = {"username": "svc", "private_key": _encrypted_private_key()}
+
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "enc01",
+            "customer_id": customer.id,
+            "protocol": "ssh",
+            "host": "enc01.example.com",
+            "base_path": "/var/log",
+            "credential": credential,
+        },
+    )
+    existing = _ssh_source(admin_client, customer, "enc02")
+    updated = admin_client.patch(f"/sources/{existing['id']}", json={"credential": credential})
+    bulk = admin_client.post(
+        "/sources/credentials",
+        json={"source_ids": [existing["id"]], "credential": credential, "test_first": False},
+    )
+
+    for response in (created, updated, bulk):
+        assert response.status_code == 400
+        assert response.json()["detail"] == ENCRYPTED_KEY_DETAIL
+    assert session.exec(select(Source).where(Source.name == "enc01")).first() is None
 
 
 def test_testing_a_new_credential_never_records_status_on_the_real_source(

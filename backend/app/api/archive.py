@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import shutil
 import tarfile
 import zipfile
@@ -8,6 +9,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from urllib.parse import quote
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -651,7 +653,43 @@ class _FinishingMixin:
             self._on_finish()
 
 
-class _FinishingFileResponse(_FinishingMixin, FileResponse):
+class _SnapshotFileResponse(FileResponse):
+    """A FileResponse that sends exactly the bytes the file had when it was
+    stat'ed, which is what its Content-Length says. A local file is served
+    in place (the system log source, a local source), and a log that grows
+    while it's being sent would otherwise be read to its new end, more than
+    the Content-Length, and the server aborts the response half way."""
+
+    def __init__(self, path: Path, **kwargs):
+        stat_result = os.stat(path)
+        super().__init__(path, stat_result=stat_result, **kwargs)
+        self._snapshot_size = stat_result.st_size
+
+    async def _handle_simple(self, send: Send, send_header_only: bool, send_pathsend: bool) -> None:
+        # pathsend would hand the server the whole path, growth included.
+        await send(
+            {"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers}
+        )
+        if send_header_only:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+        remaining = self._snapshot_size
+        file = await anyio.open_file(self.path, mode="rb")
+        try:
+            more_body = remaining > 0
+            if not more_body:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+            while more_body:
+                chunk = await file.read(min(self.chunk_size, remaining))
+                remaining -= len(chunk)
+                more_body = remaining > 0 and bool(chunk)
+                await send({"type": "http.response.body", "body": chunk, "more_body": more_body})
+        finally:
+            with anyio.CancelScope(shield=True):
+                await file.aclose()
+
+
+class _FinishingFileResponse(_FinishingMixin, _SnapshotFileResponse):
     def __init__(self, *args, on_finish: Callable[[], None], **kwargs):
         super().__init__(*args, **kwargs)
         self._on_finish = on_finish
@@ -703,7 +741,7 @@ def open_file(
     # file, not a download endpoint (downloads go through /download, gated
     # by the `download` capability -- #174). nosniff (set app-wide) keeps
     # a browser from rendering it as HTML.
-    return FileResponse(
+    return _SnapshotFileResponse(
         served_path,
         filename=filename,
         headers=headers,
@@ -879,6 +917,23 @@ def download_file(
     return _FinishingFileResponse(served_path, filename=filename, on_finish=finish)
 
 
+ZIP_LISTING_TRUNCATED_DETAIL = (
+    "This folder has more entries than a ZIP can list; narrow it to a subfolder"
+)
+ZIP_TOO_DEEP_DETAIL = "This folder is nested too deeply for a ZIP; narrow it to a subfolder"
+
+
+class _ZipListingIncomplete(Exception):
+    """The walk can't list every file under the folder, so the ZIP would
+    miss some without saying so: it's refused before it starts."""
+
+    def __init__(self, path: str, reason: str, detail: str):
+        super().__init__(path)
+        self.path = path
+        self.reason = reason
+        self.detail = detail
+
+
 def _zip_entries(
     connector,
     source: Source,
@@ -898,12 +953,16 @@ def _zip_entries(
     Like the file-name index, the walk stops MAX_DEPTH folders down and
     lists a folder only once, by its identity on the source when the
     connector knows it (#347): a symlink loop over SSH ends instead of
-    logging in again for every level."""
+    logging in again for every level. A folder it would have to leave out
+    (below MAX_DEPTH, or a listing the source cut) raises
+    _ZipListingIncomplete, so a ZIP is never missing files unannounced."""
     visited = set() if visited is None else visited
     out: list[DirEntry] = []
     entries = connector.list_directory(source, rules, current_dir)
     if is_truncated(entries):
+        # The source cut the listing (an agent's limit).
         logger.warning("archive.zip_listing_truncated", source_id=source.id, path=current_dir)
+        raise _ZipListingIncomplete(current_dir, "listing_truncated", ZIP_LISTING_TRUNCATED_DETAIL)
     for entry in entries:
         if entry.is_dir:
             if entry.real_key is not None:
@@ -913,7 +972,7 @@ def _zip_entries(
                 visited.add(entry.real_key)
             if depth + 1 >= MAX_DEPTH:
                 logger.warning("archive.zip_too_deep", source_id=source.id, path=entry.path)
-                continue
+                raise _ZipListingIncomplete(entry.path, "too_deep", ZIP_TOO_DEEP_DETAIL)
             out.extend(_zip_entries(connector, source, rules, entry.path, depth + 1, visited))
         elif _visible(source, entry.path, rules):
             out.append(entry)
@@ -1104,7 +1163,20 @@ def download_folder_zip(
     try:
         slots.append(get_limiter().connector(limits, source.id))
         limit = max_fetch_bytes()
-        entries = _zip_entries(connector, source, rules, path)
+        try:
+            entries = _zip_entries(connector, source, rules, path)
+        except _ZipListingIncomplete as exc:
+            folder_key = "truncated_folder" if exc.reason == "listing_truncated" else "folder"
+            record_audit_event(
+                session,
+                user_id=user.id,
+                action="file.download_denied",
+                target_type="source",
+                target_id=source.id,
+                metadata={"path": path, "reason": exc.reason, folder_key: exc.path},
+            )
+            session.commit()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
         listed = sum(entry.size for entry in entries)
         if listed > limit:
             raise _fetch_too_large(

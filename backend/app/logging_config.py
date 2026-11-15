@@ -58,12 +58,25 @@ def configure_logging() -> None:
     root_logger.handlers = [stream_handler, file_handler]
     root_logger.setLevel(level)
 
-    # Keeps the app's own DEBUG detail while capping protocol libraries'
-    # packet dumps, which are most of DEBUG's volume.
-    quiet = settings.log_quiet_third_party and level < logging.INFO
     for name in NOISY_THIRD_PARTY_LOGGERS:
-        logging.getLogger(name).setLevel(logging.INFO if quiet else logging.NOTSET)
+        logging.getLogger(name).setLevel(third_party_level(name, level, settings))
     file_handler.enforce_retention()
+
+
+# At INFO these log every SMB message and every SSH session they close, most
+# of an INFO log's lines: kept at WARNING unless PerchTail logs at DEBUG.
+QUIET_AT_INFO_LOGGERS = frozenset({"smbprotocol", "spnego", "paramiko"})
+
+
+def third_party_level(name: str, level: int, settings) -> int:
+    """The level of one of NOISY_THIRD_PARTY_LOGGERS for the app's `level`.
+    At DEBUG, LOG_QUIET_THIRD_PARTY keeps the app's own DEBUG detail while
+    capping the protocol libraries' packet dumps at INFO."""
+    if level < logging.INFO:
+        return logging.INFO if settings.log_quiet_third_party else logging.NOTSET
+    if name in QUIET_AT_INFO_LOGGERS:
+        return max(logging.WARNING, level)
+    return logging.NOTSET
 
 
 def get_logger(*args, **kwargs):

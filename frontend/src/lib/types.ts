@@ -199,6 +199,9 @@ export interface SSOProvider {
   client_id: string
   scopes: string
   group_claim: string | null
+  // The saved settings can't be decrypted with the current key: issuer,
+  // client ID and scopes come back empty and the secret must be re-entered.
+  secret_unreadable: boolean
 }
 
 // Settings -> Email (GET/PUT /smtp-settings, super admins only). The

@@ -1,0 +1,9 @@
+# Files that run inside a Linux container or shell keep LF line endings in
+# every checkout, including a Windows one with core.autocrlf=true: a CRLF
+# shebang line makes the image's entrypoint fail with "no such file or
+# directory". backend/tests/test_line_endings.py checks them.
+*.sh text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+backend/alembic.ini text eol=lf
+backend/migrations/script.py.mako text eol=lf

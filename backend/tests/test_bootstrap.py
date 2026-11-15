@@ -1,6 +1,7 @@
 import json
 
 from app.auth.models import (
+    AuditLog,
     AuthProviderType,
     Capability,
     Role,
@@ -19,6 +20,7 @@ from app.bootstrap import (
 )
 from app.crypto import encrypt_secret
 from app.models import Rule, Source
+from cryptography.fernet import Fernet
 from sqlmodel import select
 
 
@@ -50,6 +52,55 @@ def test_seed_system_log_source_is_idempotent(session):
     assert first.id == second.id
     assert len(session.exec(select(Source).where(Source.is_system.is_(True))).all()) == 1
     assert len(session.exec(select(Rule).where(Rule.source_id == first.id)).all()) == 1
+
+
+def test_seed_system_log_source_follows_a_changed_log_dir(session, monkeypatch, tmp_path):
+    from app.config import get_settings
+
+    old_dir, new_dir = tmp_path / "old", tmp_path / "new"
+    monkeypatch.setenv("LOG_DIR", str(old_dir))
+    get_settings.cache_clear()
+    first = seed_system_log_source(session)
+    assert session.exec(select(AuditLog)).all() == []
+
+    monkeypatch.setenv("LOG_DIR", str(new_dir))
+    get_settings.cache_clear()
+    second = seed_system_log_source(session)
+    get_settings.cache_clear()
+
+    assert second.id == first.id
+    assert second.base_path == str(new_dir)
+    [entry] = session.exec(select(AuditLog)).all()
+    assert entry.action == "source.update"
+    assert entry.user_id is None
+    assert entry.target_id == first.id
+    assert entry.event_metadata["changes"] == {
+        "base_path": {"from": str(old_dir), "to": str(new_dir)}
+    }
+
+
+def test_seed_system_log_source_writes_no_audit_when_log_dir_is_unchanged(session):
+    seed_system_log_source(session)
+    seed_system_log_source(session)
+
+    assert session.exec(select(AuditLog)).all() == []
+
+
+def test_backfill_skips_a_provider_whose_settings_are_unreadable(session):
+    user = _unbound_sso_user(session)
+    session.add(
+        SSOProviderConfig(
+            protocol=SSOProtocol.oidc,
+            name="lost",
+            config=Fernet(Fernet.generate_key()).encrypt(b"{}").decode(),
+            enabled=True,
+        )
+    )
+    session.commit()
+
+    assert backfill_sso_user_issuers(session) == 0
+    session.refresh(user)
+    assert user.external_issuer is None
 
 
 def test_system_source_stays_super_admin_only_after_seeding(session):

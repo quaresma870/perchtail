@@ -41,6 +41,53 @@ test('source overview follows the id in the URL (#192)', async ({ page }) => {
   }
 })
 
+test('source rules are read-only without manage_rules on the source', async ({ page }) => {
+  const created = await page.request.post('/sources', {
+    data: {
+      name: 'E2E Rules Read Only',
+      protocol: 'ssh',
+      host: 'rules-read-only.invalid',
+      port: 22,
+      base_path: '/var/log',
+    },
+  })
+  expect(created.ok()).toBeTruthy()
+  const source = await created.json()
+  const rule = await page.request.post(`/sources/${source.id}/rules`, {
+    data: { type: 'include', pattern: '**/*.log' },
+  })
+  expect(rule.ok()).toBeTruthy()
+
+  try {
+    // The admin can change them.
+    await page.goto(`/#/settings/sources/${source.id}`)
+    await expect(page.getByRole('heading', { level: 1, name: 'E2E Rules Read Only' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Delete' })).toBeVisible()
+    await expect(page.getByTestId('rules-read-only')).toHaveCount(0)
+
+    // A role that can only view the source sees the rules, without a way to change them.
+    await page.route(new RegExp(`/sources/${source.id}$`), async (route) => {
+      const response = await route.fetch()
+      const body = await response.json()
+      await route.fulfill({ response, json: { ...body, my_capabilities: ['view'] } })
+    })
+    await page.reload()
+    await expect(page.getByRole('heading', { level: 1, name: 'E2E Rules Read Only' })).toBeVisible()
+    await expect(page.getByTestId('rules-read-only')).toHaveText(
+      "You can't change this source's rules.",
+    )
+    const pattern = page.locator('.rule-row .pattern-input')
+    await expect(pattern).toHaveValue('**/*.log')
+    await expect(pattern).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Delete' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Add rule' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Raw text' })).toHaveCount(0)
+  } finally {
+    await page.unrouteAll()
+    await page.request.delete(`/sources/${source.id}`)
+  }
+})
+
 test('sources list sorts and filters, and keeps both after opening a source (#238)', async ({
   page,
 }) => {

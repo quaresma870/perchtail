@@ -14,18 +14,28 @@ from app.auth.models import (
     SSOProviderConfig,
     User,
 )
-from app.auth.providers.oidc import fetch_discovery_document, fetch_jwks, parse_oidc_settings
+from app.auth.providers.oidc import (
+    fetch_discovery_document,
+    fetch_jwks,
+    parse_oidc_settings,
+    read_provider_config,
+)
 from app.auth.rbac import (
     require_global_capability,
     require_role_within_authority,
     role_within_authority,
 )
-from app.crypto import decrypt_secret, encrypt_secret
+from app.crypto import encrypt_secret
 from app.db import get_session
 
 router = APIRouter(prefix="/sso", tags=["sso"])
 
 require_manage = require_global_capability(GlobalCapability.manage_sso, get_current_active_user)
+
+# A message, not a secret.
+UNREADABLE_SECRET_DETAIL = (
+    "The saved client secret can't be decrypted with the current key; enter it again"  # nosec B105
+)
 
 
 class SSOProviderPublic(BaseModel):
@@ -43,10 +53,27 @@ class SSOProviderPublic(BaseModel):
     # SSOGroupRoleMapping).
     group_claim: str | None
     # client_secret is deliberately never returned once set.
+    # True when the stored settings can't be decrypted with the current key
+    # and salt. The issuer, client ID and scopes are stored encrypted with
+    # the secret, so they come back empty and must be entered again with a
+    # new secret.
+    secret_unreadable: bool = False
 
     @classmethod
     def from_config(cls, config: SSOProviderConfig) -> "SSOProviderPublic":
-        raw = json.loads(decrypt_secret(config.config))
+        raw = read_provider_config(config.config)
+        if raw is None:
+            return cls(
+                id=config.id,
+                protocol=config.protocol,
+                name=config.name,
+                enabled=config.enabled,
+                issuer="",
+                client_id="",
+                scopes="openid email profile",
+                group_claim=None,
+                secret_unreadable=True,
+            )
         return cls(
             id=config.id,
             protocol=config.protocol,
@@ -105,9 +132,9 @@ def _encrypt_config(
 
 
 def _assert_single_enabled(session: Session, *, enabled: bool, exclude_id: int | None = None):
-    # CLAUDE.md: "One OIDC/SAML provider configured at a time for v1" — the
-    # login flow needs to unambiguously pick "the" active provider, so this
-    # is enforced here rather than left as a documentation-only convention.
+    # Only one SSO provider can be enabled at a time: the login flow needs to
+    # unambiguously pick "the" active provider, so this is enforced here
+    # rather than left as a documentation-only convention.
     if not enabled:
         return
     query = select(SSOProviderConfig).where(SSOProviderConfig.enabled.is_(True))
@@ -360,7 +387,16 @@ def update_provider(
     session: Session = Depends(get_session),
 ):
     config = _get_or_404(session, provider_id)
-    raw = json.loads(decrypt_secret(config.config))
+    raw = read_provider_config(config.config)
+    if raw is None:
+        # The stored settings are lost with the old key: everything that was
+        # encrypted with them has to come in again before anything is saved.
+        if not (payload.issuer and payload.client_id and payload.client_secret):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=UNREADABLE_SECRET_DETAIL,
+            )
+        raw = {"scopes": "openid email profile", "group_claim": None}
 
     changes_trust = (
         payload.enabled is True
@@ -434,7 +470,10 @@ def test_provider(
     document and JWKS, the same two requests a real login would make, without
     running the actual auth-code exchange."""
     config = _get_or_404(session, provider_id)
-    settings = parse_oidc_settings(json.loads(decrypt_secret(config.config)))
+    raw = read_provider_config(config.config)
+    if raw is None:
+        return ConnectionCheckResult(ok=False, detail=UNREADABLE_SECRET_DETAIL)
+    settings = parse_oidc_settings(raw)
     try:
         discovery = fetch_discovery_document(settings.issuer)
         for required in ("authorization_endpoint", "token_endpoint", "jwks_uri"):

@@ -260,8 +260,8 @@
       </span>
     {:else}
       <span class="integrity-text">
-        Audit log integrity has not been checked yet -- it runs automatically on its own
-        schedule (Settings → System), or verify it now.
+        Audit log integrity has not been checked yet -- it runs automatically once a day (the
+        AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS environment variable changes this), or verify it now.
       </span>
     {/if}
     <div class="integrity-actions">

@@ -7,6 +7,7 @@ from app.api.sso import router as sso_router
 from app.auth.models import GlobalCapability, Role, SSOProviderConfig, User
 from app.crypto import decrypt_secret
 from app.db import get_session
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -146,6 +147,81 @@ def test_delete_removes_the_provider(manage_client, session):
 def test_get_missing_provider_is_404(manage_client):
     response = manage_client.get("/sso/999")
     assert response.status_code == 404
+
+
+def _make_unreadable(session, provider_id: int) -> None:
+    """As after losing CREDENTIAL_ENCRYPTION_KEY or the salt: the stored
+    settings are encrypted under a key PerchTail no longer has."""
+    config = session.get(SSOProviderConfig, provider_id)
+    config.config = Fernet(Fernet.generate_key()).encrypt(b'{"issuer": "x"}').decode()
+    session.add(config)
+    session.commit()
+
+
+def test_unreadable_provider_is_still_listed_with_its_plain_fields(manage_client, session):
+    created = manage_client.post("/sso", json=CREATE_PAYLOAD).json()
+    _make_unreadable(session, created["id"])
+
+    listed = manage_client.get("/sso")
+    fetched = manage_client.get(f"/sso/{created['id']}")
+
+    assert listed.status_code == 200
+    assert fetched.status_code == 200
+    [body] = listed.json()
+    assert body["secret_unreadable"] is True
+    assert body["name"] == "Corporate SSO"
+    assert body["enabled"] is True
+    assert body["issuer"] == "" and body["client_id"] == ""
+    assert fetched.json()["secret_unreadable"] is True
+
+
+def test_readable_provider_is_not_flagged(manage_client):
+    created = manage_client.post("/sso", json=CREATE_PAYLOAD).json()
+    assert created["secret_unreadable"] is False
+
+
+def test_unreadable_provider_needs_the_settings_again_before_saving(manage_client, session):
+    created = manage_client.post("/sso", json=CREATE_PAYLOAD).json()
+    _make_unreadable(session, created["id"])
+
+    response = manage_client.patch(f"/sso/{created['id']}", json={"name": "Renamed"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "The saved client secret can't be decrypted with the current key; enter it again"
+    )
+
+
+def test_unreadable_provider_accepts_a_new_secret(manage_client, session):
+    created = manage_client.post("/sso", json=CREATE_PAYLOAD).json()
+    _make_unreadable(session, created["id"])
+
+    response = manage_client.patch(
+        f"/sso/{created['id']}",
+        json={
+            "issuer": "https://idp.example.com",
+            "client_id": "perchtail-client",
+            "client_secret": "new-secret",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["secret_unreadable"] is False
+    session.expire_all()
+    stored = json.loads(decrypt_secret(session.get(SSOProviderConfig, created["id"]).config))
+    assert stored["client_secret"] == "new-secret"
+    assert stored["scopes"] == "openid email profile"
+
+
+def test_connection_check_reports_unreadable_settings(manage_client, session):
+    created = manage_client.post("/sso", json=CREATE_PAYLOAD).json()
+    _make_unreadable(session, created["id"])
+
+    response = manage_client.post(f"/sso/{created['id']}/test")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert "can't be decrypted" in response.json()["detail"]
 
 
 def test_connection_check_success(manage_client, monkeypatch):

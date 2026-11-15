@@ -25,11 +25,18 @@ system_settings.update with the old and new values; the next start records
 it in the audit log with no user. Nothing is written to auditlog here: a row
 without a hash is never signed later, and is reported as tampering.
 
+Can be run again after an interruption: a leftover _alembic_tmp_auditlog is
+dropped while auditlog exists, or renamed back to auditlog when the rebuild
+stopped after dropping it (see _recover_interrupted_rebuild), and columns and
+tables that already exist aren't added again.
+
 Going down drops the columns, the outbox and AUTOINCREMENT; rows written in
 format 2 then no longer verify under the older version, since part of what
 their hash covers is gone. A raised retention is not lowered again.
 """
 
+import logging
+import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
@@ -45,6 +52,8 @@ depends_on: str | Sequence[str] | None = None
 NO_ID_REUSE = {"sqlite_autoincrement": True}
 AUDIT_RETENTION_MIN_DAYS = 90
 
+logger = logging.getLogger("alembic.runtime.migration")
+
 _audit_outbox = sa.table(
     "audit_outbox",
     sa.column("action", sa.String),
@@ -53,28 +62,68 @@ _audit_outbox = sa.table(
 )
 
 
-def upgrade() -> None:
-    with op.batch_alter_table("auditlog", recreate="always", table_kwargs=NO_ID_REUSE) as batch:
-        batch.add_column(
-            sa.Column("client_ip", sqlmodel.sql.sqltypes.AutoString(), nullable=True)
-        )
-        batch.add_column(
-            sa.Column("user_agent", sqlmodel.sql.sqltypes.AutoString(), nullable=True)
-        )
-        batch.add_column(
-            sa.Column("session_id", sqlmodel.sql.sqltypes.AutoString(), nullable=True)
-        )
-        batch.add_column(sa.Column("hash_format", sa.Integer(), nullable=True))
-    op.create_table(
-        "audit_outbox",
-        sa.Column("id", sa.Integer(), nullable=False),
-        sa.Column("action", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column("metadata", sa.JSON(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.PrimaryKeyConstraint("id"),
-    )
+def _recover_interrupted_rebuild(table: str) -> None:
+    """SQLite DDL isn't transactional: a batch rebuild runs CREATE TABLE
+    _alembic_tmp_<table>, copies the rows into it, drops <table> and renames
+    the copy, each step on its own, and an interruption can leave the
+    temporary table behind. What it holds depends on where it stopped:
 
+    - <table> still exists: the copy was never finished or never replaced
+      it, so it is a leftover and is dropped;
+    - only the copy exists: it stopped after the DROP, so the copy holds
+      every row; the rebuild is finished by renaming it, and logged;
+    - neither exists: nothing can be recovered here, so the migration stops
+      and points at the pre-upgrade backup, without touching anything.
+    """
     bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    temporary = f"_alembic_tmp_{table}"
+    if inspector.has_table(table):
+        if inspector.has_table(temporary):
+            op.execute(sa.text(f'DROP TABLE "{temporary}"'))
+        return
+    if inspector.has_table(temporary):
+        op.execute(sa.text(f'ALTER TABLE "{temporary}" RENAME TO "{table}"'))
+        logger.warning(
+            "An interrupted rebuild of table %s was finished: %s renamed back to %s.",
+            table,
+            temporary,
+            table,
+        )
+        return
+    logger.error(
+        "Table %s is missing and there is no %s to recover it from. Restore the "
+        "pre-upgrade backup (python -m app.backup restore) and run the upgrade again.",
+        table,
+        temporary,
+    )
+    sys.exit(1)
+
+
+def upgrade() -> None:
+    bind = op.get_bind()
+    _recover_interrupted_rebuild("auditlog")
+    existing = {column["name"] for column in sa.inspect(bind).get_columns("auditlog")}
+    new_columns = [
+        sa.Column("client_ip", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("user_agent", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("session_id", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("hash_format", sa.Integer(), nullable=True),
+    ]
+    with op.batch_alter_table("auditlog", recreate="always", table_kwargs=NO_ID_REUSE) as batch:
+        for column in new_columns:
+            if column.name not in existing:
+                batch.add_column(column)
+    if not sa.inspect(bind).has_table("audit_outbox"):
+        op.create_table(
+            "audit_outbox",
+            sa.Column("id", sa.Integer(), nullable=False),
+            sa.Column("action", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+            sa.Column("metadata", sa.JSON(), nullable=True),
+            sa.Column("created_at", sa.DateTime(), nullable=False),
+            sa.PrimaryKeyConstraint("id"),
+        )
+
     high_water = bind.execute(
         sa.text(
             "SELECT MAX(m) FROM (SELECT MAX(id) AS m FROM auditlog "
@@ -118,6 +167,7 @@ def _raise_short_retention(bind) -> None:
 
 def downgrade() -> None:
     op.drop_table("audit_outbox")
+    _recover_interrupted_rebuild("auditlog")
     with op.batch_alter_table(
         "auditlog", recreate="always", table_kwargs={"sqlite_autoincrement": False}
     ) as batch:
