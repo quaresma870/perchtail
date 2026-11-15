@@ -100,6 +100,12 @@ test('mfa: enroll, login with a TOTP code, login with a backup code, disable', a
   await userPage.goto('/#/profile')
   await mfa.getByRole('button', { name: 'Disable MFA' }).click()
   await mfa.getByLabel('Current password').fill(newPassword)
+  // Turning MFA off needs the second factor too; a wrong code keeps it on.
+  await mfa.getByLabel('Authentication code').fill('000000')
+  await mfa.getByRole('button', { name: 'Disable MFA' }).click()
+  await expect(mfa.locator('.error')).toContainText('Invalid authentication code')
+  await expect(userPage.getByText('Two-factor authentication is on')).toBeVisible()
+  await mfa.getByLabel('Authentication code').fill(backupCodes[1])
   await mfa.getByRole('button', { name: 'Disable MFA' }).click()
   await expect(userPage.getByText('Two-factor authentication is off')).toBeVisible()
 

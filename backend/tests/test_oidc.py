@@ -1,4 +1,5 @@
 import time
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from app.audit import record_audit_event  # noqa: F401 - imported for readability of intent
@@ -71,20 +72,79 @@ def test_build_authorization_url_includes_all_required_params():
         scopes="openid email profile",
         state="the-state",
         nonce="the-nonce",
+        code_challenge="the-challenge",
     )
     assert url.startswith(f"{ISSUER}/authorize?")
     assert "response_type=code" in url
     assert f"client_id={CLIENT_ID}" in url
     assert "state=the-state" in url
     assert "nonce=the-nonce" in url
+    assert "code_challenge=the-challenge" in url
+    assert "code_challenge_method=S256" in url
+
+
+def test_the_code_challenge_is_the_s256_of_the_verifier():
+    # RFC 7636, appendix B.
+    verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    assert oidc.code_challenge_s256(verifier) == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+
+def test_code_verifiers_are_random_and_within_the_rfc_length():
+    first, second = oidc.generate_code_verifier(), oidc.generate_code_verifier()
+    assert first != second
+    assert 43 <= len(first) <= 128
+
+
+def test_the_authorization_redirect_sends_the_s256_challenge(monkeypatch, discovery_document):
+    monkeypatch.setattr(oidc, "fetch_discovery_document", lambda issuer: discovery_document)
+    settings = oidc.OIDCSettings(issuer=ISSUER, client_id=CLIENT_ID, client_secret="s3cret")
+
+    url = oidc.OIDCProvider(settings).authorization_redirect_url(
+        redirect_uri="https://app.example.com/auth/sso/callback",
+        state="s",
+        nonce="n",
+        code_verifier="the-verifier",
+    )
+
+    query = parse_qs(urlsplit(url).query)
+    assert query["code_challenge"] == [oidc.code_challenge_s256("the-verifier")]
+    assert query["code_challenge_method"] == ["S256"]
+    assert "the-verifier" not in url
+
+
+def test_the_code_exchange_sends_the_verifier(monkeypatch):
+    sent = {}
+
+    class _Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"id_token": "t"}
+
+    def fake_post(url, data, timeout):
+        sent.update(data)
+        return _Response()
+
+    monkeypatch.setattr(oidc.httpx, "post", fake_post)
+    oidc.exchange_code_for_tokens(
+        token_endpoint=f"{ISSUER}/token",
+        code="c",
+        redirect_uri="https://app.example.com/auth/sso/callback",
+        client_id=CLIENT_ID,
+        client_secret="s3cret",
+        code_verifier="the-verifier",
+    )
+    assert sent["code_verifier"] == "the-verifier"
 
 
 # --- encode_state / decode_state ---------------------------------------------------
 
 
-def test_state_roundtrips_to_the_same_nonce():
-    state = oidc.encode_state("my-nonce")
-    assert oidc.decode_state(state) == "my-nonce"
+def test_state_roundtrips_to_the_same_nonce_and_verifier():
+    state = oidc.encode_state("my-nonce", "my-verifier")
+    assert oidc.decode_state(state) == ("my-nonce", "my-verifier")
+    assert "my-verifier" not in state
 
 
 def test_decode_state_rejects_garbage():
@@ -92,8 +152,16 @@ def test_decode_state_rejects_garbage():
         oidc.decode_state("not-a-real-token")
 
 
+def test_decode_state_rejects_a_state_from_before_pkce():
+    # A login started before the upgrade carried only the nonce: start over.
+    from app.crypto import encrypt_secret
+
+    with pytest.raises(Exception):  # noqa: B017
+        oidc.decode_state(encrypt_secret("my-nonce"))
+
+
 def test_decode_state_rejects_expired_state(monkeypatch):
-    state = oidc.encode_state("my-nonce")
+    state = oidc.encode_state("my-nonce", "my-verifier")
     monkeypatch.setattr(oidc, "STATE_TTL_SECONDS", -1)
     with pytest.raises(Exception):  # noqa: B017
         oidc.decode_state(state)
@@ -141,6 +209,18 @@ def test_verify_id_token_rejects_nonce_mismatch():
 def test_verify_id_token_rejects_expired_token():
     key_set = _make_key_set()
     token = _sign_claims(key_set, _valid_claims(exp=int(time.time()) - 60))
+    with pytest.raises(ValueError):
+        oidc.verify_id_token(
+            token, jwks=key_set.as_dict(), issuer=ISSUER, client_id=CLIENT_ID, nonce="the-nonce"
+        )
+
+
+@pytest.mark.parametrize("claim", ["exp", "iat"])
+def test_verify_id_token_rejects_a_token_without_exp_or_iat(claim):
+    key_set = _make_key_set()
+    claims = _valid_claims()
+    del claims[claim]
+    token = _sign_claims(key_set, claims)
     with pytest.raises(ValueError):
         oidc.verify_id_token(
             token, jwks=key_set.as_dict(), issuer=ISSUER, client_id=CLIENT_ID, nonce="the-nonce"
@@ -222,6 +302,7 @@ def test_find_or_provision_user_reuses_the_existing_user_on_a_second_login(sessi
 @pytest.fixture()
 def discovery_document():
     return {
+        "issuer": ISSUER,
         "authorization_endpoint": f"{ISSUER}/authorize",
         "token_endpoint": f"{ISSUER}/token",
         "jwks_uri": f"{ISSUER}/jwks",
@@ -257,6 +338,7 @@ def test_complete_login_provisions_and_signs_in_a_new_user(
         code="the-code",
         redirect_uri="https://app.example.com/auth/sso/callback",
         nonce="the-nonce",
+        code_verifier="the-verifier",
         no_access_role_id=role.id,
     )
 
@@ -279,6 +361,7 @@ def test_complete_login_raises_when_idp_omits_id_token(session, monkeypatch, dis
             code="the-code",
             redirect_uri="https://app.example.com/auth/sso/callback",
             nonce="the-nonce",
+            code_verifier="the-verifier",
             no_access_role_id=role.id,
         )
 
@@ -313,6 +396,7 @@ def test_complete_login_rejects_a_deactivated_account(session, monkeypatch, disc
             code="the-code",
             redirect_uri="https://app.example.com/auth/sso/callback",
             nonce="the-nonce",
+            code_verifier="the-verifier",
             no_access_role_id=role.id,
         )
 
@@ -492,6 +576,7 @@ def test_complete_login_provisions_a_new_user_directly_into_the_mapped_role(
         code="the-code",
         redirect_uri="https://app.example.com/auth/sso/callback",
         nonce="the-nonce",
+        code_verifier="the-verifier",
         no_access_role_id=no_access.id,
     )
 
@@ -532,6 +617,7 @@ def test_complete_login_resyncs_an_existing_users_role_on_each_login(
         code="the-code",
         redirect_uri="https://app.example.com/auth/sso/callback",
         nonce="the-nonce",
+        code_verifier="the-verifier",
         no_access_role_id=no_access.id,
     )
 
@@ -581,7 +667,138 @@ def test_complete_login_leaves_role_unchanged_when_no_group_matches(
         code="the-code",
         redirect_uri="https://app.example.com/auth/sso/callback",
         nonce="the-nonce",
+        code_verifier="the-verifier",
         no_access_role_id=no_access.id,
     )
 
     assert user.role_id == manually_promoted.id
+
+
+# --- the IdP over HTTPS only ----------------------------------------------------------
+
+
+@pytest.fixture()
+def http_localhost_allowed(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "sso_allow_http_localhost", True)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://idp.example.com",
+        "http://localhost:8080/realms/x",
+        "ftp://idp.example.com",
+        "https://",
+        "idp.example.com",
+        "",
+    ],
+)
+def test_require_https_refuses_anything_but_https(url):
+    with pytest.raises(oidc.InsecureIdPURLError, match="must be an https:// URL"):
+        oidc.require_https(url, "issuer URL")
+
+
+def test_require_https_accepts_https():
+    oidc.require_https("https://idp.example.com/realms/x", "issuer URL")
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]"])
+def test_http_on_loopback_only_with_the_development_switch(http_localhost_allowed, host):
+    oidc.require_https(f"http://{host}:8080/realms/x", "issuer URL")
+
+
+def test_the_development_switch_never_allows_another_host(http_localhost_allowed):
+    with pytest.raises(oidc.InsecureIdPURLError):
+        oidc.require_https("http://idp.example.com", "issuer URL")
+    with pytest.raises(oidc.InsecureIdPURLError):
+        oidc.require_https("http://localhost.evil.example", "issuer URL")
+
+
+def test_discovery_refuses_an_http_issuer_before_any_request(monkeypatch):
+    calls = []
+    monkeypatch.setattr(oidc.httpx, "get", lambda *a, **k: calls.append(a))
+
+    with pytest.raises(oidc.InsecureIdPURLError):
+        oidc.fetch_discovery_document("http://idp.example.com")
+    assert calls == []
+
+
+@pytest.mark.parametrize("endpoint", oidc.DISCOVERY_ENDPOINTS)
+def test_discovery_refuses_an_http_endpoint(monkeypatch, discovery_document, endpoint):
+    document = {**discovery_document, endpoint: "http://idp.example.com/x"}
+
+    class _Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return document
+
+    monkeypatch.setattr(oidc.httpx, "get", lambda url, timeout: _Response())
+
+    with pytest.raises(oidc.InsecureIdPURLError, match=endpoint):
+        oidc.fetch_discovery_document(ISSUER)
+
+
+def _serve_discovery(monkeypatch, document):
+    class _Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return document
+
+    monkeypatch.setattr(oidc.httpx, "get", lambda url, timeout: _Response())
+
+
+@pytest.mark.parametrize(
+    "discovered",
+    [
+        "https://evil.example.com",
+        "https://idp.example.com/other",
+        "https://IDP.example.com",
+        "http://idp.example.com",
+        "",
+        None,
+        ["https://idp.example.com"],
+    ],
+)
+def test_discovery_refuses_another_issuer(monkeypatch, discovery_document, discovered):
+    document = {**discovery_document, "issuer": discovered}
+    if discovered is None:
+        del document["issuer"]
+    _serve_discovery(monkeypatch, document)
+
+    with pytest.raises(oidc.IssuerMismatchError) as exc_info:
+        oidc.fetch_discovery_document(ISSUER)
+    assert "evil" not in str(exc_info.value)
+    assert ISSUER not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("configured", "discovered"), [(ISSUER, ISSUER + "/"), (ISSUER + "/", ISSUER)]
+)
+def test_discovery_ignores_only_a_trailing_slash(
+    monkeypatch, discovery_document, configured, discovered
+):
+    _serve_discovery(monkeypatch, {**discovery_document, "issuer": discovered})
+
+    assert oidc.fetch_discovery_document(configured)["issuer"] == discovered
+
+
+def test_the_token_and_jwks_requests_refuse_http(monkeypatch):
+    monkeypatch.setattr(oidc.httpx, "get", lambda *a, **k: pytest.fail("no request"))
+    monkeypatch.setattr(oidc.httpx, "post", lambda *a, **k: pytest.fail("no request"))
+    with pytest.raises(oidc.InsecureIdPURLError):
+        oidc.fetch_jwks("http://idp.example.com/jwks")
+    with pytest.raises(oidc.InsecureIdPURLError):
+        oidc.exchange_code_for_tokens(
+            token_endpoint="http://idp.example.com/token",
+            code="c",
+            redirect_uri="https://app.example.com/auth/sso/callback",
+            client_id=CLIENT_ID,
+            client_secret="s3cret",
+            code_verifier="v",
+        )

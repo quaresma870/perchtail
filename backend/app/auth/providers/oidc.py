@@ -13,9 +13,12 @@ directly instead of faking that client's internals — the same "mock the
 client, don't hit a real remote" convention the SSH/SMB/WinRM connector
 tests already use (see CONTRIBUTING.md)."""
 
+import base64
+import hashlib
 import json
+import secrets
 from dataclasses import dataclass
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from cryptography.fernet import InvalidToken
@@ -26,11 +29,51 @@ from sqlmodel import Session, select
 from app import profile
 from app.audit import record_audit_event
 from app.auth.models import AuthProviderType, SSOGroupRoleMapping, User
+from app.config import get_settings
 from app.crypto import decrypt_secret, encrypt_secret
 from app.timeutils import utcnow
 
 STATE_TTL_SECONDS = 600
 HTTP_TIMEOUT_SECONDS = 10
+# The discovery document's endpoints PerchTail calls or sends browsers to.
+DISCOVERY_ENDPOINTS = ("authorization_endpoint", "token_endpoint", "jwks_uri")
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+class InsecureIdPURLError(ValueError):
+    """An issuer or IdP endpoint that isn't https://. The message names which
+    one and says what's accepted; it never quotes a secret."""
+
+
+def require_https(url: object, what: str) -> None:
+    """Refuses anything but an https:// URL with a host, so the ID token, the
+    client secret and the authorization code never travel in clear text.
+    SSO_ALLOW_HTTP_LOCALHOST=true also accepts http:// on a loopback host,
+    for local development only."""
+    if not isinstance(url, str):
+        raise InsecureIdPURLError(f"The {what} is missing")
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    if parts.scheme == "https" and host:
+        return
+    if (
+        parts.scheme == "http"
+        and host in _LOOPBACK_HOSTS
+        and get_settings().sso_allow_http_localhost
+    ):
+        return
+    raise InsecureIdPURLError(f"The {what} must be an https:// URL")
+
+
+class IssuerMismatchError(ValueError):
+    """The discovery document names an issuer other than the configured one.
+    The message quotes neither of them."""
+
+
+def _same_issuer(configured: str, discovered: object) -> bool:
+    """Exact comparison, ignoring only a trailing slash (OpenID Connect
+    Discovery 1.0, section 4.3)."""
+    return isinstance(discovered, str) and discovered.rstrip("/") == configured.rstrip("/")
 
 
 @dataclass
@@ -105,22 +148,56 @@ def resolve_group_mapped_role_id(session: Session, claim_groups: list[str]) -> i
 
 def fetch_discovery_document(issuer: str) -> dict:
     """GET <issuer>/.well-known/openid-configuration. Raises on any HTTP or
-    network failure — callers turn that into a user-facing detail."""
+    network failure — callers turn that into a user-facing detail —,
+    InsecureIdPURLError when the issuer or any endpoint the document names
+    (DISCOVERY_ENDPOINTS) isn't https://, and IssuerMismatchError when the
+    document's `issuer` isn't the configured one: its endpoints and keys
+    then speak for another identity provider."""
+    require_https(issuer, "issuer URL")
     url = issuer.rstrip("/") + "/.well-known/openid-configuration"
     response = httpx.get(url, timeout=HTTP_TIMEOUT_SECONDS)
     response.raise_for_status()
-    return response.json()
+    document = response.json()
+    if not isinstance(document, dict):
+        raise ValueError("The discovery document isn't a JSON object")
+    if not _same_issuer(issuer, document.get("issuer")):
+        raise IssuerMismatchError(
+            "The identity provider's discovery document names a different issuer"
+        )
+    for name in DISCOVERY_ENDPOINTS:
+        if name in document:
+            require_https(document[name], f"identity provider's {name}")
+    return document
 
 
 def fetch_jwks(jwks_uri: str) -> dict:
+    require_https(jwks_uri, "identity provider's jwks_uri")
     response = httpx.get(jwks_uri, timeout=HTTP_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.json()
 
 
+def generate_code_verifier() -> str:
+    """A PKCE code verifier (RFC 7636): 64 random bytes, 86 URL-safe
+    characters, inside the 43 to 128 the RFC allows."""
+    return secrets.token_urlsafe(64)
+
+
+def code_challenge_s256(code_verifier: str) -> str:
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
 def exchange_code_for_tokens(
-    *, token_endpoint: str, code: str, redirect_uri: str, client_id: str, client_secret: str
+    *,
+    token_endpoint: str,
+    code: str,
+    redirect_uri: str,
+    client_id: str,
+    client_secret: str,
+    code_verifier: str,
 ) -> dict:
+    require_https(token_endpoint, "identity provider's token_endpoint")
     response = httpx.post(
         token_endpoint,
         data={
@@ -129,6 +206,7 @@ def exchange_code_for_tokens(
             "redirect_uri": redirect_uri,
             "client_id": client_id,
             "client_secret": client_secret,
+            "code_verifier": code_verifier,
         },
         timeout=HTTP_TIMEOUT_SECONDS,
     )
@@ -138,12 +216,17 @@ def exchange_code_for_tokens(
 
 def verify_id_token(id_token: str, *, jwks: dict, issuer: str, client_id: str, nonce: str) -> dict:
     """Validates the ID token's signature against the IdP's published JWKS
-    and its iss/exp/aud/nonce claims. Raises `ValueError` on any failure —
-    an ID token's claims are never trusted without this."""
+    and its iss/exp/iat/aud/nonce claims; exp and iat must be present.
+    Raises `ValueError` on any failure — an ID token's claims are never
+    trusted without this."""
     key_set = KeySet.import_key_set(jwks)
     token = jwt.decode(id_token, key_set)
 
-    claims_registry = jwt.JWTClaimsRegistry(iss={"essential": True, "value": issuer})
+    claims_registry = jwt.JWTClaimsRegistry(
+        iss={"essential": True, "value": issuer},
+        exp={"essential": True},
+        iat={"essential": True},
+    )
     try:
         claims_registry.validate(token.claims)
     except Exception as exc:  # noqa: BLE001 - re-raised as a uniform ValueError for callers
@@ -168,6 +251,7 @@ def build_authorization_url(
     scopes: str,
     state: str,
     nonce: str,
+    code_challenge: str,
 ) -> str:
     params = {
         "response_type": "code",
@@ -176,21 +260,28 @@ def build_authorization_url(
         "scope": scopes,
         "state": state,
         "nonce": nonce,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
     }
     return f"{authorization_endpoint}?{urlencode(params)}"
 
 
-def encode_state(nonce: str) -> str:
+def encode_state(nonce: str, code_verifier: str) -> str:
     """Self-contained, encrypted state param (Fernet, via app.crypto) instead
     of a server-side state table — Fernet tokens already embed a creation
-    timestamp, which `decode_state` uses for expiry."""
-    return encrypt_secret(nonce)
+    timestamp, which `decode_state` uses for expiry. Carries the nonce and
+    the PKCE code verifier, which never reaches the browser in clear."""
+    return encrypt_secret(json.dumps({"nonce": nonce, "code_verifier": code_verifier}))
 
 
-def decode_state(state: str) -> str:
-    """Returns the nonce, or raises if `state` is malformed, tampered with,
-    or older than STATE_TTL_SECONDS."""
-    return decrypt_secret(state, ttl=STATE_TTL_SECONDS)
+def decode_state(state: str) -> tuple[str, str]:
+    """Returns (nonce, code_verifier), or raises if `state` is malformed,
+    tampered with, or older than STATE_TTL_SECONDS."""
+    payload = json.loads(decrypt_secret(state, ttl=STATE_TTL_SECONDS))
+    nonce, code_verifier = payload["nonce"], payload["code_verifier"]
+    if not isinstance(nonce, str) or not isinstance(code_verifier, str):
+        raise ValueError("malformed state")
+    return nonce, code_verifier
 
 
 def find_or_provision_user(
@@ -252,15 +343,20 @@ class OIDCProvider:
     def __init__(self, settings: OIDCSettings):
         self.settings = settings
 
-    def authorization_redirect_url(self, *, redirect_uri: str, state: str, nonce: str) -> str:
+    def authorization_redirect_url(
+        self, *, redirect_uri: str, state: str, nonce: str, code_verifier: str
+    ) -> str:
         discovery = fetch_discovery_document(self.settings.issuer)
+        authorization_endpoint = discovery["authorization_endpoint"]
+        require_https(authorization_endpoint, "identity provider's authorization_endpoint")
         return build_authorization_url(
-            authorization_endpoint=discovery["authorization_endpoint"],
+            authorization_endpoint=authorization_endpoint,
             client_id=self.settings.client_id,
             redirect_uri=redirect_uri,
             scopes=self.settings.scopes,
             state=state,
             nonce=nonce,
+            code_challenge=code_challenge_s256(code_verifier),
         )
 
     def complete_login(
@@ -270,6 +366,7 @@ class OIDCProvider:
         code: str,
         redirect_uri: str,
         nonce: str,
+        code_verifier: str,
         no_access_role_id: int,
     ) -> User:
         """Exchanges the authorization code, verifies the ID token, and
@@ -286,6 +383,7 @@ class OIDCProvider:
             redirect_uri=redirect_uri,
             client_id=self.settings.client_id,
             client_secret=self.settings.client_secret,
+            code_verifier=code_verifier,
         )
         id_token = tokens.get("id_token")
         if not id_token:

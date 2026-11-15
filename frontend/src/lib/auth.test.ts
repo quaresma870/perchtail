@@ -9,7 +9,15 @@ vi.mock('./api', async () => {
 })
 
 import { api } from './api'
-import { authChecked, currentUser, hasCapability, login, logout, refreshCurrentUser } from './auth'
+import {
+  authChecked,
+  currentUser,
+  hasCapability,
+  login,
+  logout,
+  mfaSetupRequired,
+  refreshCurrentUser,
+} from './auth'
 
 function user(overrides: Partial<CurrentUser> = {}): CurrentUser {
   return {
@@ -23,6 +31,7 @@ function user(overrides: Partial<CurrentUser> = {}): CurrentUser {
     active: true,
     must_change_password: false,
     mfa_enabled: false,
+    mfa_required: false,
     is_super_admin: false,
     global_capabilities: [],
     ...overrides,
@@ -46,6 +55,21 @@ describe('hasCapability', () => {
 
   it('denies a capability absent from global_capabilities', () => {
     expect(hasCapability(user({ global_capabilities: ['manage_users'] }), 'manage_roles')).toBe(false)
+  })
+})
+
+describe('mfaSetupRequired', () => {
+  it('is false with no user', () => {
+    expect(mfaSetupRequired(null)).toBe(false)
+  })
+
+  it('is true for an account that must use MFA and has not turned it on', () => {
+    expect(mfaSetupRequired(user({ mfa_required: true }))).toBe(true)
+  })
+
+  it('is false once MFA is on, or when it is not required', () => {
+    expect(mfaSetupRequired(user({ mfa_required: true, mfa_enabled: true }))).toBe(false)
+    expect(mfaSetupRequired(user({ mfa_required: false }))).toBe(false)
   })
 })
 

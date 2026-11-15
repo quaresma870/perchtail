@@ -310,11 +310,33 @@ def test_mfa_disable_password_check_is_throttled(client, session, monkeypatch):
     get_settings.cache_clear()
 
 
-def test_mfa_disable_turns_off_mfa_and_allows_login_without_a_code(client, session):
+def test_a_lockout_from_reconfirmation_failures_is_audited(client, session, monkeypatch):
+    """The failures lock the account and, with the same limit, the address
+    (app/login_throttle.py) -- the address lock also stops other people's
+    logins, so each lockout gets its user.locked_out, as after a login."""
+    monkeypatch.setenv("LOGIN_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
     _login_and_change_password(client, session)
     _enroll_and_confirm(client)
 
-    response = client.post("/auth/mfa/disable", json={"password": "new-password!"})
+    for _ in range(3):
+        response = client.post("/auth/mfa/disable", json={"password": "wrong"})
+        assert response.status_code == 401
+
+    lockouts = session.exec(select(AuditLog).where(AuditLog.action == "user.locked_out")).all()
+    assert sorted(entry.event_metadata["scope"] for entry in lockouts) == ["account", "address"]
+    assert all(entry.event_metadata["username"] == USERNAME for entry in lockouts)
+
+    get_settings.cache_clear()
+
+
+def test_mfa_disable_turns_off_mfa_and_allows_login_without_a_code(client, session):
+    _login_and_change_password(client, session)
+    secret, _ = _enroll_and_confirm(client)
+
+    response = client.post(
+        "/auth/mfa/disable", json={"password": "new-password!", "code": _next_totp_code(secret)}
+    )
     assert response.status_code == 200
     assert response.json()["mfa_enabled"] is False
 
@@ -323,11 +345,77 @@ def test_mfa_disable_turns_off_mfa_and_allows_login_without_a_code(client, sessi
     assert relogin.status_code == 200
 
 
-def test_mfa_disable_audits(client, session):
+def test_mfa_disable_accepts_a_backup_code(client, session):
+    _login_and_change_password(client, session)
+    _, codes = _enroll_and_confirm(client)
+
+    response = client.post(
+        "/auth/mfa/disable", json={"password": "new-password!", "code": codes[0]}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mfa_enabled"] is False
+
+
+@pytest.mark.parametrize("code", [None, "", "000000", "not-a-code"])
+def test_mfa_disable_needs_a_valid_code_with_the_right_password(client, session, code):
+    """A phished password plus a stolen session mustn't turn MFA off."""
     _login_and_change_password(client, session)
     _enroll_and_confirm(client)
+    body = {"password": "new-password!"}
+    if code is not None:
+        body["code"] = code
 
-    client.post("/auth/mfa/disable", json={"password": "new-password!"})
+    response = client.post("/auth/mfa/disable", json=body)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid authentication code"
+    assert client.get("/auth/me").json()["mfa_enabled"] is True
+    [entry] = _reauth_failures(session)
+    assert entry.event_metadata == {"action": "mfa_disable", "target_name": USERNAME}
+
+
+def test_mfa_disable_code_guesses_share_the_login_budget(client, session, monkeypatch):
+    """The right password doesn't clear the failures while the code is
+    wrong, so a known password can't be used to guess codes without limit."""
+    monkeypatch.setenv("LOGIN_MAX_ATTEMPTS", "3")
+    get_settings.cache_clear()
+    _login_and_change_password(client, session)
+    secret, _ = _enroll_and_confirm(client)
+
+    for _ in range(3):
+        response = client.post(
+            "/auth/mfa/disable", json={"password": "new-password!", "code": "000000"}
+        )
+        assert response.status_code == 401
+
+    locked = client.post(
+        "/auth/mfa/disable", json={"password": "new-password!", "code": _next_totp_code(secret)}
+    )
+    assert locked.status_code == 429
+    assert client.get("/auth/me").json()["mfa_enabled"] is True
+
+    get_settings.cache_clear()
+
+
+def test_mfa_disable_with_only_a_pending_enrollment_needs_no_code(client, session):
+    """Enrolled but never confirmed: there's no second factor to prove."""
+    _login_and_change_password(client, session)
+    client.post("/auth/mfa/enroll", json={"password": "new-password!"})
+
+    response = client.post("/auth/mfa/disable", json={"password": "new-password!"})
+
+    assert response.status_code == 200
+    user = session.exec(select(User).where(User.username == USERNAME)).one()
+    session.refresh(user)
+    assert user.mfa_secret_encrypted is None
+
+
+def test_mfa_disable_audits(client, session):
+    _login_and_change_password(client, session)
+    _, codes = _enroll_and_confirm(client)
+
+    client.post("/auth/mfa/disable", json={"password": "new-password!", "code": codes[0]})
 
     actions = [e.action for e in session.exec(select(AuditLog)).all()]
     assert "user.mfa_disable" in actions

@@ -141,12 +141,14 @@ See [agent-service.md](agent-service.md) for installing and running the agent.
 
 ### "Too many failed login attempts. Try again later."
 
-After `LOGIN_MAX_ATTEMPTS` failed attempts in a row (5 by default) for one username, that username is locked for `LOGIN_LOCKOUT_SECONDS` (300 by default). The answer is HTTP 429 with a `Retry-After` header. A wrong MFA code counts as a failed attempt too.
+PerchTail counts failed sign-ins two ways, and either one can lock. The answer is HTTP 429 with a `Retry-After` header. A wrong MFA code counts as a failed attempt too.
 
-- The lock is per username, not per address. Someone guessing a user's password also locks the real user out for that time.
+- **Per username**: after `LOGIN_MAX_ATTEMPTS` failed attempts in a row (5 by default) for one username, that username is locked for `LOGIN_LOCKOUT_SECONDS` (300 by default), from every address. Someone guessing a user's password also locks the real user out for that time.
+- **Per address**: after `LOGIN_MAX_ATTEMPTS` failed attempts (5 by default, the same limit as per username) from one client address, whatever the usernames, that address is locked for `LOGIN_LOCKOUT_SECONDS`. Other addresses keep signing in. IPv6 addresses are counted by their /64. Everyone behind one NAT or one shared proxy has the same address, so five failures by anyone there lock sign-in for all of them for `LOGIN_LOCKOUT_SECONDS`. Behind a reverse proxy, set `TRUSTED_PROXIES` so the address is the client's and not the proxy's ([audit-events.md](audit-events.md#client-address)). When a proxy is missing from it, the log has a `client_address.untrusted_forwarded_header` warning with the proxy's address, and `/monitoring/health` reports `trusted_proxies_suspect: true` ([monitoring.md](monitoring.md)).
+- **Emergency accounts**: for an active local super admin with MFA on, the per-username count is kept per address too, so failed attempts from one address never lock it out of another. Its MFA is what protects its password from guessing spread over many addresses. A super admin that hasn't set MFA up yet (for example right after upgrading) is locked per username, from every address, like any other account: set up MFA on each super admin soon after upgrading.
 - Lockouts are kept in memory. They end on their own, and a restart of PerchTail clears them all.
-- A successful sign-in clears the count.
-- The audit log records failed sign-ins and the lockout.
+- A successful sign-in clears the username's count, not the address's.
+- The audit log records failed sign-ins and each lockout (`user.locked_out`, with its `scope`).
 
 Changing your own password has its own limit: "Too many failed attempts. Try again later."
 
@@ -159,7 +161,7 @@ Changing your own password has its own limit: "Too many failed attempts. Try aga
 
 - After the password, the sign-in page asks for "the 6-digit code from your authenticator app, or a backup code".
 - "Invalid authentication code": the code was wrong or used already. The server tolerates one 30-second step of clock difference either way: if codes keep failing, check the clock of the phone and of the PerchTail server.
-- A user who lost the authenticator can sign in with one of their backup codes, then turn MFA off and on again under **My profile** (this asks for their password). Each backup code works once.
+- A user who lost the authenticator can sign in with one of their backup codes, then turn MFA off and on again under **My profile** (this asks for their password and another backup code). Each backup code works once.
 - Administrators can't turn off another user's MFA in this version. Resetting the password doesn't remove MFA.
 
 ### Sign-in seems to work, then you're back at the sign-in page
@@ -277,6 +279,7 @@ There's no command-line tool for this in this version. What exists:
 - A user with **Manage users** can reset another user's password in **Settings → Users**: PerchTail shows a temporary password once, the user must change it at the next sign-in, and the user is signed out everywhere. A delegated administrator can't reset an account with more rights than their own.
 - A user who lost their authenticator signs in with a backup code.
 - The break-glass super admin with a random password is created only on the very first start, when the database has no users. Keep a second super admin account, so one can reset the other.
+- SSO accounts have no password in PerchTail: they sign in through the identity provider, and their password and MFA are reset there.
 
 ### Where are the agent's logs?
 

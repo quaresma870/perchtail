@@ -6,6 +6,7 @@ audit log reads (app/request_context.py, app/api/errors.py)."""
 import uuid
 
 import pytest
+from app import request_context
 from app.auth.models import AuditLog, Capability, Role, RoleGrant, ScopeType, User
 from app.auth.sessions import create_session, hash_token
 from app.config import get_settings, parse_networks
@@ -15,6 +16,7 @@ from app.models import Customer, PatternKind, Protocol, Rule, RuleType, Source
 from app.request_context import resolve_client, session_ref
 from fastapi.testclient import TestClient
 from sqlmodel import select
+from structlog.testing import capture_logs
 
 TRUSTED = parse_networks("127.0.0.0/8, ::1, 10.0.0.0/24")
 
@@ -125,6 +127,30 @@ def test_a_forwarded_header_from_an_untrusted_peer_is_ignored(session, real_app)
     client.post("/auth/logout", headers={"X-Forwarded-For": "198.51.100.7"})
     [entry] = _entries(session, "user.logout")
     assert entry.client_ip == "203.0.113.9"
+
+
+def test_a_forwarded_header_from_an_untrusted_peer_warns_once(session, real_app):
+    user = _user(session)
+    trusted_client, _ = _client(session, user, address=("127.0.0.1", 50000))
+    with capture_logs() as logs:
+        # From a trusted proxy, or with no forwarding header: nothing to say.
+        trusted_client.get("/healthz", headers={"X-Forwarded-For": "198.51.100.7"})
+        trusted_client.get("/healthz")
+        assert not request_context.trusted_proxies_suspect()
+
+        client, _ = _client(session, user, address=("203.0.113.9", 443))
+        client.get("/healthz", headers={"Forwarded": "for=198.51.100.7"})
+        client.get("/healthz", headers={"X-Forwarded-For": "198.51.100.8"})
+
+    assert request_context.trusted_proxies_suspect()
+    warnings = [e for e in logs if e["event"] == "client_address.untrusted_forwarded_header"]
+    assert warnings == [
+        {
+            "event": "client_address.untrusted_forwarded_header",
+            "log_level": "warning",
+            "peer": "203.0.113.9",
+        }
+    ]
 
 
 def test_the_user_agent_is_truncated(session, real_app):

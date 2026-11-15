@@ -23,7 +23,7 @@
 
 - **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
 - **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks.
-- **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults) and optional TOTP; OIDC single sign-on with group-to-role mapping.
+- **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults) and TOTP, required for administrators and optionally for everyone; OIDC single sign-on with group-to-role mapping.
 - **Operations:** settings in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained, verified daily and records where each action came from, including refused requests, bulk YAML import and export, server-side limits on listings and downloads running at once (Settings → System), and a system SMTP server for email, always over verified TLS (Settings → Email).
 - **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
 
@@ -128,22 +128,13 @@ version (amd64 and arm64), for example:
 
 Each [GitHub release](https://github.com/quaresma870/perchtail/releases) also carries the push-agent binaries, their `SHA256SUMS`, `SHA256SUMS.sig` (its Ed25519 signature with the release key), the image's SBOM, and `perchtail-image.json` with `perchtail-image.json.sig`, which name the release's image by digest and are signed with the same key, all attached before the release is published. The image carries the same signed agent binaries, for upgrading agents from the portal. `latest` and `X.Y` tags only move when a full release is published, never with a pre-release.
 
-On first startup (only when the database has zero users), PerchTail creates a
-break-glass super-admin account with a randomly generated password and prints
-it once to the container logs — grab it before it scrolls away:
+On first startup (only when the database has zero users), PerchTail creates a break-glass super-admin account with a randomly generated password. The password is never logged: it is written to `initial-admin-password` in `DATA_DIR` (`/data/db` in the container), readable only by PerchTail's user, and the log says where:
 
 ```bash
-docker compose logs perchtail | grep initial_super_admin
+docker compose exec perchtail cat /data/db/initial-admin-password
 ```
 
-Open `http://localhost:8080`, sign in with that username/password (`admin` by
-default — override with `INITIAL_ADMIN_USERNAME` in `.env` before first
-startup), and you'll be forced to set your own password immediately. From
-there: **Settings → Sources → + Add source** to point PerchTail at a server
-(see [docs/source-setup.md](docs/source-setup.md) for what the source side
-needs configured first), attach a rule so something is actually visible (a
-source with zero rules shows nothing, by design), and open **Viewer** to
-browse it.
+Open `http://localhost:8080`, sign in with that username/password (`admin` by default — override with `INITIAL_ADMIN_USERNAME` in `.env` before first startup), and you'll be forced to set your own password immediately; the file is deleted when you do. Super admins and every account with an administrative capability must then set up two-factor authentication (TOTP) before they can do anything else. From there: **Settings → Sources → + Add source** to point PerchTail at a server (see [docs/source-setup.md](docs/source-setup.md) for what the source side needs configured first), attach a rule so something is actually visible (a source with zero rules shows nothing, by design), and open **Viewer** to browse it.
 
 State (the SQLite database, rotated application logs, and the ephemeral
 scratch cache) lives in the `perchtail-data` Docker volume, so it survives
@@ -154,7 +145,7 @@ volume (`/data` in the container), one directory per kind of data:
 
 | Directory | Setting | Contents | Back up? |
 |---|---|---|---|
-| `/data/db` | `DATA_DIR` | SQLite database, credential-encryption salt (`credential_salt`), SSH `known_hosts` | yes |
+| `/data/db` | `DATA_DIR` | SQLite database, credential-encryption salt (`credential_salt`), SSH `known_hosts`, the first super admin's temporary password (`initial-admin-password`, until it is changed) | yes |
 | `/data/logs` | `LOG_DIR` | the app's own logs, rotated by size and day | optional |
 | `/data/scratch` | `SCRATCH_DIR` | short-lived fetches, purged on close and emptied at startup | no |
 | `/data/backups` | `BACKUP_DIR` | encrypted backups made by `python -m app.backup` | copy them off the host |

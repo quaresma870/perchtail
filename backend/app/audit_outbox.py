@@ -23,7 +23,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.audit import record_audit_event
-from app.auth.models import Capability, ScopeType
+from app.auth.models import AuthProviderType, Capability, ScopeType
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -78,11 +78,27 @@ def _duplicate_grant_deleted(metadata: object) -> bool:
     return isinstance(capabilities, list) and all(c in allowed for c in capabilities)
 
 
+def _sso_password_cleared(metadata: object) -> bool:
+    """e5c1b7a94d26: the password left on an SSO account removed."""
+    if not isinstance(metadata, dict):
+        return False
+    if set(metadata) != {"reason", "user_id", "username", "auth_provider"}:
+        return False
+    sso_providers = {p.value for p in AuthProviderType if p != AuthProviderType.local}
+    return (
+        metadata["reason"] == "sso_account"
+        and _is_int(metadata["user_id"])
+        and isinstance(metadata["username"], str)
+        and metadata["auth_provider"] in sso_providers
+    )
+
+
 # action -> (target_type, check of the metadata, metadata key of the target
 # id or None).
 ACCEPTED: dict[str, tuple[str, Callable[[object], bool], str | None]] = {
     "system_settings.update": ("system_settings", _retention_raised, None),
     "role_grant.delete": ("role_grant", _duplicate_grant_deleted, "grant_id"),
+    "user.password_cleared": ("user", _sso_password_cleared, "user_id"),
 }
 
 

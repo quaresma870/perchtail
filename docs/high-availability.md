@@ -27,7 +27,7 @@
 
 - the push agents' WebSocket connections: a command for an agent can only go through the process it's connected to;
 - the connector limits (Settings → System → Limits): the slots in use per source and per user, and the count of refused requests in `/monitoring/health`;
-- login throttling: failed sign-ins and lockouts per username, so a restart clears every lockout;
+- login throttling: failed sign-ins and lockouts per username and per client address, so a restart clears every lockout;
 - the counting of repeated failed sign-ins before they're written to the audit log;
 - which files in the scratch cache are open (the files themselves are on local disk under `SCRATCH_DIR`, and are cleared at startup);
 - the file-name index passes and source checks queued or running;

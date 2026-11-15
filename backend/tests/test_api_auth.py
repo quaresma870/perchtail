@@ -178,7 +178,10 @@ def test_login_lockout_is_scoped_to_the_attempted_username(client, session, monk
     locked_out = _login(client, password="wrong")
     assert locked_out.status_code == 401
 
-    still_open = _login(client, username="other@example.com", password="wrong")
+    # From another address: this one is locked too now (the address limit
+    # is also LOGIN_MAX_ATTEMPTS).
+    elsewhere = TestClient(client.app, client=("198.51.100.20", 50000))
+    still_open = _login(elsewhere, username="other@example.com", password="wrong")
     assert still_open.status_code == 401  # not 429 -- different username
 
     get_settings.cache_clear()
@@ -195,9 +198,11 @@ def test_successful_login_clears_prior_failures(client, session, monkeypatch):
     assert ok_response.status_code == 200
 
     # Two more wrong attempts shouldn't lock out -- the successful login
-    # above should have reset the failure count back to zero.
-    _login(client, password="wrong")
-    second_wrong = _login(client, password="wrong")
+    # above should have reset the failure count back to zero. They come from
+    # another address, since a success doesn't clear the address's count.
+    elsewhere = TestClient(client.app, client=("198.51.100.20", 50000))
+    _login(elsewhere, password="wrong")
+    second_wrong = _login(elsewhere, password="wrong")
     assert second_wrong.status_code == 401
 
     get_settings.cache_clear()
@@ -392,5 +397,7 @@ def test_lockout_and_attempts_while_locked_are_audited(client, session, monkeypa
     locked = _login(client)
 
     assert locked.status_code == 429
-    assert len(_audit(session, "user.locked_out")) == 1
+    # The same failure reaches both limits: one event per scope.
+    scopes = sorted(e.event_metadata["scope"] for e in _audit(session, "user.locked_out"))
+    assert scopes == ["account", "address"]
     assert len(_audit(session, "user.login_throttled")) == 1
