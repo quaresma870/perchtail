@@ -64,6 +64,10 @@ class SystemSettingsPublic(BaseModel):
     listing_max_entries: int
     # Scheduled backup (#334, app/backup.py), hours; 0 = off.
     backup_interval_hours: int
+    # Redaction (#382, #249): changed by super admins only.
+    redaction_enabled: bool
+    redaction_downloads: bool
+    redaction_download_suffix: bool
 
 
 class BackupPublic(BaseModel):
@@ -143,6 +147,10 @@ class SystemSettingsUpdate(BaseModel):
     )
     # 0 = off; otherwise 1 hour to a week.
     backup_interval_hours: int | None = Field(default=None, ge=0, le=168)
+    # Super admins only (_check_redaction_settings).
+    redaction_enabled: bool | None = None
+    redaction_downloads: bool | None = None
+    redaction_download_suffix: bool | None = None
 
 
 _PASSWORD_INTS = (
@@ -217,6 +225,7 @@ def update_system_settings(
     # can't parse back (int("None") raises) on every read after this.
     changed = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
     before = _read_all(session).model_dump()
+    _check_redaction_settings(user, changed)
     _check_audit_retention(user, before["audit_retention_days"], changed)
     _check_audit_folder_listings(user, before["audit_folder_listings"], changed)
     min_length = changed.get(
@@ -309,6 +318,17 @@ def _check_audit_retention(user: User, current: int, changed: dict) -> None:
         raise forbidden(
             "Only a super admin can shorten how long audit entries are kept",
             reason="audit_retention_lowered",
+            user=user,
+        )
+
+
+def _check_redaction_settings(user: User, changed: dict) -> None:
+    """Redaction is configured by super admins only (#382, #249): it decides
+    what everyone, super admins included, sees of file content."""
+    if not user.role.is_super_admin and system_settings.REDACTION_SETTINGS & changed.keys():
+        raise forbidden(
+            "Only a super admin can change redaction settings",
+            reason="redaction_settings_super_admin",
             user=user,
         )
 

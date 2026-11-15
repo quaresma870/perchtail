@@ -22,7 +22,23 @@ BOOL_DEFAULTS: dict[str, str] = {
     # Whether listing a folder below a source's root is audited
     # (`source.browse`); opening a source, its root, always is. On by default.
     "audit_folder_listings": "true",
+    # Redaction (#382, #249, app/redaction_rules.py), for super admins only
+    # (REDACTION_SETTINGS). Off by default; on with no enabled rule, nothing
+    # changes. When on, it applies to everyone, super admins included.
+    "redaction_enabled": "false",
+    # Whether downloads (single files, folder ZIPs, archives and their
+    # members) are redacted too while redaction is on; off, they carry the
+    # original content and only the viewer, Tail and alerts are redacted.
+    "redaction_downloads": "true",
+    # Whether a redacted download's file name says so (`app.redacted.log`);
+    # only counts while downloads are redacted.
+    "redaction_download_suffix": "true",
 }
+
+# The settings above that only a super admin may change (app/api/system_settings.py).
+REDACTION_SETTINGS: frozenset[str] = frozenset(
+    {"redaction_enabled", "redaction_downloads", "redaction_download_suffix"}
+)
 
 # Enumerated string settings: key -> (default, allowed values). A value
 # outside the allowed set is never stored (the API validates with a

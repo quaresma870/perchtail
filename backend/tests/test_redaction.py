@@ -181,6 +181,61 @@ def test_a_value_at_the_long_line_limit_is_not_kept_in_part():
         assert out == b"[redacted: line over 64 bytes]\n"
 
 
+ACCT = {"id": 1, "name": "acct", "pattern": r"ACCT(?: \d{4}){20}", "secret_group": 0}
+ACCT_VALUE = "ACCT" + " 1234" * 20  # 104 bytes, with blanks
+
+
+@pytest.mark.parametrize("encoding", [None, UTF16_UNSURE])
+def test_a_custom_value_with_blanks_cut_at_the_limit_leaves_nothing(encoding):
+    """A custom rule's max_length widens the guard before the cut of a long
+    line: with the built-in guard alone (64 bytes), the start of a 104-byte
+    value with blanks, cut by the limit, stayed before the marker."""
+    rules = [{**ACCT, "max_length": len(ACCT_VALUE)}]
+    assert compile_rules(rules).cut_guard == len(ACCT_VALUE)
+    limit = 256
+    for k in range(len(ACCT_VALUE) + 1):
+        prefix = "w" * (limit - k - 1) + " "
+        line = prefix + ACCT_VALUE + " end\n"
+        if encoding is None:
+            data = line.encode()
+            out, _ = redact_bytes(data, rules, max_line_bytes=limit)
+            text = out.decode()
+        else:
+            data = ("一 " + line).encode("utf-16-le")
+            out, _ = redact_bytes(data, rules, max_line_bytes=2 * limit, source_encoding=encoding)
+            text = out.replace(b"\x00", b"").decode("utf-8", "ignore")
+        kept = text.split("[redacted:")[0]
+        # Only the filler (and, in UTF-16, the 一 that starts the file,
+        # 00 4E without its zero byte) may stay: no letter or digit of the value.
+        assert set(kept) <= set("w N"), (k, kept)
+        assert "[redacted: line over" in text, k
+
+
+def test_without_max_length_the_built_in_guard_keeps_part_of_a_long_custom_value():
+    """Why max_length matters: the same line with the built-in guard only."""
+    line = ("wwwwwwwww " * 16 + ACCT_VALUE + " end\n").encode()
+    out, _ = redact_bytes(line, [ACCT], max_line_bytes=256)
+    assert b"ACCT 1234" in out
+    out, _ = redact_bytes(line, [{**ACCT, "max_length": 104}], max_line_bytes=256)
+    assert b"ACCT" not in out and b"1234" not in out
+
+
+@pytest.mark.parametrize("max_length", [0, -1, True, "64", 1.5])
+def test_max_length_must_be_a_positive_number(max_length):
+    with pytest.raises(RedactionRuleError):
+        compile_rules([{**ACCT, "max_length": max_length}])
+
+
+def test_the_guard_is_the_largest_max_length():
+    rules = [
+        {**ACCT, "max_length": 104},
+        {"id": 2, "name": "small", "pattern": "x y", "max_length": 3},
+        {"id": 3, "name": "card", "detector": "card"},
+    ]
+    assert compile_rules(rules).cut_guard == 104
+    assert compile_rules([rules[1], rules[2]]).cut_guard == 64
+
+
 def test_unsure_utf16_window_matches_the_whole_file():
     """UTF16_UNSURE readings are aligned on the file's even offsets, so a
     window that starts on an odd offset reads the same units."""

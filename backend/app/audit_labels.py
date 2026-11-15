@@ -24,7 +24,7 @@ from sqlmodel import Session, SQLModel, select
 from app.auth.models import Role, RoleGrant, ScopeType, SSOGroupRoleMapping, SSOProviderConfig, User
 from app.json_values import as_int
 from app.logging_config import get_logger
-from app.models import Alert, Customer, Folder, Rule, SeverityPattern, Source
+from app.models import Alert, Customer, Folder, RedactionRule, Rule, SeverityPattern, Source
 
 logger = get_logger(__name__)
 
@@ -131,6 +131,12 @@ def _describe(session: Session, target_type: str, target_id) -> tuple[str | None
             return None, None
         context = _source_name(session, pattern.source_id) if pattern.source_id else "global"
         return pattern.pattern, context
+    if target_type == "redaction_rule":
+        rule = _get(session, RedactionRule, target_id)
+        if rule is None:
+            return None, None
+        context = _source_name(session, rule.source_id) if rule.source_id else "system"
+        return rule.name, context
     if target_type == "alert":
         alert = _get(session, Alert, target_id)
         if alert is None:
@@ -157,6 +163,7 @@ NAMED_TARGET_TYPES = frozenset(
         "role_grant",
         "rule",
         "severity_pattern",
+        "redaction_rule",
         "alert",
         "sso_provider",
         "sso_group_mapping",
@@ -173,6 +180,7 @@ _TARGET_MODELS: dict[str, type[SQLModel]] = {
     "role_grant": RoleGrant,
     "rule": Rule,
     "severity_pattern": SeverityPattern,
+    "redaction_rule": RedactionRule,
     "alert": Alert,
     "sso_provider": SSOProviderConfig,
     "sso_group_mapping": SSOGroupRoleMapping,
@@ -208,7 +216,7 @@ def prefetch_targets(session: Session, targets) -> list:
             scope_ids[grant.scope_type].add(grant.scope_id)
     source_ids = scope_ids[ScopeType.source] | {
         row.source_id
-        for kind in ("rule", "severity_pattern", "alert")
+        for kind in ("rule", "severity_pattern", "redaction_rule", "alert")
         for row in loaded.get(kind, [])
         if row.source_id is not None
     }

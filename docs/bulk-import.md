@@ -52,8 +52,10 @@ A source:
 | `agent_upgrade_policy` | no | push-agent sources only: `inherit` (default, follows Settings → Agents), `off`, `manual` or `automatic`; see [agent upgrades](../agent/README.md#upgrades-from-the-portal) |
 | `credential` | no | `username` plus `password` or `private_key`; see below |
 | `rules` | no | replaces the source's rules when given; leave it out to keep the rules it has |
+| `redaction_rules` | no | the source's own redaction rules; replaces them when given, leave it out to keep them; see below |
+| `redaction_disable` | no | names of the system redaction rules the source turns off; replaces that list when given, leave it out to keep it |
 
-**Updating an existing source:** apart from `credential` and `rules`, every setting in the table takes the value in the file, or its default when the file leaves it out. For example, a source that's disabled in PerchTail is enabled again by a file without `enabled: false`, and a WinRM source loses its CA certificate when the file has no `tls_ca_pem`. Export first, and edit the exported file, to keep what's set. A source's **JEA endpoint** isn't in the file (see below) and is kept.
+**Updating an existing source:** apart from `credential`, `rules`, `redaction_rules` and `redaction_disable`, every setting in the table takes the value in the file, or its default when the file leaves it out. For example, a source that's disabled in PerchTail is enabled again by a file without `enabled: false`, and a WinRM source loses its CA certificate when the file has no `tls_ca_pem`. Export first, and edit the exported file, to keep what's set. A source's **JEA endpoint** isn't in the file (see below) and is kept.
 
 Rules are evaluated in order and the **last match wins**, as everywhere in PerchTail. Write each as `include <pattern>` or `exclude <pattern>`; patterns are globs, or regexes when they start with `re:`. To add a note, use the long form:
 
@@ -69,6 +71,18 @@ rules:
 Don't quote just the pattern. In `rules: [include **/*, exclude "*/secret/**"]` each item is a single string, so the quotes would become part of the pattern and the rule would never match; the import refuses such a pattern. Quote the whole rule if you need to (`- "exclude */secret/**"`), or use the list form above.
 
 A new source with no rules shows nothing until rules are added.
+
+Redaction rules replace matching text in file content before it leaves the server. Each of a source's own rules has a `name` (at most 48 characters, used in the replacement `[redacted: <name>]`), an RE2 `pattern`, `max_length` (the longest match it can make, in bytes, from 1 to 4096), and optionally `secret_group` (the capture group to replace instead of the whole match), `enabled` (default `true`) and `notes`. They're checked as when they're saved one by one: a pattern that doesn't compile, matches empty text, or can match more than `max_length` bytes is a problem. `redaction_disable` names system rules, which must exist; the system rules themselves aren't in the file.
+
+```yaml
+redaction_rules:
+  - name: msisdn
+    pattern: \b(?:\+?255)(\d{9})\b
+    secret_group: 1
+    max_length: 13
+redaction_disable:
+  - ipv4
+```
 
 Unknown keys are reported as problems rather than ignored, so a typo like `base_pth` doesn't silently drop a setting.
 

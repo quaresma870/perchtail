@@ -442,3 +442,222 @@ sources:
     assert any(
         p.where.endswith("agent_upgrade_policy") and fragment in p.message for p in parsed.problems
     ), parsed.problems
+
+
+# --- redaction (#382) ---------------------------------------------------------
+
+REDACTION_YAML = r"""
+version: 1
+sources:
+  - name: red
+    protocol: ssh
+    host: red-host
+    base_path: /var/log
+    rules: [include **/*.log]
+    redaction_rules:
+      - name: msisdn
+        pattern: \+255(\d{9})
+        secret_group: 1
+        max_length: 13
+      - name: ref
+        pattern: REF-\d{6}
+        max_length: 10
+        enabled: false
+        notes: order references
+    redaction_disable: [ipv4, Email]
+"""
+
+
+def _run(session, text, apply=True):
+    items, problems = config_transfer.run(
+        session, config_transfer.parse(text), credentials={}, apply=apply, user_id=None
+    )
+    if apply and not problems:
+        session.commit()
+    return items, problems
+
+
+def test_redaction_rules_and_disabled_system_rules_import_and_round_trip(session):
+    from app.models import RedactionRule
+    from app.redaction_rules import (
+        disabled_rule_ids,
+        seed_builtin_redaction_rules,
+        source_rules,
+        system_rules,
+    )
+
+    seed_builtin_redaction_rules(session)
+    items, problems = _run(session, REDACTION_YAML)
+    assert problems == []
+    [item] = items
+    assert "2 redaction rules" in item.changes
+    source = session.exec(select(Source).where(Source.name == "red")).one()
+    own = source_rules(session, source.id)
+    assert [(r.name, r.pattern, r.secret_group, r.max_length, r.enabled, r.notes) for r in own] == [
+        ("msisdn", r"\+255(\d{9})", 1, 13, True, None),
+        ("ref", r"REF-\d{6}", None, 10, False, "order references"),
+    ]
+    by_id = {r.id: r.name for r in system_rules(session)}
+    assert sorted(by_id[i] for i in disabled_rule_ids(session, source.id)) == ["email", "ipv4"]
+    created = session.exec(select(AuditLog).where(AuditLog.action == "source.create")).one()
+    # The audit keeps each rule's values, as the API's redaction_rule.create does.
+    assert created.event_metadata["redaction_rules"] == [
+        {
+            "name": "msisdn",
+            "pattern": r"\+255(\d{9})",
+            "secret_group": 1,
+            "max_length": 13,
+            "enabled": True,
+            "order": 0,
+            "notes": None,
+        },
+        {
+            "name": "ref",
+            "pattern": r"REF-\d{6}",
+            "secret_group": None,
+            "max_length": 10,
+            "enabled": False,
+            "order": 1,
+            "notes": "order references",
+        },
+    ]
+    assert created.event_metadata["redaction_disable"] == ["email", "ipv4"]
+
+    exported = config_transfer.export(session)
+    node = yaml.safe_load(exported)["sources"][0]
+    assert node["redaction_disable"] == ["email", "ipv4"]
+    assert node["redaction_rules"][0] == {
+        "name": "msisdn",
+        "pattern": r"\+255(\d{9})",
+        "max_length": 13,
+        "secret_group": 1,
+    }
+    assert node["redaction_rules"][1]["enabled"] is False
+    # System rules aren't exported.
+    assert "card" not in exported
+
+    items, problems = _run(session, exported)
+    assert problems == []
+    assert [i.action for i in items] == ["unchanged"]
+    assert len(session.exec(select(RedactionRule)).all()) == 11 + 2
+
+
+def test_reimport_replaces_redaction_rules_and_audits_it(session):
+    from app.redaction_rules import (
+        disabled_rule_ids,
+        seed_builtin_redaction_rules,
+        source_rules,
+    )
+
+    seed_builtin_redaction_rules(session)
+    _run(session, REDACTION_YAML)
+    changed = REDACTION_YAML.replace("max_length: 10", "max_length: 12").replace(
+        "redaction_disable: [ipv4, Email]", "redaction_disable: []"
+    )
+    items, problems = _run(session, changed)
+    assert problems == []
+    [item] = items
+    assert item.action == "update"
+    assert "redaction rules replaced (2 → 2)" in item.changes
+    assert "redaction rules turned off: none" in item.changes
+    source = session.exec(select(Source).where(Source.name == "red")).one()
+    assert [r.max_length for r in source_rules(session, source.id)] == [13, 12]
+    assert disabled_rule_ids(session, source.id) == set()
+    update = session.exec(select(AuditLog).where(AuditLog.action == "source.update")).one()
+    changes = update.event_metadata["changes"]
+    # Only the rule that changed is recorded, with its values before and after.
+    [ref_change] = changes["redaction_rules"]
+    assert ref_change["name"] == "ref"
+    assert ref_change["from"]["max_length"] == 10
+    assert ref_change["to"]["max_length"] == 12
+    assert changes["redaction_disable"] == {"from": ["email", "ipv4"], "to": []}
+
+    # Leaving the keys out keeps what the source has.
+    kept = "\n".join(
+        line
+        for line in REDACTION_YAML.splitlines()
+        if not line.startswith("    redaction") and not line.startswith("      ")
+    )
+    items, problems = _run(session, kept)
+    assert problems == []
+    assert [i.action for i in items] == ["unchanged"]
+    assert len(source_rules(session, source.id)) == 2
+
+
+def test_reimport_audits_a_rule_turned_off_a_new_pattern_and_added_and_removed_rules(session):
+    from app.redaction_rules import seed_builtin_redaction_rules
+
+    seed_builtin_redaction_rules(session)
+    _run(session, REDACTION_YAML)
+    # msisdn is turned off and gets a pattern that never matches; ref is
+    # removed and acct added. A name-only audit would hide the first change.
+    changed = REDACTION_YAML.replace(
+        "        pattern: \\+255(\\d{9})\n        secret_group: 1\n        max_length: 13\n",
+        "        pattern: \\+999(\\d{9})\n        secret_group: 1\n        max_length: 13\n"
+        "        enabled: false\n",
+    ).replace(
+        "      - name: ref\n        pattern: REF-\\d{6}\n        max_length: 10\n"
+        "        enabled: false\n        notes: order references\n",
+        "      - name: acct\n        pattern: ACCT-\\d{4}\n        max_length: 9\n",
+    )
+    assert "+999" in changed and "acct" in changed and "REF-" not in changed
+    items, problems = _run(session, changed)
+    assert problems == []
+    update = session.exec(select(AuditLog).where(AuditLog.action == "source.update")).one()
+    by_name = {c["name"]: c for c in update.event_metadata["changes"]["redaction_rules"]}
+    assert set(by_name) == {"msisdn", "ref", "acct"}
+    msisdn = by_name["msisdn"]
+    assert (msisdn["from"]["pattern"], msisdn["from"]["enabled"]) == (r"\+255(\d{9})", True)
+    assert (msisdn["to"]["pattern"], msisdn["to"]["enabled"]) == (r"\+999(\d{9})", False)
+    assert by_name["ref"]["to"] is None
+    assert by_name["ref"]["from"]["pattern"] == r"REF-\d{6}"
+    assert by_name["acct"]["from"] is None
+    assert by_name["acct"]["to"] == {
+        "name": "acct",
+        "pattern": r"ACCT-\d{4}",
+        "secret_group": None,
+        "max_length": 9,
+        "enabled": True,
+        "order": 1,
+        "notes": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("snippet", "fragment"),
+    [
+        ("redaction_rules: [{name: x, pattern: 'x*', max_length: 5}]", "matches empty text"),
+        ("redaction_rules: [{name: x, pattern: 'ab{20}', max_length: 5}]", "up to 21 bytes"),
+        ("redaction_rules: [{name: x, pattern: 'ab'}]", "max_length"),
+        ("redaction_rules: [{name: x, pattern: 'ab', max_length: 5, color: red}]", "Unknown keys"),
+        (
+            "redaction_rules: [{name: x, pattern: a, max_length: 1}, "
+            "{name: X, pattern: b, max_length: 1}]",
+            "listed twice",
+        ),
+        ("redaction_rules: x", "must be a list"),
+        ("redaction_disable: [1]", "list of system rule names"),
+    ],
+)
+def test_bad_redaction_keys_are_problems(session, snippet, fragment):
+    text = f"""
+version: 1
+sources:
+  - name: one
+    protocol: ssh
+    host: h1
+    base_path: /var/log
+    {snippet}
+"""
+    parsed = config_transfer.parse(text)
+    assert any(fragment in p.message for p in parsed.problems), parsed.problems
+
+
+def test_an_unknown_system_rule_name_is_a_problem_and_nothing_is_written(session):
+    from app.redaction_rules import seed_builtin_redaction_rules
+
+    seed_builtin_redaction_rules(session)
+    text = REDACTION_YAML.replace("[ipv4, Email]", "[ipv4, nope]")
+    items, problems = _run(session, text)
+    assert [p.where for p in problems] == ["sources[0].redaction_disable"]
+    assert "'nope'" in problems[0].message

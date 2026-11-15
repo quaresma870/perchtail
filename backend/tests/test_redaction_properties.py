@@ -190,7 +190,9 @@ GENERATED = {
         st.text(_UPPER, min_size=1, max_size=20).filter(
             lambda value: value.lower() not in DETECTORS["kv_ignore"]
         ),
-    ).map(lambda p: (f"{p[0]}={p[1]}", f"={p[1]}", p[1])),
+        # The key stays in clear, so it's part of the context: `=1` alone is
+        # also in the noise (`x=1`).
+    ).map(lambda p: (f"{p[0]}={p[1]}", f"{p[0]}={p[1]}", p[1])),
     "url_password": st.text(_UPPER, min_size=1, max_size=16).map(
         lambda secret: (f"https://u:{secret}@host", f":{secret}@", secret)
     ),

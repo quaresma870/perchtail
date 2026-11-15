@@ -14,7 +14,7 @@ Stack: Python 3.12, FastAPI, SQLModel/SQLAlchemy, Alembic and SQLite on the back
 
 The SQLite database (`DATA_DIR/perchtail.db` unless `DATABASE_URL` is set) holds:
 
-- configuration: customers, folders, sources and their connection settings, rules, severity patterns, system settings (`system_setting`), the SSO provider and the SSO group-to-role mappings;
+- configuration: customers, folders, sources and their connection settings, rules, severity patterns, redaction rules, system settings (`system_setting`), the SSO provider and the SSO group-to-role mappings;
 - encrypted secrets: source credentials (`Source.credential_ref`), the SSO provider configuration (`SSOProviderConfig.config`) and users' TOTP secrets (`User.mfa_secret_encrypted`);
 - hashes only, never the plain value: local passwords, previous passwords and MFA backup codes (argon2id), session tokens, agent enrollment tokens and the monitoring token (SHA-256);
 - users, roles and grants;
@@ -45,7 +45,7 @@ A FastAPI app (`app/main.py`). The lifespan, in order:
 
 On shutdown it stops the scheduler and drains the worker pools within `SHUTDOWN_TIMEOUT_SECONDS` (`app/jobs.py`, `shutdown`).
 
-Routers in `app/api/`, by area: auth (login, logout, profile, password change, MFA, own sessions, SSO login), users, roles, SSO configuration, customers, folders, sources, rules, archive (browse, open, follow, close, download and folder ZIP under `/sources/{id}`), file-name search, alerts, audit log, YAML import and export, system settings, update check, severity patterns, the agent WebSocket and binaries, agent upgrades, and monitoring. `/healthz` and `/readyz` are defined in `app/main.py`. The HTTP API is internal to the frontend and may change before 1.0; don't document it as a public interface.
+Routers in `app/api/`, by area: auth (login, logout, profile, password change, MFA, own sessions, SSO login), users, roles, SSO configuration, customers, folders, sources, rules, archive (browse, open, follow, close, download and folder ZIP under `/sources/{id}`), file-name search, alerts, audit log, YAML import and export, system settings, update check, severity patterns, redaction rules, the agent WebSocket and binaries, agent upgrades, and monitoring. `/healthz` and `/readyz` are defined in `app/main.py`. The HTTP API is internal to the frontend and may change before 1.0; don't document it as a public interface.
 
 The built frontend (`frontend/dist`) is served by the backend at `/` when it exists.
 
@@ -157,6 +157,8 @@ Core tables (`backend/app/models.py`):
 - `Source`: a host and how to reach it (protocol, host, port, base path or roots, encrypted credential, WinRM and TLS options), plus agent, reachability and file-name index state.
 - `Rule`: an ordered include or exclude pattern on a source.
 - `SeverityPattern`: a line-highlighting pattern for the viewer, global or per source; matching runs in the browser.
+- `RedactionRule`: a redaction rule, system-wide or a source's own: a built-in detector or a custom RE2 pattern (`app/redaction_rules.py`); configured by super admins only.
+- `SourceRedactionOverride`: a source turning a system redaction rule off.
 - `FileNameEntry`: one rule-visible file of a source in the file-name index (path, size, modification time).
 - `Alert`: a query on the files in a scope, with a webhook URL and its owner.
 - `AlertFileState`: how far an alert has read a file.

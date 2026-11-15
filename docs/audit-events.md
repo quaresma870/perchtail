@@ -66,7 +66,7 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 
 | Action | When |
 |---|---|
-| `source.create`, `source.update`, `source.delete` | Sources added, changed (with the values before and after) or deleted. |
+| `source.create`, `source.update`, `source.delete` | Sources added, changed (with the values before and after) or deleted. When an import sets a source's redaction rules, `source.create` lists each rule with its values, and `source.update` lists each rule added, changed or removed with its values before (`from`) and after (`to`). |
 | `source.credential_update`, `source.agent_token_regenerate`, `source.pick_folder` | A source's saved credential replaced, its agent token regenerated, or its folders browsed with the saved credential. |
 | `rule.create`, `rule.update`, `rule.delete`, `rule.reorder`, `rule.replace_raw` | Visibility rules changed. |
 | `customer.*`, `folder.*` | Customers and folders created, changed or deleted. |
@@ -74,6 +74,8 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 | `user.create`, `user.update`, `user.deactivate`, `user.reset_password` | User accounts managed by an admin. |
 | `sso_provider.*`, `sso_group_mapping.*` | SSO configuration and group-to-role mappings. |
 | `severity_pattern.*` | Severity highlighting patterns. |
+| `redaction_rule.create`, `redaction_rule.update`, `redaction_rule.delete` | Redaction rules added, changed (with the values before and after) or deleted, system-wide (`"scope": "system"`) or on a source (`"scope": "source"`). |
+| `redaction_override.set` | A source turning a system redaction rule off (`"disabled": true`) or back on. |
 | `alert.create`, `alert.update`, `alert.delete` | Live alerts. |
 | `alert.delivery_failed` | An alert notification the webhook never accepted, given up after retrying for an hour (`attempts`, `error`). Each retry before it is only in the application log. |
 | `smtp_settings.create`, `smtp_settings.update`, `smtp_settings.delete` | The SMTP server under **Settings → Email** set up, changed or removed: the values before and after (`{"from": ..., "to": ...}`) of the server, port, security, username, sender and **Enabled**. The password is never recorded: a new one is recorded as `"password": "changed"`, a removed one as `"removed"`; a CA certificate as `"replaced"` or `"removed"`. |

@@ -6,7 +6,16 @@ from pathlib import Path
 from app.audit import record_audit_event
 from app.audit_labels import NAMED_TARGET_TYPES, UNNAMED_TARGET_TYPES
 from app.auth.models import Role, RoleGrant, ScopeType, SSOGroupRoleMapping, User
-from app.models import Customer, Folder, Protocol, Rule, RuleType, SeverityPattern, Source
+from app.models import (
+    Customer,
+    Folder,
+    Protocol,
+    RedactionRule,
+    Rule,
+    RuleType,
+    SeverityPattern,
+    Source,
+)
 
 
 def _add(session, row):
@@ -108,6 +117,24 @@ def test_rules_grants_and_mappings_are_named_with_their_parent(session):
     assert _event(session, target_type="severity_pattern", target_id=pattern.id) == {
         "target_name": "ERROR",
         "target_context": "global",
+    }
+
+
+def test_redaction_rules_are_named_with_their_source_or_system(session):
+    _, _, _, source = _tree(session)
+    system = _add(session, RedactionRule(name="card", detector="card"))
+    own = _add(
+        session, RedactionRule(source_id=source.id, name="msisdn", pattern="x", max_length=1)
+    )
+    assert _event(session, target_type="redaction_rule", target_id=system.id) == {
+        "target_name": "card",
+        "target_context": "system",
+    }
+    own_id = own.id
+    session.delete(own)
+    assert _event(session, target_type="redaction_rule", target_id=own_id) == {
+        "target_name": "msisdn",
+        "target_context": "app01",
     }
 
 

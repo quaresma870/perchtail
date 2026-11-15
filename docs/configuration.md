@@ -223,6 +223,16 @@ Shown to super admins only. See [upgrade.md](upgrade.md#the-updates-card) for wh
 | `audit_folder_listings` | **Audit folder listings** | on | on, off | Records every folder someone lists below a source's root (`source.browse`), not only the sources they open and the files they open or download. Turning it on needs `manage_system_settings`; only a super admin can turn it off. |
 | `audit_retention_days` | **Audit log retention** | `365` | `0` (keep forever), or at least 90 days | Entries older than this are deleted by the purge job (see `AUDIT_PURGE_INTERVAL_SECONDS`), and each purge is recorded as `audit.purge`. Only a super admin can shorten it. See [audit-events.md](audit-events.md). |
 
+### Redaction
+
+No screen yet: in this version a super admin changes these through the API (`PATCH /system-settings`); anyone else, `manage_system_settings` included, is refused. Redaction rules aren't applied to file content yet.
+
+| Key | On screen | Default | Accepted values | Effect |
+|---|---|---|---|---|
+| `redaction_enabled` | none yet | off | on, off | Redaction of file content with the enabled redaction rules, for everyone, super admins included. On with no enabled rule changes nothing. |
+| `redaction_downloads` | none yet | on | on, off | While redaction is on, whether downloads (single files, folder ZIPs, archives and their members) are redacted too. Off, they carry the original content; the viewer, Tail and alerts stay redacted. |
+| `redaction_download_suffix` | none yet | on | on, off | Whether a redacted download's file name says so (`app.redacted.log`). Only counts while downloads are redacted. |
+
 ### Password policy card
 
 Applies to local accounts whenever a password is set: a user's own change, the change at first sign-in, and temporary passwords an admin sets. Existing passwords are checked at their next change. Saved together with **Save policy**.
