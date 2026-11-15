@@ -7,8 +7,9 @@
    the file-name index (seed.py index);
 2. keeps the growing files growing (gen_logs.py grow) for the whole run;
 3. runs the profile's phases one after another: applies the phase's System
-   settings, starts the collector, runs k6 on k6/profile.js for that phase,
-   stops the collector;
+   settings, starts the collector (and, for a phase with growing_files,
+   growing_heavy or daily_log, the writer of their files, gen_logs.py
+   write), runs k6 on k6/profile.js for that phase, stops them;
 4. puts the profile's settings back, stops the agents and the growing
    files, and writes the summary (report/report.py).
 
@@ -63,6 +64,9 @@ K6_DIGEST = "sha256:3656673de3f30424e8ebcfa46acd9558d83b6a43612d0f668ffeac953950
 K6_IMAGE = f"grafana/k6:{K6_VERSION}@{K6_DIGEST}"
 PY = sys.executable
 PAUSE_BETWEEN_PHASES = 15
+GROWING_SCENARIOS = ("growing_files", "growing_heavy", "daily_log", "production", "protocol_matrix")
+WINDOWS_AGENT_WAIT = int(os.environ.get("LOADTEST_WINDOWS_AGENT_WAIT", "900"))
+WRITER_START_TIMEOUT = 600
 
 
 def step(message: str) -> None:
@@ -197,6 +201,121 @@ def stop_collector(proc: subprocess.Popen, out_dir: Path) -> None:
         proc.kill()
 
 
+def start_writer(args, phase: dict, out_dir: Path) -> tuple[subprocess.Popen | None, int]:
+    """Starts the writer of the phase's growing files and waits until it has
+    written them afresh; returns it and when it started (ms since the
+    epoch), or (None, 0) when the phase has none."""
+    if not any(s in GROWING_SCENARIOS for s in phase["scenarios"]):
+        return None, 0
+    events = out_dir / "writer.jsonl"
+    events.unlink(missing_ok=True)
+    cmd = [
+        PY,
+        str(HERE / "seed" / "gen_logs.py"),
+        "write",
+        "--profile",
+        args.profile,
+        "--phase",
+        phase["name"],
+        "--events",
+        str(events),
+        "--stop-file",
+        str(out_dir / "writer.stop"),
+    ]
+    log = (out_dir / "writer.log").open("ab")
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+    deadline = time.time() + WRITER_START_TIMEOUT
+    while time.time() < deadline:
+        if events.exists():
+            for raw in events.read_text(encoding="utf-8").splitlines():
+                record = json.loads(raw)
+                if record.get("event") == "start":
+                    return proc, int(record["t"] * 1000)
+        if proc.poll() is not None:
+            raise KitError(f"the writer of growing files stopped (see {out_dir / 'writer.log'})")
+        time.sleep(1)
+    proc.kill()
+    raise KitError(f"the writer of growing files didn't start in {WRITER_START_TIMEOUT} s")
+
+
+def stop_writer(proc: subprocess.Popen | None, out_dir: Path) -> None:
+    if proc is None:
+        return
+    (out_dir / "writer.stop").touch()
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def windows_agents(profile: dict) -> None:
+    """production with a Windows test server: writes the bundle that runs
+    the Windows agents there, and waits until they are connected (the
+    operator starts them with start-agents.ps1)."""
+    if not os.environ.get("LOADTEST_WINDOWS_AGENT_HOSTS"):
+        return
+    seeded = read_state("seeded.json") or {}
+    names = {s["name"] for s in seeded.get("sources", []) if s.get("windows") and s.get("running")}
+    if not names:
+        return
+    run_py(str(HERE / "seed" / "agents.py"), "windows-bundle")
+    step(f"waiting up to {WINDOWS_AGENT_WAIT} s for the {len(names)} Windows agents to connect")
+    deadline = time.time() + WINDOWS_AGENT_WAIT
+    client = admin_client()
+    while time.time() < deadline:
+        connected = {s["name"] for s in client.get("/sources") if s.get("agent_connected")}
+        if names <= connected:
+            step("Windows agents connected")
+            return
+        time.sleep(10)
+    step(f"only {len(names & connected)} of {len(names)} Windows agents connected; going on")
+
+
+def agents_report() -> list[dict]:
+    """Each seeded agent's connection and the OS it reported, for the
+    summary (which agents ran where)."""
+    seeded = read_state("seeded.json") or {}
+    planned = {s["name"]: s for s in seeded.get("sources", []) if s["protocol"] == "agent"}
+    out = []
+    for s in admin_client().get("/sources"):
+        if s["name"] in planned:
+            out.append(
+                {
+                    "name": s["name"],
+                    "windows": bool(planned[s["name"]].get("windows")),
+                    "connected": s.get("agent_connected"),
+                    "os": s.get("agent_os"),
+                }
+            )
+    return out
+
+
+def matrix_command(args, out_dir: Path) -> list[str]:
+    """protocol_matrix runs matrix.py, with the options the environment
+    turns on: LOADTEST_SOURCE_CONTAINERS (the source servers' containers,
+    comma-separated, for their counters and tc netem), LOADTEST_NETEM=1,
+    LOADTEST_ALLOW_RESTART=1, LOADTEST_RELIABILITY=1, LOADTEST_RESTORE_TEST=1
+    and LOADTEST_MIGRATION_FROM."""
+    cmd = [PY, str(HERE / "matrix" / "matrix.py"), "--profile", args.profile, "--out", str(out_dir)]
+    if args.pid:
+        cmd += ["--pid", str(args.pid), "--container", ""]
+    else:
+        cmd += ["--container", args.container, "--db", args.db]
+    for name in filter(None, os.environ.get("LOADTEST_SOURCE_CONTAINERS", "").split(",")):
+        cmd += ["--source-container", name.strip()]
+    for env, flag in (
+        ("LOADTEST_NETEM", "--netem"),
+        ("LOADTEST_ALLOW_RESTART", "--allow-restart"),
+        ("LOADTEST_RELIABILITY", "--reliability"),
+        ("LOADTEST_RESTORE_TEST", "--restore-test"),
+    ):
+        if os.environ.get(env) == "1":
+            cmd.append(flag)
+    if os.environ.get("LOADTEST_MIGRATION_FROM"):
+        cmd += ["--migration-from", os.environ["LOADTEST_MIGRATION_FROM"]]
+    return cmd
+
+
 def run_phase(args, profile: dict, phase: dict, run_dir: Path, mode: str) -> dict:
     out_dir = run_dir / phase["name"]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -204,18 +323,31 @@ def run_phase(args, profile: dict, phase: dict, run_dir: Path, mode: str) -> dic
     apply_settings(settings)
     step(f"phase {phase['name']}: scenarios {', '.join(phase['scenarios'])}")
     collector = start_collector(args, out_dir)
-    time.sleep(args.interval)  # one sample before the load starts
-    cmd, env = k6_command(mode, base_url(), Path(profile["_path"]), phase["name"], out_dir)
-    started = time.time()
-    with (out_dir / "k6.log").open("w", encoding="utf-8") as log:
-        proc = subprocess.run(
-            cmd,
-            env={**os.environ, **env},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        log.write(proc.stdout)
+    writer = None
+    try:
+        writer, writer_started = start_writer(args, phase, out_dir)
+        time.sleep(args.interval)  # one sample before the load starts
+        if phase["scenarios"] == ["protocol_matrix"]:
+            cmd, env = matrix_command(args, out_dir), {}
+        else:
+            cmd, env = k6_command(mode, base_url(), Path(profile["_path"]), phase["name"], out_dir)
+        if writer_started:
+            env["LOADTEST_WRITER_START_MS"] = str(writer_started)
+        started = time.time()
+        with (out_dir / "k6.log").open("w", encoding="utf-8") as log:
+            proc = subprocess.run(
+                cmd,
+                env={**os.environ, **env},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            log.write(proc.stdout)
+    except BaseException:
+        stop_collector(collector, out_dir)
+        raise
+    finally:
+        stop_writer(writer, out_dir)
     print(
         proc.stdout.strip().split("\n\nphase", 1)[-1]
         if "phase " in proc.stdout
@@ -232,7 +364,7 @@ def run_phase(args, profile: dict, phase: dict, run_dir: Path, mode: str) -> dic
         "seconds": round(time.time() - started, 1),
     }
     if proc.returncode not in (0, 99):
-        step(f"phase {phase['name']}: k6 exited with {proc.returncode} (see {out_dir / 'k6.log'})")
+        step(f"phase {phase['name']}: exited with {proc.returncode} (see {out_dir / 'k6.log'})")
     return result
 
 
@@ -249,7 +381,11 @@ def main() -> None:
         "--pid", type=int, help="measure a PerchTail process on this machine instead"
     )
     parser.add_argument("--scratch-dir", default="/data/scratch", help="with --pid: SCRATCH_DIR")
-    parser.add_argument("--db", default="/data/db/perchtail.db", help="with --pid: the SQLite file")
+    parser.add_argument(
+        "--db",
+        default="/data/db/perchtail.db",
+        help="the SQLite file (in the container, or with --pid)",
+    )
     parser.add_argument("--interval", type=float, default=5.0, help="collector interval in seconds")
     parser.add_argument("--k6", choices=["auto", "native", "docker"], default="auto")
     parser.add_argument("--skip-seed", action="store_true", help="the instance is already seeded")
@@ -298,6 +434,7 @@ def main() -> None:
             if not (state_root() / "bin").exists() or not any((state_root() / "bin").iterdir()):
                 run_py(agents, "build")
             run_py(agents, "start")
+            windows_agents(profile)
         if profile.get("settings", {}).get("name_index_enabled", True):
             run_py(seed, "index", "--timeout", "300")
         seed_seconds = round(time.time() - seed_started, 1)
@@ -309,11 +446,14 @@ def main() -> None:
         )
         mode = k6_mode(args.k6)
         results = []
+        agents_seen: list[dict] = []
         try:
             for i, phase in enumerate(phases):
                 if i:
                     time.sleep(PAUSE_BETWEEN_PHASES)
                 results.append(run_phase(args, profile, phase, run_dir, mode))
+            if profile.get("agents", {}).get("running"):
+                agents_seen = agents_report()
         finally:
             grower.terminate()
             apply_settings(phase_settings(profile, {}))
@@ -330,6 +470,8 @@ def main() -> None:
             "seed_seconds": seed_seconds,
             "total_seconds": round(time.time() - run_started, 1),
             "phases": results,
+            "agents": agents_seen,
+            "production": read_state("production-plan.json"),
         }
         (run_dir / "run.json").write_text(json.dumps(run_info, indent=2), encoding="utf-8")
         run_py(str(HERE / "report" / "report.py"), str(run_dir))

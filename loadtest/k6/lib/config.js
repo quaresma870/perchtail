@@ -11,6 +11,9 @@
 //                           default LOADTEST_BASE_URL
 //   LOADTEST_PHASE          the profile phase to run (optional for a single scenario)
 //   LOADTEST_RESULTS_DIR    where handleSummary writes its JSON (optional)
+//   LOADTEST_WRITER_START_MS when the phase's writer of growing files started
+//                           (ms since the epoch): the steps of growing_heavy
+//                           and the hours of daily_log count from it
 
 function required(name) {
   const value = (__ENV[name] || '').trim()
@@ -67,7 +70,21 @@ export const profile = JSON.parse(open(required('LOADTEST_PROFILE')))
 export const users = readState('users.json')
 export const seeded = readState('seeded.json')
 export const catalog = readState('catalog.json')
+
+/** A state file that only some profiles have (production-plan.json). */
+function readOptionalState(name) {
+  try {
+    return readState(name)
+  } catch (e) {
+    if (/written for/.test(String(e))) throw e
+    return null
+  }
+}
+
+export const plan = readOptionalState('production-plan.json')
 export const RESULTS_DIR = (__ENV.LOADTEST_RESULTS_DIR || '').replace(/[\\/]+$/, '')
+
+export const WRITER_START_MS = Number(__ENV.LOADTEST_WRITER_START_MS || 0)
 
 export const PHASE_NAME = __ENV.LOADTEST_PHASE || ''
 export const phase = PHASE_NAME ? profile.phases.find((p) => p.name === PHASE_NAME) : null

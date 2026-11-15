@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -35,7 +36,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import production  # noqa: E402
 from common import (  # noqa: E402
+    RESTORE_STATE,
     SETTINGS_STATE,
     ApiError,
     Client,
@@ -51,6 +54,7 @@ from common import (  # noqa: E402
     random_password,
     read_state,
     remove_state,
+    restore_cleanup,
     state_dir,
     state_root,
     write_state,
@@ -60,8 +64,9 @@ USER_CAPABILITIES = ["view", "download"]
 SOURCES_ENV = "sources.env"
 LOGS_MARKER = ".perchtail-loadtest"
 KIT_TREES = ("shared", "agents")
+WINDOWS_AGENTS_DIR = "windows-agents"  # agents.py windows-bundle
 
-KINDS = ("customers", "folders", "sources", "roles", "users")
+KINDS = ("customers", "folders", "sources", "roles", "users", "alerts")
 NAME_KEY = {"users": "username"}
 
 
@@ -74,11 +79,12 @@ def patterns() -> dict[str, re.Pattern]:
     prefix. `clean` touches only ledger objects whose current name matches."""
     p = re.escape(prefix())
     return {
-        "customers": re.compile(rf"^{p}-customer-\d{{2}}$"),
-        "folders": re.compile(rf"^{p}-c\d{{2}}-folder-\d{{2}}$"),
+        "customers": re.compile(rf"^{p}-customer-\d{{2}}(-[a-z0-9]+)*$"),
+        "folders": re.compile(rf"^{p}-c\d{{2}}-folder-\d{{2}}(-[a-z0-9]+)*$"),
         "sources": re.compile(rf"^{p}-(ssh|smb|local|winrm|agent)-\d{{3}}$"),
-        "roles": re.compile(rf"^{p}-role$"),
+        "roles": re.compile(rf"^{p}-role(-[a-z]+)?$"),
         "users": re.compile(rf"^{p}-user-\d{{3}}$"),
+        "alerts": re.compile(rf"^{p}-alert-\d{{2}}$"),
     }
 
 
@@ -252,11 +258,29 @@ def cmd_admin_init(_args: argparse.Namespace) -> None:
 # --- apply ----------------------------------------------------------------
 
 
-def ensure_customers(client: Client, ledger: Ledger, count: int) -> list[dict]:
+def customer_names(profile: dict) -> list[str]:
+    """`lt-customer-NN`, with the profile's invented name after it when it
+    gives one (`customer_names`, e.g. lt-customer-01-kestrel-freight)."""
+    names = profile.get("customer_names", [])
+    return [
+        f"{name_prefix()}customer-{i:02d}" + (f"-{names[i - 1]}" if i <= len(names) else "")
+        for i in range(1, int(profile["customers"]) + 1)
+    ]
+
+
+def folder_names(profile: dict, c_index: int) -> list[str]:
+    names = profile.get("folder_names", [])
+    return [
+        f"{name_prefix()}c{c_index:02d}-folder-{i:02d}"
+        + (f"-{names[i - 1]}" if i <= len(names) else "")
+        for i in range(1, int(profile.get("folders_per_customer", 0)) + 1)
+    ]
+
+
+def ensure_customers(client: Client, ledger: Ledger, profile: dict) -> list[dict]:
     current = client.get("/customers")
     out = []
-    for i in range(1, count + 1):
-        name = f"{name_prefix()}customer-{i:02d}"
+    for name in customer_names(profile):
         create = partial(client.post, "/customers", {"name": name})
         customer, _ = claim(ledger, "customers", name, current, create)
         out.append(customer)
@@ -264,14 +288,13 @@ def ensure_customers(client: Client, ledger: Ledger, count: int) -> list[dict]:
 
 
 def ensure_folders(
-    client: Client, ledger: Ledger, customers: list[dict], per_customer: int
+    client: Client, ledger: Ledger, customers: list[dict], profile: dict
 ) -> dict[int, list[dict]]:
     current = client.get("/folders")
     out: dict[int, list[dict]] = {}
     for c_index, customer in enumerate(customers, start=1):
         folders = []
-        for i in range(1, per_customer + 1):
-            name = f"{name_prefix()}c{c_index:02d}-folder-{i:02d}"
+        for name in folder_names(profile, c_index):
             create = partial(client.post, "/folders", {"name": name, "customer_id": customer["id"]})
             folder, _ = claim(ledger, "folders", name, current, create)
             if folder["customer_id"] != customer["id"]:
@@ -335,7 +358,14 @@ def protocol_hosts(
     return [_split_host(entry, port) for entry in entries]
 
 
-def source_spec(profile: dict, protocol: str, index: int) -> dict:
+def _own_tree(profile: dict, base: str, name: str | None, sep: str = "/") -> str:
+    """A production source reads its own tree, prod/<name> under the base."""
+    if not name or "production" not in profile:
+        return base
+    return base.rstrip("/\\") + sep + "prod" + sep + name
+
+
+def source_spec(profile: dict, protocol: str, index: int, name: str | None = None) -> dict:
     """How to reach the servers for a protocol, for its `index`-th source
     (from 0). Defaults match compose.sources.yml; the LOADTEST_<PROTOCOL>_*
     variables, or the profile's hosts, point at the servers of a dedicated
@@ -350,8 +380,10 @@ def source_spec(profile: dict, protocol: str, index: int) -> dict:
         return {
             "host": host,
             "port": port,
-            "base_path": _env(
-                f"LOADTEST_{upper}_BASE_PATH", "/srv/logs" if protocol == "ssh" else "ltlogs"
+            "base_path": _own_tree(
+                profile,
+                _env(f"LOADTEST_{upper}_BASE_PATH", "/srv/logs" if protocol == "ssh" else "ltlogs"),
+                name,
             ),
             "credential": {
                 "username": _env(f"LOADTEST_{upper}_USERNAME", user),
@@ -362,7 +394,9 @@ def source_spec(profile: dict, protocol: str, index: int) -> dict:
         return {
             "host": "localhost",
             "port": None,
-            "base_path": _env("LOADTEST_LOCAL_BASE_PATH", "/srv/lt-local"),
+            "base_path": _own_tree(
+                profile, _env("LOADTEST_LOCAL_BASE_PATH", "/srv/lt-local"), name
+            ),
         }
     if protocol == "winrm":
         hosts = protocol_hosts(profile, "winrm", None, 5986)
@@ -370,7 +404,9 @@ def source_spec(profile: dict, protocol: str, index: int) -> dict:
         spec = {
             "host": host,
             "port": port,
-            "base_path": _env("LOADTEST_WINRM_BASE_PATH", required=True),
+            "base_path": _own_tree(
+                profile, _env("LOADTEST_WINRM_BASE_PATH", required=True), name, "\\"
+            ),
             "winrm_scheme": _env("LOADTEST_WINRM_SCHEME", "https"),
             "credential": {
                 "username": _env("LOADTEST_WINRM_USERNAME", required=True),
@@ -380,6 +416,11 @@ def source_spec(profile: dict, protocol: str, index: int) -> dict:
         ca_file = _env("LOADTEST_WINRM_CA_FILE")
         if ca_file:
             spec["tls_ca_pem"] = Path(ca_file).read_text(encoding="utf-8")
+        jea = _env("LOADTEST_WINRM_JEA_CONFIGURATION")
+        if jea and "matrix" in profile and index == 1:
+            # protocol_matrix's second WinRM source goes through the JEA
+            # endpoint (docs/examples/jea), to measure it apart.
+            spec["winrm_configuration"] = jea
         return spec
     if protocol == "agent":
         return {"host": "agent", "port": None, "base_path": "(the agent's own folder)"}
@@ -401,17 +442,20 @@ def planned_sources(profile: dict) -> list[dict]:
             )
     agents = profile.get("agents", {})
     running, stopped = int(agents.get("running", 0)), int(agents.get("stopped", 0))
+    windows = int(agents.get("windows", 0))
     for i in range(1, running + stopped + 1):
-        plan.append(
-            {
-                "name": f"{name_prefix()}agent-{i:03d}",
-                "protocol": "agent",
-                "tree": "agent",
-                "index": i - 1,
-                "agent_index": i,
-                "running": i <= running,
-            }
-        )
+        entry = {
+            "name": f"{name_prefix()}agent-{i:03d}",
+            "protocol": "agent",
+            "tree": "agent",
+            "index": i - 1,
+            "agent_index": i,
+            "running": i <= running,
+        }
+        if running - windows < i <= running:
+            # Meant to run on a Windows test server (agents.py windows-bundle).
+            entry["windows"] = True
+        plan.append(entry)
     return plan
 
 
@@ -436,7 +480,7 @@ def ensure_sources(
                 "protocol": planned["protocol"],
                 "enabled": True,
                 "name_index_enabled": index_on,
-                **source_spec(profile, planned["protocol"], planned["index"]),
+                **source_spec(profile, planned["protocol"], planned["index"], planned["name"]),
             }
             return client.post("/sources", body)
 
@@ -450,7 +494,14 @@ def ensure_sources(
         if source["rule_count"] == 0:
             client.post(f"/sources/{source['id']}/rules", {"type": "include", "pattern": "**"})
         entry = {k: v for k, v in planned.items() if k != "index"}
-        out.append({**entry, "id": source["id"]})
+        out.append(
+            {
+                **entry,
+                "id": source["id"],
+                "customer_id": source["customer_id"],
+                "folder_id": source["folder_id"],
+            }
+        )
     return out
 
 
@@ -493,11 +544,14 @@ def _set_own_password(username: str, current: str) -> str:
     return final
 
 
-def ensure_users(client: Client, ledger: Ledger, count: int, role: dict) -> dict[str, str]:
+def ensure_users(
+    client: Client, ledger: Ledger, count: int, role_of: Callable[[str], dict]
+) -> dict[str, str]:
     saved: dict[str, str] = read_state("users.json", {})
     current = client.get("/users")
     for i in range(1, count + 1):
         username = f"{name_prefix()}user-{i:03d}"
+        role = role_of(username)
         temporary = random_password()
         body = {"username": username, "password": temporary, "role_id": role["id"]}
         user, created = claim(
@@ -563,23 +617,165 @@ LIST_PATHS = {
     "sources": "/sources",
     "roles": "/roles",
     "users": "/users",
+    "alerts": "/alerts",
 }
+
+
+# --- production ---------------------------------------------------------------
+
+
+def role_names(profile: dict) -> list[str]:
+    if "production" in profile:
+        return [f"{role_name()}-{p}" for p in production.personas(profile)]
+    return [role_name()]
+
+
+def ensure_persona_roles(
+    client: Client, ledger: Ledger, profile: dict, customers: list[dict], folders: dict
+) -> dict[str, dict]:
+    """production: one role per kind of person, with the grants of
+    production.ROLES (on customers by number, or each customer's first
+    folder), and its global capabilities."""
+    current = client.get("/roles")
+    out = {}
+    for persona in production.personas(profile):
+        spec = production.ROLES.get(persona, production.ROLES["support"])
+        name = f"{role_name()}-{persona}"
+        body = {"name": name, "global_capabilities": spec["global"]}
+        role, _ = claim(ledger, "roles", name, current, partial(client.post, "/roles", body))
+        if sorted(role.get("global_capabilities", [])) != sorted(spec["global"]):
+            role = client.patch(f"/roles/{role['id']}", {"global_capabilities": spec["global"]})
+        wanted: list[tuple[str, int]] = []
+        if spec.get("first_folders"):
+            wanted = [("folder", folders[c["id"]][0]["id"]) for c in customers if folders[c["id"]]]
+        else:
+            numbers = (
+                range(1, len(customers) + 1) if spec["customers"] == "all" else spec["customers"]
+            )
+            wanted = [("customer", customers[n - 1]["id"]) for n in numbers if n <= len(customers)]
+        grants = {
+            (g["scope_type"], g["scope_id"]): g for g in client.get(f"/roles/{role['id']}/grants")
+        }
+        for scope_type, scope_id in wanted:
+            grant = grants.get((scope_type, scope_id))
+            if grant is None:
+                client.post(
+                    f"/roles/{role['id']}/grants",
+                    {
+                        "scope_type": scope_type,
+                        "scope_id": scope_id,
+                        "capabilities": spec["capabilities"],
+                    },
+                )
+            elif sorted(grant["capabilities"]) != sorted(spec["capabilities"]):
+                client.patch(
+                    f"/roles/{role['id']}/grants/{grant['id']}",
+                    {"capabilities": spec["capabilities"]},
+                )
+        out[persona] = role
+    return out
+
+
+def alert_webhook() -> str | None:
+    """Alerts need a webhook whose host resolves to public addresses (the
+    server checks it when the alert is created). The kit sets none of its
+    own: give one in LOADTEST_ALERT_WEBHOOK_URL. The alerts' query never
+    matches, so the webhook is never called; only the server's DNS lookup
+    at creation reaches outside."""
+    return os.environ.get("LOADTEST_ALERT_WEBHOOK_URL") or None
+
+
+def alert_names(profile: dict) -> list[str]:
+    count = int(production.settings(profile).get("alerts", 0))
+    return [f"{name_prefix()}alert-{i:02d}" for i in range(1, count + 1)]
+
+
+def ensure_alerts(client: Client, ledger: Ledger, profile: dict, sources: list[dict]) -> dict:
+    """production: alerts on different sources, each watching the source's
+    current.log for a word that never appears, so every pass reads what
+    was appended (the cost being measured) and never sends anything."""
+    names = alert_names(profile)
+    if not names:
+        return {"created": 0}
+    webhook = alert_webhook()
+    if not webhook:
+        print("no alerts: set LOADTEST_ALERT_WEBHOOK_URL to have them (see the README)")
+        return {"created": 0, "skipped": "LOADTEST_ALERT_WEBHOOK_URL not set"}
+    candidates = [s for s in sources if s["protocol"] != "agent" or s.get("running")]
+    current = client.get("/alerts")
+    for i, name in enumerate(names):
+        source = candidates[(i * len(candidates)) // len(names)]
+        body = {
+            "name": name,
+            "query": f"lt-never-{random_password(12)}",
+            "source_id": source["id"],
+            "file_glob": "**/current.log",
+            "webhook_url": webhook,
+        }
+        claim(ledger, "alerts", name, current, partial(client.post, "/alerts", body))
+    return {"created": len(names)}
+
+
+def write_production_plan(
+    profile: dict, sources: list[dict], users: dict[str, str], alerts: dict
+) -> None:
+    """production-plan.json, what the k6 scenario `production` runs."""
+    names = sorted(users)
+    personas_of = production.user_personas(profile, names)
+    stages = production.concurrency_stages(profile)
+    rates = production.rate_classes(profile, [s["name"] for s in sources])
+    # The incident's file: an intense source's log (a server's, or a
+    # running agent's that isn't on a Windows test server).
+    usable = [
+        s
+        for s in sources
+        if s["protocol"] != "agent" or (s.get("running") and not s.get("windows"))
+    ]
+    intense = [s for s in usable if rates[s["name"]]["class"] == "intense"] or usable
+    incident = production.incident_window(profile, stages)
+    if intense:
+        incident.update(source=intense[0]["name"], path="app-1/current.log")
+    see_all = [u for u in names if personas_of[u] in ("investigation", "admin")] or names
+    windows = [s["name"] for s in sources if s.get("windows")]
+    write_state(
+        "production-plan.json",
+        {
+            "personas": {
+                p: {**spec, "users": [u for u in names if personas_of[u] == p]}
+                for p, spec in production.personas(profile).items()
+            },
+            "stages": stages,
+            "duration": production.total_seconds(stages),
+            "peak": production.peak_window(stages),
+            "incident": incident,
+            "incident_users": see_all,
+            "admin_role_target": f"{role_name()}-occasional",
+            "user_names": names,
+            "classes": {
+                c: sum(r["class"] == c for r in rates.values()) for c in production.classes(profile)
+            },
+            "windows_agents": {"names": windows, "on": windows_agents_on()},
+            "alerts": alerts,
+        },
+    )
+
+
+def windows_agents_on() -> str:
+    return (
+        "windows test server" if os.environ.get("LOADTEST_WINDOWS_AGENT_HOSTS") else "load machine"
+    )
 
 
 def planned_names(profile: dict) -> dict[str, list[str]]:
     """Every name `apply` would claim for a profile, by kind."""
     customers = int(profile["customers"])
-    per_customer = int(profile.get("folders_per_customer", 0))
     return {
-        "customers": [f"{name_prefix()}customer-{c:02d}" for c in range(1, customers + 1)],
-        "folders": [
-            f"{name_prefix()}c{c:02d}-folder-{i:02d}"
-            for c in range(1, customers + 1)
-            for i in range(1, per_customer + 1)
-        ],
+        "customers": customer_names(profile),
+        "folders": [n for c in range(1, customers + 1) for n in folder_names(profile, c)],
         "sources": [s["name"] for s in planned_sources(profile)],
-        "roles": [role_name()],
+        "roles": role_names(profile),
         "users": [f"{name_prefix()}user-{i:03d}" for i in range(1, int(profile["users"]) + 1)],
+        "alerts": alert_names(profile) if alert_webhook() else [],
     }
 
 
@@ -608,13 +804,23 @@ def cmd_apply(args: argparse.Namespace) -> None:
     client = admin_client()
     ledger = Ledger()
     preflight(client, ledger, profile)
-    customers = ensure_customers(client, ledger, int(profile["customers"]))
-    folders = ensure_folders(client, ledger, customers, int(profile.get("folders_per_customer", 0)))
+    customers = ensure_customers(client, ledger, profile)
+    folders = ensure_folders(client, ledger, customers, profile)
     sources = ensure_sources(client, ledger, profile, _placements(customers, folders))
-    role = ensure_role(client, ledger, customers)
-    users = ensure_users(client, ledger, int(profile["users"]), role)
+    count = int(profile["users"])
+    if "production" in profile:
+        roles = ensure_persona_roles(client, ledger, profile, customers, folders)
+        usernames = [f"{name_prefix()}user-{i:03d}" for i in range(1, count + 1)]
+        personas_of = production.user_personas(profile, usernames)
+        users = ensure_users(client, ledger, count, lambda u: roles[personas_of[u]])
+    else:
+        role = ensure_role(client, ledger, customers)
+        users = ensure_users(client, ledger, count, lambda _u: role)
     ensure_agent_tokens(client, sources)
     ensure_monitoring_token(client)
+    if "production" in profile:
+        alerts = ensure_alerts(client, ledger, profile, sources)
+        write_production_plan(profile, sources, users, alerts)
     change_settings(client, profile.get("settings", {}))
     write_state(
         "seeded.json",
@@ -741,6 +947,38 @@ def clean_files() -> None:
     print(f"deleted {', '.join(t + '/' for t in KIT_TREES)} in {root}")
 
 
+def remove_windows_bundle() -> None:
+    """windows-agents/ (agents.py windows-bundle): start-agents.ps1 holds
+    the agents' tokens."""
+    folder = state_dir() / WINDOWS_AGENTS_DIR
+    if folder.is_symlink() or folder.is_file():
+        folder.unlink()
+    elif folder.exists():
+        shutil.rmtree(folder)
+
+
+def clean_restore_copy() -> None:
+    """A restore copy a protocol_matrix run left in the PerchTail container
+    (matrix.py, step `operation`), as recorded in the instance's state."""
+    copy = read_state(RESTORE_STATE)
+    if not copy:
+        return
+    command = restore_cleanup(str(copy.get("dir") or ""))
+    container = str(copy.get("container") or "")
+    if not container:
+        raise KitError(f"{RESTORE_STATE} names no container")
+    user = os.environ.get("LOADTEST_CONTAINER_USER", "perchtail")
+    r = subprocess.run(
+        ["docker", "exec", "-u", user, container, "sh", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if r.returncode != 0:
+        raise KitError(f"couldn't remove {copy['dir']} in {container}: {r.stderr.strip()[-200:]}")
+    remove_state(RESTORE_STATE)
+
+
 def _clean_step(failures: list[str], what: str, action: Callable[[], None]) -> None:
     """Runs one part of the clean; a failure is noted and the rest goes on."""
     try:
@@ -761,6 +999,10 @@ def cmd_clean(args: argparse.Namespace) -> None:
     client = admin_client()
     ledger = Ledger()
     failures: list[str] = []
+
+    def alerts() -> None:
+        for name, alert in _owned_items(ledger, "alerts", client.get("/alerts")):
+            _delete(client, ledger, "alerts", name, f"/alerts/{alert['id']}", failures)
 
     def sources() -> None:
         for name, source in _owned_items(ledger, "sources", client.get("/sources")):
@@ -801,6 +1043,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
                 _delete(client, ledger, "roles", name, f"/roles/{role['id']}", failures)
 
     for what, action in (
+        ("alerts", alerts),
         ("sources", sources),
         ("folders", folders),
         ("customers", customers),
@@ -809,8 +1052,10 @@ def cmd_clean(args: argparse.Namespace) -> None:
         ("System settings", lambda: restore_settings(client)),
     ):
         _clean_step(failures, what, action)
-    for name in ("seeded.json", "agent-tokens.json"):
+    for name in ("seeded.json", "agent-tokens.json", "production-plan.json"):
         _clean_step(failures, name, lambda name=name: remove_state(name))
+    _clean_step(failures, f"{WINDOWS_AGENTS_DIR}/", remove_windows_bundle)
+    _clean_step(failures, "restore copy", clean_restore_copy)
     if args.files:
         _clean_step(failures, "log files", clean_files)
     others = ledger.other_prefixes()
@@ -822,7 +1067,10 @@ def cmd_clean(args: argparse.Namespace) -> None:
     if failures:
         cmd_status(args)
         raise KitError(f"clean incomplete, {len(failures)} problem(s):\n  " + "\n  ".join(failures))
-    print("cleaned: the kit's sources, folders, customers and role removed; its users deactivated")
+    print(
+        "cleaned: the kit's alerts, sources, folders, customers and roles removed; "
+        "its users deactivated"
+    )
     cmd_status(args)
 
 

@@ -1,0 +1,46 @@
+{
+  "name": "protocol_matrix",
+  "description": "Measures what each protocol and each feature costs, one operation at a time (matrix/matrix.py): a source of each protocol, files of 1 to 200 MB, folders of up to 10 000 entries, 100 push agents for the reconnection storm. Needs a dedicated test environment; several hours with every step and delay.",
+  "customers": 1,
+  "folders_per_customer": 1,
+  "users": 20,
+  "sources": {"ssh": 2, "smb": 1, "local": 1, "winrm": 2},
+  "hosts": {"ssh": ["lt-ssh", "lt-ssh-fault"]},
+  "agents": {"running": 100, "stopped": 0, "windows": 1},
+  "files": {
+    "app_folders": 1,
+    "sizes_kb": [10],
+    "agent_sizes_kb": [10],
+    "per_size": 1,
+    "gz": 0,
+    "zip": 0,
+    "large_mb": 1,
+    "large_count": 0,
+    "growing": 0
+  },
+  "settings": {
+    "tail_interval_seconds": 2,
+    "explorer_refresh_seconds": 30,
+    "source_check_minutes": 0,
+    "name_index_enabled": true,
+    "name_index_minutes": 1440
+  },
+  "matrix": {
+    "lists": [100, 1000, 10000],
+    "sizes_mb": [1, 10, 50, 200],
+    "parallelism": [1, 5, 20],
+    "delays_ms": [0, 1, 20, 80],
+    "follow_seconds": 300,
+    "follow_rate_kb_s": 256,
+    "repeat": {"list": 5, "open": 2, "download": 2},
+    "login_storm": 30,
+    "mfa_logins": 3,
+    "capacity": [1, 2, 4, 8, 16, 32, 64],
+    "steps": ["matrix", "fixed", "features", "operation", "storms", "reliability"]
+  },
+  "scenarios": {
+  },
+  "phases": [
+    {"name": "matrix", "duration": "1m", "scenarios": ["protocol_matrix"]}
+  ]
+}

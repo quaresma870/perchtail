@@ -185,6 +185,7 @@ class LedgerTests(StateTestCase):
                 {"id": 1, "username": "lt-user-001"},
                 {"id": 2, "username": "lt-user-002"},
             ],
+            "/alerts": [],
         }
         client = mock.Mock()
         client.get.side_effect = lambda path: lists[path]
@@ -218,6 +219,7 @@ class PrefixTests(StateTestCase):
                 "sources": ["lt2-smb-001"],
                 "roles": ["lt2-role"],
                 "users": ["lt2-user-001"],
+                "alerts": [],
             },
         )
         self.assertTrue(seed.patterns()["users"].match("lt2-user-001"))
@@ -275,6 +277,7 @@ class FakeApi:
                 {"id": 11, "username": "lt-user-001", "active": True, "role_id": 5},
                 {"id": 12, "username": "lt-user-002", "active": True, "role_id": 5},
             ],
+            "/alerts": [],
         }
 
     def _check(self, method: str, path: str) -> None:
@@ -392,6 +395,36 @@ class CleanTests(StateTestCase):
         self.assertEqual(ledger.owned("sources"), {"lt-ssh-001": 1})
         self.assertEqual(ledger.owned("roles"), {"lt-role": 5})
 
+    def test_removes_the_windows_bundle_with_the_agents_tokens(self) -> None:
+        common.write_state("agent-tokens.json", {"lt-agent-001": "secret"})
+        bundle = common.state_dir() / seed.WINDOWS_AGENTS_DIR
+        bundle.mkdir()
+        (bundle / "start-agents.ps1").write_text("$env:PERCHTAIL_AGENT_TOKEN = 'x'", "utf-8")
+        self.clean()
+        self.assertFalse(bundle.exists())
+        self.assertIsNone(common.read_state("agent-tokens.json"))
+
+    def test_removes_a_restore_copy_left_in_the_container(self) -> None:
+        common.write_state(
+            common.RESTORE_STATE, {"container": "perchtail-1", "dir": "/tmp/lt-restore-Ab12Cd"}
+        )
+        done = mock.Mock(returncode=0, stderr="")
+        with mock.patch.object(seed.subprocess, "run", return_value=done) as run_:
+            self.clean()
+        command = run_.call_args.args[0]
+        self.assertEqual(command[:5], ["docker", "exec", "-u", "perchtail", "perchtail-1"])
+        self.assertIn("rm -rf /tmp/lt-restore-Ab12Cd ", command[-1])
+        self.assertIsNone(common.read_state(common.RESTORE_STATE))
+
+    def test_never_removes_a_recorded_path_that_isnt_a_restore_copy(self) -> None:
+        common.write_state(common.RESTORE_STATE, {"container": "perchtail-1", "dir": "/data"})
+        with (
+            mock.patch.object(seed.subprocess, "run") as run_,
+            self.assertRaisesRegex(common.KitError, "restore copy"),
+        ):
+            self.clean()
+        run_.assert_not_called()
+
     def test_main_exits_non_zero_when_clean_is_incomplete(self) -> None:
         self.api.fail = {("DELETE", "/sources/2")}
         with (
@@ -402,6 +435,43 @@ class CleanTests(StateTestCase):
         ):
             seed.main()
         self.assertNotEqual(caught.exception.code, 0)
+
+
+class RestoreCopyTests(StateTestCase):
+    """The matrix's restore runs only into a copy the kit made and recorded:
+    never over the live database, whatever paths the container sets."""
+
+    COPY = {"container": "perchtail-1", "dir": "/tmp/lt-restore-Ab12Cd"}
+
+    def test_every_path_the_restore_writes_is_inside_the_copy(self) -> None:
+        env = common.restore_env("perchtail-1", self.COPY)
+        self.assertEqual(env["DATA_DIR"], "/tmp/lt-restore-Ab12Cd")
+        self.assertEqual(env["DATABASE_URL"], "sqlite:////tmp/lt-restore-Ab12Cd/perchtail.db")
+        self.assertEqual(env["CREDENTIAL_SALT_PATH"], "/tmp/lt-restore-Ab12Cd/credential_salt")
+        self.assertEqual(env["SSH_KNOWN_HOSTS_PATH"], "/tmp/lt-restore-Ab12Cd/ssh_known_hosts")
+        self.assertTrue(env["BACKUP_DIR"].startswith("/tmp/lt-restore-Ab12Cd"))
+
+    def test_the_copy_is_required(self) -> None:
+        with self.assertRaisesRegex(common.KitError, "no restore copy recorded"):
+            common.restore_env("perchtail-1", None)
+        with self.assertRaisesRegex(common.KitError, "no restore copy recorded"):
+            common.restore_env("perchtail-other", self.COPY)
+        with self.assertRaisesRegex(common.KitError, "no restore copy recorded"):
+            common.restore_env("", {"container": "", "dir": "/tmp/lt-restore-Ab12Cd"})
+
+    def test_a_copy_the_kit_didnt_make_is_refused(self) -> None:
+        for path in ("/data", "/data/db", "/tmp/lt-restore", "/tmp/lt-restore-Ab12Cd/../x", ""):
+            with self.assertRaisesRegex(common.KitError, "isn't a restore copy"):
+                common.restore_env("perchtail-1", {"container": "perchtail-1", "dir": path})
+            with self.assertRaises(common.KitError):
+                common.restore_cleanup(path)
+
+    def test_the_restore_is_off_unless_asked_for(self) -> None:
+        args = mock.Mock(profile="protocol_matrix-mini", pid=None, container="c", db="/d")
+        with mock.patch.dict(os.environ, {"LOADTEST_RESTORE_TEST": ""}):
+            self.assertNotIn("--restore-test", run.matrix_command(args, Path("out")))
+        with mock.patch.dict(os.environ, {"LOADTEST_RESTORE_TEST": "1"}):
+            self.assertIn("--restore-test", run.matrix_command(args, Path("out")))
 
 
 class SettingsTests(StateTestCase):
