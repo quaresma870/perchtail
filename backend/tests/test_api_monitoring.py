@@ -333,6 +333,14 @@ def test_health_reports_disks_instance_and_the_new_sections(session, admin_clien
     }
     assert body["scheduler"]["failed_jobs"] == 0
     assert "last_pass_age_seconds" in body["alerts"]
+    assert body["trusted_proxies_suspect"] is False
+
+
+def test_health_reports_a_forwarded_header_from_an_untrusted_peer(admin_client, monkeypatch):
+    monkeypatch.setattr("app.request_context._untrusted_forwarded_seen", True)
+    body = _health(admin_client)
+    assert body["trusted_proxies_suspect"] is True
+    assert body["status"] == "ok"
 
 
 def test_health_reports_an_unreadable_directory_as_unknown(admin_client, monkeypatch):

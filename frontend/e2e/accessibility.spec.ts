@@ -147,3 +147,14 @@ test('accessibility: My profile', async ({ page }) => {
   await settled(page, 'My profile')
   await expectNoSeriousViolations(page)
 })
+
+test('accessibility: Set up two-factor authentication', async ({ page }) => {
+  // The page an account that must use MFA is held on. The seeded admin has
+  // MFA on already, so it shows the "on" state; the layout is the same.
+  await page.goto('/#/setup-mfa')
+  await settled(page, 'Set up two-factor authentication')
+  await expect(
+    page.getByRole('heading', { name: 'Two-factor authentication', exact: true }),
+  ).toBeVisible()
+  await expectNoSeriousViolations(page)
+})

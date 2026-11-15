@@ -68,6 +68,8 @@ class SystemSettingsPublic(BaseModel):
     redaction_enabled: bool
     redaction_downloads: bool
     redaction_download_suffix: bool
+    # MFA for every local account (app/auth/mfa_policy.py).
+    require_mfa_local_accounts: bool
 
 
 class BackupPublic(BaseModel):
@@ -151,6 +153,8 @@ class SystemSettingsUpdate(BaseModel):
     redaction_enabled: bool | None = None
     redaction_downloads: bool | None = None
     redaction_download_suffix: bool | None = None
+    # Super admins only, either way.
+    require_mfa_local_accounts: bool | None = None
 
 
 _PASSWORD_INTS = (
@@ -228,6 +232,7 @@ def update_system_settings(
     _check_redaction_settings(user, changed)
     _check_audit_retention(user, before["audit_retention_days"], changed)
     _check_audit_folder_listings(user, before["audit_folder_listings"], changed)
+    _check_require_mfa(user, before["require_mfa_local_accounts"], changed)
     min_length = changed.get(
         "password_min_length", system_settings.get_int(session, "password_min_length")
     )
@@ -342,5 +347,16 @@ def _check_audit_folder_listings(user: User, current: bool, changed: dict) -> No
         raise forbidden(
             "Only a super admin can turn off auditing of folder listings",
             reason="audit_folder_listings_disabled",
+            user=user,
+        )
+
+
+def _check_require_mfa(user: User, current: bool, changed: dict) -> None:
+    """Who must use MFA is a super admin's call, both ways."""
+    value = changed.get("require_mfa_local_accounts")
+    if value is not None and value != current and not user.role.is_super_admin:
+        raise forbidden(
+            "Only a super admin can change whether local accounts need MFA",
+            reason="require_mfa_changed",
             user=user,
         )

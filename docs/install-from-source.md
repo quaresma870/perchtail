@@ -153,10 +153,10 @@ Then start it:
 sudo systemctl daemon-reload
 sudo systemctl enable --now perchtail
 curl -fsS http://127.0.0.1:8000/healthz
-sudo journalctl -u perchtail | grep initial_super_admin.seeded
+sudo cat /var/lib/perchtail/db/initial-admin-password
 ```
 
-On the first start, PerchTail creates the break-glass super-admin and logs its generated password once, in the `temporary_password` field of `initial_super_admin.seeded`. Note it down; you change it at first login.
+On the first start, PerchTail creates the break-glass super-admin and writes its generated password to `initial-admin-password` in `DATA_DIR`, readable only by the `perchtail` user. The password is never logged; `initial_super_admin.seeded` in the log names the file. You change the password at first login, and the file is deleted then. Super admins must then set up two-factor authentication before anything else.
 
 On every start, `python -m app.data_layout` moves a layout from before 0.5.0 into `DATA_DIR` (a fresh install has nothing to move) and tightens its permissions. `alembic upgrade head` then creates or migrates the database.
 

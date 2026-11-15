@@ -47,7 +47,7 @@
   import { canFormat, formatContent } from '../lib/format-content'
   import { languageForFilename } from '../lib/file-language'
   import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
-  import { redactionCountLabel } from '../lib/redaction-markers'
+  import { countRedactionMarkers, redactionCountLabel } from '../lib/redaction-markers'
   import { parsePatternInput } from '../lib/rule-format'
   import { systemSettings } from '../lib/settings'
   import { tabKey } from '../lib/tab-key'
@@ -204,6 +204,9 @@
   $: activeTab = tabs.find((t) => t.key === activeKey) ?? null
   $: activeSource = activeTab ? allSources.find((s) => s.id === activeTab.sourceId) ?? null : null
   $: canDownloadActive = activeSource?.my_capabilities?.includes('download') ?? false
+  // Redaction (#382, #249): a file the viewer got redacted is downloaded
+  // redacted too, unless downloads are left out of redaction.
+  $: downloadLabel = activeTab?.redacted && $systemSettings.redaction_downloads ? 'Download (redacted)' : 'Download'
   $: activeSeverityPatterns = activeTab ? (severityBySource[activeTab.sourceId] ?? []) : []
   $: displayContent = activeTab
     ? (formatContent(activeTab.content, languageForFilename(activeTab.name), activeTab.format) ??
@@ -926,7 +929,14 @@
     // Tail keeps at most TAIL_MAX_LINES lines (#347): older ones go from
     // the top, and the toolbar says so.
     const newlines = (current.newlineCount ?? countNewlines(current.content)) + countNewlines(appended)
-    const capped = capTailBuffer(kept + appended, newlines)
+    const held = kept + appended
+    const capped = capTailBuffer(held, newlines)
+    if (capped.dropped > 0 && redactionCount > 0) {
+      // The count is of what the tab shows: the values in the lines that
+      // left the top go with them.
+      const gone = held.slice(0, held.length - capped.content.length)
+      redactionCount = Math.max(0, redactionCount - countRedactionMarkers(gone))
+    }
     updateTab(tab.key, {
       content: capped.content,
       newlineCount: capped.newlines,
@@ -1492,8 +1502,8 @@
             {#if canDownloadActive}
               <a
                 class="icon-btn"
-                title="Download"
-                aria-label="Download"
+                title={downloadLabel}
+                aria-label={downloadLabel}
                 href={`/sources/${activeTab.sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
                 target="_blank"
                 rel="noreferrer"

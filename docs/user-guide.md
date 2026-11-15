@@ -220,6 +220,8 @@ For a PerchTail account: enter your **Current password** and a **New password**,
 
 For a PerchTail account, you can add a code from an authenticator app (TOTP) to your sign-in. SSO accounts use their identity provider's second factor instead.
 
+Some accounts must use it: super admins, roles with an administrative capability, and every PerchTail account when an administrator turns on **Require MFA for local accounts**. Such an account without it is taken to **Set up two-factor authentication** after signing in, and can't use anything else until the steps below are done. Turning it off again takes you back to that page.
+
 To turn it on:
 
 1. Click **Enable two-factor authentication**, enter your current password and click **Continue**.
@@ -227,7 +229,7 @@ To turn it on:
 3. Enter the 6-digit code the app shows and click **Confirm**.
 4. Save the 10 backup codes shown: each one works once in place of a code from the app, and they are shown only this time. **Copy codes** copies them. Click **Done**.
 
-While it's on, **Regenerate backup codes** replaces your backup codes with 10 new ones, and **Disable MFA** turns it off. Both ask for your current password.
+While it's on, **Regenerate backup codes** replaces your backup codes with 10 new ones, and **Disable MFA** turns it off. Both ask for your current password, and **Disable MFA** also asks for an **Authentication code**: a code from your authenticator app or one of your backup codes.
 
 If you lose your authenticator app and your backup codes, you can't sign in with that account. An administrator can't turn your two-factor authentication off from the Settings pages.
 

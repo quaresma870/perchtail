@@ -4,6 +4,10 @@
   import { currentUser, refreshCurrentUser } from '../auth'
   import type { MfaBackupCodesResponse, MfaEnrollResponse } from '../types'
 
+  // Called once the new backup codes have been dismissed after enrolling
+  // (the forced setup page moves on from there).
+  export let onDone: (() => void) | undefined = undefined
+
   // Four states this page can be in, driven by $currentUser.mfa_enabled plus
   // local "mid enrollment" / "just confirmed" flags:
   //   1. idle, MFA off       -> "Enable" button
@@ -16,6 +20,7 @@
   let backupCodes: string[] | null = null
   let enrollPassword = ''
   let disablePassword = ''
+  let disableCode = ''
   let regeneratePassword = ''
   let showEnrollForm = false
   let showRegenerateForm = false
@@ -72,14 +77,18 @@
 
   function dismissBackupCodes() {
     backupCodes = null
+    onDone?.()
   }
 
   async function disable() {
     error = ''
     busy = true
     try {
-      await api.post('/auth/mfa/disable', { password: disablePassword })
+      // Turning MFA off also needs the second factor (a TOTP or backup code,
+      // see backend/app/api/auth.py's MfaDisableRequest).
+      await api.post('/auth/mfa/disable', { password: disablePassword, code: disableCode })
       disablePassword = ''
+      disableCode = ''
       showDisableForm = false
       await refreshCurrentUser()
     } catch (err) {
@@ -115,8 +124,13 @@
   <div class="header">
     <h2 class="panel-title">Two-factor authentication</h2>
     <p class="hint">
-      Optional two-factor authentication for your own local account, using an authenticator app
-      (TOTP).
+      {#if $currentUser?.mfa_required}
+        Two-factor authentication for your own local account, using an authenticator app (TOTP).
+        Your account must use it.
+      {:else}
+        Optional two-factor authentication for your own local account, using an authenticator app
+        (TOTP).
+      {/if}
     </p>
   </div>
 
@@ -208,15 +222,31 @@
           data-gramm="false"
           data-enable-grammarly="false" bind:value={disablePassword} />
         </label>
+        <label>
+          Authentication code
+          <input
+            class="input"
+            type="text"
+            bind:value={disableCode}
+            autocomplete="one-time-code"
+            spellcheck="false"
+          />
+        </label>
+        <p class="hint">A code from your authenticator app, or one of your backup codes.</p>
         <div class="actions">
           <button
             class="btn btn-ghost"
             on:click={() => {
               showDisableForm = false
               disablePassword = ''
+              disableCode = ''
             }}>Cancel</button
           >
-          <button class="btn btn-danger" on:click={disable} disabled={busy || !disablePassword}>
+          <button
+            class="btn btn-danger"
+            on:click={disable}
+            disabled={busy || !disablePassword || !disableCode}
+          >
             {busy ? 'Disabling…' : 'Disable MFA'}
           </button>
         </div>
@@ -322,11 +352,6 @@
   .actions {
     display: flex;
     gap: 0.6rem;
-  }
-  .btn-danger {
-    background: var(--danger);
-    color: #fff;
-    border: none;
   }
   .error {
     color: var(--danger);

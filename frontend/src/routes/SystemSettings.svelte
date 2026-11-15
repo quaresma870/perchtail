@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
-  import { currentUser } from '../lib/auth'
+  import { currentUser, refreshCurrentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import UpdatesCard from '../lib/components/UpdatesCard.svelte'
   import { systemSettings } from '../lib/settings'
@@ -26,6 +26,11 @@
   // anyone else), so for others the switch stays put while it's on.
   const AUDIT_FOLDER_LISTINGS_LOCKED_HINT = 'Only a super admin can turn it off.'
   $: auditFolderListingsLocked = auditFolderListings && !$currentUser?.is_super_admin
+  // Who must use MFA is a super admin's call, both ways (the server refuses
+  // anyone else).
+  let requireMfa = false
+  const REQUIRE_MFA_LOCKED_HINT = 'Only a super admin can change it.'
+  $: requireMfaLocked = !$currentUser?.is_super_admin
   // The shortest retention the server accepts, besides 0 (forever).
   const AUDIT_RETENTION_MIN_DAYS = 90
   let auditRetentionDays = 365
@@ -142,6 +147,7 @@
       const settings = await api.get<SystemSettings>('/system-settings')
       auditViewEnabled = settings.audit_view_enabled
       auditFolderListings = settings.audit_folder_listings
+      requireMfa = settings.require_mfa_local_accounts
       auditRetentionDays = settings.audit_retention_days
       retentionInput = String(settings.audit_retention_days)
       maxRoots = settings.source_max_roots
@@ -441,6 +447,27 @@
       // The switch moved before the request: put it back where the
       // setting still is.
       input.checked = auditFolderListings
+      error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
+    } finally {
+      saving = false
+    }
+  }
+
+  async function toggleRequireMfa(event: Event) {
+    const input = event.currentTarget as HTMLInputElement
+    const next = !requireMfa
+    saving = true
+    error = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        require_mfa_local_accounts: next,
+      })
+      requireMfa = settings.require_mfa_local_accounts
+      systemSettings.set(settings)
+      // Turning it on may cover this account too.
+      await refreshCurrentUser()
+    } catch (err) {
+      input.checked = requireMfa
       error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
     } finally {
       saving = false
@@ -1015,6 +1042,31 @@
             {retentionSaving ? 'Saving…' : 'Save'}
           </button>
         </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">Two-factor authentication</h2>
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Require MFA for local accounts</div>
+          <p class="hint">
+            Super admins and roles with any global capability must always use two-factor
+            authentication. This asks every other local account for it too; SSO accounts use their
+            identity provider's. Anyone covered without it can only set it up until they do. Only
+            a super admin can change it.
+          </p>
+        </div>
+        <label class="switch" title={requireMfaLocked ? REQUIRE_MFA_LOCKED_HINT : undefined}>
+          <input
+            type="checkbox"
+            aria-label="Require MFA for local accounts"
+            checked={requireMfa}
+            disabled={saving || requireMfaLocked}
+            on:change={toggleRequireMfa}
+          />
+          <span class="switch-track"></span>
+        </label>
       </div>
     </section>
 

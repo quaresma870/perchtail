@@ -4,7 +4,7 @@ import uuid
 import pytest
 from app.api.auth import get_current_active_user
 from app.api.sso import router as sso_router
-from app.auth.models import GlobalCapability, Role, SSOProviderConfig, User
+from app.auth.models import AuditLog, GlobalCapability, Role, SSOProviderConfig, User
 from app.crypto import decrypt_secret
 from app.db import get_session
 from cryptography.fernet import Fernet
@@ -78,6 +78,19 @@ def test_create_and_get_provider(manage_client):
     fetched = manage_client.get(f"/sso/{body['id']}")
     assert fetched.status_code == 200
     assert fetched.json()["name"] == "Corporate SSO"
+
+
+def test_an_http_issuer_is_refused_on_create_and_update(manage_client, session):
+    insecure = {**CREATE_PAYLOAD, "issuer": "http://idp.example.com"}
+    response = manage_client.post("/sso", json=insecure)
+    assert response.status_code == 422
+    assert response.json()["detail"] == "The issuer URL must be an https:// URL"
+    assert session.exec(select(SSOProviderConfig)).all() == []
+
+    created = manage_client.post("/sso", json=CREATE_PAYLOAD).json()
+    response = manage_client.patch(f"/sso/{created['id']}", json={"issuer": "http://x.example"})
+    assert response.status_code == 422
+    assert manage_client.get(f"/sso/{created['id']}").json()["issuer"] == CREATE_PAYLOAD["issuer"]
 
 
 def test_client_secret_is_encrypted_at_rest(manage_client, session):
@@ -274,6 +287,34 @@ def test_connection_check_reports_incomplete_discovery_document(manage_client, m
     assert response.status_code == 200
     assert response.json()["ok"] is False
     assert "authorization_endpoint" in response.json()["detail"]
+
+
+def test_connection_check_refuses_and_audits_another_issuer(manage_client, session, monkeypatch):
+    created = manage_client.post("/sso", json=CREATE_PAYLOAD).json()
+
+    from app.api import sso as sso_module
+    from app.auth.providers import oidc
+
+    def _mismatch(issuer):
+        raise oidc.IssuerMismatchError(
+            "The identity provider's discovery document names a different issuer"
+        )
+
+    monkeypatch.setattr(sso_module, "fetch_discovery_document", _mismatch)
+    monkeypatch.setattr(sso_module, "fetch_jwks", lambda jwks_uri: pytest.fail("no JWKS request"))
+
+    response = manage_client.post(f"/sso/{created['id']}/test")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "detail": "The identity provider's discovery document names a different issuer",
+    }
+    session.expire_all()
+    [entry] = session.exec(
+        select(AuditLog).where(AuditLog.action == "sso_provider.issuer_mismatch")
+    ).all()
+    assert (entry.target_type, entry.target_id) == ("sso_provider", created["id"])
 
 
 # --- group_claim on the provider config ---------------------------------------------

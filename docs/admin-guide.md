@@ -214,12 +214,12 @@ A role can't be deleted while users hold it or while an SSO group mapping points
 - **+ New user** creates a local account with a **Username**, optional **Display name** and **Email**, a **Temporary password** that follows the password policy, and a **Role**. The user must choose a new password at their first sign-in, and the list shows **must change password** until they do.
 - **Edit**, or a click on the username, changes the display name and email of a local account, the role, and **Active**. An SSO account's name and email come from the identity provider and can't be edited here. The username can't be changed.
 - The **Role** list in each row changes the role at once.
-- **Reset password** (local accounts only) creates a random temporary password, shows it once, signs the user out everywhere and makes them choose a new one at their next sign-in.
-- **Deactivate** signs the user out and stops them signing in. Their audit history is kept, and their alerts stop. **Reactivate** restores the account.
+- **Reset password** (local accounts only) creates a random temporary password, shows it once, signs the user out everywhere and makes them choose a new one at their next sign-in. The server refuses it for SSO accounts, which sign in only through the identity provider.
+- **Deactivate** ends all of the user's sessions at once and stops them signing in. Their audit history is kept, and their alerts stop. **Reactivate** restores the account; the old sessions don't come back.
 
 Users are never deleted, only deactivated. The last active super admin can't be deactivated or moved to a role without super admin.
 
-Users manage their own MFA in **My profile**. There is no way to reset another user's MFA from the Settings pages.
+Users manage their own MFA in **My profile**. There is no way to reset another user's MFA from the Settings pages. Local accounts of super admins and of roles with any global capability must use MFA; **Require MFA for local accounts** under **Settings → System** extends that to every local account ([configuration.md](configuration.md#two-factor-authentication-card)). An account that must use MFA and hasn't set it up can only set it up after signing in.
 
 ## Single sign-on
 
@@ -229,7 +229,7 @@ PerchTail supports one OIDC provider at a time. [SSO setup](sso-setup.md) covers
 
 The first SSO sign-in creates the account, with the email claim as username (or `preferred_username`, or the subject). The new account gets the **No Access** role unless a group mapping matches, so it signs in but sees no sources until someone gives it a role. An SSO account whose username is already taken by another account can't sign in until that clash is resolved.
 
-The display name and email of an SSO account are updated from the identity provider at every sign-in. SSO accounts have no PerchTail password or MFA: the identity provider handles both.
+The display name and email of an SSO account are updated from the identity provider at every sign-in. SSO accounts have no PerchTail password or MFA: the identity provider handles both, and the local sign-in form refuses them.
 
 ### Group-to-role mapping
 

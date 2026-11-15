@@ -23,6 +23,13 @@ DUPLICATE = {
     "scope_id": 5,
     "capabilities": ["view", "download"],
 }
+# e5c1b7a94d26: the password left on an SSO account removed.
+SSO_CLEARED = {
+    "reason": "sso_account",
+    "user_id": 7,
+    "username": "sso@example.com",
+    "auth_provider": "oidc",
+}
 
 
 def _last(session) -> AuditLog:
@@ -72,6 +79,12 @@ def test_an_accepted_entry_is_signed_at_the_end_of_the_chain_and_removed(session
         ("role_grant.delete", {**DUPLICATE, "grant_id": True}),
         ("role_grant.delete", {**DUPLICATE, "extra": 1}),
         ("role_grant.delete", None),
+        ("user.password_cleared", {**SSO_CLEARED, "reason": "other"}),
+        ("user.password_cleared", {**SSO_CLEARED, "auth_provider": "local"}),
+        ("user.password_cleared", {**SSO_CLEARED, "user_id": "7"}),
+        ("user.password_cleared", {**SSO_CLEARED, "username": None}),
+        ("user.password_cleared", {**SSO_CLEARED, "extra": 1}),
+        ("user.password_cleared", None),
     ],
 )
 def test_anything_else_is_refused_audited_and_removed(session, action, metadata):
@@ -108,6 +121,23 @@ def test_a_deleted_duplicate_grant_is_recorded_against_the_grant(session):
     )
     assert entry.user_id is None
     assert {key: entry.event_metadata[key] for key in DUPLICATE} == DUPLICATE
+    assert verify_chain(KEY, session).ok
+
+
+def test_a_cleared_sso_password_is_recorded_against_the_user(session):
+    session.add(AuditOutbox(action="user.password_cleared", event_metadata=SSO_CLEARED))
+    session.commit()
+
+    assert drain_audit_outbox(session) == (1, 0)
+
+    entry = _last(session)
+    assert (entry.action, entry.target_type, entry.target_id, entry.user_id) == (
+        "user.password_cleared",
+        "user",
+        7,
+        None,
+    )
+    assert {key: entry.event_metadata[key] for key in SSO_CLEARED} == SSO_CLEARED
     assert verify_chain(KEY, session).ok
 
 

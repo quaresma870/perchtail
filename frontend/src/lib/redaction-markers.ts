@@ -20,6 +20,22 @@ export function findRedactionMarkers(line: string): MarkerMatch[] {
   return out
 }
 
+// Markers the server doesn't count as a value: a line still being written,
+// or one too long to read whole.
+const UNCOUNTED = /^\[redacted: (incomplete line|line over [^\]]*)\]$/
+
+/** How many redacted values `text` shows, the way the server counts them
+ * in X-Redaction-Count: used to take the lines the Tail drops from the top
+ * off the count. */
+export function countRedactionMarkers(text: string): number {
+  if (!text.includes('[redacted: ')) return 0
+  let count = 0
+  for (const match of text.matchAll(MARKER)) {
+    if (!UNCOUNTED.test(match[0])) count++
+  }
+  return count
+}
+
 export function redactionCountLabel(count: number): string {
   return count === 1 ? '1 value redacted' : `${count.toLocaleString('en')} values redacted`
 }
