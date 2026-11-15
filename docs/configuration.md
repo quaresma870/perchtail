@@ -225,7 +225,7 @@ Shown to super admins only. See [upgrade.md](upgrade.md#the-updates-card) for wh
 
 ### Redaction
 
-No screen yet: in this version a super admin changes these through the API (`PATCH /system-settings`); anyone else, `manage_system_settings` included, is refused. Redaction rules aren't applied to file content yet.
+No screen yet: in this version a super admin changes these through the API (`PATCH /system-settings`); anyone else, `manage_system_settings` included, is refused. In this version redaction applies to what the viewer and Tail show; downloads, alerts and push agents don't apply it yet.
 
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|

@@ -44,6 +44,67 @@ export function readFollowHeaders(headers: Headers, previousOffset: number): Fol
   }
 }
 
+/** Redaction (#382, #249): what the server says about content it redacted
+ * (/open and /follow). Offsets stay in bytes of the original file, so the
+ * Tail goes on from `sourceOffset`, not from the length received; the last
+ * `partialBytes` of the body stand for an unfinished last line, which the
+ * next Follow answer sends again; `aligned` says a Follow answer starts at
+ * the next whole line rather than at the offset asked. */
+export interface RedactionInfo {
+  redacted: boolean
+  count: number
+  sourceOffset: number | null
+  partialBytes: number
+  aligned: boolean
+}
+
+function headerNumber(headers: Headers, name: string): number | null {
+  if (!headers.has(name)) return null
+  const value = Number(headers.get(name))
+  return Number.isFinite(value) && value >= 0 ? value : null
+}
+
+export function readRedactionHeaders(headers: Headers): RedactionInfo {
+  const redacted = headers.get('x-redacted') === '1'
+  return {
+    redacted,
+    count: redacted ? (headerNumber(headers, 'x-redaction-count') ?? 0) : 0,
+    sourceOffset: redacted ? headerNumber(headers, 'x-source-offset') : null,
+    partialBytes: redacted ? (headerNumber(headers, 'x-follow-partial') ?? 0) : 0,
+    aligned: headers.get('x-follow-aligned') === '1',
+  }
+}
+
+/** Decodes a body whose last `partialBytes` stand for an unfinished line:
+ * the text, and how many characters at its end the next Follow answer
+ * replaces. */
+export function decodeWithPartial(
+  decoder: TextDecoder,
+  bytes: Uint8Array,
+  partialBytes: number,
+): { text: string; partialChars: number } {
+  const cut = Math.max(0, bytes.byteLength - Math.min(partialBytes, bytes.byteLength))
+  const text = decoder.decode(bytes.subarray(0, cut), { stream: true })
+  const partial = cut < bytes.byteLength ? decoder.decode(bytes.subarray(cut), { stream: true }) : ''
+  return { text: text + partial, partialChars: partial.length }
+}
+
+/** Appends a Follow answer to `appended`, first dropping the `partialChars`
+ * at the end of what the viewer holds (the unfinished line the answer sends
+ * again). What can't be dropped from `appended` is dropped from the tab's
+ * content: returned as `dropFromContent`. */
+export function appendReplacingPartial(
+  appended: string,
+  dropFromContent: number,
+  partialChars: number,
+  text: string,
+): { appended: string; dropFromContent: number } {
+  if (appended.length >= partialChars) {
+    return { appended: appended.slice(0, appended.length - partialChars) + text, dropFromContent }
+  }
+  return { appended: text, dropFromContent: dropFromContent + partialChars - appended.length }
+}
+
 /** How many lines `text` adds when appended (a final line without a
  * newline still counts). */
 export function countLines(text: string): number {

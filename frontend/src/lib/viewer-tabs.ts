@@ -44,6 +44,13 @@ export interface Tab {
   // Opened at its end only (a large file, #347): Reload reads the end
   // again rather than the whole file.
   endOnly?: boolean
+  // Redaction (#382, #249): the server redacted the content, how many
+  // values it replaced in what the tab holds, and how many characters at
+  // the end of `content` stand for an unfinished last line that the next
+  // Follow answer sends again.
+  redacted?: boolean
+  redactionCount?: number
+  partialChars?: number
 }
 
 export interface ViewerState {
