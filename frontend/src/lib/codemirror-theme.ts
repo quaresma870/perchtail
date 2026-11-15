@@ -12,6 +12,7 @@ import {
 } from '@codemirror/view'
 import type { FileLanguage } from './file-language'
 import { findMarkMatches, type MarkPattern } from './mark-highlighting'
+import { findRedactionMarkers } from './redaction-markers'
 import { findMatchesInLine, LEVEL_CLASS } from './severity-highlighting'
 import { findCrlfLineNumbers, findWhitespaceRuns } from './whitespace-highlighting'
 import type { SeverityPattern } from './types'
@@ -81,6 +82,12 @@ export const darkTheme = EditorView.theme(
     '.cm-mark-3': { backgroundColor: 'rgba(192, 132, 252, 0.32)' },
     '.cm-mark-4': { backgroundColor: 'rgba(251, 146, 60, 0.32)' },
     '.cm-mark-5': { backgroundColor: 'rgba(94, 234, 212, 0.32)' },
+    // Values the server redacted (#382, #249).
+    '.cm-redacted': {
+      backgroundColor: 'rgba(148, 163, 184, 0.18)',
+      borderRadius: '3px',
+      fontStyle: 'italic',
+    },
   },
   { dark: true },
 )
@@ -209,6 +216,40 @@ export function markHighlighting(marks: MarkPattern[]) {
     { decorations: (v) => v.decorations },
   )
 }
+
+function buildRedactionDecorations(view: EditorView): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>()
+  const mark = Decoration.mark({ class: 'cm-redacted' })
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from
+    while (pos <= to) {
+      const line = view.state.doc.lineAt(pos)
+      for (const match of findRedactionMarkers(line.text)) {
+        builder.add(line.from + match.start, line.from + match.end, mark)
+      }
+      pos = line.to + 1
+    }
+  }
+  return builder.finish()
+}
+
+/** Shows the `[redacted: ...]` markers the server put in place of
+ * redacted values (#382, #249) apart from the log's own text. Display
+ * only: the values were removed on the server. */
+export const redactionHighlighting = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet
+    constructor(view: EditorView) {
+      this.decorations = buildRedactionDecorations(view)
+    }
+    update(update: ViewUpdate) {
+      if (update.docChanged || update.viewportChanged) {
+        this.decorations = buildRedactionDecorations(update.view)
+      }
+    }
+  },
+  { decorations: (v) => v.decorations },
+)
 
 class GlyphWidget extends WidgetType {
   constructor(
