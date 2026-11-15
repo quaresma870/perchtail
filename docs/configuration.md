@@ -219,7 +219,7 @@ Shown to super admins only. See [upgrade.md](upgrade.md#the-updates-card) for wh
 
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
-| `audit_view_enabled` | **Audit log** | on | on, off | Shows the **Settings → Audit log** page to the roles allowed to see it. Off hides the page for everyone; events are still recorded. |
+| `audit_view_enabled` | **Audit log** | on | on, off | Shows the **Settings → Audit log** page to the roles allowed to see it. Off hides the page for everyone, and the audit log API answers 404 to everyone but a super admin; events are still recorded. |
 | `audit_folder_listings` | **Audit folder listings** | on | on, off | Records every folder someone lists below a source's root (`source.browse`), not only the sources they open and the files they open or download. Turning it on needs `manage_system_settings`; only a super admin can turn it off. |
 | `audit_retention_days` | **Audit log retention** | `365` | `0` (keep forever), or at least 90 days | Entries older than this are deleted by the purge job (see `AUDIT_PURGE_INTERVAL_SECONDS`), and each purge is recorded as `audit.purge`. Only a super admin can shorten it. See [audit-events.md](audit-events.md). |
 

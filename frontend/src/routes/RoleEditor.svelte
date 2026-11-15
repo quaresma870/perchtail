@@ -122,11 +122,14 @@
     return sources.find((s) => s.id === grant.scope_id)?.name ?? fallback
   }
 
-  function scopeOptions() {
-    if (newScopeType === 'customer') return customers.map((c) => ({ id: c.id, label: c.name }))
-    if (newScopeType === 'folder') return folders.map((f) => ({ id: f.id, label: f.name }))
-    return sources.map((s) => ({ id: s.id, label: s.name }))
-  }
+  // Reactive on the scope type and the lists, so the targets follow the
+  // scope type picked.
+  $: scopeOptions =
+    newScopeType === 'customer'
+      ? customers.map((c) => ({ id: c.id, label: c.name }))
+      : newScopeType === 'folder'
+        ? folders.map((f) => ({ id: f.id, label: f.name }))
+        : sources.map((s) => ({ id: s.id, label: s.name }))
 
   async function handleSubmit() {
     error = ''
@@ -313,7 +316,7 @@
           </select>
           <select class="input" aria-label="Grant target" bind:value={newScopeId}>
             <option value={null}>— pick —</option>
-            {#each scopeOptions() as opt (opt.id)}
+            {#each scopeOptions as opt (opt.id)}
               <option value={opt.id}>{opt.label}</option>
             {/each}
           </select>

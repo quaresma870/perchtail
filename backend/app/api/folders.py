@@ -7,9 +7,14 @@ from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, ScopeType, User
 from app.auth.rbac import (
+    concealed,
+    customer_in_reach,
     delete_scope_grants,
+    folder_in_reach,
     holds_capability_at,
     move_keeps_access_within,
+    org_reach,
+    require_any_global_capability,
     require_global_capability,
 )
 from app.db import get_session
@@ -18,6 +23,13 @@ from app.models import Customer, Folder, Source
 router = APIRouter(prefix="/folders", tags=["folders"])
 
 require_manage = require_global_capability(GlobalCapability.create_source, get_current_active_user)
+# The list also backs the role editor (see api/customers.py).
+require_list = require_any_global_capability(
+    (GlobalCapability.create_source, GlobalCapability.manage_roles), get_current_active_user
+)
+
+FOLDER_NOT_FOUND = "Folder not found"
+PARENT_NOT_FOUND = "Parent folder not found"
 
 
 class FolderPublic(BaseModel):
@@ -40,21 +52,42 @@ class FolderUpdate(BaseModel):
     parent_folder_id: int | None = None
 
 
-def _get_customer_or_404(session: Session, customer_id: int) -> Customer:
+def _get_customer_or_404(session: Session, user: User, customer_id: int) -> Customer:
     customer = session.get(Customer, customer_id)
     if customer is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
+    if not customer_in_reach(session, user, customer_id):
+        raise concealed("Customer not found", reason="customer_out_of_reach", user=user)
     return customer
 
 
+def _get_folder_or_404(session: Session, user: User, folder_id: int) -> Folder:
+    """The folder, if it exists and the caller's grants reach it
+    (rbac.org_reach). One outside their reach answers exactly like one that
+    doesn't exist."""
+    folder = session.get(Folder, folder_id)
+    if folder is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=FOLDER_NOT_FOUND)
+    if not folder_in_reach(session, user, folder_id):
+        raise concealed(FOLDER_NOT_FOUND, reason="folder_out_of_reach", user=user)
+    return folder
+
+
 def _validate_parent(
-    session: Session, *, customer_id: int, parent_folder_id: int | None, folder_id: int | None
+    session: Session,
+    user: User,
+    *,
+    customer_id: int,
+    parent_folder_id: int | None,
+    folder_id: int | None,
 ) -> None:
     if parent_folder_id is None:
         return
     parent = session.get(Folder, parent_folder_id)
     if parent is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent folder not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=PARENT_NOT_FOUND)
+    if not folder_in_reach(session, user, parent_folder_id):
+        raise concealed(PARENT_NOT_FOUND, reason="folder_out_of_reach", user=user)
     if parent.customer_id != customer_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -104,13 +137,19 @@ def _require_manage_source_at(
 @router.get("", response_model=list[FolderPublic])
 def list_folders(
     customer_id: int | None = None,
-    user: User = Depends(require_manage),
+    user: User = Depends(require_list),
     session: Session = Depends(get_session),
 ):
+    """Every folder for a super admin; for anyone else, the folders their
+    role's grants reach (rbac.org_reach)."""
     query = select(Folder)
     if customer_id is not None:
         query = query.where(Folder.customer_id == customer_id)
-    return session.exec(query).all()
+    folders = session.exec(query).all()
+    reach = org_reach(session, user)
+    if reach is None:
+        return folders
+    return [folder for folder in folders if folder.id in reach.folder_ids]
 
 
 @router.post("", response_model=FolderPublic, status_code=status.HTTP_201_CREATED)
@@ -119,9 +158,10 @@ def create_folder(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    _get_customer_or_404(session, payload.customer_id)
+    _get_customer_or_404(session, user, payload.customer_id)
     _validate_parent(
         session,
+        user,
         customer_id=payload.customer_id,
         parent_folder_id=payload.parent_folder_id,
         folder_id=None,
@@ -160,20 +200,25 @@ def update_folder(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    folder = session.get(Folder, folder_id)
-    if folder is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
+    folder = _get_folder_or_404(session, user, folder_id)
+
+    # Checked before anything changes: a refusal leaves the folder as it was.
+    if payload.name is not None:
+        # Renaming, like moving and deleting, needs manage_source on it.
+        _require_manage_source_at(
+            session, user, customer_id=folder.customer_id, folder_id=folder.id
+        )
 
     if (
         "parent_folder_id" in payload.model_fields_set
         and payload.parent_folder_id != folder.parent_folder_id
     ):
-        # Checked before anything changes: a refusal leaves the folder as it was.
         _require_manage_source_at(
             session, user, customer_id=folder.customer_id, folder_id=folder.id
         )
         _validate_parent(
             session,
+            user,
             customer_id=folder.customer_id,
             parent_folder_id=payload.parent_folder_id,
             folder_id=folder.id,
@@ -218,9 +263,7 @@ def delete_folder(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    folder = session.get(Folder, folder_id)
-    if folder is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
+    folder = _get_folder_or_404(session, user, folder_id)
     _require_manage_source_at(session, user, customer_id=folder.customer_id, folder_id=folder.id)
 
     has_children = session.exec(select(Folder).where(Folder.parent_folder_id == folder_id)).first()

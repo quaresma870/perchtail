@@ -1,6 +1,7 @@
-"""create_source lets a role rename folders; adding one also needs
-manage_source where it goes, and moving or deleting one also needs
-manage_source on it (and, to move it, where it goes)."""
+"""With create_source, adding a folder also needs manage_source where it
+goes, and renaming, moving or deleting one also needs manage_source on it
+(and, to move it, where it goes). A folder outside the role's reach answers
+404, as if it didn't exist."""
 
 import uuid
 
@@ -80,7 +81,10 @@ def test_cannot_pull_a_folder_it_cannot_reach_under_one_it_can(session, tree):
     _, x, y = tree
     client = _client(session, _role(session, grants=[(ScopeType.folder, y.id, VIEW)]))
 
-    _assert_refused(client.patch(f"/folders/{x.id}", json={"parent_folder_id": y.id}))
+    # X is outside the role's reach: it answers as if it didn't exist.
+    response = client.patch(f"/folders/{x.id}", json={"parent_folder_id": y.id})
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "Folder not found"
     session.refresh(x)
     assert x.parent_folder_id is None
 
@@ -217,12 +221,27 @@ def test_deleting_needs_manage_source_on_the_folder(session, tree):
     assert client.delete(f"/folders/{y.id}").status_code == 204
 
 
-def test_renaming_needs_only_create_source(session, tree):
-    _, x, _ = tree
-    client = _client(session, _role(session))
+def test_renaming_needs_manage_source_on_the_folder(session, tree):
+    customer, x, y = tree
 
+    no_grant = _client(session, _role(session))
+    assert no_grant.patch(f"/folders/{x.id}", json={"name": "renamed"}).status_code == 404
+
+    view_only = _client(session, _role(session, grants=[(ScopeType.folder, x.id, VIEW)]))
+    _assert_refused(view_only.patch(f"/folders/{x.id}", json={"name": "renamed"}))
+    session.refresh(x)
+    assert x.name == "X"
+
+    # Resolution as usual: the customer grant reaches X, a narrower grant on
+    # Y governs Y.
+    role = _role(
+        session,
+        grants=[(ScopeType.customer, customer.id, MANAGE), (ScopeType.folder, y.id, VIEW)],
+    )
+    client = _client(session, role)
     response = client.patch(f"/folders/{x.id}", json={"name": "renamed"})
     assert response.status_code == 200, response.text
+    _assert_refused(client.patch(f"/folders/{y.id}", json={"name": "renamed"}))
     # Naming the parent it already has is not a move.
     same = client.patch(f"/folders/{x.id}", json={"name": "again", "parent_folder_id": None})
     assert same.status_code == 200, same.text
@@ -267,8 +286,9 @@ def test_adding_a_folder_needs_manage_source_where_it_goes(session, tree):
     session.add(other)
     session.commit()
     session.refresh(other)
+    # A customer outside the role's reach answers as if it didn't exist.
     elsewhere = client.post("/folders", json={"name": "b", "customer_id": other.id})
-    assert elsewhere.status_code == 403, elsewhere.text
+    assert elsewhere.status_code == 404, elsewhere.text
 
     allowed = _client(session, _role(session, grants=[(ScopeType.customer, customer.id, MANAGE)]))
     top = allowed.post("/folders", json={"name": "top", "customer_id": customer.id})

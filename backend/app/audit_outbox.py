@@ -23,6 +23,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.audit import record_audit_event
+from app.auth.models import Capability, ScopeType
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -47,9 +48,41 @@ def _retention_raised(metadata: object) -> bool:
     return _is_int(old) and _is_int(new) and 0 < old < new
 
 
-# action -> (target_type, check of the metadata).
-ACCEPTED: dict[str, tuple[str, Callable[[object], bool]]] = {
-    "system_settings.update": ("system_settings", _retention_raised),
+_DUPLICATE_GRANT_KEYS = {
+    "reason",
+    "grant_id",
+    "kept_grant_id",
+    "role_id",
+    "scope_type",
+    "scope_id",
+    "capabilities",
+}
+
+
+def _duplicate_grant_deleted(metadata: object) -> bool:
+    """a8d3f5c27e14: a role's second grant for the same scope deleted, the
+    one with the lowest id kept."""
+    if not isinstance(metadata, dict) or set(metadata) != _DUPLICATE_GRANT_KEYS:
+        return False
+    if metadata["reason"] != "duplicate_scope":
+        return False
+    ids = (metadata[key] for key in ("grant_id", "kept_grant_id", "role_id", "scope_id"))
+    if not all(_is_int(value) for value in ids):
+        return False
+    if not metadata["kept_grant_id"] < metadata["grant_id"]:
+        return False
+    if metadata["scope_type"] not in {scope.value for scope in ScopeType}:
+        return False
+    capabilities = metadata["capabilities"]
+    allowed = {capability.value for capability in Capability}
+    return isinstance(capabilities, list) and all(c in allowed for c in capabilities)
+
+
+# action -> (target_type, check of the metadata, metadata key of the target
+# id or None).
+ACCEPTED: dict[str, tuple[str, Callable[[object], bool], str | None]] = {
+    "system_settings.update": ("system_settings", _retention_raised, None),
+    "role_grant.delete": ("role_grant", _duplicate_grant_deleted, "grant_id"),
 }
 
 
@@ -80,11 +113,13 @@ def drain_audit_outbox(session: Session) -> tuple[int, int]:
         accepted = ACCEPTED.get(action) if isinstance(action, str) else None
         metadata = _parse(raw_metadata)
         if accepted is not None and accepted[1](metadata):
+            target_type, _check, target_key = accepted
             record_audit_event(
                 session,
                 user_id=None,
                 action=action,
-                target_type=accepted[0],
+                target_type=target_type,
+                target_id=metadata[target_key] if target_key else None,
                 metadata=metadata,
             )
             recorded += 1

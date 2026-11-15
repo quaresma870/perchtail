@@ -33,6 +33,28 @@ def forbidden(detail, *, reason: str, user: User | None = None) -> PermissionDen
     return PermissionDenied(detail, reason=reason)
 
 
+class ConcealedDenial(HTTPException):
+    """A refusal answered as 404, as if the target didn't exist, so the
+    answer doesn't reveal that it does (a customer or folder outside the
+    caller's reach, a role beyond their authority, the audit log while it
+    is turned off). Audited like a 403 (app/api/errors.py), with the
+    reason; the caller only sees the neutral detail."""
+
+    def __init__(self, detail, *, reason: str) -> None:
+        super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+        self.reason = reason
+
+
+def concealed(detail, *, reason: str, user: User | None = None) -> ConcealedDenial:
+    """The 404 to raise for a refusal that mustn't reveal its target; `user`
+    as in `forbidden`."""
+    if user is not None:
+        context = request_context.current()
+        if context is not None and context.user_id is None:
+            context.user_id = user.id
+    return ConcealedDenial(detail, reason=reason)
+
+
 def _find_grant(session: Session, *, role_id: int, scope_type: ScopeType, scope_id: int):
     return session.exec(
         select(RoleGrant).where(
@@ -180,29 +202,106 @@ def visible_source_ids(
     return ids
 
 
-def visible_customer_ids(session: Session, user: User) -> set[int] | None:
-    """Returns the set of customer ids the user has any grant reaching
-    (customer-scoped, or a folder/source grant somewhere underneath it), or
-    None for "all" (super-admin). A grant here only proves the org unit is
-    worth showing in a list — the actual capability is still checked at the
-    source/folder endpoints themselves."""
+@dataclass(frozen=True)
+class OrgReach:
+    """The customers and folders a role's grants reach (see `org_reach`)."""
+
+    customer_ids: frozenset[int]
+    folder_ids: frozenset[int]
+
+
+def org_reach(session: Session, user: User) -> OrgReach | None:
+    """The customers and folders `user` may see in the organization's
+    structure, or None for all of them (super admin). Customers and folder
+    names are information of each customer, so a role only sees those its
+    own grants reach:
+
+    - a customer with a grant on it, on one of its folders or on one of its
+      sources;
+    - every folder of a customer with a customer grant;
+    - a folder with a grant, and every folder below it;
+    - the folder holding a source with a grant, and the folders above that
+      one, for the path to it.
+
+    Any grant counts, whatever its capabilities: this only decides what the
+    lists show and what answers 404. What may be done there is still checked
+    by grant resolution."""
     if user.role.is_super_admin:
         return None
 
-    ids: set[int] = set()
     grants = session.exec(select(RoleGrant).where(RoleGrant.role_id == user.role_id)).all()
+    if not grants:
+        return OrgReach(customer_ids=frozenset(), folder_ids=frozenset())
+
+    folders_by_id = {f.id: f for f in session.exec(select(Folder)).all()}
+    children: dict[int, list[int]] = {}
+    for folder in folders_by_id.values():
+        if folder.parent_folder_id is not None:
+            children.setdefault(folder.parent_folder_id, []).append(folder.id)
+
+    customer_ids: set[int] = set()
+    folder_ids: set[int] = set()
+
+    def add_with_descendants(folder_id: int) -> None:
+        pending = [folder_id]
+        while pending:
+            current = pending.pop()
+            if current in folder_ids:
+                continue
+            folder_ids.add(current)
+            pending.extend(children.get(current, []))
+
+    def add_with_ancestors(folder_id: int | None) -> None:
+        # The whole chain: a folder already reached by another grant (from
+        # above it) doesn't mean the folders above it are.
+        walked: set[int] = set()
+        while folder_id is not None and folder_id not in walked:
+            folder = folders_by_id.get(folder_id)
+            if folder is None:
+                return
+            walked.add(folder_id)
+            folder_ids.add(folder_id)
+            folder_id = folder.parent_folder_id
+
+    granted_customers = {g.scope_id for g in grants if g.scope_type == ScopeType.customer}
+    for folder in folders_by_id.values():
+        if folder.customer_id in granted_customers:
+            folder_ids.add(folder.id)
+    customer_ids |= granted_customers
+
     for grant in grants:
-        if grant.scope_type == ScopeType.customer:
-            ids.add(grant.scope_id)
-        elif grant.scope_type == ScopeType.folder:
-            folder = session.get(Folder, grant.scope_id)
+        if grant.scope_type == ScopeType.folder:
+            folder = folders_by_id.get(grant.scope_id)
             if folder is not None:
-                ids.add(folder.customer_id)
+                customer_ids.add(folder.customer_id)
+                add_with_descendants(folder.id)
         elif grant.scope_type == ScopeType.source:
             source = session.get(Source, grant.scope_id)
-            if source is not None and source.customer_id is not None:
-                ids.add(source.customer_id)
-    return ids
+            if source is None or source.is_system:
+                continue
+            if source.customer_id is not None:
+                customer_ids.add(source.customer_id)
+            add_with_ancestors(source.folder_id)
+
+    return OrgReach(customer_ids=frozenset(customer_ids), folder_ids=frozenset(folder_ids))
+
+
+def customer_in_reach(session: Session, user: User, customer_id: int) -> bool:
+    reach = org_reach(session, user)
+    return reach is None or customer_id in reach.customer_ids
+
+
+def folder_in_reach(session: Session, user: User, folder_id: int) -> bool:
+    reach = org_reach(session, user)
+    return reach is None or folder_id in reach.folder_ids
+
+
+def visible_customer_ids(session: Session, user: User) -> set[int] | None:
+    """Returns the set of customer ids the user has any grant reaching
+    (customer-scoped, or a folder/source grant somewhere underneath it), or
+    None for "all" (super-admin); see `org_reach`."""
+    reach = org_reach(session, user)
+    return None if reach is None else set(reach.customer_ids)
 
 
 @dataclass
@@ -313,6 +412,23 @@ def require_global_capability(capability: GlobalCapability, get_current_user: Ca
         raise forbidden(
             "Not permitted", reason=f"missing_global_capability:{capability}", user=user
         )
+
+    return dependency
+
+
+def require_any_global_capability(
+    capabilities: tuple[GlobalCapability, ...], get_current_user: Callable[..., User]
+):
+    """Like `require_global_capability`, passing with any one of
+    `capabilities`."""
+
+    def dependency(user: User = Depends(get_current_user)) -> User:
+        if user.role.is_super_admin:
+            return user
+        if any(capability in user.role.global_capabilities for capability in capabilities):
+            return user
+        names = "|".join(str(capability) for capability in capabilities)
+        raise forbidden("Not permitted", reason=f"missing_global_capability:{names}", user=user)
 
     return dependency
 

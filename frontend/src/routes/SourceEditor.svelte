@@ -2,6 +2,7 @@
   import { createEventDispatcher, onMount, tick } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
+  import { currentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import FolderPicker from '../lib/components/FolderPicker.svelte'
   import SeverityPatternEditor from '../lib/components/SeverityPatternEditor.svelte'
@@ -81,6 +82,9 @@
   // here rather than forcing a detour through a separate admin page that
   // doesn't exist yet.
   const NEW_OPTION = '__new__'
+  // Only a super admin adds customers; everyone else picks one of the
+  // customers their grants reach.
+  $: canCreateCustomer = $currentUser?.is_super_admin ?? false
   let showNewCustomerForm = false
   let newCustomerName = ''
   let creatingCustomer = false
@@ -407,7 +411,9 @@
             {#each customers as customer (customer.id)}
               <option value={customer.id}>{customer.name}</option>
             {/each}
-            <option value={NEW_OPTION}>+ Create new customer…</option>
+            {#if canCreateCustomer}
+              <option value={NEW_OPTION}>+ Create new customer…</option>
+            {/if}
           </select>
         </label>
         <label>

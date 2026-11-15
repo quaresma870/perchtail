@@ -1,7 +1,7 @@
 import pytest
 from app.api.auth import get_current_active_user
 from app.api.customers import router as customers_router
-from app.auth.models import GlobalCapability, Role, User
+from app.auth.models import Capability, GlobalCapability, Role, RoleGrant, ScopeType, User
 from app.db import get_session
 from app.models import Customer, Folder, Protocol, Source
 from fastapi import FastAPI
@@ -36,13 +36,27 @@ def client_for(session):
     return _make
 
 
-def test_create_source_capability_can_create_and_list_customers(session, client_for):
+def test_create_source_capability_lists_only_reached_customers_and_cannot_create(
+    session, client_for
+):
     user = _make_user(session, global_capabilities=[GlobalCapability.create_source])
+    reached = Customer(name="Vodacom Tanzania")
+    other = Customer(name="Elsewhere")
+    session.add_all([reached, other])
+    session.commit()
+    session.add(
+        RoleGrant(
+            role_id=user.role_id,
+            scope_type=ScopeType.customer,
+            scope_id=reached.id,
+            capabilities=[Capability.view],
+        )
+    )
+    session.commit()
     client = client_for(user)
 
-    create = client.post("/customers", json={"name": "Vodacom Tanzania"})
-    assert create.status_code == 201
-    assert create.json()["name"] == "Vodacom Tanzania"
+    # Only a super admin adds customers.
+    assert client.post("/customers", json={"name": "New"}).status_code == 403
 
     listed = client.get("/customers")
     assert listed.status_code == 200

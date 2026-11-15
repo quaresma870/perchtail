@@ -1,9 +1,13 @@
 import type { Folder } from './types'
 
+/** A folder whose parent isn't in the list sits at the top: the API lists
+ * only the folders a role's grants reach, so a grant on a deep folder comes
+ * back without the folders above it. */
 function groupByParent(folders: Folder[]): Map<number | null, Folder[]> {
+  const ids = new Set(folders.map((f) => f.id))
   const byParent = new Map<number | null, Folder[]>()
   for (const f of folders) {
-    const key = f.parent_folder_id
+    const key = f.parent_folder_id !== null && ids.has(f.parent_folder_id) ? f.parent_folder_id : null
     if (!byParent.has(key)) byParent.set(key, [])
     byParent.get(key)!.push(f)
   }

@@ -17,14 +17,29 @@ from app.audit_integrity import (
 )
 from app.audit_labels import NAMED_TARGET_TYPES, describe_target, prefetch_targets
 from app.auth.models import AuditChainState, AuditLog, GlobalCapability, User
-from app.auth.rbac import require_global_capability
+from app.auth.rbac import concealed, require_global_capability
 from app.crypto import audit_chain_key
 from app.db import get_session
+from app.system_settings import get_bool
 from app.timeutils import utc_iso, utcnow
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
-require_view = require_global_capability(GlobalCapability.view_audit_log, get_current_active_user)
+_require_view_capability = require_global_capability(
+    GlobalCapability.view_audit_log, get_current_active_user
+)
+
+
+def require_view(
+    user: User = Depends(get_current_active_user), session: Session = Depends(get_session)
+) -> User:
+    """view_audit_log, while the audit log page is on (audit_view_enabled).
+    Turned off, the audit log answers 404 to everyone but a super admin,
+    the auditor of last resort; events are still recorded."""
+    if not user.role.is_super_admin and not get_bool(session, "audit_view_enabled"):
+        raise concealed("Not Found", reason="audit_view_disabled", user=user)
+    return _require_view_capability(user)
+
 
 # A safety valve for load (an unbounded page could pull the whole table into
 # memory), not a design goal -- same spirit as the scratch store's size guard
