@@ -26,7 +26,7 @@ from sqlmodel import Session, select
 
 from app import system_settings
 from app.models import RedactionRule, Source, SourceRedactionOverride
-from app.redaction import DETECTOR_NAMES, RedactionRuleError, compile_rules
+from app.redaction import DETECTOR_NAMES, MAX_RULE_LENGTH, RedactionRuleError, compile_rules
 
 # Limits on custom rules: a pattern RE2 runs in linear
 # time, but its cost still grows with its size and with the number of rules.
@@ -36,10 +36,9 @@ MAX_PROGRAM_SIZE = 2000
 MAX_PATTERN_MEM_BYTES = 8 * 1024 * 1024
 # Names go into every replacement (`[redacted: <name>]`).
 MAX_NAME_CHARS = 48
-# The longest match a custom rule may declare, in bytes: the engine keeps
-# that much before the cut of a long line, so a value cut by the limit
-# leaves nothing behind.
-MAX_RULE_LENGTH = 4096
+# The longest match a custom rule may declare is MAX_RULE_LENGTH bytes (from
+# the engine, which refuses more): the engine keeps that much before the cut
+# of a long line, so a value cut by the limit leaves nothing behind.
 
 _NAME_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f\[\]]")
 
