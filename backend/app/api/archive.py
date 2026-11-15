@@ -1,5 +1,7 @@
+import gzip
 import hashlib
 import io
+import mimetypes
 import os
 import shutil
 import tarfile
@@ -8,7 +10,7 @@ import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import BinaryIO, NamedTuple
 from urllib.parse import quote
 
 import anyio
@@ -21,6 +23,10 @@ from starlette.types import Receive, Scope, Send
 from app import request_context, source_roots, system_settings
 from app.api.auth import get_current_active_user
 from app.archives import (
+    SKIP_ENCRYPTED,
+    SKIP_LINK,
+    SKIP_NESTED_ARCHIVE,
+    SKIP_UNSUPPORTED_COMPRESSION,
     ArchiveMember,
     DecompressionLimitError,
     decompress_gzip,
@@ -29,6 +35,7 @@ from app.archives import (
     is_transparent_gzip,
     list_members,
     normalize_member_name,
+    rebuild_archive,
     resolve_member_name,
     tree_children,
 )
@@ -53,9 +60,11 @@ from app.logging_config import get_logger
 from app.models import Protocol, Rule, RuleType, Source
 from app.name_index import MAX_DEPTH
 from app.redaction import (
+    CHUNK_BYTES,
     HEAD_BYTES,
     CompiledRules,
     RedactionRuleError,
+    Redactor,
     UnsupportedEncodingError,
     compile_rules,
     detect_encoding,
@@ -279,6 +288,83 @@ class RedactionEncodingRefused(AuditedRefusal):
         self.reason = _AUDIT_REDACTION_ENCODING_REASON
 
 
+# Redaction is on and the content is compressed in a format PerchTail doesn't
+# decompress (bzip2, xz, zstd, 7z, rar, or gzip or zip in a file not named
+# as one), so the values inside can't be redacted.
+_AUDIT_REDACTION_FORMAT_REASON = "redaction_unsupported_format"
+REDACTION_FORMAT_MESSAGE = (
+    "This file is in a compressed format redaction doesn't support, so it can't be shown."
+)
+REDACTION_FORMAT_ERROR_CODE = "redaction_unsupported_format"
+
+
+class RedactionFormatRefused(AuditedRefusal):
+    """409 for content compressed in a format redaction can't read
+    (unsupported_compressed_format): refused rather than served with the
+    values inside it unredacted."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": REDACTION_FORMAT_MESSAGE,
+                "error_code": REDACTION_FORMAT_ERROR_CODE,
+            },
+        )
+        self.reason = _AUDIT_REDACTION_FORMAT_REASON
+
+
+# The first bytes of the compressed formats PerchTail doesn't decompress.
+# bzip2 is "BZh", the block size ('1' to '9'), then the magic of its first
+# block or of the end of an empty stream. gzip and zip are decompressed only
+# when the file name says so (.gz, .zip); by the time content reaches this
+# check, that has already happened, so gzip or zip content here is in a
+# file whose name doesn't say so (app.log.1 holding gzip) and is refused too.
+_BZIP2_BLOCK_MAGICS = (b"\x31\x41\x59\x26\x53\x59", b"\x17\x72\x45\x38\x50\x90")
+_UNSUPPORTED_COMPRESSED_MAGICS = (
+    b"\xfd7zXZ\x00",  # xz
+    b"\x28\xb5\x2f\xfd",  # zstd
+    b"7z\xbc\xaf\x27\x1c",  # 7z
+    b"Rar!\x1a\x07",  # rar (1.5 and 5)
+    b"\x1f\x8b",  # gzip
+    b"PK\x03\x04",  # zip
+    b"PK\x05\x06",  # zip with no members
+    b"PK\x07\x08",  # zip split or spanned
+)
+
+
+def unsupported_compressed_format(head: bytes) -> bool:
+    """Whether content starting with `head` is compressed in a format
+    PerchTail doesn't decompress there (bzip2, xz, zstd, 7z, rar, and gzip
+    or zip in a file not named as one), told by its first bytes rather than
+    by its file name."""
+    if (
+        head[:3] == b"BZh"
+        and len(head) >= 10
+        and head[3:4] in (b"1", b"2", b"3", b"4", b"5", b"6", b"7", b"8", b"9")
+        and head[4:10] in _BZIP2_BLOCK_MAGICS
+    ):
+        return True
+    return head.startswith(_UNSUPPORTED_COMPRESSED_MAGICS)
+
+
+# Redaction is on and a compressed file inside an archive can't be read, so
+# it can't be redacted.
+_AUDIT_REDACTION_UNREADABLE_REASON = "redaction_unreadable"
+
+
+class RedactionUnreadableRefused(AuditedRefusal):
+    """409 for a compressed file a redacted download can't read: refused
+    rather than sent unredacted."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This compressed file can't be read, so it can't be redacted.",
+        )
+        self.reason = _AUDIT_REDACTION_UNREADABLE_REASON
+
+
 def _archive_has_hidden_members(
     source: Source, path: str, local_archive: Path, rules: list[Rule]
 ) -> bool:
@@ -322,12 +408,23 @@ def _require_whole_archive_allowed(
 
 
 def _materialize(
-    source: Source, path: str, member: str | None, rules: list[Rule], destination: Path
+    source: Source,
+    path: str,
+    member: str | None,
+    rules: list[Rule],
+    destination: Path,
+    *,
+    check_whole_archive: bool = True,
 ) -> str:
     """Fetches `path` (or `member` inside it, if `path` is an archive) into
     `destination`, applying transparent .gz decompression. Returns the
     filename to present to the client. Every call is a fresh fetch — see
-    CLAUDE.md's "Live browsing & ephemeral fetch behavior"."""
+    CLAUDE.md's "Live browsing & ephemeral fetch behavior".
+
+    A whole archive (or an archive member that is one) is only fetched when
+    none of its members is hidden (_require_whole_archive_allowed), unless
+    `check_whole_archive` is False: a redacted download rebuilds it with
+    only the members the rules don't hide (_rebuild_redacted)."""
     if not _visible(source, path, rules):
         # Rules gate which files are reachable independent of RBAC — a user
         # may have view/download on the source overall but not on this
@@ -354,7 +451,7 @@ def _materialize(
                 extract_member(
                     archive_local, filename, raw_name, destination, _max_decompressed_bytes()
                 )
-            if is_archive(member.rsplit("/", 1)[-1]):
+            if check_whole_archive and is_archive(member.rsplit("/", 1)[-1]):
                 # A member that is itself an archive is served whole, so it
                 # gets the same check as any whole archive, at its virtual
                 # path.
@@ -378,7 +475,8 @@ def _materialize(
     if is_archive(filename):
         # Read from the source once: the same copy is checked and served.
         with connector.local_copy(source, path) as archive_local:
-            _require_whole_archive_allowed(source, path, Path(archive_local), rules)
+            if check_whole_archive:
+                _require_whole_archive_allowed(source, path, Path(archive_local), rules)
             shutil.copyfile(archive_local, destination)
         return filename
 
@@ -652,6 +750,8 @@ def _redact_file(original: Path, destination: Path, rules: CompiledRules, final:
     finds in its first bytes, for the viewer (UTF-8 out)."""
     with original.open("rb") as src:
         head = src.read(HEAD_BYTES)
+        if unsupported_compressed_format(head):
+            raise RedactionFormatRefused()
         try:
             encoding = detect_encoding(head)
         except UnsupportedEncodingError as exc:
@@ -675,8 +775,11 @@ def _resolve_redacted(
     fetched original deleted before the response goes out, so scratch only
     ever keeps the redacted copy. A whole archive (or an archive inside
     one) would carry its members unredacted, so it is refused (403, the
-    same answer as an archive hiding files). A .gz file or an archive
-    member is complete content, so its last line is redacted as it is; a
+    same answer as an archive hiding files). A .gz member is decompressed
+    first, like a .gz file. Content compressed in a format redaction
+    doesn't support (unsupported_compressed_format) is refused (409). A .gz
+    file or an archive member is complete content, so its last line is redacted
+    as it is; a
     plain file may still be written to, so an unfinished last line becomes
     `[redacted: incomplete line]` and the Tail reads it again."""
     filename = path.rsplit("/", 1)[-1]
@@ -698,6 +801,7 @@ def _resolve_redacted(
         key = _scratch_key(source.id, path, member)
         destination = store.acquire(key)
         fetched = destination.with_name(f"{destination.name}.source")
+        plain = destination.with_name(f"{destination.name}.plain")
         try:
             if source.protocol == Protocol.local and not complete:
                 original = _local_plain_path(source, path)
@@ -705,6 +809,13 @@ def _resolve_redacted(
             else:
                 served_filename = _materialize(source, path, member, rules, fetched)
                 original = fetched
+                if member is not None and is_transparent_gzip(served_filename):
+                    # A .gz member opens like a plain .gz file: decompressed,
+                    # then redacted; one that can't be read is refused.
+                    _decompress_gzip_member(fetched, plain)
+                    fetched.unlink()
+                    original = plain
+                    served_filename = served_filename[: -len(".gz")]
             redacted = _redact_file(original, destination, redaction, final=complete)
         except FetchTooLargeError as exc:
             store.release(key)
@@ -714,7 +825,20 @@ def _resolve_redacted(
             raise
         finally:
             fetched.unlink(missing_ok=True)
+            plain.unlink(missing_ok=True)
     return _Resolved(destination, served_filename, key, redacted)
+
+
+def _decompress_gzip_member(compressed: Path, destination: Path) -> None:
+    """A .gz archive member decompressed into `destination` for redaction,
+    up to MAX_DECOMPRESSED_MB (413 past it); 409 (RedactionUnreadableRefused)
+    when it can't be read as gzip, rather than redacting compressed bytes."""
+    try:
+        decompress_gzip(compressed, destination, _max_decompressed_bytes())
+    except DecompressionLimitError as exc:
+        raise _too_large(exc) from exc
+    except _UNREADABLE_ERRORS as exc:
+        raise RedactionUnreadableRefused() from exc
 
 
 def _local_plain_path(source: Source, path: str) -> Path:
@@ -835,7 +959,11 @@ def _redaction_metadata(redacted: RedactedRead | None) -> dict:
     didn't apply."""
     if redacted is None:
         return {}
-    return {"redaction": "applied", "redaction_at": "server"}
+    return dict(_REDACTION_APPLIED)
+
+
+# What the audit entry of a read redacted on the server says.
+_REDACTION_APPLIED = {"redaction": "applied", "redaction_at": "server"}
 
 
 def _redaction_headers(redacted: RedactedRead) -> dict[str, str]:
@@ -1078,6 +1206,17 @@ def follow_file(
         )
 
     if redaction is not None:
+        if unsupported_compressed_format(first):
+            _audit_refusal(
+                session,
+                user,
+                source,
+                "file.open_denied",
+                path,
+                _AUDIT_REDACTION_FORMAT_REASON,
+                follow=True,
+            )
+            raise RedactionFormatRefused()
         try:
             encoding = detect_encoding(first)
         except UnsupportedEncodingError as exc:
@@ -1204,6 +1343,416 @@ def close_file(
     store.release(key)
 
 
+# Redacted downloads (#382, #249): every redacted download says so in this
+# header, and in its file name when the redaction_download_suffix setting
+# is on.
+REDACTED_DOWNLOAD_HEADER = "X-PerchTail-Redacted"
+# What a redacted archive or folder ZIP leaves out is listed in this file
+# inside it.
+REDACTION_SKIPPED_NAME = "REDACTION-SKIPPED.txt"
+_REDACTION_SKIPPED_FALLBACK_NAME = "REDACTION-SKIPPED (PerchTail).txt"
+# Why a redacted download left a file out, besides archives.SKIP_*.
+_SKIP_ENCODING = "unsupported_encoding"
+_SKIP_TOO_LARGE = "too_large"
+_SKIP_UNREADABLE = "unreadable"
+_SKIP_FORMAT = "unsupported_format"
+_REDACTION_SKIP_TEXT = {
+    SKIP_NESTED_ARCHIVE: "an archive inside an archive, which redaction doesn't open",
+    SKIP_ENCRYPTED: "encrypted, so it can't be redacted",
+    SKIP_LINK: "a symbolic link, which redaction doesn't follow",
+    SKIP_UNSUPPORTED_COMPRESSION: "compressed with a method that can't be read",
+    _SKIP_ENCODING: "in an encoding redaction doesn't support (UTF-32)",
+    _SKIP_FORMAT: "in a compressed format redaction doesn't support",
+    _SKIP_TOO_LARGE: "too large once decompressed (MAX_DECOMPRESSED_MB)",
+    _SKIP_UNREADABLE: "can't be read as an archive or a compressed file",
+}
+# What a corrupt archive or compressed file raises while it is read.
+_UNREADABLE_ERRORS = (
+    zipfile.BadZipFile,
+    tarfile.TarError,
+    gzip.BadGzipFile,
+    EOFError,
+    zlib.error,
+)
+
+
+def download_redaction_rules_for(session: Session, source: Source) -> CompiledRules | None:
+    """The rules a download from `source` is redacted with: those of the
+    viewer (redaction_rules_for) while the redaction_downloads setting is
+    on; None, and the original content, while it is off."""
+    if not system_settings.get_bool(session, "redaction_downloads"):
+        return None
+    return redaction_rules_for(session, source)
+
+
+def redacted_filename(name: str) -> str:
+    """`app.log` -> `app.redacted.log`, `app.log.gz` -> `app.redacted.log.gz`,
+    `logs.tar.gz` -> `logs.redacted.tar.gz`, `README` -> `README.redacted`."""
+    lower = name.lower()
+    for extension in (".tar.gz", ".tgz"):
+        if lower.endswith(extension) and len(name) > len(extension):
+            cut = len(name) - len(extension)
+            return f"{name[:cut]}.redacted{name[cut:]}"
+    if lower.endswith(".gz") and len(name) > len(".gz"):
+        return f"{redacted_filename(name[:-3])}{name[-3:]}"
+    stem, dot, extension = name.rpartition(".")
+    if dot and stem:
+        return f"{stem}.redacted.{extension}"
+    return f"{name}.redacted"
+
+
+def _download_name(session: Session, name: str) -> str:
+    if system_settings.get_bool(session, "redaction_download_suffix"):
+        return redacted_filename(name)
+    return name
+
+
+def _read_head(src: BinaryIO) -> bytes:
+    """The first HEAD_BYTES of a stream (fewer only at its end), which
+    decide its encoding the same way /open does."""
+    head = b""
+    while len(head) < HEAD_BYTES:
+        block = src.read(HEAD_BYTES - len(head))
+        if not block:
+            break
+        head += block
+    return head
+
+
+def _redact_into(
+    src: BinaryIO, destination: Path, rules: CompiledRules, max_bytes: int | None
+) -> str | None:
+    """Redacts the whole of `src` into `destination`, for a download: the
+    last line is redacted as it is, and UTF-16 content goes back to UTF-16.
+    Returns None, or why it can't be redacted (nothing is then written).
+    Raises DecompressionLimitError past `max_bytes` of content."""
+    head = _read_head(src)
+    if unsupported_compressed_format(head):
+        return _SKIP_FORMAT
+    try:
+        encoding = detect_encoding(head)
+    except UnsupportedEncodingError:
+        return _SKIP_ENCODING
+    redactor = Redactor(rules, source_encoding=encoding, output_encoding="source")
+    total = 0
+    try:
+        with destination.open("wb") as dst:
+            block = head
+            while block:
+                total += len(block)
+                if max_bytes is not None and total > max_bytes:
+                    raise DecompressionLimitError(
+                        f"decompressed size exceeds the {max_bytes}-byte limit"
+                    )
+                dst.write(redactor.feed(block))
+                block = src.read(CHUNK_BYTES)
+            dst.write(redactor.finish(final=True))
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+    return None
+
+
+def _redact_content(
+    name: str,
+    src: BinaryIO,
+    destination: Path,
+    rules: CompiledRules,
+    work_dir: Path,
+) -> str | None:
+    """A file of a redacted archive or folder ZIP, redacted into
+    `destination`: a .gz file is decompressed, redacted and compressed again
+    under the same name. Returns None, or why it is left out: content
+    redaction can't read, past MAX_DECOMPRESSED_MB once decompressed, or a
+    corrupt .gz file."""
+    max_bytes = _max_decompressed_bytes()
+    try:
+        if not is_transparent_gzip(name):
+            return _redact_into(src, destination, rules, max_bytes)
+        plain = work_dir / "redact-gz"
+        try:
+            with gzip.GzipFile(fileobj=src, mode="rb") as decompressed:
+                reason = _redact_into(decompressed, plain, rules, max_bytes)
+            if reason is None:
+                with plain.open("rb") as redacted, gzip.open(destination, "wb") as dst:
+                    shutil.copyfileobj(redacted, dst, CHUNK_BYTES)
+            return reason
+        finally:
+            plain.unlink(missing_ok=True)
+    except DecompressionLimitError:
+        destination.unlink(missing_ok=True)
+        return _SKIP_TOO_LARGE
+    except _UNREADABLE_ERRORS:
+        destination.unlink(missing_ok=True)
+        return _SKIP_UNREADABLE
+
+
+def _redaction_skipped_name(names: set[str]) -> str:
+    """REDACTION-SKIPPED.txt, unless a file by that name is already at the
+    top of the archive (compared ignoring case, so extracting on Windows
+    can't collide)."""
+    if REDACTION_SKIPPED_NAME.lower() in {name.lower() for name in names}:
+        return _REDACTION_SKIPPED_FALLBACK_NAME
+    return REDACTION_SKIPPED_NAME
+
+
+def _redaction_skipped_text(skipped: list[tuple[str, str]]) -> bytes:
+    lines = [
+        "These files were left out of this redacted download:\n",
+        *(f"{name}: {_REDACTION_SKIP_TEXT[reason]}\n" for name, reason in skipped),
+    ]
+    return "".join(lines).encode("utf-8")
+
+
+def _redaction_skipped_list(skipped: list[tuple[str, str]], names: set[str]) -> tuple[str, bytes]:
+    return _redaction_skipped_name(names), _redaction_skipped_text(skipped)
+
+
+class _ArchiveUnreadable(Exception):
+    """An archive a redacted download can't read, so it can't be rebuilt."""
+
+
+def _rebuild_redacted(
+    source: Source,
+    virtual_path: str,
+    local_archive: Path,
+    filename: str,
+    destination: Path,
+    rules: list[Rule],
+    redaction: CompiledRules,
+    work_dir: Path,
+) -> list[tuple[str, str]]:
+    """The archive at `virtual_path` (copied to `local_archive`), rebuilt in
+    the same format into `destination` with its members redacted
+    (app.archives.rebuild_archive, _redact_content). A member the rules
+    hide on purpose (the last rule matching `<archive>/<member>` is an
+    exclude, as for _archive_has_hidden_members) is left out without a
+    trace; what can't be redacted is left out and listed in
+    REDACTION-SKIPPED.txt. Returns the (member, reason) of each one listed.
+    Raises _ArchiveUnreadable for an archive that can't be read."""
+    case_insensitive = rules_case_insensitive(source)
+
+    def keep(name: str) -> bool:
+        return not is_explicitly_excluded(
+            f"{virtual_path}/{name}", rules, case_insensitive=case_insensitive
+        )
+
+    def transform(name: str, src: BinaryIO, out: Path) -> str | None:
+        return _redact_content(name, src, out, redaction, work_dir)
+
+    try:
+        return rebuild_archive(
+            local_archive,
+            filename,
+            destination,
+            work_dir,
+            keep=keep,
+            transform=transform,
+            skipped_list=_redaction_skipped_list,
+        )
+    except (*_UNREADABLE_ERRORS, NotImplementedError) as exc:
+        # NotImplementedError: a zip feature zipfile can't read, met
+        # outside a single member (a member's own is listed instead).
+        logger.warning(
+            "archive.redaction_archive_unreadable",
+            source_id=source.id,
+            path=virtual_path,
+            error_type=type(exc).__name__,
+        )
+        raise _ArchiveUnreadable() from exc
+
+
+class _RedactedDownload(NamedTuple):
+    path: Path
+    filename: str
+    # Content redacted while it is sent, in this encoding (detect_encoding);
+    # unused for a rebuilt archive, which is sent as it is.
+    encoding: str | None
+    # Already redacted (a rebuilt archive, a .gz member): sent as it is.
+    ready: bool
+    # For a rebuilt archive, the (member, reason) of each member left out.
+    skipped: list[tuple[str, str]] | None
+    work_dir: Path
+
+
+def _prepare_redacted_download(
+    source: Source,
+    path: str,
+    member: str | None,
+    rules: list[Rule],
+    limits: Limits,
+    redaction: CompiledRules,
+) -> _RedactedDownload:
+    """A download when redaction applies to it. A file, a .gz file (sent
+    decompressed, as without redaction) or an archive member is fetched
+    into scratch (a local plain file is read in place) and redacted while
+    it is sent; UTF-32 content, or content compressed in a format redaction
+    doesn't support (unsupported_compressed_format), is refused (409). A whole archive, or a
+    member that is one, is rebuilt in the same format with only the members
+    the rules don't hide, each redacted (_rebuild_redacted), and sent once
+    rebuilt; one that can't be read is refused (403). Takes a connector
+    slot while it fetches (#344)."""
+    if not path:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
+    if not _visible(source, path, rules):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    filename = path.rsplit("/", 1)[-1]
+    if member is not None:
+        member = normalize_member_name(member)
+        if not member or not _visible(source, f"{path}/{member}", rules):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        target, virtual_path = member.rsplit("/", 1)[-1], f"{path}/{member}"
+    else:
+        target, virtual_path = filename, path
+    whole_archive = is_archive(target)
+    in_place = (
+        source.protocol == Protocol.local
+        and member is None
+        and not whole_archive
+        and not is_transparent_gzip(filename)
+    )
+    store = get_scratch_store()
+    with get_limiter().connector(limits, source.id):
+        store.ensure_room()
+        work_dir = make_scratch_dir("perchtail-download-")
+        try:
+            fetched = work_dir / "source"
+            if in_place:
+                original = _local_plain_path(source, path)
+                served_filename = filename
+            else:
+                served_filename = _materialize(
+                    source, path, member, rules, fetched, check_whole_archive=False
+                )
+                original = fetched
+            if whole_archive:
+                rebuilt = work_dir / "rebuilt"
+                try:
+                    skipped = _rebuild_redacted(
+                        source, virtual_path, fetched, target, rebuilt, rules, redaction, work_dir
+                    )
+                except _ArchiveUnreadable as exc:
+                    raise WholeArchiveRefused(_AUDIT_REDACTION_ARCHIVE_REASON) from exc
+                fetched.unlink(missing_ok=True)
+                return _RedactedDownload(rebuilt, served_filename, None, True, skipped, work_dir)
+            if member is not None and is_transparent_gzip(target):
+                # Sent as it is in the archive, a .gz member: decompressed,
+                # redacted and compressed again.
+                rebuilt = work_dir / "rebuilt"
+                with fetched.open("rb") as src:
+                    reason = _redact_content(target, src, rebuilt, redaction, work_dir)
+                fetched.unlink(missing_ok=True)
+                if reason == _SKIP_ENCODING:
+                    raise RedactionEncodingRefused()
+                if reason == _SKIP_FORMAT:
+                    raise RedactionFormatRefused()
+                if reason == _SKIP_TOO_LARGE:
+                    raise _too_large(DecompressionLimitError("decompressed size over the limit"))
+                if reason is not None:
+                    raise RedactionUnreadableRefused()
+                return _RedactedDownload(rebuilt, served_filename, None, True, None, work_dir)
+            with original.open("rb") as src:
+                head = _read_head(src)
+            if unsupported_compressed_format(head):
+                raise RedactionFormatRefused()
+            try:
+                encoding = detect_encoding(head)
+            except UnsupportedEncodingError as exc:
+                raise RedactionEncodingRefused() from exc
+            return _RedactedDownload(original, served_filename, encoding, False, None, work_dir)
+        except FetchTooLargeError as exc:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise _fetch_too_large(exc) from exc
+        except BaseException:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise
+
+
+def _redacted_chunks(original: Path, rules: CompiledRules, encoding: str | None) -> Iterator[bytes]:
+    """`original` redacted a block at a time as it is sent: the last line
+    as it is, UTF-16 back to UTF-16."""
+    redactor = Redactor(rules, source_encoding=encoding, output_encoding="source")
+    with original.open("rb") as src:
+        while block := src.read(CHUNK_BYTES):
+            out = redactor.feed(block)
+            if out:
+                yield out
+    out = redactor.finish(final=True)
+    if out:
+        yield out
+
+
+def _download_redacted(
+    source: Source,
+    path: str,
+    member: str | None,
+    rules: list[Rule],
+    limits: Limits,
+    redaction: CompiledRules,
+    user: User,
+    session: Session,
+) -> Response:
+    """download_file when the download is redacted (#382, #249)."""
+    transfer = get_limiter().transfer(limits, user.id)
+    try:
+        try:
+            prepared = _prepare_redacted_download(source, path, member, rules, limits, redaction)
+        except AuditedRefusal as exc:
+            refused_path = path if member is None else f"{path}/{normalize_member_name(member)}"
+            _audit_refusal(session, user, source, "file.download_denied", refused_path, exc.reason)
+            raise
+    except BaseException:
+        transfer.release()
+        raise
+
+    def finish() -> None:
+        transfer.release()
+        shutil.rmtree(prepared.work_dir, ignore_errors=True)
+
+    try:
+        metadata: dict = {"path": path, "member": member} if member else {"path": path}
+        metadata.update(_REDACTION_APPLIED)
+        if prepared.skipped is not None:
+            metadata["skipped_count"] = len(prepared.skipped)
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="file.download",
+            target_type="source",
+            target_id=source.id,
+            metadata=metadata,
+        )
+        session.commit()
+    except BaseException:
+        finish()
+        raise
+    name = _download_name(session, prepared.filename)
+    headers = {REDACTED_DOWNLOAD_HEADER: "1"}
+    if prepared.ready:
+        return _FinishingFileResponse(
+            prepared.path, filename=name, headers=headers, on_finish=finish
+        )
+    stream = _redacted_chunks(prepared.path, redaction, prepared.encoding)
+
+    def finish_stream() -> None:
+        # The generator's own cleanup (its open file) first, if the download
+        # was cut short; a generator still running in its thread does it
+        # itself.
+        try:
+            stream.close()
+        except ValueError:
+            pass
+        finish()
+
+    headers["Content-Disposition"] = _attachment(name)
+    return _FinishingStreamingResponse(
+        stream,
+        media_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
+        headers=headers,
+        on_finish=finish_stream,
+    )
+
+
 @router.get("/download")
 def download_file(
     path: str,
@@ -1211,16 +1760,24 @@ def download_file(
     source: Source = Depends(readable_source(Capability.download)),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
-) -> FileResponse:
+) -> Response:
     """One-shot: fetches, streams, and releases within the same request —
     no persistent session, so no /close call is needed afterward.
 
     Counts as one of the user's transfers (#344) until the client has the
     whole file or goes away: 503 with Retry-After when the user already has
-    as many downloads and folder ZIPs in progress as allowed."""
+    as many downloads and folder ZIPs in progress as allowed.
+
+    When redaction applies and the redaction_downloads setting is on
+    (#382, #249), the download is redacted on the server, for every user
+    (_prepare_redacted_download), says so in X-PerchTail-Redacted and, with
+    redaction_download_suffix on, in its name (`app.redacted.log`)."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     limits = current_limits(session)
+    redaction = download_redaction_rules_for(session, source)
+    if redaction is not None:
+        return _download_redacted(source, path, member, rules, limits, redaction, user, session)
     transfer = get_limiter().transfer(limits, user.id)
     try:
         served_path, filename, key, _ = _resolve_content_audited(
@@ -1455,6 +2012,309 @@ def _stream_zip(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+class _RedactedEntry(NamedTuple):
+    entry: DirEntry
+    # Already redacted (an archive rebuilt, a .gz file redacted and
+    # compressed again), stored as it is; None for a file fetched and
+    # redacted while the ZIP is sent.
+    prepared: Path | None
+
+
+def _prepare_redacted_folder(
+    connector,
+    source: Source,
+    rules: list[Rule],
+    entries: list[DirEntry],
+    request_root: str,
+    tmp_dir: Path,
+    redaction: CompiledRules,
+    limit: int,
+) -> tuple[list[_RedactedEntry], list[tuple[str, str]], int]:
+    """Before a redacted folder ZIP starts: fetches each archive and .gz
+    file among `entries` into `tmp_dir` and redacts it there: an archive is
+    rebuilt with only the members the rules don't hide, each redacted
+    (_rebuild_redacted); a .gz file is decompressed, redacted and compressed
+    again under the same name. What can't be redacted is left out and
+    returned as (arcname, reason), a member of an archive as
+    `<archive>/<member>`. Returns the entries to zip, those left out and the
+    bytes fetched, which count against `limit` (MAX_FETCH_MB) as fetched
+    from the source, not as redacted."""
+    planned: list[_RedactedEntry] = []
+    skipped: list[tuple[str, str]] = []
+    fetched_total = 0
+    for index, entry in enumerate(entries):
+        archive = is_archive(entry.name)
+        if not archive and not is_transparent_gzip(entry.name):
+            planned.append(_RedactedEntry(entry, None))
+            continue
+        arcname = _arcname(entry.path, request_root)
+        original = tmp_dir / f"source-{index}"
+        prepared = tmp_dir / f"prepared-{index}"
+        try:
+            connector.fetch_file(source, entry.path, original)
+            fetched_total += original.stat().st_size
+            if fetched_total > limit:
+                raise FetchTooLargeError(
+                    "folder is over the MAX_FETCH_MB limit", size=fetched_total, limit=limit
+                )
+            if archive:
+                try:
+                    inner = _rebuild_redacted(
+                        source,
+                        entry.path,
+                        original,
+                        entry.name,
+                        prepared,
+                        rules,
+                        redaction,
+                        tmp_dir,
+                    )
+                except _ArchiveUnreadable:
+                    skipped.append((arcname, _SKIP_UNREADABLE))
+                    continue
+                skipped.extend((f"{arcname}/{name}", reason) for name, reason in inner)
+            else:
+                with original.open("rb") as src:
+                    reason = _redact_content(entry.name, src, prepared, redaction, tmp_dir)
+                if reason is not None:
+                    skipped.append((arcname, reason))
+                    continue
+        finally:
+            original.unlink(missing_ok=True)
+        planned.append(_RedactedEntry(entry, prepared))
+    return planned, skipped, fetched_total
+
+
+def _stream_redacted_zip(
+    connector,
+    source: Source,
+    planned: list[_RedactedEntry],
+    request_root: str,
+    tmp_dir: Path,
+    remaining: int,
+    redaction: CompiledRules,
+    skipped: list[tuple[str, str]],
+    skipped_name: str,
+    record_late_skips: Callable[[list[str]], None],
+) -> Iterator[bytes]:
+    """_stream_zip for a redacted folder ZIP. Each plain file is fetched
+    fresh, one at a time, redacted into scratch and written into the ZIP;
+    one redaction can't read (UTF-32, or compressed in a format it doesn't
+    support) is left out. The archives and .gz files prepared beforehand
+    (_prepare_redacted_folder) are stored as they are, without compressing
+    them again. `remaining` is what is left of the MAX_FETCH_MB budget,
+    counted in bytes fetched from the source. Everything left out is listed
+    last, in `skipped_name`. The files only found to be left out while the
+    ZIP is sent go to `record_late_skips` (their paths on the source) once
+    it ends, however it ends."""
+    sink = _ZipSink()
+    late: list[str] = []
+    try:
+        with zipfile.ZipFile(sink, "w", zipfile.ZIP_DEFLATED) as zf:
+            for index, (entry, prepared) in enumerate(planned):
+                arcname = _arcname(entry.path, request_root)
+                original = tmp_dir / f"member-{index}"
+                redacted = prepared if prepared is not None else tmp_dir / f"redacted-{index}"
+                try:
+                    compress = zipfile.ZIP_STORED
+                    if prepared is None:
+                        compress = zipfile.ZIP_DEFLATED
+                        connector.fetch_file(source, entry.path, original)
+                        remaining -= original.stat().st_size
+                        if remaining < 0:
+                            raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
+                        with original.open("rb") as src:
+                            reason = _redact_into(src, redacted, redaction, None)
+                        original.unlink()
+                        if reason is not None:
+                            logger.warning(
+                                "archive.redaction_skipped",
+                                source_id=source.id,
+                                path=entry.path,
+                                reason=reason,
+                            )
+                            skipped.append((arcname, reason))
+                            late.append(entry.path)
+                            continue
+                    info = zipfile.ZipInfo.from_file(redacted, arcname=arcname)
+                    info.compress_type = compress
+                    with redacted.open("rb") as src, zf.open(info, "w") as dst:
+                        while chunk := src.read(_ZIP_READ_BYTES):
+                            dst.write(chunk)
+                            if sink.pending >= _ZIP_FLUSH_BYTES:
+                                yield sink.take()
+                finally:
+                    original.unlink(missing_ok=True)
+                    redacted.unlink(missing_ok=True)
+                if sink.pending:
+                    yield sink.take()
+            if skipped:
+                zf.writestr(skipped_name, _redaction_skipped_text(skipped))
+        yield sink.take()
+    except Exception as exc:
+        logger.warning(
+            "archive.zip_stream_failed",
+            source_id=source.id,
+            path=request_root,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if late:
+            record_late_skips(late)
+
+
+def _late_skips_recorder(
+    session: Session, user: User, source: Source, path: str
+) -> Callable[[list[str]], None]:
+    """What records the files a redacted folder ZIP only found it had to
+    leave out while it was sent, after its folder.download entry was
+    written: a second audit entry, file.download_redaction_skipped, with the
+    folder, the count and their paths. Written in its own session, since
+    the request's may be gone by then; a failure is logged, never raised
+    into the response."""
+    bind = session.get_bind()
+    user_id = user.id
+    source_id = source.id
+
+    def record(paths: list[str]) -> None:
+        try:
+            with Session(bind) as late_session:
+                record_audit_event(
+                    late_session,
+                    user_id=user_id,
+                    action="file.download_redaction_skipped",
+                    target_type="source",
+                    target_id=source_id,
+                    metadata={"path": path, "skipped_count": len(paths), "skipped": paths},
+                )
+                late_session.commit()
+        except Exception as exc:
+            logger.error(
+                "archive.redaction_skipped_audit_failed",
+                source_id=source_id,
+                path=path,
+                error_type=type(exc).__name__,
+            )
+
+    return record
+
+
+def _download_folder_zip_redacted(
+    connector,
+    source: Source,
+    rules: list[Rule],
+    path: str,
+    redaction: CompiledRules,
+    limits: Limits,
+    user: User,
+    session: Session,
+) -> StreamingResponse:
+    """download_folder_zip when the download is redacted (#382, #249): every
+    file in the ZIP is redacted (_prepare_redacted_folder,
+    _stream_redacted_zip), what can't be is listed in REDACTION-SKIPPED.txt,
+    and the ZIP says so in X-PerchTail-Redacted and, with
+    redaction_download_suffix on, in its name."""
+    slots: list[Slot] = [get_limiter().transfer(limits, user.id)]
+
+    def finish() -> None:
+        for slot in slots:
+            slot.release()
+
+    tmp_dir: Path | None = None
+    try:
+        slots.append(get_limiter().connector(limits, source.id))
+        limit = max_fetch_bytes()
+        entries = _zip_entries(connector, source, rules, path)
+        listed = sum(entry.size for entry in entries)
+        if listed > limit:
+            raise _fetch_too_large(
+                FetchTooLargeError(
+                    "folder is over the MAX_FETCH_MB limit", size=listed, limit=limit
+                ),
+                folder=True,
+            )
+        # The archives and .gz files are prepared before the ZIP starts and
+        # wait in scratch, redacted, for their turn; a plain file sits there
+        # one at a time, fetched and redacted.
+        prepared_size = sum(
+            entry.size
+            for entry in entries
+            if is_archive(entry.name) or is_transparent_gzip(entry.name)
+        )
+        largest_other = max(
+            (
+                entry.size
+                for entry in entries
+                if not is_archive(entry.name) and not is_transparent_gzip(entry.name)
+            ),
+            default=0,
+        )
+        get_scratch_store().ensure_room(prepared_size + 2 * largest_other)
+        tmp_dir = make_scratch_dir("perchtail-zip-")
+        try:
+            planned, skipped, fetched = _prepare_redacted_folder(
+                connector, source, rules, entries, path, tmp_dir, redaction, limit
+            )
+        except FetchTooLargeError as exc:
+            raise _fetch_too_large(exc, folder=True) from exc
+        metadata: dict = {
+            "path": path,
+            "file_count": len(planned),
+            **_REDACTION_APPLIED,
+            "skipped_count": len(skipped),
+        }
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="folder.download",
+            target_type="source",
+            target_id=source.id,
+            metadata=metadata,
+        )
+        session.commit()
+    except BaseException:
+        finish()
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    root_names = {_arcname(entry.path, path) for entry in entries}
+    stream = _stream_redacted_zip(
+        connector,
+        source,
+        planned,
+        path,
+        tmp_dir,
+        limit - fetched,
+        redaction,
+        skipped,
+        _redaction_skipped_name(root_names),
+        _late_skips_recorder(session, user, source, path),
+    )
+
+    def finish_stream() -> None:
+        finish()
+        try:
+            stream.close()
+        except ValueError:
+            pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    folder_name = path.rsplit("/", 1)[-1] if path else source.name
+    return _FinishingStreamingResponse(
+        stream,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": _attachment(_download_name(session, f"{folder_name}.zip")),
+            REDACTED_DOWNLOAD_HEADER: "1",
+        },
+        on_finish=finish_stream,
+    )
+
+
 def _attachment(filename: str) -> str:
     """A Content-Disposition for `filename`, written the way FileResponse
     writes it."""
@@ -1482,7 +2342,10 @@ def download_folder_zip(
     SKIPPED.txt. The folder's listed total is checked against MAX_FETCH_MB before anything
     is fetched (413). Holds one of the user's transfers and a connector
     slot until the client has it all or goes away (#344, 503 with
-    Retry-After when none is free)."""
+    Retry-After when none is free).
+
+    When redaction applies and the redaction_downloads setting is on
+    (#382, #249), see _download_folder_zip_redacted."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     if path and not _dir_visible(source, path, rules):
@@ -1490,6 +2353,11 @@ def download_folder_zip(
     connector = _connector(source)
 
     limits = current_limits(session)
+    redaction = download_redaction_rules_for(session, source)
+    if redaction is not None:
+        return _download_folder_zip_redacted(
+            connector, source, rules, path, redaction, limits, user, session
+        )
     slots: list[Slot] = [get_limiter().transfer(limits, user.id)]
 
     def finish() -> None:

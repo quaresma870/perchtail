@@ -5,12 +5,16 @@ import zipfile
 
 import pytest
 from app.archives import (
+    SKIP_LINK,
+    SKIP_NESTED_ARCHIVE,
+    SKIP_UNSUPPORTED_COMPRESSION,
     DecompressionLimitError,
     decompress_gzip,
     extract_member,
     is_archive,
     is_transparent_gzip,
     list_members,
+    rebuild_archive,
 )
 
 
@@ -230,3 +234,125 @@ def test_extract_member_missing_is_a_key_error(tmp_path):
     for path in (tar_path, zip_path):
         with pytest.raises(KeyError):
             extract_member(path, path.name, "missing.log", tmp_path / "out")
+
+
+# -- rebuild_archive --------------------------------------------------------------
+
+
+def _upper(name, src, out):
+    """A transform that upper-cases a member, and turns down `refuse.log`."""
+    if name.endswith("refuse.log"):
+        return "refused"
+    out.write_bytes(src.read().upper())
+    return None
+
+
+def _skipped_list(skipped, names):
+    return "SKIPPED-LIST.txt", "".join(f"{n}: {r}\n" for n, r in skipped).encode()
+
+
+def _rebuild(source, filename, tmp_path, keep=lambda name: name != "hidden.log"):
+    destination = tmp_path / f"rebuilt-{filename}"
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    skipped = rebuild_archive(
+        source,
+        filename,
+        destination,
+        work,
+        keep=keep,
+        transform=_upper,
+        skipped_list=_skipped_list,
+    )
+    assert list(work.iterdir()) == []
+    return destination, skipped
+
+
+def test_rebuild_zip_keeps_names_and_times_and_lists_what_it_leaves_out(tmp_path):
+    source = tmp_path / "logs.zip"
+    when = (2024, 5, 1, 10, 20, 30)
+    with zipfile.ZipFile(source, "w") as zf:
+        zf.writestr(zipfile.ZipInfo("dir/", date_time=when), b"")
+        for name in ("dir/a.log", "../evil.log", "hidden.log", "refuse.log", "inner.tgz"):
+            zf.writestr(zipfile.ZipInfo(name, date_time=when), b"content of " + name.encode())
+
+    destination, skipped = _rebuild(source, "logs.zip", tmp_path)
+
+    assert skipped == [("refuse.log", "refused"), ("inner.tgz", SKIP_NESTED_ARCHIVE)]
+    with zipfile.ZipFile(destination) as zf:
+        assert zf.namelist() == ["dir/a.log", "evil.log", "SKIPPED-LIST.txt"]
+        assert zf.read("dir/a.log") == b"CONTENT OF DIR/A.LOG"
+        assert zf.getinfo("dir/a.log").date_time == when
+        assert b"hidden" not in zf.read("SKIPPED-LIST.txt")
+
+
+def zip_with_unsupported_method(path, name, content, others=()):
+    """A zip whose first member, `name`, says it is compressed with Deflate64
+    (method 9), which zipfile can't read; `others` are ordinary members."""
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(name, content)
+        for other_name, other_content in others:
+            zf.writestr(other_name, other_content)
+    data = bytearray(path.read_bytes())
+    local = data.index(b"PK\x03\x04")
+    central = data.index(b"PK\x01\x02")
+    data[local + 8 : local + 10] = (9).to_bytes(2, "little")
+    data[central + 10 : central + 12] = (9).to_bytes(2, "little")
+    path.write_bytes(bytes(data))
+
+
+def zip_link_info(name):
+    """A zip member that is a symbolic link (S_IFLNK in its attributes)."""
+    info = zipfile.ZipInfo(name)
+    info.create_system = 3
+    info.external_attr = 0o120777 << 16
+    return info
+
+
+def test_rebuild_zip_lists_a_member_with_an_unsupported_compression_method(tmp_path):
+    source = tmp_path / "logs.zip"
+    zip_with_unsupported_method(source, "big.log", b"secret", others=[("a.log", b"fine")])
+
+    destination, skipped = _rebuild(source, "logs.zip", tmp_path)
+
+    assert skipped == [("big.log", SKIP_UNSUPPORTED_COMPRESSION)]
+    with zipfile.ZipFile(destination) as zf:
+        assert zf.namelist() == ["a.log", "SKIPPED-LIST.txt"]
+        assert zf.read("a.log") == b"FINE"
+
+
+def test_rebuild_zip_leaves_out_and_lists_symbolic_links(tmp_path):
+    source = tmp_path / "logs.zip"
+    with zipfile.ZipFile(source, "w") as zf:
+        zf.writestr(zip_link_info("current.log"), b"hidden.log")
+        zf.writestr("a.log", b"fine")
+
+    destination, skipped = _rebuild(source, "logs.zip", tmp_path)
+
+    assert skipped == [("current.log", SKIP_LINK)]
+    with zipfile.ZipFile(destination) as zf:
+        assert zf.namelist() == ["a.log", "SKIPPED-LIST.txt"]
+        assert all((info.external_attr >> 16) & 0o170000 != 0o120000 for info in zf.infolist())
+
+
+def test_rebuild_tar_gz_drops_links_devices_and_folders(tmp_path):
+    source = tmp_path / "logs.tar.gz"
+    _tar_with_special_members(source)
+
+    destination, skipped = _rebuild(source, "logs.tar.gz", tmp_path, keep=lambda name: True)
+
+    assert skipped == []
+    with tarfile.open(destination, "r:gz") as tf:
+        assert tf.getnames() == ["secret.txt"]
+        assert tf.extractfile("secret.txt").read() == b"HIDDEN CONTENT"
+
+
+def test_rebuild_leaves_nothing_behind_when_it_fails(tmp_path):
+    source = tmp_path / "logs.zip"
+    source.write_bytes(b"not a zip")
+
+    with pytest.raises(zipfile.BadZipFile):
+        _rebuild(source, "logs.zip", tmp_path)
+    assert not (tmp_path / "rebuilt-logs.zip").exists()
+    with pytest.raises(ValueError):
+        _rebuild(source, "logs.rar", tmp_path)

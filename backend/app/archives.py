@@ -1,6 +1,9 @@
 import gzip
+import io
+import shutil
 import tarfile
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -193,3 +196,169 @@ def extract_member(
 def decompress_gzip(local_path: Path, destination: Path, max_bytes: int | None = None) -> None:
     with gzip.open(local_path, "rb") as src:
         _bounded_copy(src, destination, max_bytes)
+
+
+# Why rebuild_archive left a member out (besides the ones `keep` refuses,
+# which are left out without a trace).
+SKIP_NESTED_ARCHIVE = "nested_archive"
+SKIP_ENCRYPTED = "encrypted"
+SKIP_LINK = "link"
+SKIP_UNSUPPORTED_COMPRESSION = "unsupported_compression"
+
+# Rewrites one member: reads its content from the stream, writes the new
+# content to the path, and returns None, or why the member is left out
+# instead (nothing is then written).
+MemberTransform = Callable[[str, BinaryIO, Path], str | None]
+# The list of what was left out, as (file name, content), written into the
+# rebuilt archive; called with the left-out (name, reason) pairs and the
+# names already in the archive, only when something was left out.
+SkippedList = Callable[[list[tuple[str, str]], set[str]], tuple[str, bytes]]
+
+# Zip's "encrypted" general-purpose flag.
+_ZIP_ENCRYPTED = 0x1
+# The Unix file type bits of a zip member's external attributes, and the
+# type of a symbolic link.
+_S_IFMT = 0o170000
+_S_IFLNK = 0o120000
+
+
+def _is_zip_link(info: zipfile.ZipInfo) -> bool:
+    return (info.external_attr >> 16) & _S_IFMT == _S_IFLNK
+
+
+def rebuild_archive(
+    local_path: Path,
+    filename: str,
+    destination: Path,
+    work_dir: Path,
+    *,
+    keep: Callable[[str], bool],
+    transform: MemberTransform,
+    skipped_list: SkippedList,
+) -> list[tuple[str, str]]:
+    """Writes to `destination` a new archive in the same format as the one at
+    `local_path` (zip, or tar.gz): its regular files that `keep` accepts,
+    each rewritten by `transform`, under their normalized names
+    (normalize_member_name) and with their modification times. Folders, a
+    tar's links, devices and FIFOs, and members `keep` refuses are left out
+    without a trace; a zip's symbolic links, encrypted zip members, zip
+    members compressed with a method zipfile can't read, archives inside the
+    archive and members `transform` turns down are left out and listed in
+    the file `skipped_list` gives. Each member passes through `work_dir` one
+    at a time. Returns the (name, reason) of each member listed."""
+    if _is_zip(filename):
+        rebuild = _rebuild_zip
+    elif _is_tar_gz(filename):
+        rebuild = _rebuild_tar_gz
+    else:
+        raise ValueError(f"Not a supported archive: {filename}")
+    try:
+        return rebuild(local_path, destination, work_dir, keep, transform, skipped_list)
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def _skip_reason(name: str) -> str | None:
+    return SKIP_NESTED_ARCHIVE if is_archive(name.rsplit("/", 1)[-1]) else None
+
+
+def _rebuild_zip(
+    local_path: Path,
+    destination: Path,
+    work_dir: Path,
+    keep: Callable[[str], bool],
+    transform: MemberTransform,
+    skipped_list: SkippedList,
+) -> list[tuple[str, str]]:
+    skipped: list[tuple[str, str]] = []
+    written: set[str] = set()
+    member_copy = work_dir / "rebuild-member"
+    with (
+        zipfile.ZipFile(local_path) as source,
+        zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as rebuilt,
+    ):
+        for info in source.infolist():
+            name = normalize_member_name(info.filename)
+            if info.is_dir() or not name or not keep(name):
+                continue
+            reason = SKIP_LINK if _is_zip_link(info) else _skip_reason(name)
+            if reason is None and info.flag_bits & _ZIP_ENCRYPTED:
+                reason = SKIP_ENCRYPTED
+            if reason is None:
+                try:
+                    try:
+                        src = source.open(info)
+                    except NotImplementedError:
+                        # A compression method zipfile doesn't support
+                        # (Deflate64, PPMd...): the member can't be read.
+                        src = None
+                        reason = SKIP_UNSUPPORTED_COMPRESSION
+                    if src is not None:
+                        with src:
+                            reason = transform(name, src, member_copy)
+                    if reason is None:
+                        out = zipfile.ZipInfo(name, date_time=info.date_time)
+                        out.compress_type = zipfile.ZIP_DEFLATED
+                        out.external_attr = info.external_attr
+                        out.file_size = member_copy.stat().st_size
+                        with member_copy.open("rb") as src, rebuilt.open(out, "w") as dst:
+                            shutil.copyfileobj(src, dst, _CHUNK)
+                        written.add(name)
+                finally:
+                    member_copy.unlink(missing_ok=True)
+            if reason is not None:
+                skipped.append((name, reason))
+        if skipped:
+            list_name, content = skipped_list(skipped, written)
+            rebuilt.writestr(list_name, content)
+    return skipped
+
+
+def _rebuild_tar_gz(
+    local_path: Path,
+    destination: Path,
+    work_dir: Path,
+    keep: Callable[[str], bool],
+    transform: MemberTransform,
+    skipped_list: SkippedList,
+) -> list[tuple[str, str]]:
+    skipped: list[tuple[str, str]] = []
+    written: set[str] = set()
+    member_copy = work_dir / "rebuild-member"
+    with (
+        tarfile.open(local_path, mode="r:gz") as source,
+        tarfile.open(destination, mode="w:gz") as rebuilt,
+    ):
+        for member in source:
+            name = normalize_member_name(member.name)
+            if not member.isfile() or not name or not keep(name):
+                continue
+            reason = _skip_reason(name)
+            if reason is None:
+                try:
+                    src = source.extractfile(member)
+                    if src is None:
+                        continue
+                    with src:
+                        reason = transform(name, src, member_copy)
+                    if reason is None:
+                        out = tarfile.TarInfo(name)
+                        out.size = member_copy.stat().st_size
+                        out.mtime = member.mtime
+                        out.mode = member.mode & 0o777
+                        with member_copy.open("rb") as src:
+                            rebuilt.addfile(out, src)
+                        written.add(name)
+                finally:
+                    member_copy.unlink(missing_ok=True)
+            if reason is not None:
+                skipped.append((name, reason))
+        if skipped:
+            list_name, content = skipped_list(skipped, written)
+            out = tarfile.TarInfo(list_name)
+            out.size = len(content)
+            out.mtime = int(datetime.now(UTC).timestamp())
+            out.mode = 0o644
+            rebuilt.addfile(out, io.BytesIO(content))
+    return skipped

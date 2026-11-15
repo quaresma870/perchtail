@@ -3,10 +3,13 @@ content, for every user, when redaction applies to the source; offsets and
 the Tail's head stay about the original; nothing of a redacted value comes
 out, whole or in part."""
 
+import bz2
 import gzip
 import hashlib
 import io
+import lzma
 import stat as stat_module
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -63,6 +66,37 @@ def assert_no_secret(data: bytes | str) -> None:
     text = data.decode("utf-8", "replace") if isinstance(data, bytes) else data
     for secret in SECRETS:
         assert secret not in text, secret
+
+
+# Content compressed in a format PerchTail doesn't decompress, told by its
+# first bytes. bzip2 and xz are real; for zstd, 7z and rar only the
+# signature is real, followed by SAMPLE in clear, so a format that slipped
+# through would show the values.
+UNSUPPORTED_FORMATS = ["bz2", "xz", "zst", "7z", "rar"]
+# gzip and zip content in a file whose name doesn't say so (app.log.1), so
+# PerchTail doesn't decompress it. Both are stored uncompressed, so SAMPLE is
+# in clear inside them and one that slipped through would show the values.
+MISNAMED_FORMATS = ["gzip", "zip"]
+
+
+def _stored_zip(data: bytes) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("app.log", data)
+    return buffer.getvalue()
+
+
+def compressed_sample(fmt: str, data: bytes | None = None) -> bytes:
+    data = SAMPLE.encode() if data is None else data
+    return {
+        "bz2": lambda: bz2.compress(data),
+        "xz": lambda: lzma.compress(data),
+        "zst": lambda: b"\x28\xb5\x2f\xfd" + data,
+        "7z": lambda: b"7z\xbc\xaf\x27\x1c" + data,
+        "rar": lambda: b"Rar!\x1a\x07\x01\x00" + data,
+        "gzip": lambda: gzip.compress(data, compresslevel=0),
+        "zip": lambda: _stored_zip(data),
+    }[fmt]()
 
 
 def all_rules() -> list[dict]:
@@ -272,6 +306,158 @@ def test_utf32_is_refused_and_audited(session, viewer):
     events = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).all()
     assert [e.event_metadata["reason"] for e in events] == ["redaction_unsupported_encoding"] * 2
     assert events[1].event_metadata["follow"] is True
+
+
+@pytest.mark.parametrize("fmt", UNSUPPORTED_FORMATS)
+@pytest.mark.parametrize("name", ["app.log", "app.log.{fmt}"])
+def test_an_unsupported_compressed_format_is_refused_and_audited(session, viewer, fmt, name):
+    _, client, source, folder = viewer
+    # Told by the content, whatever the file is called.
+    path = name.format(fmt=fmt)
+    (folder / path).write_bytes(compressed_sample(fmt))
+
+    response = _open(client, source, path)
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "redaction_unsupported_format"
+    assert_no_secret(response.text)
+    response = _poll(client, source, 0, path=path)
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "redaction_unsupported_format"
+    assert_no_secret(response.text)
+    events = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).all()
+    assert [e.event_metadata["reason"] for e in events] == ["redaction_unsupported_format"] * 2
+    assert events[1].event_metadata["follow"] is True
+
+
+@pytest.mark.parametrize("fmt", MISNAMED_FORMATS)
+@pytest.mark.parametrize("name", ["app.log", "app.log.1"])
+def test_gzip_or_zip_content_under_another_name_is_refused_and_audited(session, viewer, fmt, name):
+    _, client, source, folder = viewer
+    (folder / name).write_bytes(compressed_sample(fmt))
+
+    response = _open(client, source, name)
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "redaction_unsupported_format"
+    assert_no_secret(response.text)
+    response = _poll(client, source, 0, path=name)
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "redaction_unsupported_format"
+    assert_no_secret(response.text)
+    events = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).all()
+    assert [e.event_metadata["reason"] for e in events] == ["redaction_unsupported_format"] * 2
+    assert events[1].event_metadata["follow"] is True
+
+
+def test_gz_and_zip_named_as_such_still_open_redacted(viewer):
+    _, client, source, folder = viewer
+    (folder / "app.log.gz").write_bytes(gzip.compress(SAMPLE.encode()))
+    (folder / "bundle.zip").write_bytes(compressed_sample("zip"))
+
+    for path, params in (("app.log.gz", {}), ("bundle.zip", {"member": "app.log"})):
+        response = _open(client, source, path, **params)
+        assert response.status_code == 200, (path, params)
+        assert "[redacted: email]" in response.text
+        assert_no_secret(response.text)
+
+
+@pytest.mark.parametrize("fmt", UNSUPPORTED_FORMATS + MISNAMED_FORMATS)
+def test_an_unsupported_compressed_format_inside_gz_or_a_member_is_refused(viewer, fmt):
+    _, client, source, folder = viewer
+    (folder / "app.log.gz").write_bytes(gzip.compress(compressed_sample(fmt)))
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("app.log", compressed_sample(fmt))
+        zf.writestr("app.log.gz", gzip.compress(compressed_sample(fmt)))
+    (folder / "bundle.zip").write_bytes(buffer.getvalue())
+
+    for path, params in (
+        ("app.log.gz", {}),
+        ("bundle.zip", {"member": "app.log"}),
+        ("bundle.zip", {"member": "app.log.gz"}),
+    ):
+        response = _open(client, source, path, **params)
+        assert response.status_code == 409, (path, params)
+        assert response.json()["detail"]["error_code"] == "redaction_unsupported_format"
+
+
+def test_without_redaction_compressed_formats_open_as_before(session, viewer):
+    _, client, source, folder = viewer
+    system_settings.set_bool(session, "redaction_enabled", False)
+    session.commit()
+    content = compressed_sample("xz")
+    (folder / "app.log").write_bytes(content)
+
+    assert _open(client, source, "app.log").content == content
+    assert _poll(client, source, 0).content == content
+    assert session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).all() == []
+
+
+def _gz_member_archive(kind: str, content: bytes) -> bytes:
+    buffer = io.BytesIO()
+    if kind == "zip":
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr("inner/app.log.gz", content)
+    else:
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tf:
+            info = tarfile.TarInfo("inner/app.log.gz")
+            info.size = len(content)
+            tf.addfile(info, io.BytesIO(content))
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("kind, archive", [("zip", "bundle.zip"), ("tar", "bundle.tar.gz")])
+def test_open_of_a_gz_member_decompresses_and_redacts_it(
+    session, viewer, scratch_store, kind, archive
+):
+    _, client, source, folder = viewer
+    content = SAMPLE.encode() + b"password=hunter2"
+    (folder / archive).write_bytes(_gz_member_archive(kind, gzip.compress(content)))
+
+    response = _open(client, source, archive, member="inner/app.log.gz")
+    assert response.status_code == 200
+    assert_no_secret(response.content)
+    # Complete content, like a .gz file: the last line is redacted as it is.
+    assert response.content == redact_bytes(content, all_rules(), final=True)[0]
+    assert response.headers["x-redacted"] == "1"
+    assert "x-follow-head" not in response.headers
+    assert 'filename="app.log"' in response.headers["content-disposition"]
+    files = _scratch_files(scratch_store)
+    assert len(files) == 1
+    assert_no_secret(files[0].read_bytes())
+    event = session.exec(select(AuditLog).where(AuditLog.action == "file.open")).one()
+    assert event.event_metadata["redaction"] == "applied"
+    # The Tail doesn't follow archive members: the viewer reloads them whole.
+    response = _poll(client, source, 0, path=archive)
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "follow_unsupported"
+
+
+def test_open_of_a_corrupt_gz_member_is_refused_and_audited(session, viewer, scratch_store):
+    _, client, source, folder = viewer
+    (folder / "bundle.zip").write_bytes(_gz_member_archive("zip", b"not gzip " + SAMPLE.encode()))
+
+    response = _open(client, source, "bundle.zip", member="inner/app.log.gz")
+    assert response.status_code == 409
+    assert_no_secret(response.text)
+    event = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).one()
+    assert event.event_metadata["reason"] == "redaction_unreadable"
+    assert event.event_metadata["path"] == "bundle.zip/inner/app.log.gz"
+    assert _scratch_files(scratch_store) == []
+
+
+def test_open_of_a_gz_member_past_the_decompression_limit_is_refused(
+    viewer, scratch_store, monkeypatch
+):
+    _, client, source, folder = viewer
+    monkeypatch.setenv("MAX_DECOMPRESSED_MB", "0.01")
+    get_settings.cache_clear()
+    content = SAMPLE.encode() * 1000
+    (folder / "bundle.zip").write_bytes(_gz_member_archive("zip", gzip.compress(content)))
+
+    response = _open(client, source, "bundle.zip", member="inner/app.log.gz")
+    assert response.status_code == 413
+    assert_no_secret(response.text)
+    assert _scratch_files(scratch_store) == []
 
 
 def test_open_holds_back_an_unfinished_last_line(viewer):

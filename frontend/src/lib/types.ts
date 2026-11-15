@@ -277,6 +277,11 @@ export interface SystemSettings {
   listing_max_entries: number
   // Scheduled backup (#334), hours between backups, 1..168; 0 = off.
   backup_interval_hours: number
+  // Redaction (#382, #249), changed by super admins only: on, whether
+  // downloads are redacted too, and whether their name says so.
+  redaction_enabled: boolean
+  redaction_downloads: boolean
+  redaction_download_suffix: boolean
   // MFA for every local account, not only administrators; super admins only.
   require_mfa_local_accounts: boolean
 }
