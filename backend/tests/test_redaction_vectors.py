@@ -10,19 +10,23 @@ from pathlib import Path
 import pytest
 from app.redaction import (
     UTF16_UNSURE,
+    RedactionRuleError,
     Redactor,
     UnsupportedEncodingError,
+    compile_rules,
     detect_encoding,
     head_digest,
     long_line_label,
     marker,
     redact_window,
+    rules_digest,
 )
 
 REPO = Path(__file__).resolve().parents[2]
 VECTORS_PATH = REPO / "agent" / "internal" / "redact" / "testdata" / "vectors.json"
 VECTORS = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
 DETECTORS_PATH = REPO / "backend" / "app" / "redaction" / "detectors.json"
+AGENT_DETECTORS_PATH = REPO / "agent" / "internal" / "redact" / "detectors.json"
 
 
 def _bytes(vector: dict, key: str) -> bytes:
@@ -189,6 +193,21 @@ def test_detect_vector(vector):
         assert detect_encoding(head) == vector["detected"]
 
 
+@pytest.mark.parametrize("vector", VECTORS["rule_digests"])
+def test_rule_digest_vector(vector):
+    """The agent caches compiled rules by the same digest."""
+    assert rules_digest(vector["rules"]) == vector["expected"]
+
+
+@pytest.mark.parametrize(
+    "vector", VECTORS["rule_errors"], ids=[v["name"] for v in VECTORS["rule_errors"]]
+)
+def test_rule_error_vector(vector):
+    """Rule lists both engines refuse to compile."""
+    with pytest.raises(RedactionRuleError):
+        compile_rules(vector["rules"])
+
+
 def test_every_detector_has_a_vector():
     used = {
         rule["detector"]
@@ -199,3 +218,12 @@ def test_every_detector_has_a_vector():
     detectors = json.loads(DETECTORS_PATH.read_text(encoding="utf-8"))
     assert used == {d["name"] for d in detectors["detectors"]}
     assert VECTORS["engine"] == detectors["engine"]
+
+
+def test_the_agent_embeds_the_same_detectors():
+    """The agent's Go engine embeds its own copy of detectors.json (it can't
+    read the backend's, and the backend image doesn't carry agent/): a
+    detector changed on one side only must fail here."""
+    assert (
+        AGENT_DETECTORS_PATH.read_bytes() == DETECTORS_PATH.read_bytes()
+    ), "agent/internal/redact/detectors.json differs from backend/app/redaction/detectors.json"
