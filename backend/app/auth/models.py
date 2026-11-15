@@ -47,6 +47,10 @@ class GlobalCapability(StrEnum):
     # content to an outside URL, an export channel, so it isn't implied by
     # view access to the sources it watches.
     manage_alerts = "manage_alerts"
+    # Generating the access report (app/access_report.py): who holds what,
+    # where. Read-only, so a reviewer can review access without being able
+    # to change it; not implied by manage_users or manage_roles.
+    view_access_report = "view_access_report"
 
 
 class AuthProviderType(StrEnum):
@@ -121,6 +125,12 @@ class User(SQLModel, table=True):
     external_issuer: str | None = Field(default=None, index=True)
     external_id: str | None = None
     last_login_at: datetime | None = None
+    # The IdP group whose SSOGroupRoleMapping gave this SSO user their role
+    # at their last sign-in (auth/providers/oidc.py), for the access report
+    # (app/access_report.py). Only that one group name is kept, never the
+    # token's other groups. Null when no mapping matched, once an admin
+    # changes the role by hand (api/users.py), and for local accounts.
+    sso_role_group: str | None = None
     # Set on admin-created local accounts (see CLAUDE.md's Security notes);
     # cleared once the user picks their own password.
     must_change_password: bool = False

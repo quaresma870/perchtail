@@ -9,6 +9,7 @@ const backendTarget = 'http://127.0.0.1:8000'
 // prefix rewrite. backend/tests/test_dev_proxy_prefixes.py checks that this
 // list names every top-level path the backend's routes use.
 const apiPrefixes = [
+  '/access-report',
   '/admin',
   '/agent',
   '/agent-upgrades',

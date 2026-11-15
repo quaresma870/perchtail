@@ -117,6 +117,24 @@ def test_update_user_role_and_active(session, admin_client):
     assert response.json()["active"] is False
 
 
+def test_changing_the_role_by_hand_clears_the_sso_role_group(session, admin_client):
+    role_a = _make_target_role(session, "A")
+    role_b = _make_target_role(session, "B")
+    target = User(username="sso@example.com", role_id=role_a.id, sso_role_group="engineering")
+    session.add(target)
+    session.commit()
+    session.refresh(target)
+
+    # The same role again isn't a change: the group stays.
+    assert admin_client.patch(f"/users/{target.id}", json={"role_id": role_a.id}).status_code == 200
+    session.refresh(target)
+    assert target.sso_role_group == "engineering"
+
+    assert admin_client.patch(f"/users/{target.id}", json={"role_id": role_b.id}).status_code == 200
+    session.refresh(target)
+    assert target.sso_role_group is None
+
+
 def test_reset_password_forces_change_and_returns_temp_password(session, admin_client):
     role = _make_target_role(session)
     created = admin_client.post(

@@ -30,7 +30,14 @@ logger = get_logger(__name__)
 
 # Target types whose events never carry an id: there's nothing to name.
 UNNAMED_TARGET_TYPES = frozenset(
-    {"system_settings", "monitoring_token", "audit_log", "backup", "smtp_settings"}
+    {
+        "system_settings",
+        "monitoring_token",
+        "audit_log",
+        "backup",
+        "smtp_settings",
+        "access_report",
+    }
 )
 
 _MAX_FOLDER_DEPTH = 64

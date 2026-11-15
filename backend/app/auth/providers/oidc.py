@@ -128,22 +128,29 @@ def extract_claim_groups(claims: dict, group_claim: str | None) -> list[str]:
     return []
 
 
-def resolve_group_mapped_role_id(session: Session, claim_groups: list[str]) -> int | None:
-    """Returns the role_id the user's IdP groups map to, or None if none of
-    the configured SSOGroupRoleMapping rows match -- callers decide what
-    "no match" means (fall back to the no-access default for a brand-new
-    user; leave the existing role untouched for a returning one). Mappings
-    are evaluated in `order`, last match wins, same semantics as Rule's
-    include/exclude precedence (see CLAUDE.md)."""
+def resolve_group_mapping(session: Session, claim_groups: list[str]) -> SSOGroupRoleMapping | None:
+    """The SSOGroupRoleMapping the user's IdP groups match, or None if none
+    does. Mappings are evaluated in `order`, last match wins, same semantics
+    as Rule's include/exclude precedence (see CLAUDE.md)."""
     if not claim_groups:
         return None
     claim_set = set(claim_groups)
     mappings = session.exec(select(SSOGroupRoleMapping).order_by(SSOGroupRoleMapping.order)).all()
-    matched_role_id: int | None = None
+    matched: SSOGroupRoleMapping | None = None
     for mapping in mappings:
         if mapping.group_name in claim_set:
-            matched_role_id = mapping.role_id
-    return matched_role_id
+            matched = mapping
+    return matched
+
+
+def resolve_group_mapped_role_id(session: Session, claim_groups: list[str]) -> int | None:
+    """Returns the role_id the user's IdP groups map to, or None if none of
+    the configured SSOGroupRoleMapping rows match -- callers decide what
+    "no match" means (fall back to the no-access default for a brand-new
+    user; leave the existing role untouched for a returning one). See
+    `resolve_group_mapping`."""
+    mapping = resolve_group_mapping(session, claim_groups)
+    return mapping.role_id if mapping is not None else None
 
 
 def fetch_discovery_document(issuer: str) -> dict:
@@ -404,7 +411,8 @@ class OIDCProvider:
         email = claims.get("email") or claims.get("preferred_username") or external_id
 
         claim_groups = extract_claim_groups(claims, self.settings.group_claim)
-        mapped_role_id = resolve_group_mapped_role_id(session, claim_groups)
+        mapping = resolve_group_mapping(session, claim_groups)
+        mapped_role_id = mapping.role_id if mapping is not None else None
 
         user = find_or_provision_user(
             session,
@@ -435,6 +443,10 @@ class OIDCProvider:
                 target_id=user.id,
                 metadata={"role_id": mapped_role_id, "groups": claim_groups},
             )
+        # The group that gave the role, for the access report: only that
+        # one name, never the token's other groups. With no match the role
+        # wasn't set by a mapping at this sign-in, so nothing is recorded.
+        user.sso_role_group = mapping.group_name if mapping is not None else None
 
         user.last_login_at = utcnow()
         session.add(user)

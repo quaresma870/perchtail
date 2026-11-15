@@ -18,6 +18,7 @@ from app import instance_lock, name_index, source_status
 from app.agent_registry import get_agent_registry
 from app.agent_upgrades import run_scheduled_upgrades
 from app.alerts import run_alert_pass
+from app.api.access_report import router as access_report_router
 from app.api.agent_upgrades import router as agent_upgrades_router
 from app.api.agent_ws import router as agent_ws_router
 from app.api.alerts import router as alerts_router
@@ -446,6 +447,7 @@ app.add_middleware(RequestIDMiddleware)
 # request's audit context (app/request_context.py).
 app.add_middleware(ClientAddressMiddleware)
 app.include_router(auth_router)
+app.include_router(access_report_router)
 app.include_router(alerts_router)
 app.include_router(files_router)
 app.include_router(archive_router)

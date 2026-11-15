@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from fastapi import Depends, HTTPException, status
 from sqlmodel import Session, select
@@ -65,6 +66,150 @@ def _find_grant(session: Session, *, role_id: int, scope_type: ScopeType, scope_
     ).first()
 
 
+# --- Grant resolution ------------------------------------------------------
+#
+# `resolve_access` is the one function that decides what a principal holds
+# on a source (or at a folder or customer): `resolve_capability` and the
+# access report (app/access_report.py) both use it. It reads grants and the
+# folder tree through a `GrantLookup`, so the same decision runs against
+# the database (one query at a time, `DbGrantLookup`) or against a snapshot
+# loaded once (the access report's), and it returns where the decision came
+# from (`AccessVia`) along with the capabilities.
+
+
+class GrantLookup(Protocol):
+    def find_grant(
+        self, *, role_id: int, scope_type: ScopeType, scope_id: int
+    ) -> RoleGrant | None: ...
+
+    def folder_parent(self, folder_id: int) -> int | None: ...
+
+
+class DbGrantLookup:
+    """`GrantLookup` over the database, one query per step."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def find_grant(self, *, role_id: int, scope_type: ScopeType, scope_id: int):
+        return _find_grant(self.session, role_id=role_id, scope_type=scope_type, scope_id=scope_id)
+
+    def folder_parent(self, folder_id: int) -> int | None:
+        return self.session.get(Folder, folder_id).parent_folder_id
+
+
+PRINCIPAL_ROLE = "role"
+# `AccessVia.scope_type` of a super admin's access, which no grant decides.
+VIA_SUPER_ADMIN = "super_admin"
+
+
+@dataclass(frozen=True)
+class Principal:
+    """Who access is resolved for. Today only a role (`PRINCIPAL_ROLE`):
+    every user holding a role has exactly its access."""
+
+    principal_type: str
+    principal_id: int
+    is_super_admin: bool = False
+
+
+@dataclass(frozen=True)
+class AccessVia:
+    """What decided an access: the principal, and the scope of its grant
+    that decided it, or `VIA_SUPER_ADMIN` with no scope id."""
+
+    principal_type: str
+    principal_id: int
+    scope_type: str
+    scope_id: int | None
+
+
+@dataclass(frozen=True)
+class AccessDecision:
+    capabilities: frozenset[Capability]
+    via: tuple[AccessVia, ...] = ()
+
+
+NO_ACCESS = AccessDecision(capabilities=frozenset())
+
+
+def role_principal(role: Role) -> Principal:
+    return Principal(PRINCIPAL_ROLE, role.id, is_super_admin=role.is_super_admin)
+
+
+def resolve_access(
+    lookup: GrantLookup,
+    principal: Principal,
+    *,
+    source_id: int | None = None,
+    is_system: bool = False,
+    folder_id: int | None,
+    customer_id: int | None,
+) -> AccessDecision:
+    """What `principal` holds on a source (`source_id`, placed at `folder_id`
+    and `customer_id`), or, with no `source_id`, at a folder or at the
+    customer's root, per CLAUDE.md's "Access control (RBAC + SSO)" section:
+
+    - no grant reaches a system source; only a super admin does;
+    - a super admin holds everything;
+    - otherwise the most specific grant of the principal decides alone: on
+      the source, then its folder and each folder above it, nearest first,
+      then the customer. A grant decides even when it holds nothing, so a
+      narrower grant can take away what a broader one gives;
+    - with no grant, nothing.
+
+    A folder chain that loops back on itself (which the folders API never
+    creates) holds nothing, rather than walking forever."""
+    if principal.is_super_admin:
+        return AccessDecision(
+            capabilities=frozenset(Capability),
+            via=(
+                AccessVia(principal.principal_type, principal.principal_id, VIA_SUPER_ADMIN, None),
+            ),
+        )
+    if is_system:
+        return NO_ACCESS
+
+    def decided(grant: RoleGrant) -> AccessDecision:
+        held = grant.capabilities or []
+        return AccessDecision(
+            capabilities=frozenset(c for c in Capability if c in held),
+            via=(
+                AccessVia(
+                    principal.principal_type,
+                    principal.principal_id,
+                    str(grant.scope_type),
+                    grant.scope_id,
+                ),
+            ),
+        )
+
+    role_id = principal.principal_id
+    if source_id is not None:
+        grant = lookup.find_grant(role_id=role_id, scope_type=ScopeType.source, scope_id=source_id)
+        if grant is not None:
+            return decided(grant)
+
+    walked: set[int] = set()
+    while folder_id is not None:
+        if folder_id in walked:
+            return NO_ACCESS
+        walked.add(folder_id)
+        grant = lookup.find_grant(role_id=role_id, scope_type=ScopeType.folder, scope_id=folder_id)
+        if grant is not None:
+            return decided(grant)
+        folder_id = lookup.folder_parent(folder_id)
+
+    if customer_id is not None:
+        grant = lookup.find_grant(
+            role_id=role_id, scope_type=ScopeType.customer, scope_id=customer_id
+        )
+        if grant is not None:
+            return decided(grant)
+
+    return NO_ACCESS
+
+
 def resolve_folder_or_customer_capability(
     session: Session,
     user: User,
@@ -73,29 +218,15 @@ def resolve_folder_or_customer_capability(
     customer_id: int | None,
     capability: Capability,
 ) -> bool:
-    """Shared tail of the grant-resolution walk (folder chain, nearest first,
-    then the customer) — used both by `resolve_capability` (for a source's
-    own folder/customer) and directly by the folders API (for a folder that
-    isn't attached to a source). Super-admin short-circuit and any
-    source-scoped grant are the caller's concern, not this helper's."""
-    role_id = user.role_id
-
-    while folder_id is not None:
-        grant = _find_grant(
-            session, role_id=role_id, scope_type=ScopeType.folder, scope_id=folder_id
-        )
-        if grant is not None:
-            return capability in grant.capabilities
-        folder_id = session.get(Folder, folder_id).parent_folder_id
-
-    if customer_id is not None:
-        grant = _find_grant(
-            session, role_id=role_id, scope_type=ScopeType.customer, scope_id=customer_id
-        )
-        if grant is not None:
-            return capability in grant.capabilities
-
-    return False
+    """Grant resolution at a folder (its chain, nearest first, then the
+    customer) or at a customer's root, by the role's grants alone: the
+    super-admin short-circuit is the caller's concern, not this helper's,
+    so the role is resolved as an ordinary one here (see `resolve_access`)."""
+    principal = Principal(PRINCIPAL_ROLE, user.role_id)
+    decision = resolve_access(
+        DbGrantLookup(session), principal, folder_id=folder_id, customer_id=customer_id
+    )
+    return capability in decision.capabilities
 
 
 def holds_capability_at(
@@ -111,11 +242,13 @@ def holds_capability_at(
     would get: the folder, its ancestors, then the customer. Super admins
     hold everything. Used to check both what is being moved and where it
     goes, so a move can never widen the mover's own access."""
-    if user.role.is_super_admin:
-        return True
-    return resolve_folder_or_customer_capability(
-        session, user, folder_id=folder_id, customer_id=customer_id, capability=capability
+    decision = resolve_access(
+        DbGrantLookup(session),
+        role_principal(user.role),
+        folder_id=folder_id,
+        customer_id=customer_id,
     )
+    return capability in decision.capabilities
 
 
 def _capabilities_at(
@@ -164,25 +297,19 @@ def resolve_capability(
     section: no grant can reach a system source short of super-admin; the
     most specific scope wins — a source-scoped grant beats a folder-scoped
     one, which beats a (possibly deeper) parent folder's, which beats the
-    customer-scoped one; otherwise deny."""
-    if source.is_system:
-        return user.role.is_super_admin
+    customer-scoped one; otherwise deny. Decided by `resolve_access`."""
+    return capability in resolve_source_access(session, user, source).capabilities
 
-    if user.role.is_super_admin:
-        return True
 
-    grant = _find_grant(
-        session, role_id=user.role_id, scope_type=ScopeType.source, scope_id=source.id
-    )
-    if grant is not None:
-        return capability in grant.capabilities
-
-    return resolve_folder_or_customer_capability(
-        session,
-        user,
+def resolve_source_access(session: Session, user: User, source: Source) -> AccessDecision:
+    """Everything `user` holds on `source`, and what decided it."""
+    return resolve_access(
+        DbGrantLookup(session),
+        role_principal(user.role),
+        source_id=source.id,
+        is_system=source.is_system,
         folder_id=source.folder_id,
         customer_id=source.customer_id,
-        capability=capability,
     )
 
 

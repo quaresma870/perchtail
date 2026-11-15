@@ -170,6 +170,9 @@ def update_user(
         require_role_within_authority(session, user, new_role)
         if not new_role.is_super_admin:
             _require_not_last_super_admin(session, target)
+        if new_role.id != target.role_id:
+            # Set by hand now, not by an IdP group mapping.
+            target.sso_role_group = None
         target.role_id = payload.role_id
     if payload.active is False:
         _require_not_last_super_admin(session, target)
