@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { findRedactionMarkers, redactionCountLabel } from './redaction-markers'
+import { countRedactionMarkers, findRedactionMarkers, redactionCountLabel } from './redaction-markers'
+
+describe('countRedactionMarkers', () => {
+  it('counts the redacted values across lines', () => {
+    expect(countRedactionMarkers('a=[redacted: email]\nb [redacted: card ****1111] [redacted: ip]\n')).toBe(3)
+    expect(countRedactionMarkers('nothing here\n')).toBe(0)
+  })
+
+  it("leaves out the markers the server doesn't count", () => {
+    expect(countRedactionMarkers('[redacted: incomplete line]')).toBe(0)
+    expect(countRedactionMarkers('x[redacted: line over 1008 KiB]\n[redacted: jwt]\n')).toBe(1)
+  })
+})
 
 describe('findRedactionMarkers', () => {
   it('finds every marker in a line', () => {

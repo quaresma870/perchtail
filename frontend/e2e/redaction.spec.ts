@@ -87,6 +87,21 @@ test('redacted content in the viewer and in Tail', async ({ page }) => {
     await expect(content).not.toContainText('abcdef123')
     await expect(count).toHaveText(`${before + 2} values redacted`)
     await page.getByRole('button', { name: 'Tail', exact: true }).click()
+
+    // The download is redacted too, says so, and is named for it.
+    const download = page.getByRole('link', { name: 'Download (redacted)', exact: true })
+    await expect(download).toBeVisible()
+    const href = await download.getAttribute('href')
+    expect(href).not.toBeNull()
+    const downloaded = await page.request.get(href as string)
+    expect(downloaded.ok()).toBeTruthy()
+    expect(downloaded.headers()['x-perchtail-redacted']).toBe('1')
+    expect(downloaded.headers()['content-disposition']).toContain('app.redacted.log')
+    const body = await downloaded.text()
+    expect(body).toContain('token=[redacted: token]')
+    for (const secret of ['alice@example.com', '4111 1111', 'Sup3rS3cret', 'hunter2', 'abcdef123', 'bob@example.org']) {
+      expect(body).not.toContain(secret)
+    }
   } finally {
     await setRedaction(page.request, false)
     await setDetectors(page.request, turnedOn, false)
