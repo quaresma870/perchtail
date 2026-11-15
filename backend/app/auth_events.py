@@ -44,7 +44,10 @@ def _record(
     reason: str,
     extra: dict | None = None,
 ) -> None:
-    key = (action, username, client_ip, reason)
+    # An account lockout and an address lockout from the same failure are
+    # two events, not one repeated.
+    scope = (extra or {}).get("scope")
+    key = (action, username, client_ip, f"{reason}:{scope}" if scope else reason)
     now = time.monotonic()
     with _lock:
         last = _recent.get(key)
@@ -81,15 +84,24 @@ def login_failed(session: Session, *, username: str, client_ip: str | None, reas
 
 
 def locked_out(
-    session: Session, *, username: str, client_ip: str | None, lock_seconds: float
+    session: Session,
+    *,
+    username: str,
+    client_ip: str | None,
+    lock_seconds: float,
+    scope: str = "account",
 ) -> None:
+    """`scope` says what was locked (app/login_throttle.py): `account` (the
+    username, from every address), `account_and_address` (an emergency
+    account, from this address only) or `address` (every username from this
+    address)."""
     _record(
         session,
         "user.locked_out",
         username=username,
         client_ip=client_ip,
         reason="too_many_failures",
-        extra={"lock_seconds": round(lock_seconds)},
+        extra={"lock_seconds": round(lock_seconds), "scope": scope},
     )
 
 

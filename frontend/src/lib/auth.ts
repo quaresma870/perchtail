@@ -45,6 +45,12 @@ export async function logout(): Promise<void> {
   currentUser.set(null)
 }
 
+/** Signed in, but must set up MFA before anything else: the account has to
+ * use it (backend app/auth/mfa_policy.py) and hasn't turned it on. */
+export function mfaSetupRequired(user: CurrentUser | null): boolean {
+  return !!user && user.mfa_required && !user.mfa_enabled
+}
+
 export function hasCapability(user: CurrentUser | null, capability: GlobalCapability): boolean {
   if (!user) return false
   return user.is_super_admin || user.global_capabilities.includes(capability)

@@ -68,6 +68,7 @@ _DEFAULTS = {
     "redaction_enabled": False,
     "redaction_downloads": True,
     "redaction_download_suffix": True,
+    "require_mfa_local_accounts": False,
 }
 
 
@@ -206,6 +207,35 @@ def test_a_delegated_admin_may_turn_folder_listing_auditing_on(session, client_f
     # Sending the value it already has changes nothing and is not refused.
     response = client.patch("/system-settings", json={"audit_folder_listings": True})
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("start", [False, True])
+def test_only_a_super_admin_changes_whether_local_accounts_need_mfa(session, client_for, start):
+    from app import system_settings
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    system_settings.set_bool(session, "require_mfa_local_accounts", start)
+    session.commit()
+    delegated = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+    client = client_for(delegated)
+    response = client.patch("/system-settings", json={"require_mfa_local_accounts": not start})
+    assert response.status_code == 403
+    assert system_settings.get_bool(session, "require_mfa_local_accounts") is start
+    assert session.exec(select(AuditLog)).all() == []
+    # Sending the value it already has changes nothing and is not refused.
+    response = client.patch("/system-settings", json={"require_mfa_local_accounts": start})
+    assert response.status_code == 200
+
+    admin = _make_user(session, is_super_admin=True)
+    response = client_for(admin).patch(
+        "/system-settings", json={"require_mfa_local_accounts": not start}
+    )
+    assert response.status_code == 200
+    assert response.json()["require_mfa_local_accounts"] is (not start)
+    entry = session.exec(select(AuditLog).order_by(AuditLog.id.desc())).first()
+    assert entry.action == "system_settings.update"
+    assert entry.event_metadata["require_mfa_local_accounts"] == {"old": start, "new": not start}
 
 
 def test_the_audit_entry_records_old_and_new_values(session, client_for):

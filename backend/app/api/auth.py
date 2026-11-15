@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 
 from app import auth_events, password_policy, preferences, profile, request_context
 from app.audit import record_audit_event
-from app.auth import mfa
+from app.auth import mfa, mfa_policy
 from app.auth.models import (
     AuthProviderType,
     AuthSession,
@@ -25,9 +25,12 @@ from app.auth.providers.local import (
 )
 from app.auth.providers.oidc import (
     STATE_TTL_SECONDS,
+    InsecureIdPURLError,
+    IssuerMismatchError,
     OIDCProvider,
     decode_state,
     encode_state,
+    generate_code_verifier,
     parse_oidc_settings,
     read_provider_config,
 )
@@ -44,8 +47,14 @@ from app.auth.sessions import (
 from app.bootstrap import NO_ACCESS_ROLE_NAME
 from app.config import get_settings
 from app.db import get_session
+from app.initial_admin_password import remove_initial_admin_password
 from app.logging_config import get_logger
-from app.login_throttle import record_failure, record_success, seconds_until_unlocked
+from app.login_throttle import (
+    FailureOutcome,
+    record_failure,
+    record_success,
+    seconds_until_allowed,
+)
 
 logger = get_logger(__name__)
 
@@ -139,6 +148,9 @@ class UserPublic(BaseModel):
     active: bool
     must_change_password: bool
     mfa_enabled: bool
+    # Whether this account must use MFA (app/auth/mfa_policy.py): while it's
+    # true and mfa_enabled isn't, the only thing it can do is set MFA up.
+    mfa_required: bool
     # Denormalized from the user's role so the frontend can gate nav/UI
     # (e.g. show the Roles/Users admin pages) without a second round-trip or
     # needing manage_roles just to read its own role's shape.
@@ -146,7 +158,7 @@ class UserPublic(BaseModel):
     global_capabilities: list[GlobalCapability]
 
     @classmethod
-    def from_user(cls, user: User) -> "UserPublic":
+    def from_user(cls, user: User, session: Session) -> "UserPublic":
         return cls(
             id=user.id,
             username=user.username,
@@ -158,6 +170,7 @@ class UserPublic(BaseModel):
             active=user.active,
             must_change_password=user.must_change_password,
             mfa_enabled=user.mfa_enabled,
+            mfa_required=mfa_policy.mfa_required(session, user),
             is_super_admin=user.role.is_super_admin,
             global_capabilities=user.role.global_capabilities,
         )
@@ -183,17 +196,44 @@ def get_current_user(
     return user
 
 
-def get_current_active_user(user: User = Depends(get_current_user)) -> User:
-    """Blocks every endpoint except login/me/change-password until an
-    admin-created account's forced password change is done."""
+def _not_a_denial() -> None:
+    # Not a refused permission (app/api/errors.py): the account just has a
+    # step to finish first, and every screen asks until it does.
+    context = request_context.current()
+    if context is not None:
+        context.denial_handled = True
+
+
+def get_current_user_setting_up_mfa(user: User = Depends(get_current_user)) -> User:
+    """For the MFA setup calls: blocks only until a forced password change
+    is done, so an account that must use MFA can still set it up."""
     if user.must_change_password:
-        # Not a refused permission (app/api/errors.py): the account just has
-        # to pick a password first, and every screen asks until it does.
-        context = request_context.current()
-        if context is not None:
-            context.denial_handled = True
+        _not_a_denial()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Password change required"
+        )
+    return user
+
+
+MFA_SETUP_REQUIRED = "mfa_setup_required"
+
+
+def get_current_active_user(
+    user: User = Depends(get_current_user_setting_up_mfa),
+    session: Session = Depends(get_session),
+) -> User:
+    """Blocks every endpoint except login/me/change-password until an
+    admin-created account's forced password change is done, and every
+    endpoint except those and the MFA setup until an account that must use
+    MFA (app/auth/mfa_policy.py) has set it up."""
+    if mfa_policy.mfa_setup_required(session, user):
+        _not_a_denial()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "message": "Set up two-factor authentication to continue",
+                "error_code": MFA_SETUP_REQUIRED,
+            },
         )
     return user
 
@@ -230,18 +270,65 @@ def _clear_sso_state_cookie(response: Response) -> None:
     )
 
 
+def _per_address_account(session: Session, username: str) -> bool:
+    """Whether this username's failed logins are counted per client address
+    (an emergency account, app/auth/mfa_policy.py), so an anonymous caller
+    can't lock it out everywhere (app/login_throttle.py)."""
+    user = session.exec(select(User).where(User.username == username)).first()
+    return user is not None and mfa_policy.emergency_account(user)
+
+
 def _record_failed_login(
-    session: Session, username: str, client_ip: str | None, reason: str
+    session: Session,
+    username: str,
+    client_ip: str | None,
+    reason: str,
+    *,
+    per_address_account: bool,
 ) -> None:
-    """Counts the failure toward the lockout, audits it, and audits the
-    lockout itself when this failure is the one that triggers it."""
-    record_failure(username)
+    """Counts the failure toward the lockouts, audits it, and audits each
+    lockout this failure triggers."""
+    outcome = record_failure(username, client_ip, per_address_account=per_address_account)
     auth_events.login_failed(session, username=username, client_ip=client_ip, reason=reason)
-    remaining = seconds_until_unlocked(username)
-    if remaining is not None:
+    _audit_lockouts(session, username, client_ip, outcome, per_address_account=per_address_account)
+
+
+def _audit_lockouts(
+    session: Session,
+    username: str,
+    client_ip: str | None,
+    outcome: FailureOutcome,
+    *,
+    per_address_account: bool,
+) -> None:
+    """Audits each lockout a failure triggered (app/login_throttle.py), one
+    user.locked_out per scope -- after a failed login or a failed password
+    re-confirmation alike, since both count toward the same lockouts."""
+    lock_seconds = get_settings().login_lockout_seconds
+    if outcome.account_locked:
         auth_events.locked_out(
-            session, username=username, client_ip=client_ip, lock_seconds=remaining
+            session,
+            username=username,
+            client_ip=client_ip,
+            lock_seconds=lock_seconds,
+            scope="account_and_address" if per_address_account else "account",
         )
+    if outcome.address_locked:
+        auth_events.locked_out(
+            session,
+            username=username,
+            client_ip=client_ip,
+            lock_seconds=lock_seconds,
+            scope="address",
+        )
+
+
+def _too_many_attempts(remaining: float, detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=detail,
+        headers={"Retry-After": str(math.ceil(remaining))},
+    )
 
 
 @router.post("/login", response_model=UserPublic)
@@ -252,19 +339,20 @@ def login(
     session: Session = Depends(get_session),
 ):
     client_ip = request.client.host if request.client else None
-    remaining = seconds_until_unlocked(payload.username)
+    per_address = _per_address_account(session, payload.username)
+    remaining = seconds_until_allowed(payload.username, client_ip, per_address_account=per_address)
     if remaining is not None:
         auth_events.login_throttled(session, username=payload.username, client_ip=client_ip)
-        retry_after = math.ceil(remaining)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many failed login attempts. Try again later.",
-            headers={"Retry-After": str(retry_after)},
+        raise _too_many_attempts(remaining, "Too many failed login attempts. Try again later.")
+
+    def failed(reason: str) -> None:
+        _record_failed_login(
+            session, payload.username, client_ip, reason, per_address_account=per_address
         )
 
     user = LocalPasswordProvider().authenticate(session, payload.username, payload.password)
     if user is None:
-        _record_failed_login(session, payload.username, client_ip, "bad_credentials")
+        failed("bad_credentials")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     if user.mfa_enabled:
@@ -281,7 +369,10 @@ def login(
                 },
             )
         if not mfa.verify_mfa_code(session, user, payload.mfa_code):
-            _record_failed_login(session, payload.username, client_ip, "mfa_invalid_code")
+            # Whatever the check recorded (user.mfa_secret_unreadable) is
+            # kept, even when the failure below is folded into an earlier one.
+            session.commit()
+            failed("mfa_invalid_code")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={
@@ -290,15 +381,25 @@ def login(
                 },
             )
 
-    record_success(payload.username)
+    record_success(payload.username, client_ip, per_address_account=per_address)
     # Expired password (#245): signed in, but only to change it.
     if password_policy.password_expired(user, password_policy.get_policy(session)):
         user.must_change_password = True
         logger.info("user.password_expired", user_id=user.id)
+    # Signed in, but only to set MFA up (app/auth/mfa_policy.py).
+    if mfa_policy.mfa_setup_required(session, user):
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="user.mfa_required",
+            target_type="user",
+            target_id=user.id,
+            metadata={"reason": "admin_account" if mfa_policy.admin_account(user) else "setting"},
+        )
     complete_login(session, user)
     _, token = create_session(session, user, user_agent=request.headers.get("user-agent"))
     _set_session_cookie(response, token)
-    return UserPublic.from_user(user)
+    return UserPublic.from_user(user, session)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -328,8 +429,8 @@ def logout(
 
 
 @router.get("/me", response_model=UserPublic)
-def me(user: User = Depends(get_current_user)):
-    return UserPublic.from_user(user)
+def me(user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    return UserPublic.from_user(user, session)
 
 
 @router.post("/change-password", response_model=UserPublic)
@@ -365,7 +466,10 @@ def change_password_endpoint(
         )
     session.commit()
     session.refresh(user)
-    return UserPublic.from_user(user)
+    # The first-run password file (app/initial_admin_password.py) goes with
+    # the password it holds.
+    remove_initial_admin_password(user)
+    return UserPublic.from_user(user, session)
 
 
 @router.patch("/me", response_model=UserPublic)
@@ -379,7 +483,7 @@ def update_my_profile(
     here."""
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
-        return UserPublic.from_user(user)
+        return UserPublic.from_user(user, session)
     if user.auth_provider != AuthProviderType.local:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -391,7 +495,7 @@ def update_my_profile(
         raise profile_error(exc) from exc
     session.commit()
     session.refresh(user)
-    return UserPublic.from_user(user)
+    return UserPublic.from_user(user, session)
 
 
 @router.patch("/preferences", response_model=UserPublic)
@@ -409,7 +513,7 @@ def update_my_preferences(
     session.add(user)
     session.commit()
     session.refresh(user)
-    return UserPublic.from_user(user)
+    return UserPublic.from_user(user, session)
 
 
 @router.get("/password-policy", response_model=PasswordPolicyPublic)
@@ -446,8 +550,20 @@ class MfaPasswordConfirmRequest(BaseModel):
     password: str
 
 
+class MfaDisableRequest(MfaPasswordConfirmRequest):
+    # Turning MFA off also needs the second factor it protects: a password
+    # caught by phishing plus a stolen session mustn't be enough. A TOTP
+    # code or a backup code; required while MFA is on.
+    code: str | None = None
+
+
 def _require_password_reconfirmation(
-    session: Session, user: User, password: str, *, action: str
+    session: Session,
+    user: User,
+    password: str,
+    *,
+    action: str,
+    mfa_code: str | None = None,
 ) -> None:
     """Shared by every /mfa/* endpoint that re-proves account ownership via
     password -- throttled exactly like /auth/login itself (keyed by
@@ -455,18 +571,22 @@ def _require_password_reconfirmation(
     stolen session token would let an attacker brute-force the account
     password at argon2-timing speed with no cap on attempts.
 
-    A wrong password is audited as user.reauth_failed, naming what it was
-    meant to allow (`action`) and nothing about the password itself."""
-    remaining = seconds_until_unlocked(user.username)
+    With `mfa_code`, the account's second factor is checked too (a TOTP
+    code or a backup code, app/auth/mfa.py), on the same budget: the
+    failures are cleared only once both the password and the code pass, so
+    a known password can't be used to guess codes without limit.
+
+    A wrong password or code is audited as user.reauth_failed, naming what
+    it was meant to allow (`action`) and nothing about what was sent."""
+    context = request_context.current()
+    client_ip = context.client_ip if context is not None else None
+    per_address = mfa_policy.emergency_account(user)
+    remaining = seconds_until_allowed(user.username, client_ip, per_address_account=per_address)
     if remaining is not None:
-        retry_after = math.ceil(remaining)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many failed attempts. Try again later.",
-            headers={"Retry-After": str(retry_after)},
-        )
-    if not verify_password(user, password):
-        record_failure(user.username)
+        raise _too_many_attempts(remaining, "Too many failed attempts. Try again later.")
+
+    def refuse(detail: str) -> None:
+        outcome = record_failure(user.username, client_ip, per_address_account=per_address)
         record_audit_event(
             session,
             user_id=user.id,
@@ -475,17 +595,24 @@ def _require_password_reconfirmation(
             target_id=user.id,
             metadata={"action": action},
         )
+        _audit_lockouts(session, user.username, client_ip, outcome, per_address_account=per_address)
         session.commit()
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect"
-        )
-    record_success(user.username)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+
+    if not verify_password(user, password):
+        refuse("Current password is incorrect")
+    # Whatever the check records (user.mfa_secret_unreadable, a spent backup
+    # code) is committed with the refusal or with the caller's change.
+    if mfa_code is not None and not mfa.verify_mfa_code(session, user, mfa_code):
+        refuse("Invalid authentication code")
+    record_success(user.username, client_ip, per_address_account=per_address)
 
 
 @router.post("/mfa/enroll", response_model=MfaEnrollResponse)
 def mfa_enroll(
     payload: MfaPasswordConfirmRequest,
-    user: User = Depends(get_current_active_user),
+    # Open to an account that must set MFA up before anything else.
+    user: User = Depends(get_current_user_setting_up_mfa),
     session: Session = Depends(get_session),
 ):
     """Self-service only, same scope as change-password -- generates a new
@@ -508,7 +635,7 @@ def mfa_enroll(
 @router.post("/mfa/confirm", response_model=MfaBackupCodesResponse)
 def mfa_confirm(
     payload: MfaConfirmRequest,
-    user: User = Depends(get_current_active_user),
+    user: User = Depends(get_current_user_setting_up_mfa),
     session: Session = Depends(get_session),
 ):
     try:
@@ -519,7 +646,13 @@ def mfa_confirm(
         ) from None
 
     record_audit_event(
-        session, user_id=user.id, action="user.mfa_enable", target_type="user", target_id=user.id
+        session,
+        user_id=user.id,
+        action="user.mfa_enable",
+        target_type="user",
+        target_id=user.id,
+        # Whether the account had to set it up (app/auth/mfa_policy.py).
+        metadata={"required": mfa_policy.mfa_required(session, user)},
     )
     session.commit()
     return MfaBackupCodesResponse(backup_codes=codes)
@@ -527,11 +660,21 @@ def mfa_confirm(
 
 @router.post("/mfa/disable", response_model=UserPublic)
 def mfa_disable(
-    payload: MfaPasswordConfirmRequest,
+    payload: MfaDisableRequest,
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
-    _require_password_reconfirmation(session, user, payload.password, action="mfa_disable")
+    """Turns the caller's own MFA off. Needs the current password and, while
+    MFA is on, a TOTP or backup code (MfaDisableRequest). With MFA only
+    pending (enrolled, not confirmed), there's no second factor to prove and
+    the password is enough."""
+    _require_password_reconfirmation(
+        session,
+        user,
+        payload.password,
+        action="mfa_disable",
+        mfa_code=(payload.code or "") if user.mfa_enabled else None,
+    )
 
     mfa.disable_mfa(session, user)
     record_audit_event(
@@ -539,7 +682,7 @@ def mfa_disable(
     )
     session.commit()
     session.refresh(user)
-    return UserPublic.from_user(user)
+    return UserPublic.from_user(user, session)
 
 
 @router.post("/mfa/backup-codes/regenerate", response_model=MfaBackupCodesResponse)
@@ -684,13 +827,36 @@ def sso_login(request: Request, session: Session = Depends(get_session)):
         )
     oidc_settings = parse_oidc_settings(raw_config)
     nonce = secrets.token_urlsafe(32)
-    state = encode_state(nonce)
+    # PKCE (RFC 7636, S256): the verifier travels only inside the encrypted
+    # state, the IdP sees its hash, and the code exchange must present it.
+    code_verifier = generate_code_verifier()
+    state = encode_state(nonce, code_verifier)
     redirect_uri = f"{app_settings.public_base_url}/auth/sso/callback"
 
     try:
         authorize_url = OIDCProvider(oidc_settings).authorization_redirect_url(
-            redirect_uri=redirect_uri, state=state, nonce=nonce
+            redirect_uri=redirect_uri, state=state, nonce=nonce, code_verifier=code_verifier
         )
+    except InsecureIdPURLError as exc:
+        # Configured before HTTPS was required: a clear line for the admin
+        # in the log, the usual answer for whoever tried to sign in.
+        logger.error("sso.login.insecure_idp_url", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach the identity provider"
+        ) from exc
+    except IssuerMismatchError as exc:
+        # The discovery document speaks for another issuer: its endpoints
+        # and keys aren't the configured IdP's. Audited, and answered like
+        # any other unreachable IdP.
+        logger.error("sso.login.issuer_mismatch")
+        auth_events.sso_login_failed(
+            session,
+            client_ip=request.client.host if request.client else None,
+            reason="issuer_mismatch",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach the identity provider"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 - surfaced as a clean error, not a raw 500
         logger.error("sso.login.discovery_failed", error=str(exc))
         raise HTTPException(
@@ -760,7 +926,7 @@ def sso_callback(
         return failed("state_cookie_mismatch")
 
     try:
-        nonce = decode_state(state)
+        nonce, code_verifier = decode_state(state)
     except Exception:  # noqa: BLE001 - any decode failure means "start the login over"
         logger.warning("sso.callback.invalid_state")
         return failed("invalid_state")
@@ -788,8 +954,15 @@ def sso_callback(
             code=code,
             redirect_uri=redirect_uri,
             nonce=nonce,
+            code_verifier=code_verifier,
             no_access_role_id=no_access_role.id,
         )
+    except IssuerMismatchError:
+        # See sso_login. Raised by the discovery, before any request that
+        # carries the code or the client secret.
+        logger.error("sso.callback.issuer_mismatch")
+        session.rollback()
+        return failed("issuer_mismatch")
     except Exception as exc:  # noqa: BLE001 - any failure here means "login didn't succeed"
         logger.warning("sso.callback.login_failed", error=str(exc))
         # Rolled back first: whatever the provider got half way through

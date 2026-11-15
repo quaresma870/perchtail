@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { expect, type Page } from '@playwright/test'
 
 // A minimal RFC 6238 TOTP generator, just enough to drive the MFA e2e spec
 // against a real secret returned by /auth/mfa/enroll -- deliberately
@@ -22,6 +23,10 @@ function base32Decode(input: string): Buffer {
   return Buffer.from(bytes)
 }
 
+// The seeded e2e super admin's TOTP secret: super admins must use MFA. Must
+// match backend/scripts/run_e2e_server.sh (and whatever it was run with).
+export const ADMIN_TOTP_SECRET = process.env.E2E_ADMIN_TOTP_SECRET ?? 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP'
+
 export function totp(secret: string, atMs: number = Date.now(), stepOffset = 0): string {
   const timeStepSeconds = 30
   const digits = 6
@@ -38,4 +43,21 @@ export function totp(secret: string, atMs: number = Date.now(), stepOffset = 0):
     (hmac[offset + 3] & 0xff)
   const otp = binary % 10 ** digits
   return otp.toString().padStart(digits, '0')
+}
+
+/** On the forced "Set up two-factor authentication" page: enrolls with the
+ * account's `password`, confirms with a live code, dismisses the backup
+ * codes. Returns the secret, for codes at later sign-ins. */
+export async function setUpMfa(page: Page, password: string): Promise<string> {
+  await expect(page.getByRole('heading', { name: 'Set up two-factor authentication' })).toBeVisible()
+  await page.getByRole('button', { name: 'Enable two-factor authentication' }).click()
+  await page.getByLabel('Current password').fill(password)
+  await page.getByRole('button', { name: 'Continue' }).click()
+  await expect(page.locator('img.qr')).toBeVisible()
+  const secret = await page.locator('.secret code').innerText()
+  await page.getByLabel('Confirmation code').fill(totp(secret))
+  await page.getByRole('button', { name: 'Confirm' }).click()
+  await expect(page.locator('.backup-codes')).toBeVisible()
+  await page.getByRole('button', { name: 'Done' }).click()
+  return secret
 }

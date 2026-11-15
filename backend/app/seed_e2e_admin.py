@@ -26,13 +26,19 @@ from sqlmodel import Session, select
 from app.auth.models import User
 from app.auth.providers.local import hash_password
 from app.auth.rbac import create_role
+from app.crypto import encrypt_secret
+from app.timeutils import utcnow
 
 DEFAULT_USERNAME = "e2e-admin"
 # For the e2e tests only, against their own throwaway database.
 DEFAULT_PASSWORD = "e2e-test-password-123!"  # noqa: S105  # nosec B105
+# Super admins must use MFA (app/auth/mfa_policy.py), so the e2e admin is
+# seeded with it on, with this known TOTP secret (base32) that the specs
+# compute codes from (frontend/e2e/totp.ts).
+DEFAULT_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"  # noqa: S105  # nosec B105
 
 
-def seed(username: str, password: str) -> int:
+def seed(username: str, password: str, totp_secret: str = DEFAULT_TOTP_SECRET) -> int:
     # Deferred: lets tests patch app.db.engine, same as
     # app.rotate_credential_key.rotate/app.search_index.run_indexing_sweep do.
     from app.db import engine, init_db
@@ -58,6 +64,9 @@ def seed(username: str, password: str) -> int:
             username=username,
             password_hash=hash_password(password),
             role_id=role.id,
+            mfa_enabled=True,
+            mfa_secret_encrypted=encrypt_secret(totp_secret),
+            mfa_enrolled_at=utcnow(),
         )
         session.add(user)
         session.commit()
@@ -69,7 +78,8 @@ def seed(username: str, password: str) -> int:
 def main() -> int:
     username = os.environ.get("E2E_ADMIN_USERNAME", DEFAULT_USERNAME)
     password = os.environ.get("E2E_ADMIN_PASSWORD", DEFAULT_PASSWORD)
-    return seed(username, password)
+    totp_secret = os.environ.get("E2E_ADMIN_TOTP_SECRET", DEFAULT_TOTP_SECRET)
+    return seed(username, password, totp_secret)
 
 
 if __name__ == "__main__":
