@@ -211,6 +211,13 @@
       <p class="error">{error}</p>
     {/if}
 
+    {#if provider?.secret_unreadable}
+      <p class="error" role="alert" data-testid="sso-secret-unreadable">
+        The saved client secret can't be decrypted with the current key; enter it again.
+        The issuer URL and client ID were saved with it, so enter them again too.
+      </p>
+    {/if}
+
     <form class="card" on:submit|preventDefault={handleSubmit}>
       <label>
         Display name
@@ -238,8 +245,10 @@
           data-gramm="false"
           data-enable-grammarly="false"
           bind:value={clientSecret}
-          placeholder={provider ? 'Leave blank to keep the current secret' : ''}
-          required={!provider}
+          placeholder={provider && !provider.secret_unreadable
+            ? 'Leave blank to keep the current secret'
+            : ''}
+          required={!provider || provider.secret_unreadable}
         />
       </label>
       <label>

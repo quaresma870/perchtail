@@ -11,13 +11,13 @@ class Protocol(StrEnum):
     smb = "smb"
     winrm = "winrm"
     local = "local"
-    # Phase 2: for sources not reachable inbound. The Go push-agent dials
-    # *out* to this app (solving the firewall/NAT problem) and holds that
-    # connection open; the connector then sends live list/fetch commands
-    # down it on demand — see collectors/agent.py and app/agent_registry.py.
-    # Deliberately not a proactive sync: CLAUDE.md's always-fresh,
-    # nothing-persisted rule still applies here, just relayed through the
-    # agent's connection instead of a direct SSH/SMB/WinRM dial.
+    # For sources not reachable inbound. The Go push-agent dials *out* to
+    # this app (solving the firewall/NAT problem) and holds that connection
+    # open; the connector then sends live list/fetch commands down it on
+    # demand — see collectors/agent.py and app/agent_registry.py.
+    # Deliberately not a proactive sync: every open is a fresh read and no
+    # file content is kept, just relayed through the agent's connection
+    # instead of a direct SSH/SMB/WinRM dial.
     agent = "agent"
 
 
@@ -60,7 +60,7 @@ class Folder(SQLModel, table=True):
     folders) into an arbitrarily nested tree, for both browsing and RBAC
     scoping (see auth/rbac.py). A folder always belongs to exactly one
     customer — folders don't span customers — and nests only within that
-    same customer (see CLAUDE.md's "Access control" section)."""
+    same customer."""
 
     __table_args__ = NO_ID_REUSE
 
@@ -114,7 +114,6 @@ class Source(SQLModel, table=True):
     # server-wide REQUESTS_CA_BUNDLE. Public data, not a secret.
     tls_ca_pem: str | None = None
     enabled: bool = True
-    schedule_cron: str | None = None
     is_system: bool = False
     # Push-agent (protocol=agent) enrollment: only the SHA-256 hash of the
     # enrollment token is stored (same rationale as password/session-token
@@ -185,9 +184,7 @@ class Rule(SQLModel, table=True):
 
 
 class SeverityPattern(SQLModel, table=True):
-    """Admin-configurable line-highlighting rule for the Viewer (see
-    CLAUDE.md's CodeMirror choice and ROADMAP.md's "Viewer: toward an
-    advanced editor" section) — display-only, never affects what's
+    """Admin-configurable line-highlighting rule for the Viewer — display-only, never affects what's
     readable/fetchable the way `Rule` does. Matching itself runs client-side
     (see frontend/src/lib/severity-highlighting.ts); this table is pure
     config storage + CRUD.
@@ -421,10 +418,10 @@ class AgentUpgradeRun(SQLModel, table=True):
 class SystemSetting(SQLModel, table=True):
     """Deployment-wide feature toggles, admin-configurable from Settings ->
     System (see app/api/system_settings.py) rather than only via an env var
-    and a redeploy. Key-value rather than dedicated columns so a new toggle
-    (e.g. the audit log viewer, once built) slots in without its own
-    migration each time. Missing key == default, defined in code
-    (app.system_settings.DEFAULTS), not stored — so shipping a new toggle
+    and a redeploy. Key-value rather than dedicated columns so a new setting
+    slots in without its own migration each time. Missing key == default,
+    defined in code (app/system_settings.py: BOOL_DEFAULTS, INT_DEFAULTS and
+    CHOICE_DEFAULTS), not stored — so shipping a new setting
     doesn't require backfilling every existing deployment's rows."""
 
     __tablename__ = "system_setting"

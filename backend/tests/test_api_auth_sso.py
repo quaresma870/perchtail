@@ -4,13 +4,21 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 from app.api.auth import router as auth_router
-from app.auth.models import AuthProviderType, Role, SSOProtocol, SSOProviderConfig, User
+from app.auth.models import (
+    AuditLog,
+    AuthProviderType,
+    Role,
+    SSOProtocol,
+    SSOProviderConfig,
+    User,
+)
 from app.auth.providers import oidc
 from app.auth.providers.local import create_local_user
 from app.bootstrap import seed_no_access_role
 from app.config import get_settings
 from app.crypto import encrypt_secret
 from app.db import get_session
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from joserfc import jwt
@@ -364,6 +372,54 @@ def test_callback_redirects_to_login_error_when_sso_disabled_mid_flow(client, se
     response = client.get("/auth/sso/callback", params={"code": "the-code", "state": state})
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
+
+
+# --- provider settings that can't be decrypted with the current key ------------------
+
+
+def _foreign_ciphertext() -> str:
+    """Settings encrypted under some other key, as after losing the key or salt."""
+    return (
+        Fernet(Fernet.generate_key())
+        .encrypt(json.dumps({"issuer": ISSUER, "client_id": CLIENT_ID}).encode())
+        .decode()
+    )
+
+
+def _sso_failures(session) -> list[AuditLog]:
+    return session.exec(select(AuditLog).where(AuditLog.action == "user.sso_login_failed")).all()
+
+
+def test_sso_login_with_unreadable_settings_fails_neutrally_and_is_audited(client, session):
+    provider = _make_enabled_provider(session)
+    provider.config = _foreign_ciphertext()
+    session.add(provider)
+    session.commit()
+
+    response = client.get("/auth/sso/login")
+
+    assert response.status_code == 302
+    assert "sso_error=1" in response.headers["location"]
+    [entry] = _sso_failures(session)
+    assert entry.event_metadata["reason"] == "secret_unreadable"
+
+
+def test_callback_with_unreadable_settings_fails_neutrally_and_is_audited(
+    client, session, monkeypatch
+):
+    seed_no_access_role(session)
+    provider = _make_enabled_provider(session)
+    state, _nonce = _get_state_and_nonce(client, session, monkeypatch)
+    provider.config = _foreign_ciphertext()
+    session.add(provider)
+    session.commit()
+
+    response = client.get("/auth/sso/callback", params={"code": "the-code", "state": state})
+
+    assert response.status_code == 302
+    assert "sso_error=1" in response.headers["location"]
+    assert "perchtail_session" not in response.cookies
+    assert [e.event_metadata["reason"] for e in _sso_failures(session)] == ["secret_unreadable"]
 
 
 # --- local auth keeps working alongside SSO (Phase 1b checklist item) ---------------

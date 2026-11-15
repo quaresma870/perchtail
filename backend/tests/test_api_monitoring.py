@@ -83,14 +83,24 @@ def plain_client(session, client_for):
 
 
 @pytest.fixture(autouse=True)
-def _healthy_stubs(monkeypatch):
+def _healthy_stubs(monkeypatch, tmp_path):
     """Every test that exercises GET /monitoring/health gets a deterministic,
     "everything is fine" stand-in for the process-wide scheduler/scratch/
     agent-registry singletons, so status defaults to "ok" unless a test
-    explicitly overrides one of these to check a degraded path."""
+    explicitly overrides one of these to check a degraded path.
+
+    The alert pass and the uptime are process-wide too: an earlier test that
+    started the app (its lifespan marks the start) or ran an alert pass would
+    otherwise make the alerts look overdue once the run is slow enough, as
+    when another run shares the machine. The log folder is the test's own."""
+    from app.config import get_settings
+
     monkeypatch.setattr("app.api.monitoring.scheduler", _FakeScheduler())
     monkeypatch.setattr("app.api.monitoring.get_scratch_store", lambda: _FakeScratchStore())
     monkeypatch.setattr("app.api.monitoring.get_agent_registry", lambda: _FakeAgentRegistry())
+    monkeypatch.setattr("app.api.monitoring.alerts_last_pass", lambda: {"at": None, "stats": None})
+    monkeypatch.setattr("app.api.monitoring.uptime_seconds", lambda: 1.0)
+    monkeypatch.setattr(get_settings(), "log_dir", str(tmp_path / "logs"))
 
 
 def test_regenerate_token_requires_manage_capability(plain_client):

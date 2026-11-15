@@ -15,6 +15,9 @@ an HMAC with a per-source key (app.redaction.head_digest), which no stored
 head would match, and a mismatch reads the file again from the start and
 repeats its alerts. A null head is never compared; the next pass stores the
 new one. Offsets are kept.
+
+Can be run again after an interruption: SQLite DDL isn't transactional, so
+each table and index is created only when it isn't there yet.
 """
 
 from collections.abc import Sequence
@@ -29,7 +32,21 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+INDEX = "ix_redaction_rule_source_id"
+
+
 def upgrade() -> None:
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("redaction_rule"):
+        _create_redaction_rule()
+    if INDEX not in {index["name"] for index in inspector.get_indexes("redaction_rule")}:
+        op.create_index(INDEX, "redaction_rule", ["source_id"], unique=False)
+    if not inspector.has_table("source_redaction_override"):
+        _create_source_redaction_override()
+    op.execute("UPDATE alert_file_state SET head = NULL")
+
+
+def _create_redaction_rule() -> None:
     op.create_table(
         "redaction_rule",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -46,10 +63,9 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sqlite_autoincrement=True,
     )
-    with op.batch_alter_table("redaction_rule") as batch_op:
-        batch_op.create_index(
-            batch_op.f("ix_redaction_rule_source_id"), ["source_id"], unique=False
-        )
+
+
+def _create_source_redaction_override() -> None:
     op.create_table(
         "source_redaction_override",
         sa.Column("source_id", sa.Integer(), nullable=False),
@@ -59,7 +75,6 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["source_id"], ["source.id"]),
         sa.PrimaryKeyConstraint("source_id", "rule_id"),
     )
-    op.execute("UPDATE alert_file_state SET head = NULL")
 
 
 def downgrade() -> None:

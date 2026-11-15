@@ -113,7 +113,13 @@ def _common(exc: BaseException) -> SourceError | None:
 def translate_ssh(exc: BaseException) -> SourceError | None:
     import paramiko
 
+    from app.collectors.ssh import PrivateKeyError
+
     text = str(exc)
+    if isinstance(exc, PrivateKeyError):
+        # Saving refuses an encrypted key; one saved before that, or a key
+        # paramiko can't parse, still gets the neutral credential error.
+        return SourceAuthError(text)
     if isinstance(exc, paramiko.BadHostKeyException):
         return SourceHostKeyError(text)
     if isinstance(exc, paramiko.AuthenticationException):

@@ -77,21 +77,44 @@ _KEY_CLASSES: tuple[type[paramiko.PKey], ...] = (
 )
 
 
+ENCRYPTED_PRIVATE_KEY_DETAIL = (
+    "Encrypted SSH private keys aren't supported; provide the key without a passphrase"
+)
+
+
+class PrivateKeyError(ValueError):
+    """The saved private key can't be loaded. collectors/errors.py answers it
+    with the connector's neutral credential error, never a 500."""
+
+
+class EncryptedPrivateKeyError(PrivateKeyError):
+    """The key is protected by a passphrase."""
+
+
 def load_private_key(key_text: str) -> paramiko.PKey:
     """Parses a pasted ed25519, ECDSA or RSA private key, in either OpenSSH or
     PEM format. Passphrase-protected keys aren't supported -- there's nowhere
-    to store a passphrase, and storing it next to the key would add nothing."""
+    to store a passphrase, and storing it next to the key would add nothing.
+    Saving a source refuses them up front (`is_encrypted_private_key`)."""
     for key_class in _KEY_CLASSES:
         try:
             return key_class.from_private_key(io.StringIO(key_text))
         except paramiko.PasswordRequiredException as exc:
-            raise ValueError(
-                "SSH private key is protected by a passphrase; "
-                "use a key without one (see docs/source-setup.md)"
-            ) from exc
-        except (paramiko.SSHException, ValueError):
+            raise EncryptedPrivateKeyError(ENCRYPTED_PRIVATE_KEY_DETAIL) from exc
+        # A malformed key can fail in many ways: try the next key type.
+        except Exception:  # noqa: BLE001  # nosec B112
             continue
-    raise ValueError("not a supported SSH private key (expected ed25519, ECDSA or RSA)")
+    raise PrivateKeyError("not a supported SSH private key (expected ed25519, ECDSA or RSA)")
+
+
+def is_encrypted_private_key(key_text: str) -> bool:
+    try:
+        load_private_key(key_text)
+    except EncryptedPrivateKeyError:
+        return True
+    except PrivateKeyError:
+        return False
+    return False
 
 
 def _missing_host_key_policy() -> paramiko.MissingHostKeyPolicy:

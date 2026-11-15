@@ -40,15 +40,8 @@ export E2E_ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-e2e-test-password-123!}"
 # CI or a dev sandbox, unlike ssh/smb below, which run against real local
 # test servers.
 export PERCHTAIL_TEST_PATCH_MODULE="app.testing.fake_winrm"
-# The default (300s) would leave frontend/e2e/search.spec.ts and
-# alerts.spec.ts waiting minutes for the background indexer to pick up a
-# freshly-created source -- short enough here to keep those specs fast
-# without being so short it starves other requests on a single-process
-# uvicorn.
-export SEARCH_INDEX_INTERVAL_SECONDS="2"
-# frontend/e2e/search.spec.ts points a local-disk source at the ssh fixture
-# tree (setup_e2e_test_servers.sh's FIXTURE_ROOT) -- see LOCAL_SOURCE_ROOTS
-# in .env.example.
+# Lets a spec point a local-disk source at a fixture tree under this folder
+# -- see LOCAL_SOURCE_ROOTS in .env.example.
 export LOCAL_SOURCE_ROOTS="/tmp/perchtail-e2e-fixtures"
 
 # Stop any previous run's sshd/smbd before wiping data/e2e/ below -- they
@@ -80,12 +73,12 @@ rm -rf ./data/e2e
 mkdir -p ./data/e2e
 
 # Real sshd/smbd test targets for frontend/e2e/sources-ssh.spec.ts,
-# sources-smb.spec.ts, and search.spec.ts (see setup_e2e_test_servers.sh for
+# sources-smb.spec.ts and the specs that browse them (see setup_e2e_test_servers.sh for
 # why these are real servers rather than mocked, unlike WinRM above). Must
 # run after the rm -rf above -- it populates its own fixture files under
 # data/e2e/. Skippable (SKIP_E2E_TEST_SERVERS=1) for a quick local run of
 # everything else without needing sudo/openssh-server/samba installed --
-# just expect those three specs to fail against nothing listening on
+# just expect those specs to fail against nothing listening on
 # 2222/1445. CI always runs it.
 if [ "${SKIP_E2E_TEST_SERVERS:-}" != "1" ]; then
   bash "$(dirname "${BASH_SOURCE[0]}")/setup_e2e_test_servers.sh"

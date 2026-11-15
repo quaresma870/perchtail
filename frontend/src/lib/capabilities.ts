@@ -30,7 +30,7 @@ export const CAPABILITY_HINTS: Record<Capability, string> = {
   manage_rules: "Edit this scope's visibility rules.",
   manage_source:
     'Manage sources: edit, move and delete sources and folders here, their agent and credentials; with "Create new sources", add them here.',
-  run_now: 'Reserved: not used by any feature yet.',
+  run_now: "Index this source's file names now (Index now on the source's page).",
 }
 
 export const SCOPE_TYPE_LABELS: Record<ScopeType, string> = {

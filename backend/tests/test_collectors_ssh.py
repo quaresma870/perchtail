@@ -361,6 +361,50 @@ def test_passphrase_protected_private_key_is_a_clear_error():
         ssh_module.load_private_key(key_text)
 
 
+def _encrypted_pem_rsa_key() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.BestAvailableEncryption(b"secret"),
+    ).decode()
+
+
+def test_is_encrypted_private_key_spots_openssh_and_pem_keys():
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    openssh = _openssh_private_key(ed25519.Ed25519PrivateKey.generate(), b"secret")
+    assert ssh_module.is_encrypted_private_key(openssh) is True
+    assert ssh_module.is_encrypted_private_key(_encrypted_pem_rsa_key()) is True
+    assert ssh_module.is_encrypted_private_key(_generated_key("ed25519")) is False
+    assert ssh_module.is_encrypted_private_key("not a key at all") is False
+
+
+@pytest.mark.parametrize("key_text", ["not a key at all", "encrypted"])
+def test_a_key_that_cannot_be_loaded_is_the_neutral_credential_error(
+    monkeypatch, tmp_path, key_text
+):
+    """A key saved before saving refused encrypted ones, or one paramiko
+    can't parse, answers like a wrong credential -- never a 500."""
+    from app.collectors.base import SourceAuthError
+    from app.collectors.registry import CONNECTORS
+    from app.models import Protocol
+
+    if key_text == "encrypted":
+        key_text = _encrypted_pem_rsa_key()
+    _patch_ssh_infra(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        ssh_module, "decrypt_credential", lambda _ref: {"username": "svc", "private_key": key_text}
+    )
+
+    with pytest.raises(SourceAuthError) as caught:
+        CONNECTORS[Protocol.ssh].list_directory(_source(), [], "")
+    assert caught.value.public_message == "Authentication to the source failed"
+
+
 def test_fetch_refuses_a_file_over_max_fetch_mb_before_transferring_it(monkeypatch, tmp_path):
     from app.collectors.base import FetchTooLargeError
 

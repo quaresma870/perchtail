@@ -154,7 +154,7 @@ A grant gives capabilities in one customer, folder or source. The role editor an
 | **Download** (`download`) | Download single files and folders as a ZIP. Every download is audited. |
 | **Manage rules** (`manage_rules`) | Edit the source's rules and its own severity indicators. |
 | **Manage sources** (`manage_source`) | With **Create new sources**: edit, move and delete sources and folders here, rename folders here, rename and delete the customer when the grant is on the customer, their agent token, saved credential and agent upgrades, and add sources and folders here. It gives no access to the rules. |
-| **Run now** (`run_now`) | **Index now** on the source's page, which lists the source's files for the file-name index ahead of schedule. (Its tooltip in the role editor says it isn't used by any feature yet; it is used for this.) |
+| **Run now** (`run_now`) | **Index now** on the source's page, which lists the source's files for the file-name index ahead of schedule. |
 
 Give `manage_rules` and `manage_source` together with `view`: the source's page and editor need `view` to load. `manage_source` does nothing without **Create new sources**.
 

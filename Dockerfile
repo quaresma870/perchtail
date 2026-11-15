@@ -38,7 +38,9 @@ COPY backend/app ./app
 COPY backend/migrations ./migrations
 COPY backend/alembic.ini .
 COPY backend/docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
+# .gitattributes keeps it LF; this also covers a checkout made without it
+# (a CRLF shebang stops the container from starting).
+RUN sed -i 's/\r$//' /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
 
 # The signed push-agent binaries of this version (#319), which agents
 # upgraded from the portal download from the server (app/agent_upgrades.py).

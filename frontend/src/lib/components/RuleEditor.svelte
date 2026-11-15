@@ -6,6 +6,8 @@
 
   export let sourceId: number
   export let readOnly = false
+  // Shown when readOnly: why the rules can't be changed here.
+  export let readOnlyNote = "This source's rules are managed by the system and cannot be edited."
 
   // Fired with the rule count after every (re)load, so a parent can react
   // (e.g. the source overview's "no rules yet" callout).
@@ -111,7 +113,7 @@
   </div>
 
   {#if readOnly}
-    <p class="hint">This source's rules are managed by the system and cannot be edited.</p>
+    <p class="hint" data-testid="rules-read-only">{readOnlyNote}</p>
   {/if}
 
   {#if error}

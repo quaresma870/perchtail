@@ -3,7 +3,10 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -34,7 +37,8 @@ type Config struct {
 
 // LoadConfig reads the three required settings and the optional ones via getenv (os.Getenv in
 // production; a fake lookup in tests, so no env-var pollution is needed to
-// exercise the validation paths).
+// exercise the validation paths), and checks that the base path is a
+// readable folder.
 func LoadConfig(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		ServerURL: getenv("PERCHTAIL_SERVER_URL"),
@@ -52,6 +56,9 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if err := checkServerURL(cfg.ServerURL, isTruthy(getenv(allowInsecureEnv))); err != nil {
 		return cfg, err
 	}
+	if err := checkBasePath(cfg.BasePath); err != nil {
+		return cfg, err
+	}
 	// A typo must not silently leave upgrades on for a host that meant to
 	// turn them off, so anything but a clear yes or no stops the agent.
 	switch raw := getenv(remoteUpgradeEnv); {
@@ -63,6 +70,35 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return cfg, fmt.Errorf("%s must be true or false (got %q)", remoteUpgradeEnv, raw)
 	}
 	return cfg, nil
+}
+
+// checkBasePath stops the agent at startup when PERCHTAIL_BASE_PATH can't be
+// served: missing, not a folder, or not readable by the agent's account.
+// Otherwise the agent would connect and fail every listing with an error
+// that says nothing about the configuration.
+func checkBasePath(path string) error {
+	info, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("PERCHTAIL_BASE_PATH %q doesn't exist", path)
+	case err != nil:
+		return fmt.Errorf("PERCHTAIL_BASE_PATH %q can't be read: %v", path, err)
+	case !info.IsDir():
+		return fmt.Errorf("PERCHTAIL_BASE_PATH %q is not a folder", path)
+	}
+	dir, err := os.Open(path) // #nosec G304 -- the operator's configured base path
+	if err == nil {
+		_, err = dir.Readdirnames(1)
+		_ = dir.Close()
+		if errors.Is(err, io.EOF) {
+			err = nil // an empty folder is fine
+		}
+	}
+	if err != nil {
+		return fmt.Errorf(
+			"PERCHTAIL_BASE_PATH %q is not readable by the agent's account: %v", path, err)
+	}
+	return nil
 }
 
 func checkServerURL(raw string, allowInsecure bool) error {

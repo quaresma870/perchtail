@@ -1,14 +1,14 @@
-import json
 from pathlib import Path
 
 from sqlmodel import Session, select
 
 from app import password_policy
+from app.audit import record_audit_event
 from app.auth.models import AuditLog, AuthProviderType, Role, SSOProtocol, SSOProviderConfig, User
 from app.auth.providers.local import create_local_user
+from app.auth.providers.oidc import read_provider_config
 from app.auth.rbac import create_role
 from app.config import get_settings
-from app.crypto import decrypt_secret
 from app.logging_config import get_logger
 from app.models import PatternKind, Protocol, Rule, RuleType, SmtpSettings, Source
 from app.redaction_rules import seed_builtin_redaction_rules
@@ -65,21 +65,44 @@ def assert_credential_salt_present(session: Session) -> None:
 def seed_system_log_source(session: Session) -> Source:
     """Seeds the built-in, super-admin-only log viewer on first startup —
     dogfooding the same live-browsing/viewer path as customer sources, via
-    the `local` protocol pointed at LOG_DIR (CLAUDE.md's "Built-in log
-    viewer" section). Idempotent: a no-op on every startup after the
-    first. Access is gated purely by is_system + is_super_admin in
-    auth/rbac.py's resolve_capability — no grant, however permissive, can
-    reach it.
+    the `local` protocol pointed at LOG_DIR. Idempotent: on every startup
+    after the first it only follows a changed LOG_DIR, moving the source's
+    base path to it with a system audit entry. Access is gated purely by
+    is_system + is_super_admin in auth/rbac.py's resolve_capability — no
+    grant, however permissive, can reach it.
 
     Seeds one broad include rule (LOG_DIR is a dedicated directory that
     should only ever contain this app's own rotated logs, and the source
     is already super-admin-only) rather than leaving it with zero rules,
     which would make the viewer show nothing at all."""
+    settings = get_settings()
     existing = session.exec(select(Source).where(Source.is_system.is_(True))).first()
     if existing is not None:
+        if existing.base_path != settings.log_dir:
+            old_path = existing.base_path
+            existing.base_path = settings.log_dir
+            session.add(existing)
+            record_audit_event(
+                session,
+                user_id=None,
+                action="source.update",
+                target_type="source",
+                target_id=existing.id,
+                metadata={
+                    "reason": "log_dir_changed",
+                    "changes": {"base_path": {"from": old_path, "to": settings.log_dir}},
+                },
+            )
+            session.commit()
+            session.refresh(existing)
+            logger.info(
+                "system_source.log_dir_updated",
+                source_id=existing.id,
+                old=old_path,
+                new=settings.log_dir,
+            )
         return existing
 
-    settings = get_settings()
     source = Source(
         name=SYSTEM_SOURCE_NAME,
         customer_id=None,
@@ -197,7 +220,15 @@ def backfill_sso_user_issuers(session: Session) -> int:
         )
         return 0
 
-    issuer = json.loads(decrypt_secret(candidates[0].config))["issuer"]
+    raw_config = read_provider_config(candidates[0].config)
+    if raw_config is None:
+        logger.warning(
+            "sso.issuer_backfill_skipped",
+            unbound_users=len(unbound),
+            reason="the SSO provider's settings can't be decrypted with the current key",
+        )
+        return 0
+    issuer = raw_config["issuer"]
     for user in unbound:
         user.external_issuer = issuer
         session.add(user)

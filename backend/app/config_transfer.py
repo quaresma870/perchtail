@@ -31,6 +31,7 @@ from app import source_roots
 from app.agent_registry import disconnect_after_commit
 from app.alerts import forget_source
 from app.audit import record_audit_event
+from app.collectors import ssh
 from app.crypto import decrypt_credential, encrypt_credential
 from app.logging_config import get_logger
 from app.models import (
@@ -465,6 +466,9 @@ def _parse_credential(
         resolved.get("password") or resolved.get("private_key")
     ):
         problems.append(Problem(where, "credential needs a username and a password or private_key"))
+        return None
+    if resolved.get("private_key") and ssh.is_encrypted_private_key(resolved["private_key"]):
+        problems.append(Problem(f"{where}.private_key", ssh.ENCRYPTED_PRIVATE_KEY_DETAIL))
         return None
     return resolved
 

@@ -1,16 +1,43 @@
+import atexit
 import ipaddress
+import os
+import shutil
 import socket
+import tempfile
 
-import pytest
-from app import (
+
+def _isolate_state_dirs() -> None:
+    """Every state path PerchTail derives from DATA_DIR, LOG_DIR, SCRATCH_DIR
+    and BACKUP_DIR points into a folder of this test run, set before any
+    `app` module builds its settings (app.db opens its engine at import).
+    The defaults are relative folders (./data/...) that every run from the
+    same checkout would share, and whatever the shell has set could be a
+    real installation's."""
+    root = tempfile.mkdtemp(prefix="perchtail-tests-")
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
+    for name, sub in (
+        ("DATA_DIR", "db"),
+        ("LOG_DIR", "logs"),
+        ("SCRATCH_DIR", "scratch"),
+        ("BACKUP_DIR", "backups"),
+    ):
+        os.environ[name] = os.path.join(root, sub)
+    for name in ("DATABASE_URL", "CREDENTIAL_SALT_PATH", "SSH_KNOWN_HOSTS_PATH"):
+        os.environ.pop(name, None)
+
+
+_isolate_state_dirs()
+
+import pytest  # noqa: E402
+from app import (  # noqa: E402
     auth_events,
     login_throttle,
     models,  # noqa: F401  registers tables on SQLModel.metadata
 )
-from app.auth import models as auth_models  # noqa: F401  registers tables on SQLModel.metadata
-from app.name_index_store import ensure_name_index_schema
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from app.auth import models as auth_models  # noqa: E402, F401  registers tables
+from app.name_index_store import ensure_name_index_schema  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+from sqlmodel import Session, SQLModel, create_engine  # noqa: E402
 
 assert models and auth_models
 

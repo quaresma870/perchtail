@@ -13,10 +13,12 @@ directly instead of faking that client's internals — the same "mock the
 client, don't hit a real remote" convention the SSH/SMB/WinRM connector
 tests already use (see CONTRIBUTING.md)."""
 
+import json
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
 import httpx
+from cryptography.fernet import InvalidToken
 from joserfc import jwt
 from joserfc.jwk import KeySet
 from sqlmodel import Session, select
@@ -42,6 +44,19 @@ class OIDCSettings:
     # resolve_group_mapped_role_id. None/empty disables group-to-role
     # auto-mapping entirely, same as today's behavior.
     group_claim: str | None = None
+
+
+def read_provider_config(ciphertext: str) -> dict | None:
+    """The provider's decrypted settings, or None when they can't be
+    decrypted with the current CREDENTIAL_ENCRYPTION_KEY and salt (the key
+    or the salt was lost or changed outside `app.rotate_credential_key`).
+    Callers treat None as "the stored secret is unreadable": the admin page
+    still lists the provider so a new secret can be saved, and a login fails
+    with the usual neutral error."""
+    try:
+        return json.loads(decrypt_secret(ciphertext))
+    except InvalidToken:
+        return None
 
 
 def parse_oidc_settings(raw_config: dict) -> OIDCSettings:
@@ -195,8 +210,10 @@ def find_or_provision_user(
     claim matched a configured SSOGroupRoleMapping, else the no-access
     default role. Does not attempt to link to an existing local account
     sharing the same email/username — that's a deliberate account-linking
-    decision left out of v1; a username collision surfaces as a plain 409
-    to the caller instead (see api/auth.py's callback handler)."""
+    decision left out of v1. A username collision makes the insert fail;
+    api/auth.py's callback handler rolls back, audits it as a failed SSO
+    login and sends the browser back to the login page with the neutral SSO
+    error."""
     user = session.exec(
         select(User).where(
             User.auth_provider == AuthProviderType.oidc,

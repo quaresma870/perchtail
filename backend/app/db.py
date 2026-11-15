@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 # How long a write waits for another writer to finish before failing with
 # "database is locked" (#188). Writers hold the lock only briefly (the
-# search indexer commits file by file), so this is a backstop, not the fix.
+# file-name index commits in batches), so this is a backstop, not the fix.
 SQLITE_BUSY_TIMEOUT_SECONDS = 30
 # What the WAL file is cut back to after a checkpoint (#346): without a
 # limit it keeps the size of its biggest burst of writes.

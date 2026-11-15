@@ -38,6 +38,7 @@ from app.auth.rbac import (
 from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
 from app.collectors import smb_shares
+from app.collectors import ssh as ssh_collector
 from app.collectors import winrm as winrm_collector
 from app.collectors.base import SourceError, SourceNotFoundError
 from app.collectors.errors import translate_smb, translate_winrm, translated
@@ -383,6 +384,19 @@ def _validate_roots(
     return out
 
 
+def _reject_encrypted_private_key(credential: dict | None) -> None:
+    """There's nowhere to keep a passphrase, so a passphrase-protected key
+    would only fail on every connection: refused when it's saved."""
+    private_key = (credential or {}).get("private_key")
+    if not isinstance(private_key, str) or not private_key:
+        return
+    if ssh_collector.is_encrypted_private_key(private_key):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ssh_collector.ENCRYPTED_PRIVATE_KEY_DETAIL,
+        )
+
+
 def _validate_ca_pem(protocol: Protocol, pem: str | None) -> str | None:
     """None/"" clears it; anything else must be PEM certificates (#169)."""
     if not pem or not pem.strip():
@@ -605,6 +619,7 @@ def create_source(
         capability=Capability.manage_source,
     ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=CREATE_SOURCE_REFUSED)
+    _reject_encrypted_private_key(payload.credential)
     roots = _validate_roots(payload.protocol, payload.roots or [], source_roots.max_roots(session))
     if roots:
         base_path = roots[0]["path"]
@@ -676,6 +691,7 @@ def update_source(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
     _require_not_system(source)
     require_manage_existing_source(session, user, source)
+    _reject_encrypted_private_key(payload.credential)
 
     fields_set = payload.model_fields_set
     before = {
@@ -1193,6 +1209,7 @@ def update_credentials(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A credential needs a password or a private_key",
         )
+    _reject_encrypted_private_key(credential)
     results: list[BulkCredentialResult] = []
     for source_id in dict.fromkeys(payload.source_ids):
         source = session.get(Source, source_id)

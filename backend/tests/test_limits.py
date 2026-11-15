@@ -515,6 +515,36 @@ def test_a_truncated_source_listing_is_marked_on_browse(session, client, tmp_pat
     assert response.headers["X-Listing-Truncated"] == "1"
 
 
+def test_a_folder_zip_over_a_truncated_listing_is_refused_and_audited(
+    session, client, tmp_path, monkeypatch
+):
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    (tmp_path / "logs" / "sub").mkdir(parents=True)
+    source = _local_source(session, tmp_path / "logs")
+
+    def cut_short(source, rules, relative_path=""):
+        if relative_path == "":
+            return DirListing([DirEntry(name="sub", path="sub", is_dir=True, size=0)])
+        listing = DirListing([DirEntry(name="a.log", path="sub/a.log", is_dir=False, size=1)])
+        listing.truncated = True
+        return listing
+
+    monkeypatch.setattr("app.collectors.local.list_directory", cut_short)
+    response = client.get(f"/sources/{source.id}/download-zip")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "This folder has more entries than a ZIP can list; narrow it to a subfolder"
+    )
+    [denied] = session.exec(select(AuditLog).where(AuditLog.action == "file.download_denied")).all()
+    assert denied.event_metadata["reason"] == "listing_truncated"
+    assert denied.event_metadata["path"] == ""
+    assert denied.event_metadata["truncated_folder"] == "sub"
+    assert session.exec(select(AuditLog).where(AuditLog.action == "folder.download")).all() == []
+
+
 # --- recursive walks end (#347) ---------------------------------------------
 
 
@@ -556,9 +586,35 @@ def test_the_folder_zip_walk_stops_at_the_name_index_depth():
     source = Source(id=1, name="s", protocol=Protocol.ssh, host="h", base_path="/")
     rules = [Rule(source_id=1, order=0, type=RuleType.include, pattern="**")]
 
-    entries = archive_api._zip_entries(connector, source, rules, "")
+    with pytest.raises(archive_api._ZipListingIncomplete) as raised:
+        archive_api._zip_entries(connector, source, rules, "")
     assert connector.calls == MAX_DEPTH
-    assert len(entries) == MAX_DEPTH
+    assert raised.value.reason == "too_deep"
+    assert raised.value.path == "/".join(["loop"] * MAX_DEPTH)
+
+
+def test_a_folder_zip_deeper_than_the_walk_is_refused_and_audited(
+    session, client, tmp_path, monkeypatch
+):
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    (tmp_path / "logs").mkdir()
+    source = _local_source(session, tmp_path / "logs")
+    connector = _EndlessConnector()
+    monkeypatch.setattr("app.collectors.local.list_directory", connector.list_directory)
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "This folder is nested too deeply for a ZIP; narrow it to a subfolder"
+    )
+    [denied] = session.exec(select(AuditLog).where(AuditLog.action == "file.download_denied")).all()
+    assert denied.event_metadata["reason"] == "too_deep"
+    assert denied.event_metadata["path"] == ""
+    assert denied.event_metadata["folder"] == "/".join(["loop"] * MAX_DEPTH)
+    assert session.exec(select(AuditLog).where(AuditLog.action == "folder.download")).all() == []
 
 
 def test_the_name_index_walk_lists_a_looping_folder_once(session, tmp_path):
