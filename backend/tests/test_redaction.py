@@ -137,6 +137,15 @@ def test_empty_matches_are_ignored():
         [{"id": 1, "name": "x", "pattern": "a", "secret_group": 1}],
         [{"id": 1, "detector": "card"}],
         [{"id": 1, "name": "x"}],
+        # Escapes above \xff in a pure-ASCII (Latin-1) pattern: the agent
+        # refuses the same ones (TestLatin1PatternsRefuseEscapesAboveFF).
+        [{"id": 1, "name": "x", "pattern": "\\x{100}"}],
+        [{"id": 1, "name": "x", "pattern": "a\\x{fffd}b"}],
+        [{"id": 1, "name": "x", "pattern": "[\\x00-\\x{10ffff}]"}],
+        [{"id": 1, "name": "x", "pattern": "[^\\x{fffd}]"}],
+        [{"id": 1, "name": "x", "pattern": "\\400"}],
+        [{"id": 1, "name": "x", "pattern": "[\\0-\\777]"}],
+        [{"id": 1, "name": "x", "pattern": "\\p{NoSuchClass}"}],
     ],
 )
 def test_rules_the_engine_cant_run_are_refused(rules):

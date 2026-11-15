@@ -106,7 +106,8 @@ Implemented in `app/rules.py`.
 - Opening or downloading always fetches fresh from the source. Nothing is cached or reused between opens.
 - `.zip`, `.tar.gz` and `.tgz` files appear as folders; opening a member extracts only that member (`app/archives.py`). A plain `.gz` file is decompressed and opens like any other file.
 - Fetched files go to `SCRATCH_DIR`, tracked in memory by `app/scratch.py`'s `ScratchStore`. Each open gets its own file, reference-counted by key. A file is deleted when the viewer closes it and no other viewer holds it, when the idle sweep finds it untouched past `SCRATCH_IDLE_SECONDS`, or when the size guard evicts it (oldest unreferenced first). A new fetch is refused with 507 when scratch is full or its filesystem is below `SCRATCH_MIN_FREE_GB` / `SCRATCH_MIN_FREE_PERCENT`. Scratch is emptied at startup.
-- Follow (tail) polls with ranged reads of what was appended and detects rotation by the file's first bytes; it doesn't fetch the whole file again.
+- Follow (tail) polls with ranged reads of what was appended and detects rotation by the file's first bytes (an HMAC of them with a per-source key, `app/redaction/engine.py`, `head_digest`, shared with the alerts); it doesn't fetch the whole file again.
+- When redaction applies to a source (`redaction_enabled` and an effective redaction rule, `app/redaction_rules.py`), `/open` and `/follow` send content redacted on the server (`app/redaction/`), for every user: `/open` fetches into scratch, redacts into the scratch file it serves and deletes the fetched original before answering; `/follow` reads a little before the offset for context and sends only redacted whole lines. Offsets stay in bytes of the original (`X-Source-Offset`, `X-Follow-Offset`), an unfinished last line is sent as `[redacted: incomplete line]` (`X-Follow-Partial`), and whole archives and UTF-32 files are refused. Downloads, alerts and agents don't apply it yet.
 
 ## Access control (RBAC + SSO)
 
@@ -237,7 +238,7 @@ CI (`.github/workflows/ci.yml`) runs these on every push and pull request:
 - Backend, from the repository root: `ruff check backend`, `black --check backend`, `python -m alembic upgrade head` (from `backend/`), `pytest -v`, then `pip-audit` and `bandit -q -r backend/app`.
 - Frontend, from `frontend/`: `npm run check` (svelte-check and the TypeScript projects), `npm test` (vitest), `npm run build`, `npm audit --audit-level=high`.
 - End-to-end, from `frontend/`: `npm run test:e2e` (Playwright). It starts its own backend on port 8001 with a throwaway database and real local sshd and smbd test servers; WinRM uses the fake in `app/testing/fake_winrm.py`. `e2e/accessibility.spec.ts` runs axe-core on every main page.
-- Agent, from `agent/`: `go vet ./...`, `gofmt -l .` (must print nothing), `go test ./... -v`, 30 seconds of fuzzing for each of `FuzzIsSafeRelativePath` and `FuzzFetchStaysInBase`, cross-compilation for linux/amd64, linux/arm64 and windows/amd64, `gosec` and `govulncheck`.
+- Agent, from `agent/`: `go vet ./...`, `gofmt -l .` (must print nothing), `go test ./... -v`, 30 seconds of fuzzing for each of `FuzzIsSafeRelativePath` and `FuzzFetchStaysInBase` (path checks) and of `FuzzRedactBlockCuts`, `FuzzRedactUTF16`, `FuzzRedactWindow` and `FuzzCustomRule` (redaction engine), cross-compilation for linux/amd64, linux/arm64 and windows/amd64, `gosec` and `govulncheck`.
 - The Docker image is built and scanned with Trivy, and the workflows are audited with zizmor.
 
 Two backend tests cover every endpoint: `tests/test_every_endpoint_needs_auth.py` (each operation needs authentication unless it is listed in `PUBLIC_OPERATIONS`) and `tests/test_api_properties.py` (Schemathesis, no 5xx, no outbound connections).

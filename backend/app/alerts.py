@@ -19,7 +19,6 @@ Matches are sent as one webhook call per alert per pass (#328): sent
 right away, retried with backoff while it fails for up to an hour
 (AlertDelivery), then dropped and counted on the alert."""
 
-import hashlib
 import threading
 import time
 from dataclasses import dataclass, field
@@ -33,6 +32,7 @@ from app.archives import is_archive, is_transparent_gzip
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, User
 from app.auth.rbac import visible_source_ids
+from app.crypto import follow_head_key
 from app.logging_config import get_logger
 from app.models import (
     Alert,
@@ -43,6 +43,7 @@ from app.models import (
     Rule,
     Source,
 )
+from app.redaction import head_digest
 from app.rules import compile_linear, glob_matches, is_visible, rules_case_insensitive
 from app.timeutils import utcnow
 from app.webhook_safety import UnsafeWebhookURLError, resolve_pinned_webhook_target
@@ -89,8 +90,10 @@ def last_pass() -> dict:
     return dict(_last_pass)
 
 
-def head_hash(start: bytes, offset: int) -> str:
-    return hashlib.sha256(start[: min(HEAD_BYTES, offset)]).hexdigest()[:32]
+def head_hash(source_id: int, start: bytes, offset: int) -> str:
+    """The same identity of a file's start as the Tail's X-Follow-Head: an
+    HMAC with the source's key (app.redaction.head_digest)."""
+    return head_digest(follow_head_key(source_id), start, offset)
 
 
 def compile_query(query: str, regex: bool):
@@ -167,7 +170,9 @@ def _read_file(connector, source: Source, state: AlertFileState, matches, stats:
         source, state.file_path, state.offset, READ_BYTES, HEAD_BYTES
     )
     if state.offset > size or (
-        state.head is not None and state.offset > 0 and head_hash(first, state.offset) != state.head
+        state.head is not None
+        and state.offset > 0
+        and head_hash(source.id, first, state.offset) != state.head
     ):
         # Rotated or rewritten: everything in it is new.
         state.offset = 0
@@ -183,7 +188,7 @@ def _read_file(connector, source: Source, state: AlertFileState, matches, stats:
             )
         position += len(raw) + 1
     state.offset += len(chunk)
-    state.head = head_hash(first, state.offset) if state.offset else None
+    state.head = head_hash(source.id, first, state.offset) if state.offset else None
     stats.files_read += 1
     return hits
 

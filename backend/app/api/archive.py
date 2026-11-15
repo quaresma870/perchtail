@@ -6,7 +6,9 @@ import tarfile
 import zipfile
 import zlib
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import quote
 
 import anyio
@@ -44,11 +46,26 @@ from app.collectors.base import (
 )
 from app.collectors.registry import CONNECTORS
 from app.config import get_settings
+from app.crypto import follow_head_key
 from app.db import get_session
 from app.limits import Limits, Slot, current_limits, get_limiter
 from app.logging_config import get_logger
 from app.models import Protocol, Rule, RuleType, Source
 from app.name_index import MAX_DEPTH
+from app.redaction import (
+    HEAD_BYTES,
+    CompiledRules,
+    RedactionRuleError,
+    UnsupportedEncodingError,
+    compile_rules,
+    detect_encoding,
+    head_digest,
+    long_line_label,
+    marker,
+    redact_stream,
+    redact_window,
+)
+from app.redaction_rules import effective_redaction_rules, engine_rules
 from app.rules import (
     is_dir_visible,
     is_entry_visible,
@@ -210,15 +227,27 @@ WHOLE_ARCHIVE_REFUSED_MESSAGE = (
 )
 WHOLE_ARCHIVE_REFUSED_ERROR_CODE = "archive_not_downloadable_whole"
 _SKIPPED_REASON = "can't be included whole; open or download its files one by one"
-# The reason recorded in the audit log, which only view_audit_log can read.
+# The reasons recorded in the audit log, which only view_audit_log can read.
 _AUDIT_REFUSAL_REASON = "archive_hidden_members"
+# Redaction is on and a whole archive would carry its members unredacted.
+_AUDIT_REDACTION_ARCHIVE_REASON = "redaction_whole_archive"
+# Redaction is on and the content is in an encoding it can't redact (UTF-32).
+_AUDIT_REDACTION_ENCODING_REASON = "redaction_unsupported_encoding"
 
 
-class WholeArchiveRefused(HTTPException):
-    """403 for a whole archive that holds a file the rules hide; /open and
-    /download audit it before passing it on."""
+class AuditedRefusal(HTTPException):
+    """A refusal that /open, /follow and /download record in the audit log
+    themselves (file.open_denied, file.download_denied), with `reason`,
+    before passing it on."""
 
-    def __init__(self) -> None:
+    reason: str = ""
+
+
+class WholeArchiveRefused(AuditedRefusal):
+    """403 for a whole archive that holds a file the rules hide, or that
+    redaction can't serve (`reason`)."""
+
+    def __init__(self, reason: str = _AUDIT_REFUSAL_REASON) -> None:
         super().__init__(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -226,6 +255,28 @@ class WholeArchiveRefused(HTTPException):
                 "error_code": WHOLE_ARCHIVE_REFUSED_ERROR_CODE,
             },
         )
+        self.reason = reason
+
+
+REDACTION_ENCODING_MESSAGE = (
+    "This file is in an encoding redaction doesn't support (UTF-32), so it can't be shown."
+)
+REDACTION_ENCODING_ERROR_CODE = "redaction_unsupported_encoding"
+
+
+class RedactionEncodingRefused(AuditedRefusal):
+    """409 for content redaction can't read (UTF-32): refused rather than
+    served unredacted."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": REDACTION_ENCODING_MESSAGE,
+                "error_code": REDACTION_ENCODING_ERROR_CODE,
+            },
+        )
+        self.reason = _AUDIT_REDACTION_ENCODING_REASON
 
 
 def _archive_has_hidden_members(
@@ -550,10 +601,140 @@ def _browse(
     return listed, truncated or is_truncated(entries)
 
 
+def redaction_rules_for(session: Session, source: Source) -> CompiledRules | None:
+    """The compiled redaction rules a source's content goes through, or None
+    when redaction doesn't apply to it (off, or no effective rule: see
+    app.redaction_rules.redaction_applies). The same for every user, super
+    admins included. A stored rule the engine can't run fails the request
+    rather than letting the content out unredacted."""
+    if not system_settings.get_bool(session, "redaction_enabled"):
+        return None
+    rules = effective_redaction_rules(session, source.id)
+    if not rules:
+        return None
+    try:
+        return compile_rules(engine_rules(rules))
+    except RedactionRuleError as exc:
+        logger.error("redaction.rules_invalid", source_id=source.id, error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="The redaction rules can't be applied. An administrator needs to check them.",
+        ) from exc
+
+
+@dataclass(frozen=True)
+class RedactedRead:
+    """What redacting a file's content for the viewer gave: the count per
+    rule, how many bytes of the original the content covers (where the Tail
+    goes on from), how many bytes at the end of the content stand for an
+    unfinished last line, and the original's first HEAD_BYTES (to identify
+    the file for the Tail)."""
+
+    counts: dict[str, int]
+    source_offset: int
+    trailing_partial: int
+    head: bytes
+
+    @property
+    def count(self) -> int:
+        return sum(self.counts.values())
+
+
+class _Resolved(NamedTuple):
+    path: Path
+    filename: str
+    scratch_key: str | None
+    redacted: RedactedRead | None = None
+
+
+def _redact_file(original: Path, destination: Path, rules: CompiledRules, final: bool):
+    """Redacts `original` into `destination`, in the encoding detect_encoding
+    finds in its first bytes, for the viewer (UTF-8 out)."""
+    with original.open("rb") as src:
+        head = src.read(HEAD_BYTES)
+        try:
+            encoding = detect_encoding(head)
+        except UnsupportedEncodingError as exc:
+            raise RedactionEncodingRefused() from exc
+        src.seek(0)
+        with destination.open("wb") as dst:
+            result = redact_stream(src, dst, rules, final=final, source_encoding=encoding)
+    return RedactedRead(result.counts, result.source_offset, result.trailing_partial, head)
+
+
+def _resolve_redacted(
+    source: Source,
+    path: str,
+    member: str | None,
+    rules: list[Rule],
+    limits: Limits,
+    redaction: CompiledRules,
+) -> _Resolved:
+    """_resolve_content when redaction applies: the content is fetched (or,
+    for a local plain file, read in place), redacted into scratch, and the
+    fetched original deleted before the response goes out, so scratch only
+    ever keeps the redacted copy. A whole archive (or an archive inside
+    one) would carry its members unredacted, so it is refused (403, the
+    same answer as an archive hiding files). A .gz file or an archive
+    member is complete content, so its last line is redacted as it is; a
+    plain file may still be written to, so an unfinished last line becomes
+    `[redacted: incomplete line]` and the Tail reads it again."""
+    filename = path.rsplit("/", 1)[-1]
+    if member is not None:
+        member = normalize_member_name(member)
+        if not member or not _visible(source, f"{path}/{member}", rules):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        whole_archive = is_archive(member.rsplit("/", 1)[-1])
+    else:
+        whole_archive = is_archive(filename)
+    if whole_archive:
+        logger.warning("archive.redaction_whole_archive_refused", source_id=source.id, path=path)
+        raise WholeArchiveRefused(_AUDIT_REDACTION_ARCHIVE_REASON)
+
+    complete = member is not None or is_transparent_gzip(filename)
+    store = get_scratch_store()
+    with get_limiter().connector(limits, source.id):
+        store.ensure_room()
+        key = _scratch_key(source.id, path, member)
+        destination = store.acquire(key)
+        fetched = destination.with_name(f"{destination.name}.source")
+        try:
+            if source.protocol == Protocol.local and not complete:
+                original = _local_plain_path(source, path)
+                served_filename = filename
+            else:
+                served_filename = _materialize(source, path, member, rules, fetched)
+                original = fetched
+            redacted = _redact_file(original, destination, redaction, final=complete)
+        except FetchTooLargeError as exc:
+            store.release(key)
+            raise _fetch_too_large(exc) from exc
+        except BaseException:
+            store.release(key)
+            raise
+        finally:
+            fetched.unlink(missing_ok=True)
+    return _Resolved(destination, served_filename, key, redacted)
+
+
+def _local_plain_path(source: Source, path: str) -> Path:
+    _require_local_source_allowed(source)
+    if source_roots.is_multi_root(source):
+        rooted, inner = source_roots.split(source, path)
+        return local_collector.resolve_path(rooted, inner)
+    return local_collector.resolve_path(source, path)
+
+
 def _resolve_content(
-    source: Source, path: str, member: str | None, rules: list[Rule], limits: Limits
-) -> tuple[Path, str, str | None]:
-    """Returns (path_to_serve, filename, scratch_key). scratch_key is None
+    source: Source,
+    path: str,
+    member: str | None,
+    rules: list[Rule],
+    limits: Limits,
+    redaction: CompiledRules | None = None,
+) -> _Resolved:
+    """Returns (path_to_serve, filename, scratch_key, redacted). With
+    `redaction`, the content is redacted (_resolve_redacted). scratch_key is None
     when nothing was fetched/copied — currently only a local, plain file
     (not an archive member, not transparent-gzip), served straight from its
     real path with no ephemeral scratch involved at all (CLAUDE.md's Built-
@@ -570,6 +751,8 @@ def _resolve_content(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
     if not _visible(source, path, rules):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    if redaction is not None:
+        return _resolve_redacted(source, path, member, rules, limits, redaction)
 
     filename = path.rsplit("/", 1)[-1]
     needs_scratch = (
@@ -577,15 +760,10 @@ def _resolve_content(
     )
 
     if not needs_scratch:
-        _require_local_source_allowed(source)
-        if source_roots.is_multi_root(source):
-            rooted, inner = source_roots.split(source, path)
-            resolved = local_collector.resolve_path(rooted, inner)
-        else:
-            resolved = local_collector.resolve_path(source, path)
+        resolved = _local_plain_path(source, path)
         if is_archive(filename):
             _require_whole_archive_allowed(source, path, resolved, rules)
-        return resolved, filename, None
+        return _Resolved(resolved, filename, None)
 
     store = get_scratch_store()
     with get_limiter().connector(limits, source.id):
@@ -600,7 +778,32 @@ def _resolve_content(
         except BaseException:
             store.release(key)
             raise
-    return destination, served_filename, key
+    return _Resolved(destination, served_filename, key)
+
+
+def _audit_refusal(
+    session: Session,
+    user: User,
+    source: Source,
+    action: str,
+    path: str,
+    reason: str,
+    **extra,
+) -> None:
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action=action,
+        target_type="source",
+        target_id=source.id,
+        metadata={"path": path, "reason": reason, **extra},
+    )
+    session.commit()
+    # Audited here, so the central access.denied handler (app/api/errors.py)
+    # doesn't write it again.
+    context = request_context.current()
+    if context is not None:
+        context.denial_handled = True
 
 
 def _resolve_content_audited(
@@ -612,30 +815,40 @@ def _resolve_content_audited(
     user: User,
     session: Session,
     denied_action: str,
-) -> tuple[Path, str, str | None]:
-    """_resolve_content, recording a refused whole archive in the audit log
-    (`denied_action`) before the 403 goes out, so every attempt leaves a
-    trace. For an archive inside an archive (`member=`), the path recorded
-    is the refused archive's virtual path, `<archive>/<member>`."""
+    redaction: CompiledRules | None = None,
+) -> _Resolved:
+    """_resolve_content, recording a refused whole archive (or content
+    redaction can't read) in the audit log (`denied_action`) before the
+    refusal goes out, so every attempt leaves a trace. For an archive
+    inside an archive (`member=`), the path recorded is the refused
+    archive's virtual path, `<archive>/<member>`."""
     try:
-        return _resolve_content(source, path, member, rules, limits)
-    except WholeArchiveRefused:
+        return _resolve_content(source, path, member, rules, limits, redaction)
+    except AuditedRefusal as exc:
         refused_path = path if member is None else f"{path}/{normalize_member_name(member)}"
-        record_audit_event(
-            session,
-            user_id=user.id,
-            action=denied_action,
-            target_type="source",
-            target_id=source.id,
-            metadata={"path": refused_path, "reason": _AUDIT_REFUSAL_REASON},
-        )
-        session.commit()
-        # Audited here, so the central access.denied handler (app/api/errors.py)
-        # doesn't write it again.
-        context = request_context.current()
-        if context is not None:
-            context.denial_handled = True
+        _audit_refusal(session, user, source, denied_action, refused_path, exc.reason)
         raise
+
+
+def _redaction_metadata(redacted: RedactedRead | None) -> dict:
+    """What the audit entry of a read says about redaction: nothing when it
+    didn't apply."""
+    if redacted is None:
+        return {}
+    return {"redaction": "applied", "redaction_at": "server"}
+
+
+def _redaction_headers(redacted: RedactedRead) -> dict[str, str]:
+    """X-Redacted, X-Redaction-Count (values replaced), X-Source-Offset (bytes
+    of the original the content covers: where the Tail goes on from) and
+    X-Follow-Partial (bytes at the end of the content that stand for an
+    unfinished last line, which the next Tail answer sends again)."""
+    return {
+        "X-Redacted": "1",
+        "X-Redaction-Count": str(redacted.count),
+        "X-Source-Offset": str(redacted.source_offset),
+        "X-Follow-Partial": str(redacted.trailing_partial),
+    }
 
 
 class _FinishingMixin:
@@ -715,28 +928,50 @@ def open_file(
 
     Viewing necessarily hands the client the file's bytes, so `view` can
     read a whole file; `download` gates bulk export (/download, the folder
-    ZIP). Every open is audited so reads are as traceable as downloads."""
+    ZIP). Every open is audited so reads are as traceable as downloads.
+
+    When redaction applies to the source (#382, #249), the content is
+    redacted on the server before it is stored in scratch or sent, for
+    every user, and the redaction headers (_redaction_headers) say so; the
+    viewer then follows from X-Source-Offset, not from the length of what
+    it received."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
-    served_path, filename, key = _resolve_content_audited(
-        source, path, member, rules, current_limits(session), user, session, "file.open_denied"
+    redaction = redaction_rules_for(session, source)
+    served_path, filename, key, redacted = _resolve_content_audited(
+        source,
+        path,
+        member,
+        rules,
+        current_limits(session),
+        user,
+        session,
+        "file.open_denied",
+        redaction,
     )
+    metadata: dict = {"path": path, "member": member} if member else {"path": path}
     record_audit_event(
         session,
         user_id=user.id,
         action="file.open",
         target_type="source",
         target_id=source.id,
-        metadata={"path": path, "member": member} if member else {"path": path},
+        metadata={**metadata, **_redaction_metadata(redacted)},
     )
     session.commit()
     headers = {"X-Scratch-Key": key} if key else {}
-    if member is None and not is_transparent_gzip(path.rsplit("/", 1)[-1]):
+    followable = member is None and not is_transparent_gzip(path.rsplit("/", 1)[-1])
+    if redacted is not None:
+        headers.update(_redaction_headers(redacted))
+        if followable:
+            # Over the original's start, up to where the Tail goes on from.
+            headers["X-Follow-Head"] = _head_hash(source.id, redacted.head, redacted.source_offset)
+    elif followable:
         # What the first Follow poll compares against (#254), so a file
         # rotated between this open and that poll is caught too.
         size = served_path.stat().st_size
         with served_path.open("rb") as served:
-            headers["X-Follow-Head"] = _head_hash(served.read(FOLLOW_HEAD_BYTES), size)
+            headers["X-Follow-Head"] = _head_hash(source.id, served.read(FOLLOW_HEAD_BYTES), size)
     # Inline, not an attachment: this is what the viewer reads to display a
     # file, not a download endpoint (downloads go through /download, gated
     # by the `download` capability -- #174). nosniff (set app-wide) keeps
@@ -763,10 +998,20 @@ def _follow_unsupported(message: str) -> HTTPException:
     )
 
 
-def _head_hash(start: bytes, offset: int) -> str:
+def _head_hash(source_id: int, start: bytes, offset: int) -> str:
     """Identifies the file by the bytes the viewer already has from its
-    start: the first min(FOLLOW_HEAD_BYTES, offset)."""
-    return hashlib.sha256(start[: min(FOLLOW_HEAD_BYTES, offset)]).hexdigest()[:32]
+    start: the first min(FOLLOW_HEAD_BYTES, offset), as an HMAC with the
+    source's key (app.redaction.head_digest), so a short, guessable start
+    of a file can't be confirmed from the header."""
+    return head_digest(follow_head_key(source_id), start, offset)
+
+
+# Redacted Tail (#382, #249): how much is read before the offset, only to
+# know whether it falls inside a private-key block. Never sent.
+FOLLOW_CONTEXT_BYTES = 16 * 1024
+# The most a redacted poll reads after the offset; a line with no end
+# within it is replaced by a marker and skipped.
+FOLLOW_WINDOW_BYTES = RANGE_MAX_BYTES - FOLLOW_CONTEXT_BYTES
 
 
 @router.get("/follow")
@@ -794,7 +1039,12 @@ def follow_file(
     agent older than 0.6: the viewer reloads the whole file instead.
     Audited when following starts (`start`) and whenever a read begins at
     the start of the file, so a whole file can't be read through here
-    without a record; not on every poll."""
+    without a record; not on every poll.
+
+    When redaction applies to the source (#382, #249), see _follow_redacted:
+    only redacted whole lines come back, offsets stay in bytes of the
+    original, and X-Follow-Aligned / X-Follow-Partial tell the viewer how
+    the answer starts and ends."""
     _require_safe_path(source, path)
     if not path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
@@ -805,28 +1055,59 @@ def follow_file(
     if is_transparent_gzip(filename) or is_archive(filename):
         raise _follow_unsupported("Compressed files and archives can only be reloaded whole")
 
+    redaction = redaction_rules_for(session, source)
     connector = _connector(source)
+    # Redacted, the read starts a little before the offset (context only).
+    read_from = max(0, offset - FOLLOW_CONTEXT_BYTES) if redaction is not None else offset
     try:
         # One round trip: the size, the start of the file and the new bytes.
         size, first, data = connector.read_range(
-            source, path, offset, RANGE_MAX_BYTES, FOLLOW_HEAD_BYTES
+            source, path, read_from, RANGE_MAX_BYTES, FOLLOW_HEAD_BYTES
         )
     except RangeNotSupportedError as exc:
         raise _follow_unsupported(
             "This source's agent is older than 0.6 and can't send only the new lines"
         ) from exc
 
-    changed = head is not None and offset > 0 and head != _head_hash(first, offset)
+    changed = head is not None and offset > 0 and head != _head_hash(source.id, first, offset)
     if offset > size or changed:
         return Response(
             content=b"",
             media_type="application/octet-stream",
             headers={"X-Follow-Reset": "1", "X-File-Size": str(size)},
         )
-    next_offset = offset + len(data)
-    # What the viewer holds from the start once it appends `data`: the head
-    # as read, extended by the new bytes while the file is still short.
-    start_bytes = first[:offset] + data if offset < FOLLOW_HEAD_BYTES else first
+
+    if redaction is not None:
+        try:
+            encoding = detect_encoding(first)
+        except UnsupportedEncodingError as exc:
+            _audit_refusal(
+                session,
+                user,
+                source,
+                "file.open_denied",
+                path,
+                _AUDIT_REDACTION_ENCODING_REASON,
+                follow=True,
+            )
+            raise RedactionEncodingRefused() from exc
+        body, headers = _follow_redacted(
+            source, redaction, encoding, offset, read_from, size, first, data
+        )
+    else:
+        next_offset = offset + len(data)
+        # What the viewer holds from the start once it appends `data`: the
+        # head as read, extended by the new bytes while the file is still
+        # short.
+        start_bytes = first[:offset] + data if offset < FOLLOW_HEAD_BYTES else first
+        body = data
+        headers = {
+            "X-File-Size": str(size),
+            "X-Follow-Offset": str(next_offset),
+            "X-Follow-Head": _head_hash(source.id, start_bytes, next_offset),
+        }
+        if next_offset < size:
+            headers["X-Follow-More"] = "1"
 
     if start or offset == 0:
         record_audit_event(
@@ -835,17 +1116,73 @@ def follow_file(
             action="file.follow",
             target_type="source",
             target_id=source.id,
-            metadata={"path": path},
+            metadata={
+                "path": path,
+                **({"redaction": "applied", "redaction_at": "server"} if redaction else {}),
+            },
         )
         session.commit()
+    return Response(content=body, media_type="application/octet-stream", headers=headers)
+
+
+def _follow_redacted(
+    source: Source,
+    redaction: CompiledRules,
+    encoding: str | None,
+    offset: int,
+    read_from: int,
+    size: int,
+    first: bytes,
+    data: bytes,
+) -> tuple[bytes, dict[str, str]]:
+    """A redacted Tail answer. `data` was read from `read_from`, up to
+    FOLLOW_CONTEXT_BYTES before `offset`; that context is never sent, only
+    read to know whether `offset` falls inside a private-key block.
+
+    - Only whole lines are redacted and sent. When `offset` isn't the start
+      of a line (opening only the end of a file), the answer starts at the
+      next line and says X-Follow-Aligned: 1, so a value the offset cuts is
+      never shown in part.
+    - An unfinished last line is sent as `[redacted: incomplete line]`;
+      X-Follow-Partial is its length in the answer and X-Follow-Offset its
+      start, so the next poll sends it again, whole once it is.
+    - A line with no end within FOLLOW_WINDOW_BYTES can't be redacted whole:
+      it becomes a marker and the Tail goes on after it.
+    - Offsets, X-File-Size and X-Follow-Head are about the original."""
+    window = redact_window(
+        data,
+        min(offset - read_from, len(data)),
+        redaction,
+        base_offset=read_from,
+        final=False,
+        source_encoding=encoding,
+    )
+    body = window.data
+    counts = window.counts
+    partial = window.trailing_partial
+    read_end = read_from + len(data)
+    next_offset = read_from + window.end
+    if next_offset <= offset and read_end < size:
+        # No line ends within what one poll can read: skip it, fail closed.
+        body = marker(long_line_label(FOLLOW_WINDOW_BYTES)) + b"\n"
+        counts = {}
+        partial = 0
+        next_offset = read_end
     headers = {
         "X-File-Size": str(size),
         "X-Follow-Offset": str(next_offset),
-        "X-Follow-Head": _head_hash(start_bytes, next_offset),
+        "X-Follow-Head": _head_hash(source.id, first, next_offset),
+        "X-Redacted": "1",
+        "X-Redaction-Count": str(sum(counts.values())),
+        "X-Follow-Partial": str(partial),
     }
-    if next_offset < size:
+    if window.aligned:
+        headers["X-Follow-Aligned"] = "1"
+    # More is waiting only when something wasn't read yet: an unfinished
+    # last line is read again on the next poll, not right away.
+    if read_end < size:
         headers["X-Follow-More"] = "1"
-    return Response(content=data, media_type="application/octet-stream", headers=headers)
+    return body, headers
 
 
 class CloseRequest(BaseModel):
@@ -886,7 +1223,7 @@ def download_file(
     limits = current_limits(session)
     transfer = get_limiter().transfer(limits, user.id)
     try:
-        served_path, filename, key = _resolve_content_audited(
+        served_path, filename, key, _ = _resolve_content_audited(
             source, path, member, rules, limits, user, session, "file.download_denied"
         )
     except BaseException:

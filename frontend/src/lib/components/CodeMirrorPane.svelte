@@ -18,6 +18,7 @@
     darkTheme,
     languageExtension,
     markHighlighting,
+    redactionHighlighting,
     severityHighlighting,
     whitespaceHighlighting,
   } from '../codemirror-theme'
@@ -81,6 +82,7 @@
       severityHighlighting(severityPatterns),
       bookmarkHighlighting(bookmarks),
       markHighlighting(markPatterns),
+      redactionHighlighting,
       languageExtension(languageForFilename(filename)),
       ...(wrapEnabled ? [EditorView.lineWrapping] : []),
       ...(showWhitespace ? [whitespaceHighlighting(content)] : []),

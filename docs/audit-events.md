@@ -51,9 +51,9 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 |---|---|
 | `source.open` | A source opened in the explorer (its root listed). |
 | `source.browse` | A folder below a source's root (or inside an archive) listed. On by default; turned off with the **Audit folder listings** System setting, which only a super admin can turn off. The explorer's periodic refresh of folders already open isn't recorded again. |
-| `file.open`, `file.follow` | A file opened, or followed live. |
+| `file.open`, `file.follow` | A file opened, or followed live. When redaction applied to what was sent, `"redaction": "applied"` and `"redaction_at": "server"`. |
 | `file.download`, `folder.download` | A file downloaded, or a folder downloaded as a ZIP. |
-| `file.open_denied`, `file.download_denied` | A whole archive refused because it holds files the rules hide. |
+| `file.open_denied`, `file.download_denied` | A whole archive refused because it holds files the rules hide (`"reason": "archive_hidden_members"`), or content redaction can't serve: a whole archive (`"reason": "redaction_whole_archive"`) or a UTF-32 file (`"reason": "redaction_unsupported_encoding"`, with `"follow": true` when it came from Tail). |
 | `files.search` | A search of the file-name index: the `query`, whether it was a regex, and how many results the page had. Each page fetched is its own entry. |
 
 ### Refused requests

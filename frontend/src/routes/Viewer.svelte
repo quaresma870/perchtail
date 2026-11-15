@@ -35,10 +35,19 @@
   import { trackedFetch } from '../lib/server-status'
   import { parentPath, refreshFolder, startAutoRefresh, stopAutoRefresh } from '../lib/explorer-refresh'
   import { connectionsViewPreference, migrateLegacyViewChoice, savePreference } from '../lib/preferences'
-  import { countLines, followUrl, readFollowHeaders, tailIntervalMs } from '../lib/follow'
+  import {
+    appendReplacingPartial,
+    countLines,
+    decodeWithPartial,
+    followUrl,
+    readFollowHeaders,
+    readRedactionHeaders,
+    tailIntervalMs,
+  } from '../lib/follow'
   import { canFormat, formatContent } from '../lib/format-content'
   import { languageForFilename } from '../lib/file-language'
   import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
+  import { redactionCountLabel } from '../lib/redaction-markers'
   import { parsePatternInput } from '../lib/rule-format'
   import { systemSettings } from '../lib/settings'
   import { tabKey } from '../lib/tab-key'
@@ -377,11 +386,12 @@
         }
         return false
       }
-      const bytes = await response.arrayBuffer()
+      const bytes = new Uint8Array(await response.arrayBuffer())
       // Streaming, so a character the file's end splits is completed by
       // the first Follow answer (#254) instead of turning into two U+FFFD.
       const decoder = new TextDecoder()
-      const content = decoder.decode(bytes, { stream: true })
+      const redaction = readRedactionHeaders(response.headers)
+      const { text: content, partialChars } = decodeWithPartial(decoder, bytes, redaction.partialBytes)
       followDecoders.set(key, decoder)
       const tab: Tab = {
         key,
@@ -398,12 +408,17 @@
         markPatterns: [],
         format: 'none',
         following: false,
-        byteSize: bytes.byteLength,
+        // Redacted content isn't as long as the file: the Tail goes on from
+        // the offset in the original the server gives.
+        byteSize: redaction.sourceOffset ?? bytes.byteLength,
         followHead: response.headers.get('x-follow-head'),
         // A .gz file or an archive member is decompressed on the server: only
         // the whole of it can be reloaded.
         followMode: member || name.toLowerCase().endsWith('.gz') ? 'reload' : 'incremental',
         newLines: 0,
+        redacted: redaction.redacted,
+        redactionCount: redaction.count,
+        partialChars,
       }
       notice = null
       ensureSeverityPatterns(sourceId)
@@ -455,6 +470,9 @@
     content: string
     byteSize: number
     followHead: string | null
+    redacted: boolean
+    redactionCount: number
+    partialChars: number
   }
 
   /** Reads the end of a file (its last TAIL_START_BYTES) through Follow,
@@ -482,9 +500,18 @@
       if (!retried && Number.isFinite(now)) return readEnd(sourceId, path, name, now, true)
       return { message: `${name} changed while it was being read. Try again.`, retryable: true }
     }
-    const bytes = await response.arrayBuffer()
-    const text = new TextDecoder().decode(bytes, { stream: true })
-    return { content: dropPartialFirstLine(text, offset), byteSize: answer.offset, followHead: answer.head }
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    const redaction = readRedactionHeaders(response.headers)
+    const { text, partialChars } = decodeWithPartial(new TextDecoder(), bytes, redaction.partialBytes)
+    return {
+      // Redacted, the server already started at the next whole line.
+      content: redaction.aligned ? text : dropPartialFirstLine(text, offset),
+      byteSize: answer.offset,
+      followHead: answer.head,
+      redacted: redaction.redacted,
+      redactionCount: redaction.count,
+      partialChars,
+    }
   }
 
   /** Opens only the end of a large file, with Tail on (#347). */
@@ -522,6 +549,9 @@
         followMode: 'incremental',
         newLines: 0,
         endOnly: true,
+        redacted: read.redacted,
+        redactionCount: read.redactionCount,
+        partialChars: read.partialChars,
       }
       notice = null
       ensureSeverityPatterns(sourceId)
@@ -732,9 +762,10 @@
         notice = { ...problem, retry: problem.retryable ? reloadActiveTab : undefined }
         return
       }
-      const bytes = await response.arrayBuffer()
+      const bytes = new Uint8Array(await response.arrayBuffer())
       const decoder = new TextDecoder()
-      const content = decoder.decode(bytes, { stream: true })
+      const redaction = readRedactionHeaders(response.headers)
+      const { text: content, partialChars } = decodeWithPartial(decoder, bytes, redaction.partialBytes)
       const scratchKey = response.headers.get('x-scratch-key')
       const followHead = response.headers.get('x-follow-head')
       followDecoders.set(tab.key, decoder)
@@ -745,12 +776,15 @@
                 ...t,
                 content,
                 scratchKey,
-                byteSize: bytes.byteLength,
+                byteSize: redaction.sourceOffset ?? bytes.byteLength,
                 followHead,
                 newLines: 0,
                 missing: false,
                 newlineCount: undefined,
                 droppedLines: 0,
+                redacted: redaction.redacted,
+                redactionCount: redaction.count,
+                partialChars,
               }
             : t,
         ),
@@ -784,6 +818,9 @@
         newlineCount: undefined,
         droppedLines: 0,
         bookmarks: [],
+        redacted: read.redacted,
+        redactionCount: read.redactionCount,
+        partialChars: read.partialChars,
       })
     } catch {
       notice = { message: `${tab.name}: the server could not be reached.`, retryable: true, retry: reloadActiveTab }
@@ -824,6 +861,14 @@
     let byteSize = tab.byteSize
     let followHead = tab.followHead
     let appended = ''
+    // Redacted (#382, #249): an unfinished last line is shown as a marker
+    // that the next answer replaces. `partialChars` is that marker's length
+    // at the end of what the tab holds plus `appended`; what of it was
+    // already in the content before this tick is dropped from it.
+    let partialChars = tab.partialChars ?? 0
+    let dropFromContent = 0
+    let redacted = tab.redacted ?? false
+    let redactionCount = tab.redactionCount ?? 0
     for (let round = 0; round < FOLLOW_ROUNDS_PER_TICK; round++) {
       const start = !followStarted.has(tab.key)
       const response = await trackedFetch(followUrl(tab.sourceId, tab.path, byteSize, followHead, start), {
@@ -856,7 +901,17 @@
         decoder = new TextDecoder()
         followDecoders.set(tab.key, decoder)
       }
-      appended += decoder.decode(bytes, { stream: true })
+      const redaction = readRedactionHeaders(response.headers)
+      const decoded = decodeWithPartial(decoder, bytes, redaction.partialBytes)
+      ;({ appended, dropFromContent } = appendReplacingPartial(
+        appended,
+        dropFromContent,
+        partialChars,
+        decoded.text,
+      ))
+      partialChars = decoded.partialChars
+      redacted = redacted || redaction.redacted
+      redactionCount += redaction.count
       byteSize = answer.offset
       followHead = answer.head
       if (!answer.more) break
@@ -865,10 +920,13 @@
     const current = tabs.find((t) => t.key === tab.key)
     if (!current || current.byteSize !== tab.byteSize) return
     const readingAbove = appended !== '' && tab.key === activeKey && !(paneRef?.isAtBottom() ?? true)
+    // The unfinished line the answers replaced holds no newline, so the
+    // newline count stays right.
+    const kept = dropFromContent > 0 ? current.content.slice(0, current.content.length - dropFromContent) : current.content
     // Tail keeps at most TAIL_MAX_LINES lines (#347): older ones go from
     // the top, and the toolbar says so.
     const newlines = (current.newlineCount ?? countNewlines(current.content)) + countNewlines(appended)
-    const capped = capTailBuffer(current.content + appended, newlines)
+    const capped = capTailBuffer(kept + appended, newlines)
     updateTab(tab.key, {
       content: capped.content,
       newlineCount: capped.newlines,
@@ -876,7 +934,14 @@
       bookmarks: shiftBookmarks(current.bookmarks, capped.dropped),
       byteSize,
       followHead,
-      newLines: readingAbove ? current.newLines + countLines(appended) : current.newLines,
+      // Redacted, only whole lines are new: the marker of an unfinished
+      // one comes back on every poll until the line is written.
+      newLines: readingAbove
+        ? current.newLines + (redacted ? countNewlines(appended) : countLines(appended))
+        : current.newLines,
+      redacted,
+      redactionCount,
+      partialChars,
     })
   }
 
@@ -1346,6 +1411,16 @@
             {#if activeTab.droppedLines}
               <span class="hint" role="status" title="Reload to read the file again from the source">
                 Older lines dropped: Tail keeps the last {TAIL_MAX_LINES.toLocaleString('en')} lines
+              </span>
+            {/if}
+            {#if activeTab.redacted}
+              <span
+                class="hint redaction-count"
+                role="status"
+                data-testid="redaction-count"
+                title="Redaction is on: the server replaced these values before sending the file"
+              >
+                {redactionCountLabel(activeTab.redactionCount ?? 0)}
               </span>
             {/if}
           </div>
