@@ -45,6 +45,18 @@ describe('nestFoldersFlat', () => {
   it('returns an empty list for no folders', () => {
     expect(nestFoldersFlat([])).toEqual([])
   })
+
+  it('puts a folder whose parent is not listed at the top', () => {
+    // A grant on a deep folder lists it and what is below, not its parents.
+    const folders = [
+      folder({ id: 3, name: 'Production', parent_folder_id: 1 }),
+      folder({ id: 4, name: 'App1', parent_folder_id: 3 }),
+    ]
+    expect(nestFoldersFlat(folders)).toEqual([
+      { folder: folders[0], depth: 0 },
+      { folder: folders[1], depth: 1 },
+    ])
+  })
 })
 
 describe('nestFoldersTree', () => {
@@ -65,5 +77,15 @@ describe('nestFoldersTree', () => {
 
   it('returns an empty tree for no folders', () => {
     expect(nestFoldersTree([])).toEqual([])
+  })
+
+  it('roots the tree at folders whose parent is not listed', () => {
+    const folders = [
+      folder({ id: 3, name: 'Production', parent_folder_id: 1 }),
+      folder({ id: 4, name: 'App1', parent_folder_id: 3 }),
+    ]
+    const tree = nestFoldersTree(folders)
+    expect(tree.map((n) => n.folder.name)).toEqual(['Production'])
+    expect(tree[0].children.map((n) => n.folder.name)).toEqual(['App1'])
   })
 })

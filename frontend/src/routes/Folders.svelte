@@ -224,7 +224,7 @@
     <p class="error">{error}</p>
   {:else if customers.length === 0}
     <p class="hint">
-      No customers yet — create one from a source's editor (Settings → Sources → + Add source)
+      No customers yet — a super admin creates one from a source's editor (Settings → Sources → + Add source)
       before organizing folders.
     </p>
   {:else}

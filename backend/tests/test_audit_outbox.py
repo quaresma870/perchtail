@@ -13,6 +13,16 @@ from sqlmodel import select
 
 KEY = audit_chain_key()
 RAISED = {"audit_retention_days": {"old": 30, "new": 90}}
+# a8d3f5c27e14: a duplicate grant deleted.
+DUPLICATE = {
+    "reason": "duplicate_scope",
+    "grant_id": 11,
+    "kept_grant_id": 10,
+    "role_id": 1,
+    "scope_type": "customer",
+    "scope_id": 5,
+    "capabilities": ["view", "download"],
+}
 
 
 def _last(session) -> AuditLog:
@@ -54,6 +64,14 @@ def test_an_accepted_entry_is_signed_at_the_end_of_the_chain_and_removed(session
         ("system_settings.update", {"audit_retention_days": {"old": 90, "new": 30}}),
         ("system_settings.update", {"audit_retention_days": {"old": True, "new": 90}}),
         ("system_settings.update", {"audit_retention_days": "changed"}),
+        ("role_grant.delete", {**DUPLICATE, "reason": "other"}),
+        ("role_grant.delete", {**DUPLICATE, "kept_grant_id": 12}),
+        ("role_grant.delete", {**DUPLICATE, "scope_type": "planet"}),
+        ("role_grant.delete", {**DUPLICATE, "capabilities": ["root"]}),
+        ("role_grant.delete", {**DUPLICATE, "capabilities": "view"}),
+        ("role_grant.delete", {**DUPLICATE, "grant_id": True}),
+        ("role_grant.delete", {**DUPLICATE, "extra": 1}),
+        ("role_grant.delete", None),
     ],
 )
 def test_anything_else_is_refused_audited_and_removed(session, action, metadata):
@@ -73,6 +91,23 @@ def test_anything_else_is_refused_audited_and_removed(session, action, metadata)
     assert set(entry.event_metadata) == {"outbox_id", "action", "created_at"}
     assert session.exec(select(AuditLog).where(AuditLog.action == action)).all() == []
     assert _outbox_ids(session) == []
+    assert verify_chain(KEY, session).ok
+
+
+def test_a_deleted_duplicate_grant_is_recorded_against_the_grant(session):
+    session.add(AuditOutbox(action="role_grant.delete", event_metadata=DUPLICATE))
+    session.commit()
+
+    assert drain_audit_outbox(session) == (1, 0)
+
+    entry = _last(session)
+    assert (entry.action, entry.target_type, entry.target_id) == (
+        "role_grant.delete",
+        "role_grant",
+        11,
+    )
+    assert entry.user_id is None
+    assert {key: entry.event_metadata[key] for key in DUPLICATE} == DUPLICATE
     assert verify_chain(KEY, session).ok
 
 

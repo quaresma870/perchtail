@@ -60,7 +60,7 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 
 | Action | When |
 |---|---|
-| `access.denied` | Any request refused for lack of permission (HTTP 403) by a signed-in user, anywhere in the API: what was `attempted` (method and route), the target when the route names one, and the `reason` (for example `missing_capability:download`, `missing_global_capability:manage_roles`, `role_beyond_authority`). The person refused only gets a neutral message; the reason is only in the audit log. Refusals that already have their own event (`file.*_denied`) aren't recorded twice. |
+| `access.denied` | Any request refused for lack of permission by a signed-in user, anywhere in the API (HTTP 403, or 404 where the answer mustn't reveal that the target exists: a customer or folder outside the role's grants, a role beyond the reader's authority, the audit log while its page is off): what was `attempted` (method and route), the target when the route names one, and the `reason` (for example `missing_capability:download`, `missing_global_capability:manage_roles`, `role_beyond_authority`). The person refused only gets a neutral message; the reason is only in the audit log. Refusals that already have their own event (`file.*_denied`) aren't recorded twice. |
 
 ### Administration
 
@@ -70,7 +70,7 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 | `source.credential_update`, `source.agent_token_regenerate`, `source.pick_folder` | A source's saved credential replaced, its agent token regenerated, or its folders browsed with the saved credential. |
 | `rule.create`, `rule.update`, `rule.delete`, `rule.reorder`, `rule.replace_raw` | Visibility rules changed. |
 | `customer.*`, `folder.*` | Customers and folders created, changed or deleted. |
-| `role.*`, `role_grant.*` | Roles and their grants created, changed or deleted. |
+| `role.*`, `role_grant.*` | Roles and their grants created, changed or deleted. A `role_grant.delete` with no user and reason `duplicate_scope` is a duplicate grant removed by the 0.7.0 migration, with the grant kept and the capabilities deleted. |
 | `user.create`, `user.update`, `user.deactivate`, `user.reset_password` | User accounts managed by an admin. |
 | `sso_provider.*`, `sso_group_mapping.*` | SSO configuration and group-to-role mappings. |
 | `severity_pattern.*` | Severity highlighting patterns. |
@@ -110,7 +110,7 @@ When the purge deletes the oldest entries, the newest deleted one becomes the ch
 
 Every entry is signed when it is written. An entry without a signature is never signed afterwards, except entries from before the chain existed, once, on the first start that builds it. Any other unsigned entry was written outside PerchTail: it is reported as tampering (`unsigned_row`), and when one is found at startup PerchTail logs it at `ERROR` and checks the chain straight away.
 
-A database migration can't sign entries, so an event it has to record (today only the retention raised to 90 days on upgrading to 0.7.0) waits in an outbox table. On the next start, after the chain is checked, PerchTail records each one as an ordinary signed entry at the end of the chain, with no user, and removes it from the outbox. Only the events PerchTail's own migrations write are accepted, in the exact form they write them; anything else is refused and recorded as `audit.outbox_rejected`. Writing to the outbox can only add entries at the end of the chain, never change the ones already there.
+A database migration can't sign entries, so an event it has to record (today the retention raised to 90 days and the duplicate grants removed on upgrading to 0.7.0) waits in an outbox table. On the next start, after the chain is checked, PerchTail records each one as an ordinary signed entry at the end of the chain, with no user, and removes it from the outbox. Only the events PerchTail's own migrations write are accepted, in the exact form they write them; anything else is refused and recorded as `audit.outbox_rejected`. Writing to the outbox can only add entries at the end of the chain, never change the ones already there.
 
 Whether the chain has started is also kept outside the database, in `DATA_DIR/.audit-chain-started` (readable by PerchTail's user only, with the time it was written and the first signed entry's id). PerchTail writes it on the first start of a version that has it, once any older entries are signed, and never removes it; a restore puts it back when the backup has a chain ([backup-and-restore.md](backup-and-restore.md#restoring)). With the marker present, an audit log with no signed entry and no anchor, or whose first signed entry comes after the one the marker names, had its signatures taken away or its entries deleted: nothing is signed again, the check reports it as tampering (`chain_reset`), and at startup PerchTail logs `audit_hash_chain.chain_reset` at `ERROR`.
 

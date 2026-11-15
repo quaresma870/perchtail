@@ -132,8 +132,8 @@ def test_the_manage_source_migration_keeps_what_each_role_could_do(tmp_path):
         for grant_id, (role_id, caps) in grants.items():
             conn.execute(
                 "INSERT INTO rolegrant (id, role_id, scope_type, scope_id, capabilities) "
-                "VALUES (?, ?, 'customer', 1, ?)",
-                (grant_id, role_id, json.dumps(caps)),
+                "VALUES (?, ?, 'customer', ?, ?)",
+                (grant_id, role_id, grant_id, json.dumps(caps)),
             )
 
     def capabilities():
@@ -360,3 +360,116 @@ def test_audit_ids_are_never_reused_after_the_upgrade(tmp_path):
         )
         [new_id] = conn.execute("SELECT id FROM auditlog").fetchone()
     assert new_id == 51
+
+
+# --- a8d3f5c27e14: one grant per role and scope -----------------------------------
+
+BEFORE_ONE_GRANT_PER_SCOPE = "d4a8f2c6b913"
+
+
+def _grants(db: Path) -> dict[int, tuple]:
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute(
+            "SELECT id, role_id, scope_type, scope_id, capabilities FROM rolegrant"
+        ).fetchall()
+    return {row[0]: (row[1], row[2], row[3], json.loads(row[4])) for row in rows}
+
+
+def _insert_grant(conn, grant_id, role_id, scope_type, scope_id, caps) -> None:
+    conn.execute(
+        "INSERT INTO rolegrant (id, role_id, scope_type, scope_id, capabilities) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (grant_id, role_id, scope_type, scope_id, json.dumps(caps)),
+    )
+
+
+def test_duplicate_grants_are_merged_into_the_one_resolution_used(tmp_path, monkeypatch):
+    from app.audit_hash_chain import backfill_chain_if_needed
+    from app.audit_integrity import verify_chain
+    from app.audit_outbox import drain_audit_outbox
+    from app.auth.models import AuditLog
+    from sqlmodel import Session, select
+
+    monkeypatch.setattr("app.audit.audit_chain_key", lambda: CHAIN_KEY)
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_ONE_GRANT_PER_SCOPE)
+    with sqlite3.connect(db) as conn:
+        for role_id in (1, 2):
+            conn.execute(
+                "INSERT INTO role (id, name, is_builtin, is_super_admin, global_capabilities) "
+                "VALUES (?, ?, 0, 0, '[]')",
+                (role_id, f"r{role_id}"),
+            )
+        _insert_grant(conn, 10, 1, "customer", 5, ["view"])
+        _insert_grant(conn, 11, 1, "customer", 5, ["view", "download"])
+        _insert_grant(conn, 12, 1, "folder", 5, ["view"])
+        _insert_grant(conn, 13, 2, "customer", 5, ["view", "manage_rules"])
+        _insert_grant(conn, 14, 1, "customer", 5, [])
+        _insert_grant(conn, 15, 2, "source", 7, ["view"])
+
+    _alembic(tmp_path, "upgrade", "head")
+
+    # The lowest id of each role and scope stays; the others are gone.
+    assert _grants(db) == {
+        10: (1, "customer", 5, ["view"]),
+        12: (1, "folder", 5, ["view"]),
+        13: (2, "customer", 5, ["view", "manage_rules"]),
+        15: (2, "source", 7, ["view"]),
+    }
+    assert _audit_actions(db) == []
+    assert _outbox(db) == [
+        (
+            "role_grant.delete",
+            {
+                "reason": "duplicate_scope",
+                "grant_id": 11,
+                "kept_grant_id": 10,
+                "role_id": 1,
+                "scope_type": "customer",
+                "scope_id": 5,
+                "capabilities": ["view", "download"],
+            },
+        ),
+        (
+            "role_grant.delete",
+            {
+                "reason": "duplicate_scope",
+                "grant_id": 14,
+                "kept_grant_id": 10,
+                "role_id": 1,
+                "scope_type": "customer",
+                "scope_id": 5,
+                "capabilities": [],
+            },
+        ),
+    ]
+
+    # The constraint refuses a new duplicate.
+    with sqlite3.connect(db) as conn, pytest.raises(sqlite3.IntegrityError):
+        _insert_grant(conn, 20, 1, "customer", 5, ["view"])
+
+    # The next start records each deletion as a signed entry with no user.
+    engine = _audit_engine(db)
+    with Session(engine) as session:
+        assert backfill_chain_if_needed(CHAIN_KEY, session) == 0
+        assert drain_audit_outbox(session) == (2, 0)
+        entries = session.exec(select(AuditLog).order_by(AuditLog.id)).all()
+        assert [(e.action, e.target_type, e.target_id, e.user_id) for e in entries] == [
+            ("role_grant.delete", "role_grant", 11, None),
+            ("role_grant.delete", "role_grant", 14, None),
+        ]
+        assert entries[0].event_metadata["capabilities"] == ["view", "download"]
+        assert verify_chain(CHAIN_KEY, session).ok
+    engine.dispose()
+
+    # Down drops the constraint (the deleted grants stay deleted); up again
+    # brings it back.
+    _alembic(tmp_path, "downgrade", BEFORE_ONE_GRANT_PER_SCOPE)
+    with sqlite3.connect(db) as conn:
+        _insert_grant(conn, 20, 1, "customer", 5, ["view"])
+    assert set(_grants(db)) == {10, 12, 13, 15, 20}
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert set(_grants(db)) == {10, 12, 13, 15}
+    with sqlite3.connect(db) as conn, pytest.raises(sqlite3.IntegrityError):
+        _insert_grant(conn, 21, 1, "customer", 5, ["view"])

@@ -229,12 +229,13 @@ def test_cannot_create_a_grant_beyond_their_own(session, customers):
     client = _client(session, admin)
     role_id = client.post("/roles", json={"name": "Tier 2"}).json()["id"]
 
-    _assert_refused(
-        client.post(
-            f"/roles/{role_id}/grants",
-            json={"scope_type": "customer", "scope_id": customer_b.id, "capabilities": ["view"]},
-        )
+    # A customer outside the admin's reach answers as if it didn't exist.
+    hidden = client.post(
+        f"/roles/{role_id}/grants",
+        json={"scope_type": "customer", "scope_id": customer_b.id, "capabilities": ["view"]},
     )
+    assert hidden.status_code == 404, hidden.text
+    assert hidden.json()["detail"] == "customer not found"
     _assert_refused(
         client.post(
             f"/roles/{role_id}/grants",

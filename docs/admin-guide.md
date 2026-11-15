@@ -49,7 +49,9 @@ A super admin sees every page (the Audit log only while its switch in **Settings
 
 A customer is the top level of the organisation, for example one client or one environment. Folders group sources inside a customer and can be nested as deep as you need. Folders are only for organising and for granting access: they are not hosts.
 
-Create a customer from the source editor: in **Settings → Sources → + Add source**, pick **+ Create new customer…** in the **Customer** list. There is no page to rename or delete a customer.
+Only a super admin creates customers, from the source editor: in **Settings → Sources → + Add source**, pick **+ Create new customer…** in the **Customer** list. There is no page to rename or delete a customer; through the API, renaming or deleting one needs a super admin or `manage_source` in a grant on that customer.
+
+Customer and folder names are information of each customer, so lists show a role only the customers and folders its grants reach: a customer with a grant on it, on one of its folders or on one of its sources; every folder of a customer with a customer grant; a folder with a grant and every folder below it; and the folders on the path to a source with a grant. Any grant counts, whatever its capabilities. A customer or folder outside that reach answers as if it didn't exist, and the refusal is recorded in the audit log. Super admins see everything.
 
 **Settings → Folders** shows one customer at a time (pick it in **Customer**), with its folders and the sources inside them:
 
@@ -60,7 +62,7 @@ Create a customer from the source editor: in **Settings → Sources → + Add so
 
 You can also create a folder from the source editor with **+ Create new folder…** in the **Folder** list.
 
-Adding, moving and deleting folders needs **Create new sources** and the `manage_source` capability, see [Moving never widens access](#moving-never-widens-access). Deleting a folder or a customer also deletes the role grants and the alerts scoped to it.
+Adding, renaming, moving and deleting folders needs **Create new sources** and the `manage_source` capability, see [Moving never widens access](#moving-never-widens-access). Deleting a folder or a customer also deletes the role grants and the alerts scoped to it.
 
 ## Sources
 
@@ -132,9 +134,9 @@ A role with no grants can't see any source.
 
 | On screen | Key | What it allows |
 |---|---|---|
-| **Create new sources** | `create_source` | Shows **Settings → Folders** and **Settings → Agents**. Together with `manage_source` where it applies: add, edit, move and delete sources, add, move and delete folders, change credentials in bulk, regenerate agent tokens, use **Browse…** with a saved credential, and upgrade push agents. Also creates customers, renames folders, and shows the full error when a connection test fails. |
+| **Create new sources** | `create_source` | Shows **Settings → Folders** and **Settings → Agents**. Together with `manage_source` where it applies: add, edit, move and delete sources, add, rename, move and delete folders, rename and delete customers, change credentials in bulk, regenerate agent tokens, use **Browse…** with a saved credential, and upgrade push agents. Also shows the full error when a connection test fails. Lists only the customers and folders the role's grants reach. |
 | **Manage users** | `manage_users` | **Settings → Users**: create users, change their role, name and email, reset passwords, deactivate and reactivate. |
-| **Manage roles** | `manage_roles` | **Settings → Roles**: create, edit, duplicate and delete roles and their grants. |
+| **Manage roles** | `manage_roles` | **Settings → Roles**: create, edit, duplicate and delete roles and their grants. A role's grants are shown only for roles within your own access. |
 | **Manage SSO settings** | `manage_sso` | **Settings → SSO**: the OIDC provider and the group-to-role mappings. |
 | **Manage system settings (feature toggles)** | `manage_system_settings` | **Settings → System** and **Settings → Severity indicators**, the monitoring token, and the system-wide agent upgrade policy and window. |
 | **View audit log** | `view_audit_log` | **Settings → Audit log**, including **Verify now**. |
@@ -151,7 +153,7 @@ A grant gives capabilities in one customer, folder or source. The role editor an
 | **View** (`view`) | See the source in the Viewer and in **Settings → Sources**, browse it, open files, use Tail, read its rules, and run the connection check. Opening a file sends its whole content to the browser, so `view` can read whole files. Every open is audited. |
 | **Download** (`download`) | Download single files and folders as a ZIP. Every download is audited. |
 | **Manage rules** (`manage_rules`) | Edit the source's rules and its own severity indicators. |
-| **Manage sources** (`manage_source`) | With **Create new sources**: edit, move and delete sources and folders here, their agent token, saved credential and agent upgrades, and add sources and folders here. It gives no access to the rules. |
+| **Manage sources** (`manage_source`) | With **Create new sources**: edit, move and delete sources and folders here, rename folders here, rename and delete the customer when the grant is on the customer, their agent token, saved credential and agent upgrades, and add sources and folders here. It gives no access to the rules. |
 | **Run now** (`run_now`) | **Index now** on the source's page, which lists the source's files for the file-name index ahead of schedule. (Its tooltip in the role editor says it isn't used by any feature yet; it is used for this.) |
 
 Give `manage_rules` and `manage_source` together with `view`: the source's page and editor need `view` to load. `manage_source` does nothing without **Create new sources**.
@@ -178,7 +180,7 @@ A move is also refused when it would give the person moving it more than they al
 
 Adding a source or a folder needs **Create new sources** and `manage_source` where it goes. Only a super admin can add a source with neither a customer nor a folder.
 
-A user with **Create new sources** who creates a new customer has no grant on it yet, so they can't add sources or folders to it until someone gives them `manage_source` there.
+Only a super admin creates customers. A user with **Create new sources** adds sources and folders only in customers where someone gave them `manage_source`.
 
 ### Delegated administrators
 
@@ -190,8 +192,9 @@ A delegated administrator is someone with **Manage users**, **Manage roles** or 
 - They can't create or edit a super-admin role.
 - They can only assign a role, create a user with it, duplicate it or map an SSO group to it when the whole role is within their own access.
 - They can't reset the password of, deactivate or edit a user whose role reaches beyond their own access.
+- They only see the roles within their own access: the others are left out of the roles list and the role pickers, and opening one, or its grants, answers as if the role didn't exist. In **Users**, a user holding such a role shows it by id and can't be changed.
 
-The **Target** list of the role editor lists customers and folders only for people who also have **Create new sources**. Others can still add grants on sources.
+The **Target** list of the role editor lists the customers, folders and sources within the delegated administrator's own reach.
 
 ### Built-in roles
 

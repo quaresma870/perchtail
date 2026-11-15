@@ -23,7 +23,10 @@ from app.auth.models import AuditLog, Capability, GlobalCapability, ScopeType, U
 from app.auth.rbac import (
     FolderVisibilityContext,
     build_folder_visibility_context,
+    concealed,
+    customer_in_reach,
     delete_scope_grants,
+    folder_in_reach,
     folder_path_boundary,
     holds_capability_at,
     move_keeps_access_within,
@@ -426,11 +429,18 @@ def _location(source: Source) -> dict:
     }
 
 
-def _validate_scope(session: Session, *, customer_id: int | None, folder_id: int | None) -> None:
+def _validate_scope(
+    session: Session, user: User, *, customer_id: int | None, folder_id: int | None
+) -> None:
+    """The customer or folder must exist; one outside the caller's reach
+    answers exactly like one that doesn't, so the answer can't tell which
+    ids exist."""
     if folder_id is not None:
         folder = session.get(Folder, folder_id)
         if folder is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
+        if not folder_in_reach(session, user, folder_id):
+            raise concealed("Folder not found", reason="folder_out_of_reach", user=user)
         if customer_id is not None and folder.customer_id != customer_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -439,6 +449,8 @@ def _validate_scope(session: Session, *, customer_id: int | None, folder_id: int
     elif customer_id is not None:
         if session.get(Customer, customer_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
+        if not customer_in_reach(session, user, customer_id):
+            raise concealed("Customer not found", reason="customer_out_of_reach", user=user)
 
 
 MANAGE_EXISTING_SOURCE_REFUSED = (
@@ -579,7 +591,7 @@ def create_source(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    _validate_scope(session, customer_id=payload.customer_id, folder_id=payload.folder_id)
+    _validate_scope(session, user, customer_id=payload.customer_id, folder_id=payload.folder_id)
     # Adding a source also needs manage_source where it lands, by the grant
     # resolution it will get there: create_source alone would otherwise put
     # a source under any customer. With no customer and no folder there is
@@ -675,7 +687,7 @@ def update_source(
     new_customer_id = payload.customer_id if "customer_id" in fields_set else source.customer_id
     new_folder_id = payload.folder_id if "folder_id" in fields_set else source.folder_id
     if "customer_id" in fields_set or "folder_id" in fields_set:
-        _validate_scope(session, customer_id=new_customer_id, folder_id=new_folder_id)
+        _validate_scope(session, user, customer_id=new_customer_id, folder_id=new_folder_id)
         if (new_customer_id, new_folder_id) != (source.customer_id, source.folder_id):
             _require_manage_destination(
                 session, user, source, customer_id=new_customer_id, folder_id=new_folder_id

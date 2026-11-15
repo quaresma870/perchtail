@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.api.auth import get_current_active_user
@@ -15,8 +16,11 @@ from app.auth.models import (
     User,
 )
 from app.auth.rbac import (
+    concealed,
     create_role,
     create_role_grant,
+    customer_in_reach,
+    folder_in_reach,
     record_role_created,
     record_role_grant_created,
     require_capabilities_within_authority,
@@ -25,6 +29,7 @@ from app.auth.rbac import (
     require_grant_within_authority,
     require_not_own_role,
     require_role_within_authority,
+    role_within_authority,
 )
 from app.db import get_session
 from app.models import Customer, Folder, Source
@@ -151,21 +156,49 @@ def _get_editable_role(session: Session, user: User, role_id: int) -> Role:
     return role
 
 
-def _validate_scope_exists(session: Session, *, scope_type: ScopeType, scope_id: int) -> None:
+def _validate_scope_exists(
+    session: Session, user: User, *, scope_type: ScopeType, scope_id: int
+) -> None:
+    """The scope must exist; a customer or folder outside the caller's reach
+    answers exactly like one that doesn't, so the answer can't tell which
+    ids exist."""
     model = {
         ScopeType.customer: Customer,
         ScopeType.folder: Folder,
         ScopeType.source: Source,
     }[scope_type]
+    detail = f"{scope_type.value} not found"
     if session.get(model, scope_id) is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=f"{scope_type.value} not found"
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+    if scope_type == ScopeType.customer and not customer_in_reach(session, user, scope_id):
+        raise concealed(detail, reason="customer_out_of_reach", user=user)
+    if scope_type == ScopeType.folder and not folder_in_reach(session, user, scope_id):
+        raise concealed(detail, reason="folder_out_of_reach", user=user)
+
+
+def _find_scope_grant(
+    session: Session, *, role_id: int, scope_type: ScopeType, scope_id: int
+) -> RoleGrant | None:
+    return session.exec(
+        select(RoleGrant).where(
+            RoleGrant.role_id == role_id,
+            RoleGrant.scope_type == scope_type,
+            RoleGrant.scope_id == scope_id,
         )
+    ).first()
+
+
+ROLE_NOT_FOUND = "Role not found"
 
 
 @router.get("", response_model=list[RolePublic])
 def list_roles(user: User = Depends(require_read), session: Session = Depends(get_session)):
-    return session.exec(select(Role)).all()
+    """A delegated admin only sees the roles within their own authority (the
+    ones they could assign or edit); a super admin sees them all."""
+    roles = session.exec(select(Role)).all()
+    if user.role.is_super_admin:
+        return roles
+    return [role for role in roles if role_within_authority(session, user, role)]
 
 
 @router.get("/{role_id}", response_model=RolePublic)
@@ -176,7 +209,9 @@ def get_role(
 ):
     role = session.get(Role, role_id)
     if role is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ROLE_NOT_FOUND)
+    if not role_within_authority(session, user, role):
+        raise concealed(ROLE_NOT_FOUND, reason="role_beyond_authority", user=user)
     return role
 
 
@@ -341,9 +376,19 @@ def duplicate_role(
 def list_role_grants(
     role_id: int, user: User = Depends(require_manage), session: Session = Depends(get_session)
 ):
-    if session.get(Role, role_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    """A role's grants name the customers, folders and sources it reaches,
+    so a delegated admin only reads those of a role within their own
+    authority (the rule that decides who may edit it); any other answers
+    like a role that doesn't exist."""
+    role = session.get(Role, role_id)
+    if role is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ROLE_NOT_FOUND)
+    if not role_within_authority(session, user, role):
+        raise concealed(ROLE_NOT_FOUND, reason="role_beyond_authority", user=user)
     return session.exec(select(RoleGrant).where(RoleGrant.role_id == role_id)).all()
+
+
+DUPLICATE_GRANT_REFUSED = "This role already has a grant for that scope; edit it instead"
 
 
 @router.post(
@@ -356,7 +401,12 @@ def create_grant(
     session: Session = Depends(get_session),
 ):
     role = _get_editable_role(session, user, role_id)
-    _validate_scope_exists(session, scope_type=payload.scope_type, scope_id=payload.scope_id)
+    _validate_scope_exists(session, user, scope_type=payload.scope_type, scope_id=payload.scope_id)
+    scope = {"role_id": role_id, "scope_type": payload.scope_type, "scope_id": payload.scope_id}
+    if _find_scope_grant(session, **scope) is not None:
+        # One grant per scope (uq_rolegrant_scope): with two, which one
+        # resolution used would be undefined.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=DUPLICATE_GRANT_REFUSED)
     require_grant_within_authority(
         session,
         user,
@@ -366,19 +416,27 @@ def create_grant(
         role_id=role_id,
     )
 
-    grant = create_role_grant(
-        session,
-        actor_user_id=user.id,
-        role_id=role_id,
-        scope_type=payload.scope_type,
-        scope_id=payload.scope_id,
-        capabilities=payload.capabilities,
-        commit=False,
-        audit=False,
-    )
-    require_changed_role_within_authority(session, user, role)
-    record_role_grant_created(session, actor_user_id=user.id, grant=grant)
-    session.commit()
+    try:
+        grant = create_role_grant(
+            session,
+            actor_user_id=user.id,
+            capabilities=payload.capabilities,
+            commit=False,
+            audit=False,
+            **scope,
+        )
+        require_changed_role_within_authority(session, user, role)
+        record_role_grant_created(session, actor_user_id=user.id, grant=grant)
+        session.commit()
+    except IntegrityError:
+        # The same grant added by a concurrent request after the check
+        # above: uq_rolegrant_scope refuses this one, answered the same way.
+        session.rollback()
+        if _find_scope_grant(session, **scope) is None:
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=DUPLICATE_GRANT_REFUSED
+        ) from None
     session.refresh(grant)
     return grant
 

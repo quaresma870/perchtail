@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import JSON, Column
-from sqlmodel import Field, Relationship, SQLModel
+from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 from app.timeutils import utcnow
 
@@ -80,6 +80,11 @@ class Role(SQLModel, table=True):
 
 
 class RoleGrant(SQLModel, table=True):
+    # One grant per role and scope: resolution reads a single grant there.
+    __table_args__ = (
+        UniqueConstraint("role_id", "scope_type", "scope_id", name="uq_rolegrant_scope"),
+    )
+
     id: int | None = Field(default=None, primary_key=True)
     role_id: int = Field(foreign_key="role.id")
     # scope_id points at either customer.id or source.id depending on scope_type,

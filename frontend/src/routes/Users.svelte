@@ -206,6 +206,9 @@
   })
   $: saveViewState(VIEW_KEY, view)
 
+  // A delegated admin only gets the roles within their authority: a user
+  // holding another role shows it by id and can't be changed from here.
+  const knownRole = (id: number) => roles.some((r) => r.id === id)
   const roleName = (id: number) => roles.find((r) => r.id === id)?.name ?? `#${id}`
   const signInLabel = (u: AppUser) => (u.auth_provider === 'local' ? 'Local' : 'SSO')
   const formatLogin = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : 'never')
@@ -310,9 +313,13 @@
                   class="input"
                   aria-label="Role of {user.username}"
                   value={user.role_id}
+                  disabled={!knownRole(user.role_id)}
                   on:change={(e) =>
                     changeRole(user, Number((e.target as HTMLSelectElement).value))}
                 >
+                  {#if !knownRole(user.role_id)}
+                    <option value={user.role_id} disabled>{roleName(user.role_id)}</option>
+                  {/if}
                   {#each roles as role (role.id)}
                     <option value={role.id}>{role.name}</option>
                   {/each}
@@ -400,7 +407,10 @@
           {/if}
           <label class="field"
             >Role
-            <select class="input" bind:value={editing.roleId}>
+            <select class="input" bind:value={editing.roleId} disabled={!knownRole(editing.user.role_id)}>
+              {#if !knownRole(editing.user.role_id)}
+                <option value={editing.user.role_id} disabled>{roleName(editing.user.role_id)}</option>
+              {/if}
               {#each roles as role (role.id)}
                 <option value={role.id}>{role.name}</option>
               {/each}

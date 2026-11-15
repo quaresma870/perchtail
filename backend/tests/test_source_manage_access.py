@@ -422,14 +422,14 @@ def test_creating_a_source_needs_manage_source_where_it_goes(session, two_custom
     )
     client = _client(session, _user(session, role))
 
-    for scope in (
-        {"customer_id": customer_a.id},
-        {"customer_id": customer_b.id},
-        {},
-    ):
+    for scope in ({"customer_id": customer_a.id}, {}):
         response = client.post("/sources", json=_new_source(**scope))
         assert response.status_code == 403, response.text
         assert response.json()["detail"] == CREATE_SOURCE_REFUSED
+    # A customer outside the role's reach answers as if it didn't exist.
+    response = client.post("/sources", json=_new_source(customer_id=customer_b.id))
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "Customer not found"
     assert session.exec(select(Source).where(Source.name.startswith("new-"))).first() is None
 
     created = client.post(

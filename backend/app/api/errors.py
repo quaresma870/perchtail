@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import request_context
 from app.audit import record_audit_event
-from app.auth.rbac import PermissionDenied
+from app.auth.rbac import ConcealedDenial, PermissionDenied
 from app.collectors.base import PathOutsideBaseError, SourceError
 from app.db import get_session
 from app.logging_config import get_logger
@@ -51,7 +51,7 @@ def _target(path_params: dict) -> tuple[str | None, int | None]:
 
 
 def _reason(exc: StarletteHTTPException) -> str:
-    if isinstance(exc, PermissionDenied):
+    if isinstance(exc, (PermissionDenied, ConcealedDenial)):
         return exc.reason
     detail = exc.detail
     if isinstance(detail, dict):
@@ -108,9 +108,11 @@ async def access_denied(request: Request, exc: StarletteHTTPException):
     user gets is unchanged). Refusals an endpoint already audited itself
     (the file.*_denied events) aren't written twice. A 403 that isn't a
     permission refusal (the monitoring allowlist, where no user is known; a
-    forced password change) isn't recorded. If recording fails, the
-    refusal still goes out."""
-    if exc.status_code == 403:
+    forced password change) isn't recorded. A refusal answered as 404 so
+    it doesn't reveal its target (ConcealedDenial) is recorded the same
+    way; a plain 404 isn't. If recording fails, the refusal still goes
+    out."""
+    if exc.status_code == 403 or isinstance(exc, ConcealedDenial):
         context = request_context.current()
         if context is not None and context.user_id is not None and not context.denial_handled:
             try:
