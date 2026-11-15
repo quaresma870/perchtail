@@ -1,0 +1,49 @@
+{
+  "name": "production",
+  "description": "PerchTail as an installation in use: 170 sources (90 Linux: 60 SSH and 30 agents; 80 Windows: 40 SMB, 30 WinRM and 10 Windows agents), each with its own logs and write rate, and up to 30 people of five kinds signed in at once through a working day of 2 hours, with an incident in the middle. Needs a dedicated test environment.",
+  "customers": 5,
+  "customer_names": ["brightwater-retail", "kestrel-freight", "harbourline-bank", "orchard-health", "nordvale-energy"],
+  "folders_per_customer": 3,
+  "folder_names": ["production", "staging", "shared-services"],
+  "users": 40,
+  "sources": {"ssh": 60, "smb": 40, "local": 0, "winrm": 30},
+  "agents": {"running": 40, "stopped": 0, "windows": 10},
+  "files": {
+    "app_folders": 1,
+    "sizes_kb": [10],
+    "agent_sizes_kb": [10],
+    "per_size": 1,
+    "gz": 0,
+    "zip": 0,
+    "large_mb": 1,
+    "large_count": 0,
+    "growing": 0
+  },
+  "settings": {
+    "tail_interval_seconds": 2,
+    "explorer_refresh_seconds": 30,
+    "source_check_minutes": 10,
+    "name_index_enabled": true,
+    "name_index_minutes": 15,
+    "alerts_interval_seconds": 60,
+    "backup_interval_hours": 1
+  },
+  "production": {
+    "peak_users": 30,
+    "start_users": 3,
+    "end_users": 8,
+    "ramp_up_minutes": 30,
+    "peak_minutes": 60,
+    "ramp_down_minutes": 30,
+    "incident": {"minutes": 10, "users": 20, "zip_users": 4},
+    "alerts": 10,
+    "rate_classes": {"calm": {"share": 0.7, "kb_s": [2, 8], "rotate_mb": 64}, "moving": {"share": 0.25, "kb_s": [100, 300], "rotate_mb": 64}, "intense": {"share": 0.05, "daily_size_gb": 3}},
+    "tree": {"app_folders": 3, "rotated": 3, "rotated_kb": [64, 512, 2048], "large_every": 10, "large_mb": 200}
+  },
+  "scenarios": {
+    "production": {"thresholds": {"error_rate": 0.01, "ops": {}}}
+  },
+  "phases": [
+    {"name": "production", "duration": "121m", "scenarios": ["production"]}
+  ]
+}

@@ -7,11 +7,12 @@ runs.
 
 Each sample (every --interval seconds, 5 by default) has:
 
-- CPU and memory of the server process: `docker stats` for a container,
-  /proc/<pid> for a process on this machine (Linux);
-- bytes used under the scratch directory, and the size of the SQLite
-  database and its WAL, measured on disk (`docker exec` into the container,
-  or the local paths);
+- CPU, memory and bytes in and out (cumulative) of the server process:
+  `docker stats` for a container, /proc/<pid> for a process on this
+  machine (Linux, without the network counters);
+- bytes used under the scratch directory, the size of the SQLite database
+  and its WAL, measured on disk, and the number of rows in the audit log,
+  read-only (`docker exec` into the container, or the local paths);
 - PerchTail's own report, GET /monitoring/health, read with the
   monitoring token (LOADTEST_MONITORING_TOKEN, or the one seed.py saved),
   never with a user's credentials.
@@ -51,9 +52,12 @@ FIELDS = [
     "mem_bytes",
     "mem_limit_bytes",
     "pids",
+    "net_rx_bytes",
+    "net_tx_bytes",
     "scratch_bytes",
     "db_bytes",
     "wal_bytes",
+    "audit_rows",
     "health_status",
     "health_db_latency_ms",
     "health_scratch_used_bytes",
@@ -114,11 +118,14 @@ class DockerSampler:
             return {}
         stats = json.loads(out.splitlines()[0])
         used, _, limit = stats.get("MemUsage", "").partition("/")
+        rx, _, tx = stats.get("NetIO", "").partition("/")
         return {
             "cpu_percent": float(stats.get("CPUPerc", "0").rstrip("%") or 0),
             "mem_bytes": _bytes(used),
             "mem_limit_bytes": _bytes(limit),
             "pids": int(stats.get("PIDs") or 0),
+            "net_rx_bytes": _bytes(rx),
+            "net_tx_bytes": _bytes(tx),
         }
 
     def disk(self) -> dict:
@@ -128,7 +135,8 @@ class DockerSampler:
         script = (
             f"du -sb {scratch} 2>/dev/null | cut -f1; "
             f"stat -c %s {db} 2>/dev/null || echo; "
-            f"stat -c %s {wal} 2>/dev/null || echo"
+            f"stat -c %s {wal} 2>/dev/null || echo; "
+            f"python3 -c {shlex.quote(AUDIT_COUNT)} {db} 2>/dev/null || echo"
         )
         out = subprocess.run(
             ["docker", "exec", self.container, "sh", "-c", script],
@@ -136,8 +144,28 @@ class DockerSampler:
             text=True,
             timeout=60,
         ).stdout.splitlines()
-        values = [int(v) if v.strip().isdigit() else None for v in (out + ["", "", ""])[:3]]
-        return dict(zip(("scratch_bytes", "db_bytes", "wal_bytes"), values, strict=True))
+        values = [int(v) if v.strip().isdigit() else None for v in (out + ["", "", "", ""])[:4]]
+        keys = ("scratch_bytes", "db_bytes", "wal_bytes", "audit_rows")
+        return dict(zip(keys, values, strict=True))
+
+
+# Rows in the audit log, read-only (WAL mode lets this run beside the
+# server's writes): run with the database file as its one argument.
+AUDIT_COUNT = (
+    "import sqlite3, sys; "
+    "c = sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True); "
+    "print(c.execute('SELECT count(*) FROM auditlog').fetchone()[0])"
+)
+
+
+def audit_rows(db_path: Path) -> int | None:
+    import sqlite3  # noqa: PLC0415
+
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            return int(conn.execute("SELECT count(*) FROM auditlog").fetchone()[0])
+    except sqlite3.Error:
+        return None
 
 
 class ProcSampler:
@@ -178,6 +206,7 @@ class ProcSampler:
             "scratch_bytes": total,
             "db_bytes": self.db_path.stat().st_size if self.db_path.exists() else None,
             "wal_bytes": wal.stat().st_size if wal.exists() else None,
+            "audit_rows": audit_rows(self.db_path),
         }
 
 

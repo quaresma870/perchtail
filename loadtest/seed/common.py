@@ -182,6 +182,53 @@ def remove_state(name: str) -> None:
         path.unlink()
 
 
+# --- the restore test's copy (matrix.py, step `operation`) ----------------
+#
+# A restore runs only into a DATA_DIR of its own inside the container, made
+# by the kit with mktemp and recorded here before anything is written there;
+# `seed.py clean` removes a copy a run left behind.
+
+RESTORE_STATE = "restore-copy.json"
+
+
+def restore_copy_pattern() -> re.Pattern:
+    """The only directories a restore may write to: what `mktemp -d
+    /tmp/<prefix>-restore-XXXXXX` makes."""
+    return re.compile(rf"^/tmp/{re.escape(prefix())}-restore-[A-Za-z0-9]{{6,}}$")
+
+
+def restore_env(container: str, copy: dict | None) -> dict:
+    """The environment a restore runs with: every place it writes (DATA_DIR,
+    the database, the credential salt, the SSH host keys and its working
+    folder) inside the copy the kit made for it in `container` and recorded
+    in the instance's state. Anything else is refused, so a restore never
+    lands on the live database, whatever DATABASE_URL, CREDENTIAL_SALT_PATH
+    or SSH_KNOWN_HOSTS_PATH the container has."""
+    if not container or not copy or copy.get("container") != container:
+        raise KitError(
+            "no restore copy recorded for this container: a restore runs only into a DATA_DIR "
+            "the kit made for it"
+        )
+    target = str(copy.get("dir") or "")
+    if not restore_copy_pattern().match(target):
+        raise KitError(f"{target!r} isn't a restore copy the kit made; refusing to restore")
+    return {
+        "DATA_DIR": target,
+        "DATABASE_URL": f"sqlite:///{target}/perchtail.db",
+        "CREDENTIAL_SALT_PATH": f"{target}/credential_salt",
+        "SSH_KNOWN_HOSTS_PATH": f"{target}/ssh_known_hosts",
+        "BACKUP_DIR": f"{target}-work",
+    }
+
+
+def restore_cleanup(target: str) -> str:
+    """The shell command that removes a restore copy and what the restore
+    left next to it; only for a path restore_env accepts."""
+    if not restore_copy_pattern().match(target):
+        raise KitError(f"{target!r} isn't a restore copy the kit made")
+    return f"rm -rf {target} {target}.before-restore-* {target}.restoring-* {target}-work"
+
+
 def random_password(length: int = 32) -> str:
     """Random, and inside any sensible password policy: every character
     class, no dictionary words, long enough."""

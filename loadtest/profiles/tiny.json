@@ -1,6 +1,6 @@
 {
   "name": "tiny",
-  "description": "Validates the kit on a development machine in under 15 minutes. Not a sizing profile.",
+  "description": "Validates the kit on a development machine in about 25 minutes (12 without the growing-file phases). Not a sizing profile.",
   "customers": 1,
   "folders_per_customer": 2,
   "users": 4,
@@ -25,7 +25,19 @@
     "large_count": 2,
     "growing": 2,
     "growing_bytes_per_second": 2048,
-    "growing_rotate_mb": 8
+    "growing_rotate_mb": 8,
+    "growing_count": 2,
+    "growing_size_mb": 5,
+    "growing_rate_kb_s": 256,
+    "growing_rotate_s": 60,
+    "growing_agents": 1,
+    "heavy_count": 2,
+    "heavy_start_mb": 1,
+    "heavy_rates_mb_s": [1],
+    "heavy_step_seconds": 60,
+    "heavy_rotate_mb": 64,
+    "daily_size_gb": 0.1953125,
+    "daily_duration_min": 5
   },
   "settings": {
     "tail_interval_seconds": 2,
@@ -85,6 +97,25 @@
       "warmup_seconds": 15,
       "min_requests": 20,
       "thresholds": {"p95_ms": 1000, "error_rate": 0.01}
+    },
+    "growing_files": {
+      "vus": 2,
+      "follow_vus": 2,
+      "think_seconds": [2, 5],
+      "follow_seconds": 100,
+      "download_every": 3,
+      "zip_every": 4,
+      "thresholds": {"open_p95_ms": 15000, "download_p95_ms": 15000, "zip_p95_ms": 60000, "follow_p95_ms": 2000, "error_rate": 0.01}
+    },
+    "growing_heavy": {
+      "followers_per_file": 1,
+      "thresholds": {"open_p95_ms": 15000, "follow_p95_ms": 5000, "error_rate": 0.01}
+    },
+    "daily_log": {
+      "vus": 1,
+      "follow_vus": 1,
+      "every_seconds": [20, 40],
+      "thresholds": {"open_p95_ms": 60000, "download_p95_ms": 60000, "follow_p95_ms": 5000, "error_rate": 0.01}
     }
   },
   "phases": [
@@ -92,6 +123,9 @@
     {"name": "mixed", "duration": "120s", "scenarios": ["browse", "follow", "download", "name_search", "agents"]},
     {"name": "mixed-index-off", "duration": "60s", "settings": {"name_index_enabled": false}, "scenarios": ["browse", "follow", "download", "agents"]},
     {"name": "large_files", "duration": "60s", "scenarios": ["large_files"]},
-    {"name": "ramp", "scenarios": ["ramp"]}
+    {"name": "ramp", "scenarios": ["ramp"]},
+    {"name": "growing_files", "duration": "150s", "scenarios": ["growing_files"]},
+    {"name": "growing_heavy", "duration": "60s", "scenarios": ["growing_heavy"]},
+    {"name": "daily_log", "duration": "5m", "scenarios": ["daily_log"]}
   ]
 }

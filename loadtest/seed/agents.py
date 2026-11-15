@@ -5,6 +5,7 @@ source of the seeded profile, each with its own token and log folder.
     python loadtest/seed/agents.py start
     python loadtest/seed/agents.py status
     python loadtest/seed/agents.py stop
+    python loadtest/seed/agents.py windows-bundle
 
 `build` uses the local Go toolchain when `go` is on PATH, otherwise the
 golang image in Docker (LOADTEST_GO_IMAGE), and writes the binary to bin/
@@ -20,6 +21,15 @@ binary.
 The agents dial LOADTEST_AGENT_URL, by default the ws(s):// form of
 LOADTEST_BASE_URL plus /agent/connect. Plain ws:// is allowed only for a
 host in LOADTEST_ALLOWED_HOSTS (PERCHTAIL_ALLOW_INSECURE is set for them).
+
+The production profile marks some agents as Windows agents. When
+LOADTEST_WINDOWS_AGENT_HOSTS names a Windows test server, `start` leaves
+them out, and `windows-bundle` writes, in the instance's state, what runs
+them there: the Windows build of the agent, a PowerShell script that starts
+one process per agent (each with its own token and folder under
+LOADTEST_WINDOWS_AGENT_ROOT, C:\\perchtail-loadtest\\agents by default) and one
+that stops them. The kit runs nothing on that server itself. Without a
+Windows test server they run here like the others, and the summary says so.
 """
 
 from __future__ import annotations
@@ -91,6 +101,11 @@ PASS_THROUGH_ENV = (
 
 def binary_path() -> Path:
     return state_root() / "bin" / f"perchtail-agent{EXE}"
+
+
+def windows_remote() -> bool:
+    """True when the Windows agents run on a Windows test server."""
+    return bool(os.environ.get("LOADTEST_WINDOWS_AGENT_HOSTS"))
 
 
 def agent_env(url: str, token: str, root: Path) -> dict[str, str]:
@@ -240,6 +255,8 @@ def cmd_start(_args: argparse.Namespace) -> None:
     for source in seeded["sources"]:
         if source["protocol"] != "agent" or not source.get("running"):
             continue
+        if source.get("windows") and windows_remote():
+            continue  # started on the Windows test server (windows-bundle)
         name = source["name"]
         if name in pids:
             continue
@@ -290,6 +307,97 @@ def cmd_stop(_args: argparse.Namespace) -> None:
     print(f"stopped {len(stopping)} agents")
 
 
+def _ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def cmd_windows_bundle(_args: argparse.Namespace) -> None:
+    """Writes windows-agents/ in the instance's state: the agent built for
+    Windows, start-agents.ps1 and stop-agents.ps1. The start script holds
+    the agents' tokens: copy the folder to the Windows test server over a
+    channel you trust, and delete it there after the run."""
+    seeded = read_state("seeded.json")
+    tokens = read_state("agent-tokens.json", {})
+    if not seeded:
+        fail("nothing seeded yet: run seed.py apply first")
+    agents = [s for s in seeded["sources"] if s.get("windows") and s.get("running")]
+    if not agents:
+        fail("the seeded profile has no Windows agents")
+    out = state_dir() / "windows-agents"
+    out.mkdir(exist_ok=True)
+    agent_dir = REPO_DIR / "agent"
+    target = out / "perchtail-agent.exe"
+    env = {"GOOS": "windows", "GOARCH": "amd64", "CGO_ENABLED": "0"}
+    if shutil.which("go"):
+        subprocess.run(
+            ["go", "build", "-o", str(target), "."],
+            cwd=agent_dir,
+            check=True,
+            env={**os.environ, **env},
+        )
+    else:
+        cmd = ["docker", "run", "--rm", "-v", f"{agent_dir}:/src:ro", "-v", f"{out}:/out"]
+        for key, value in env.items():
+            cmd += ["-e", f"{key}={value}"]
+        cmd += ["-w", "/src", GO_IMAGE, "go", "build", "-o", "/out/perchtail-agent.exe", "."]
+        subprocess.run(cmd, check=True)
+    url = agent_url()
+    root = os.environ.get("LOADTEST_WINDOWS_AGENT_ROOT", r"C:\perchtail-loadtest\agents")
+    lines = [
+        "# Starts the load test's Windows agents (written by loadtest/seed/agents.py).",
+        "# Holds the agents' enrollment tokens: delete this folder after the run.",
+        '$ErrorActionPreference = "Stop"',
+        "$exe = Join-Path $PSScriptRoot 'perchtail-agent.exe'",
+        "$pids = @()",
+    ]
+    for source in agents:
+        token = tokens.get(source["name"])
+        if not token:
+            fail(f"no token saved for {source['name']}: run seed.py apply again")
+        folder = f"{root}\\agent-{source['agent_index']:03d}"
+        lines += [
+            f"New-Item -ItemType Directory -Force {_ps_quote(folder)} | Out-Null",
+            f"$env:PERCHTAIL_SERVER_URL = {_ps_quote(url)}",
+            f"$env:PERCHTAIL_AGENT_TOKEN = {_ps_quote(token)}",
+            f"$env:PERCHTAIL_BASE_PATH = {_ps_quote(folder)}",
+            '$env:PERCHTAIL_REMOTE_UPGRADE = "false"',
+        ]
+        if url.startswith("ws://"):
+            lines.append('$env:PERCHTAIL_ALLOW_INSECURE = "true"')
+        log = f"{root}\\{source['name']}.log"
+        lines.append(
+            "$p = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden "
+            f"-RedirectStandardOutput {_ps_quote(log)} "
+            f"-RedirectStandardError {_ps_quote(log + '.err')}"
+        )
+        lines.append("$pids += $p.Id")
+    lines += [
+        "Remove-Item Env:PERCHTAIL_AGENT_TOKEN",
+        "$pids | Set-Content (Join-Path $PSScriptRoot 'agent-pids.txt')",
+        'Write-Output "started $($pids.Count) agents"',
+    ]
+    start = out / "start-agents.ps1"
+    start.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    try:
+        start.chmod(0o600)
+    except OSError:
+        pass
+    (out / "stop-agents.ps1").write_text(
+        "# Stops the agents start-agents.ps1 started.\r\n"
+        "$file = Join-Path $PSScriptRoot 'agent-pids.txt'\r\n"
+        "Get-Content $file | ForEach-Object {\r\n"
+        "  Stop-Process -Id $_ -ErrorAction SilentlyContinue\r\n"
+        "}\r\n"
+        "Remove-Item $file\r\n",
+        encoding="utf-8",
+    )
+    print(
+        f"wrote {out}: copy it to the Windows test server, generate the agents' folders there "
+        f"(gen_logs.py generate --only-windows-agents --agents-dir {root}) and run "
+        "start-agents.ps1; it holds the agents' tokens"
+    )
+
+
 def cmd_status(_args: argparse.Namespace) -> None:
     print(json.dumps({name: _is_kit_agent(pid) for name, pid in _pids().items()}, sort_keys=True))
 
@@ -299,15 +407,20 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("build", "start", "stop", "status"):
+    for name in ("build", "start", "stop", "status", "windows-bundle"):
         sub.add_parser(name)
     args = parser.parse_args()
     try:
         if args.command != "build":
             check_state()
-        {"build": cmd_build, "start": cmd_start, "stop": cmd_stop, "status": cmd_status}[
-            args.command
-        ](args)
+        commands = {
+            "build": cmd_build,
+            "start": cmd_start,
+            "stop": cmd_stop,
+            "status": cmd_status,
+            "windows-bundle": cmd_windows_bundle,
+        }
+        commands[args.command](args)
     except (KitError, subprocess.CalledProcessError) as exc:
         fail(str(exc))
 

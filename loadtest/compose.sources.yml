@@ -4,6 +4,11 @@
 #
 #   docker compose -f docker-compose.yml -f loadtest/compose.sources.yml up -d --build
 #
+# lt-ssh-fault, started only with `--profile fault`, is a second SSH server
+# for protocol_matrix's reliability step (a slow source, then one that goes
+# down). The test servers' images carry iproute2 for tc netem, which the
+# matrix uses only when it is asked to (--netem).
+#
 # lt-ssh, lt-smb and the local-disk sources all serve the same tree,
 # LOADTEST_LOGS_DIR/shared, written by loadtest/seed/gen_logs.py (read-only
 # everywhere). The source account's password comes from
@@ -24,15 +29,39 @@ services:
   lt-ssh:
     build: ./loadtest/sources/ssh
     restart: unless-stopped
+    # The matrix adds network delay to (tc netem), or stops, only containers
+    # with this label (loadtest/matrix/matrix.py, require_kit_container).
+    labels:
+      perchtail.loadtest: test-source
+    env_file:
+      - ./loadtest/.state/sources.env
+    volumes:
+      - ${LOADTEST_LOGS_DIR:-./loadtest/.state/logs}/shared:/srv/logs:ro
+      # Its host keys, kept when the container is rebuilt (PerchTail pins them).
+      - lt-ssh-keys:/etc/ssh/keys
+
+  lt-ssh-fault:
+    build: ./loadtest/sources/ssh
+    profiles: ["fault"]
+    restart: unless-stopped
+    labels:
+      perchtail.loadtest: test-source
+    env_file:
+      - ./loadtest/.state/sources.env
+    volumes:
+      - ${LOADTEST_LOGS_DIR:-./loadtest/.state/logs}/shared:/srv/logs:ro
+      - lt-ssh-fault-keys:/etc/ssh/keys
+
+  lt-smb:
+    build: ./loadtest/sources/smb
+    restart: unless-stopped
+    labels:
+      perchtail.loadtest: test-source
     env_file:
       - ./loadtest/.state/sources.env
     volumes:
       - ${LOADTEST_LOGS_DIR:-./loadtest/.state/logs}/shared:/srv/logs:ro
 
-  lt-smb:
-    build: ./loadtest/sources/smb
-    restart: unless-stopped
-    env_file:
-      - ./loadtest/.state/sources.env
-    volumes:
-      - ${LOADTEST_LOGS_DIR:-./loadtest/.state/logs}/shared:/srv/logs:ro
+volumes:
+  lt-ssh-keys:
+  lt-ssh-fault-keys:

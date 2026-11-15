@@ -34,6 +34,7 @@ const relogins = new Counter('session_relogins')
 
 const FOLLOW_ROUNDS_PER_TICK = 8
 const MAX_EXPANDED_FOLDERS = 6
+const MAX_LISTED_SIZES = 20000
 const TIMEOUT = '180s'
 
 export function between(range, fallback) {
@@ -69,6 +70,9 @@ export class Ui {
     this.beforeRequest = null
     this.severityLoaded = {} // source id -> true, for the page's lifetime
     this.signingIn = false
+    this.tags = {} // added to every request's tags (e.g. persona, gop)
+    this.visible = null // ids of the sources GET /sources returned
+    this.listed = new Map() // "sourceId\npath" -> size, from the last listings
   }
 
   // --- requests ----------------------------------------------------------
@@ -91,11 +95,15 @@ export class Ui {
     // name searches too, so name_search's limit is about the search.
     const flow = name === 'POST /auth/login' ? 'login' : name.startsWith('GET files') ? 'search' : 'ui'
     const params = {
-      tags: { name, flow, ...(extra.tags || {}) },
+      tags: { name, flow, ...this.tags, ...(extra.tags || {}) },
       timeout: TIMEOUT,
       headers: { Accept: 'application/json' },
       responseType: extra.responseType || 'text',
     }
+    // Statuses besides 2xx that are a correct answer to this request (a
+    // file over MAX_FETCH_MB refused with 413, for daily_log).
+    const accepted = extra.accept || []
+    if (accepted.length) params.responseCallback = http.expectedStatuses({ min: 200, max: 299 }, ...accepted)
     let payload = null
     if (body !== undefined && body !== null) {
       payload = JSON.stringify(body)
@@ -103,11 +111,11 @@ export class Ui {
     }
     if (method !== 'GET') params.headers.Origin = ORIGIN
     const res = http.request(method, `${BASE_URL}${path}`, payload, params)
-    check(res, { [`${name} ok`]: (r) => r.status >= 200 && r.status < 300 })
+    check(res, { [`${name} ok`]: (r) => (r.status >= 200 && r.status < 300) || accepted.includes(r.status) })
     if (res.status === 401 && this.loggedIn && !this.signingIn && !retried && flow !== 'login') {
       relogins.add(1)
       this.resetSession()
-      if (this.ensureLogin()) return this.request(method, path, body, name, extra, true)
+      if (this.ensureLogin(this.username)) return this.request(method, path, body, name, extra, true)
     }
     return res
   }
@@ -121,19 +129,29 @@ export class Ui {
     this.expanded = []
     this.following = null
     this.severityLoaded = {}
+    this.listed = new Map()
   }
 
   get(path, name, extra) {
     return this.request('GET', path, null, name, extra)
   }
 
+  /** Signs out (POST /auth/logout) and forgets the page, as closing the
+   * session in the UI does. */
+  logout() {
+    if (this.loggedIn) this.request('POST', '/auth/logout', null, 'POST /auth/logout')
+    this.resetSession()
+    this.visible = null
+  }
+
   // --- session -----------------------------------------------------------
 
   /** Signs in once per virtual user (each VU has its own cookie jar), as
-   * one of the profile's users, then loads the page. */
-  ensureLogin() {
+   * `as` or one of the profile's users, then loads the page. */
+  ensureLogin(as) {
     if (this.loggedIn) return true
-    const username = usernames[(exec.vu.idInTest - 1) % usernames.length]
+    const username = as || usernames[(exec.vu.idInTest - 1) % usernames.length]
+    this.username = username
     const res = this.request('POST', '/auth/login', { username, password: users[username] }, 'POST /auth/login')
     if (res.status !== 200) {
       sleep(5)
@@ -162,7 +180,8 @@ export class Ui {
       this.settings.tail_interval_seconds = body.tail_interval_seconds || 2
       this.settings.explorer_refresh_seconds = body.explorer_refresh_seconds || 0
     }
-    this.get('/sources', 'GET /sources')
+    const sources = this.get('/sources', 'GET /sources')
+    if (sources.status === 200) this.visible = new Set(sources.json().map((s) => s.id))
     this.get('/sources/recent', 'GET /sources/recent')
     const now = Date.now()
     this.lastRefresh = now
@@ -179,7 +198,18 @@ export class Ui {
     this.expanded.push({ sourceId, path })
     if (this.expanded.length > MAX_EXPANDED_FOLDERS) this.expanded.shift()
     if (res.status !== 200) return []
-    return res.json()
+    const entries = res.json()
+    if (this.listed.size > MAX_LISTED_SIZES) this.listed.clear()
+    // The viewer decides from the listed size whether a file is opened
+    // whole or only its end (lib/viewer-limits.ts, LARGE_FILE_BYTES).
+    for (const e of entries) if (!e.is_dir) this.listed.set(`${sourceId}\n${e.path}`, e.size)
+    return entries
+  }
+
+  /** A file's size as last listed in the explorer, or null. */
+  listedSize(sourceId, path) {
+    const size = this.listed.get(`${sourceId}\n${path}`)
+    return size == null ? null : size
   }
 
   /** Expands an archive: the UI lists all its members at once (&all=true)

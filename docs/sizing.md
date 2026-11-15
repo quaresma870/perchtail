@@ -36,6 +36,30 @@ To be measured, in the same form as Small.
 
 To be measured, in the same form as Small, plus the `mixed-limits-2x` and `ramp-limits-2x` phases: the same load with the three concurrency limits doubled (32, 8, 4), next to the default ones, to show what raising them buys.
 
+### Files that grow while they are read
+
+Logs are usually being written while people open, download and follow them. Each profile has three phases about that, and their results go here per profile, from the summary's growing-file tables:
+
+- `growing_files`: files of 50 MB that grow at 256 KB/s and rotate every 5 minutes, opened whole, downloaded, downloaded as a folder ZIP and followed, on every protocol. Besides latency per protocol and operation, every answer is checked line by line: the file from its first line, nothing missing, repeated or cut off, never shorter than the server announced, and Follow carrying on exactly where it stopped, across rotations. The number that matters is the integrity errors, which must be zero: a viewer that shows a log with lines missing is wrong, however fast it is.
+- `growing_heavy`: files written at 1, 5 and 10 MB/s each, followed at the viewer's pace. The result is the write rate from which Follow stops keeping up (its delay behind the writer keeps growing instead of staying level), with the server's CPU, memory and scratch at each rate. The viewer reads at most 8 × 1 MB per tick, so with a 2 s Follow interval about 4 MB/s per file is the most it can take in, whatever the hardware; a shorter interval raises that, at the cost of more requests.
+- `daily_log`: one log that grows to 3 GB over a day compressed into an hour, quiet at night and busy in office hours with peaks of several MB/s, like a busy web server's access log. Follow runs all day, and the file is opened and downloaded whole now and then: below `MAX_FETCH_MB` that must work with every line intact, and above it the server must refuse cleanly (413) while Follow carries on. The result is Follow's delay per hour, above all at the peaks, and the server's CPU, memory and scratch through the day.
+
+To be measured.
+
+### A typical installation: the `production` profile
+
+The profiles above load one thing at a time. `production` is the reference for a typical installation in use: 170 sources (90 Linux hosts, 60 over SSH and 30 with a push agent; 80 Windows hosts, 40 over SMB, 30 over WinRM and 10 with a push agent), each with its own logs, most of them quiet (70 % write a few KB/s), a quarter busier (hundreds of KB/s) and a few as busy as a web server's access log; and up to 30 people signed in at once at the peak of a working day, of five kinds: support staff browsing and opening files (40 %), people on call following several logs for hours (25 %), investigators searching names and downloading files and folders (20 %), administrators (10 %) and occasional visitors (5 %), each with a role that shows them only their part. In the middle of the peak, 20 people open and follow the same busy log for 10 minutes, as during an incident. The file-name index, the source checks, 10 alerts and a scheduled backup run as usual.
+
+Its result goes here: latency and errors per kind of person, the server's CPU, memory, scratch and database over the day (and memory's trend per hour, to show a leak), what the incident costs, and whether the day stayed within the limits. It also runs for several days as a soak test.
+
+To be measured.
+
+### What each protocol and feature costs
+
+The `protocol_matrix` profile measures one thing at a time, so protocols and features can be compared: on one source of each protocol (SSH, SMB, WinRM, WinRM through JEA, push agents on Linux and Windows, local disk), listing folders of 100 to 10,000 entries, opening and downloading files of 1 to 200 MB and following a growing file, one at a time and with 5 and 20 at once, optionally with added network delay towards the source. For each cell it records latency, time to the first byte and throughput, PerchTail's CPU time, memory and network traffic, and the source server's CPU, memory and disk reads. It also measures the fixed cost of a source (a reachability check and a file-name index pass), features with and without their cost (the audit page, sign-in with MFA), a backup (and, when asked for, its restore into a separate copy), and how a slow or failing source affects the others. From these, `report.py costs` works out cost units per operation, per MB transferred, per source and, with a `production` run, per active user.
+
+To be measured.
+
 ## What drives each resource
 
 ### CPU
@@ -48,7 +72,7 @@ To be measured: the process's resident memory with no users, and its growth with
 
 ### Scratch disk
 
-Every file opened or downloaded from a remote source (SSH, SMB, WinRM, push agent) is fetched in full into scratch, and stays there while any tab has it open; a download or folder ZIP holds it only for the transfer. Local-disk sources are read in place and use no scratch. So scratch needs about the number of files open at the same time across all users, times their size: ten people with a 500 MB log open each need 5 GB. Decompressed `.gz` files and archive members count at their decompressed size.
+Every file opened or downloaded from a remote source (SSH, SMB, WinRM, push agent) is fetched in full into scratch, and stays there while any tab has it open; a download or folder ZIP holds it only for the transfer. Local-disk sources are read in place and use no scratch. So scratch needs about the number of files open at the same time across all users, times their size: ten people with a 500 MB log open each need 5 GB. A file that grows is fetched at the size it has when it is opened; reopening it fetches it again at its new size, and Follow reads only what was appended, without scratch. Decompressed `.gz` files and archive members count at their decompressed size.
 
 Scratch is bounded by `SCRATCH_MAX_GB` (the oldest unused copies are evicted first), by `SCRATCH_MIN_FREE_GB`/`SCRATCH_MIN_FREE_PERCENT` (new fetches are refused with HTTP 507 rather than filling the disk), and per file by `MAX_FETCH_MB` and `MAX_DECOMPRESSED_MB`. Copies a closed browser never released are deleted after `SCRATCH_IDLE_SECONDS`. Put scratch on its own volume (see `docker-compose.yml`) so a burst of large opens can't fill the database's disk.
 

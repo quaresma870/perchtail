@@ -25,7 +25,19 @@
     "large_count": 8,
     "growing": 16,
     "growing_bytes_per_second": 4096,
-    "growing_rotate_mb": 256
+    "growing_rotate_mb": 256,
+    "growing_count": 16,
+    "growing_size_mb": 50,
+    "growing_rate_kb_s": 256,
+    "growing_rotate_s": 300,
+    "growing_agents": 2,
+    "heavy_count": 3,
+    "heavy_start_mb": 1,
+    "heavy_rates_mb_s": [1, 5, 10],
+    "heavy_step_seconds": 120,
+    "heavy_rotate_mb": 256,
+    "daily_size_gb": 3,
+    "daily_duration_min": 60
   },
   "settings": {
     "tail_interval_seconds": 2,
@@ -85,6 +97,25 @@
       "warmup_seconds": 30,
       "min_requests": 500,
       "thresholds": {"p95_ms": 1000, "error_rate": 0.01}
+    },
+    "growing_files": {
+      "vus": 8,
+      "follow_vus": 8,
+      "think_seconds": [5, 20],
+      "follow_seconds": 420,
+      "download_every": 3,
+      "zip_every": 4,
+      "thresholds": {"open_p95_ms": 15000, "download_p95_ms": 15000, "zip_p95_ms": 60000, "follow_p95_ms": 2000, "error_rate": 0.01}
+    },
+    "growing_heavy": {
+      "followers_per_file": 1,
+      "thresholds": {"open_p95_ms": 15000, "follow_p95_ms": 5000, "error_rate": 0.01}
+    },
+    "daily_log": {
+      "vus": 4,
+      "follow_vus": 4,
+      "every_seconds": [120, 300],
+      "thresholds": {"open_p95_ms": 60000, "download_p95_ms": 60000, "follow_p95_ms": 5000, "error_rate": 0.01}
     }
   },
   "phases": [
@@ -94,6 +125,9 @@
     {"name": "large_files", "duration": "10m", "scenarios": ["large_files"]},
     {"name": "ramp", "scenarios": ["ramp"]},
     {"name": "mixed-limits-2x", "duration": "30m", "settings": {"concurrency_global": 32, "concurrency_per_source": 8, "concurrency_user_transfers": 4}, "scenarios": ["browse", "follow", "download", "name_search", "agents"]},
-    {"name": "ramp-limits-2x", "settings": {"concurrency_global": 32, "concurrency_per_source": 8, "concurrency_user_transfers": 4}, "scenarios": ["ramp"]}
+    {"name": "ramp-limits-2x", "settings": {"concurrency_global": 32, "concurrency_per_source": 8, "concurrency_user_transfers": 4}, "scenarios": ["ramp"]},
+    {"name": "growing_files", "duration": "15m", "scenarios": ["growing_files"]},
+    {"name": "growing_heavy", "duration": "6m", "scenarios": ["growing_heavy"]},
+    {"name": "daily_log", "duration": "60m", "scenarios": ["daily_log"]}
   ]
 }

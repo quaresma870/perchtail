@@ -1,6 +1,6 @@
 Port 22
-HostKey /etc/ssh/ssh_host_ed25519_key
-HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/keys/ssh_host_ed25519_key
+HostKey /etc/ssh/keys/ssh_host_rsa_key
 UsePAM no
 PasswordAuthentication yes
 KbdInteractiveAuthentication no
