@@ -100,8 +100,9 @@ func ListDirectory(basePath, relPath string, maxEntries int) ([]DirEntryWire, bo
 	}
 }
 
-// wireSize is how many bytes the entry takes in the list_result message.
-func wireSize(wire DirEntryWire) (int, error) {
+// wireSize is how many bytes the entry takes in the list_result (or
+// list_archive_result) message.
+func wireSize(wire any) (int, error) {
 	encoded, err := json.Marshal(wire)
 	if err != nil {
 		return 0, err

@@ -82,6 +82,9 @@ MAX_LINE_BYTES = 1024 * 1024
 PEM_MAX_LINES = 200
 CHUNK_BYTES = 1024 * 1024
 HEAD_BYTES = 64
+# The largest max_length a custom rule may declare, in bytes; the agent's
+# engine refuses the same (MaxRuleLength).
+MAX_RULE_LENGTH = 4096
 
 INCOMPLETE_LINE_LABEL = "incomplete line"
 
@@ -223,9 +226,14 @@ def _compile_canonical(canonical: str) -> CompiledRules:
             )
         max_length = rule.get("max_length")
         if max_length is not None:
-            if isinstance(max_length, bool) or not isinstance(max_length, int) or max_length < 1:
+            if (
+                isinstance(max_length, bool)
+                or not isinstance(max_length, int)
+                or not 1 <= max_length <= MAX_RULE_LENGTH
+            ):
                 raise RedactionRuleError(
-                    f"redaction rule {name!r}: max_length must be a positive number of bytes"
+                    f"redaction rule {name!r}: max_length must be a whole number of bytes"
+                    f" from 1 to {MAX_RULE_LENGTH}"
                 )
             cut_guard = max(cut_guard, max_length)
         compiled.append(_Rule(name=name, regex=regex, group=group, label=name))

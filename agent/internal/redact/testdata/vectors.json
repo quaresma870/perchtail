@@ -6,6 +6,7 @@
     "head_digests": "HMAC-SHA256 with key_b64 of the first min(64, offset) bytes of data, hex, first 32 characters.",
     "detect": "the encoding decided from head_b64: utf-16-le, utf-16-be, utf-16-unsure, null (bytes) or error.",
     "rule_digests": "rules_digest of rules: the SHA-256 of their canonical JSON (keys sorted, no spaces, non-ASCII characters as they are), hex.",
+    "rule_errors": "rule lists both engines refuse to compile (a rule error), unless accepted is true, which marks a limit both engines accept; message, when present, is how the error message ends in both engines (each starts it with the rule's name).",
     "generated": "vectors named generated come from random content redacted by the Python engine (reviewed when they change); vectors named parity pin where RE2, in Latin-1 or UTF-8, and Go's regexp could part."
   },
   "vectors": [
@@ -1163,6 +1164,8 @@
     {"name": "max_length a fraction", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": 104.5}]},
     {"name": "max_length in exponent form", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": 1e2}]},
     {"name": "max_length a list", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": [104]}]},
-    {"name": "max_length on the second rule", "rules": [{"id": 1, "name": "card", "detector": "card"}, {"id": 2, "name": "acct", "pattern": "ACCT \\d+", "max_length": 0}]}
+    {"name": "max_length on the second rule", "rules": [{"id": 1, "name": "card", "detector": "card"}, {"id": 2, "name": "acct", "pattern": "ACCT \\d+", "max_length": 0}]},
+    {"name": "max_length over 4096", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": 4097}], "message": "max_length must be a whole number of bytes from 1 to 4096"},
+    {"name": "max_length at 4096", "rules": [{"id": 1, "name": "acct", "pattern": "ACCT \\d+", "max_length": 4096}], "accepted": true}
   ]
 }

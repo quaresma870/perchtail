@@ -115,6 +115,7 @@ func connectAndServe(ctx context.Context, cfg Config, upgrades *upgrader) (time.
 	// NTFS does (#189); it can only know which OS this is if told.
 	header.Set(OSHeader, runtime.GOOS)
 	header.Set(VersionHeader, Version)
+	header.Set(FeaturesHeader, FeatureRedaction)
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.ServerURL, header)
 	if err != nil {
@@ -184,7 +185,7 @@ func connectAndServe(ctx context.Context, cfg Config, upgrades *upgrader) (time.
 		_ = conn.Close()
 	}
 	running := newInflight()
-	slots := make(chan struct{}, maxParallelCommands)
+	slots := newCommandSlots()
 
 	for {
 		if ctx.Err() != nil {
@@ -215,8 +216,7 @@ func connectAndServe(ctx context.Context, cfg Config, upgrades *upgrader) (time.
 		cmdCtx := running.start(connCtx, cmd.ID)
 		go func(cmd Command) {
 			defer running.finish(cmd.ID)
-			slots <- struct{}{}
-			defer func() { <-slots }()
+			defer slots.acquire(cmd)()
 			if err := serveCommand(cmdCtx, cfg, cmd, send); err != nil {
 				// The connection is broken: closing it ends the read loop,
 				// and Run reconnects.
@@ -229,6 +229,36 @@ func connectAndServe(ctx context.Context, cfg Config, upgrades *upgrader) (time.
 
 // maxParallelCommands bounds how many commands read files at once.
 const maxParallelCommands = 8
+
+// commandSlots bounds the commands that run at once: maxParallelCommands
+// in all, of which at most maxParallelRedactions redact (#382, #249).
+type commandSlots struct {
+	all, redacting chan struct{}
+}
+
+func newCommandSlots() *commandSlots {
+	return &commandSlots{
+		all:       make(chan struct{}, maxParallelCommands),
+		redacting: make(chan struct{}, maxParallelRedactions),
+	}
+}
+
+// acquire waits for the slots cmd needs and returns what frees them. A
+// command that redacts waits for its redaction slot first, so commands
+// queued behind the redaction limit don't hold the slots of the others.
+func (s *commandSlots) acquire(cmd Command) func() {
+	redacting := hasRedact(cmd.Redact)
+	if redacting {
+		s.redacting <- struct{}{}
+	}
+	s.all <- struct{}{}
+	return func() {
+		<-s.all
+		if redacting {
+			<-s.redacting
+		}
+	}
+}
 
 // errCancelled stops a streamed fetch the backend cancelled.
 var errCancelled = errors.New("cancelled by the backend")
@@ -273,8 +303,16 @@ func (r *inflight) finish(id string) {
 // connection is broken, is returned; a failed command is answered with an
 // ErrorResult instead. When ctx is cancelled (the backend sent "cancel"),
 // a streamed fetch stops at the next chunk and sends nothing more.
+//
+// A fetch with a `redact` block, a member or a decompression, and a
+// fetch_archive, always stream (serveContentFetch, serveFetchArchive).
 func serveCommand(ctx context.Context, cfg Config, cmd Command, send func(any) error) error {
-	if cmd.Type != "fetch" || cmd.ChunkSize <= 0 {
+	switch {
+	case cmd.Type == "fetch_archive":
+		return serveFetchArchive(ctx, cfg, cmd, send)
+	case cmd.Type == "fetch" && (hasRedact(cmd.Redact) || cmd.Member != "" || cmd.Decompress != ""):
+		return serveContentFetch(ctx, cfg, cmd, send)
+	case cmd.Type != "fetch" || cmd.ChunkSize <= 0:
 		return send(handleCommand(cfg, cmd))
 	}
 
@@ -323,7 +361,17 @@ func handleCommand(cfg Config, cmd Command) any {
 			return ErrorResult{Type: "list_error", ID: cmd.ID, Error: err.Error()}
 		}
 		return ListResult{Type: "list_result", ID: cmd.ID, Entries: entries, Truncated: truncated}
+	case "list_archive":
+		members, truncated, err := ListArchive(cfg.BasePath, cmd.Path, cmd.MaxEntries)
+		if err != nil {
+			return ErrorResult{Type: "list_archive_error", ID: cmd.ID, Error: err.Error()}
+		}
+		return ListArchiveResult{Type: "list_archive_result", ID: cmd.ID, Members: members, Truncated: truncated}
 	case "fetch":
+		if hasRedact(cmd.Redact) || cmd.Member != "" || cmd.Decompress != "" {
+			// Only ever streamed (serveCommand); never the content as it is.
+			return ErrorResult{Type: "fetch_error", ID: cmd.ID, Error: "this fetch can only be streamed"}
+		}
 		content, err := HandleFetch(cfg.BasePath, cmd.Path)
 		if err != nil {
 			return ErrorResult{Type: "fetch_error", ID: cmd.ID, Error: err.Error()}
@@ -334,6 +382,18 @@ func handleCommand(cfg Config, cmd Command) any {
 			ContentB64: base64.StdEncoding.EncodeToString(content),
 		}
 	case "read_range":
+		if hasRedact(cmd.Redact) {
+			red, err := parseRedaction(cmd.Redact)
+			if err != nil {
+				return errorResult(cmd, "read_range_error", err)
+			}
+			result, err := HandleReadRangeRedacted(cfg.BasePath, cmd.Path, cmd.Offset, cmd.Length, red)
+			if err != nil {
+				return errorResult(cmd, "read_range_error", err)
+			}
+			result.Type, result.ID = "read_range_result", cmd.ID
+			return result
+		}
 		size, head, data, err := HandleReadRange(cfg.BasePath, cmd.Path, cmd.Offset, cmd.Length, cmd.HeadLength)
 		if err != nil {
 			return ErrorResult{Type: "read_range_error", ID: cmd.ID, Error: err.Error()}

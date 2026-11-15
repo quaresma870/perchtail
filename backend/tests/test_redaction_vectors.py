@@ -203,9 +203,15 @@ def test_rule_digest_vector(vector):
     "vector", VECTORS["rule_errors"], ids=[v["name"] for v in VECTORS["rule_errors"]]
 )
 def test_rule_error_vector(vector):
-    """Rule lists both engines refuse to compile."""
-    with pytest.raises(RedactionRuleError):
+    """Rule lists both engines refuse to compile (or, marked accepted, a
+    limit both accept)."""
+    if vector.get("accepted"):
         compile_rules(vector["rules"])
+        return
+    with pytest.raises(RedactionRuleError) as caught:
+        compile_rules(vector["rules"])
+    if "message" in vector:
+        assert str(caught.value).endswith(vector["message"])
 
 
 def test_every_detector_has_a_vector():

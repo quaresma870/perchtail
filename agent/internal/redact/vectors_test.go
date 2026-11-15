@@ -368,14 +368,24 @@ func TestLongLineCutVectors(t *testing.T) {
 }
 
 func TestRuleErrorVectors(t *testing.T) {
-	// Rule lists both engines refuse to compile.
+	// Rule lists both engines refuse to compile (or, marked accepted, a
+	// limit both accept).
 	for _, v := range loadVectors(t).RuleErrors {
 		v := v
 		t.Run(v["name"].(string), func(t *testing.T) {
 			_, err := Compile(ruleSpecs(v))
+			if accepted, _ := v["accepted"].(bool); accepted {
+				if err != nil {
+					t.Fatalf("want it accepted, got %v", err)
+				}
+				return
+			}
 			var ruleErr *RuleError
 			if !errors.As(err, &ruleErr) {
 				t.Fatalf("want a RuleError, got %v", err)
+			}
+			if message, ok := v["message"].(string); ok && !strings.HasSuffix(ruleErr.Message, message) {
+				t.Fatalf("message %q doesn't end with %q", ruleErr.Message, message)
 			}
 		})
 	}

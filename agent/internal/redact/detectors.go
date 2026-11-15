@@ -493,6 +493,11 @@ var (
 
 const cacheSize = 32
 
+// MaxRuleLength is the largest max_length a custom rule may declare, in
+// bytes, as the backend's MAX_RULE_LENGTH: a larger one is refused, so the
+// cut guard stays small.
+const MaxRuleLength = 4096
+
 // Compile compiles a rule list, cached by its digest so the same rules
 // compile once. It returns a *RuleError for a rule that can't run.
 func Compile(specs []RuleSpec) (*Rules, error) {
@@ -610,8 +615,9 @@ func compile(specs []RuleSpec) (*Rules, error) {
 		}
 		if raw, ok := spec["max_length"]; ok && raw != nil {
 			maxLength, isInt := intValue(raw)
-			if !isInt || maxLength < 1 {
-				return nil, &RuleError{fmt.Sprintf("redaction rule %q: max_length must be a positive number of bytes", name)}
+			if !isInt || maxLength < 1 || maxLength > MaxRuleLength {
+				return nil, &RuleError{fmt.Sprintf(
+					"redaction rule %q: max_length must be a whole number of bytes from 1 to %d", name, MaxRuleLength)}
 			}
 			out.maxLength = max(out.maxLength, maxLength)
 		}
