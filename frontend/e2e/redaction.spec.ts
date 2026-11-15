@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { expect, test, type APIRequestContext } from '@playwright/test'
 
@@ -9,8 +9,9 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
 // A local-disk source under the e2e backend's LOCAL_SOURCE_ROOTS
 // (backend/scripts/run_e2e_server.sh). Redaction is deployment-wide, so the
 // test turns it back off (and the detectors it turned on) whatever happens.
+const fixtureRoot = '/tmp/perchtail-e2e-fixtures'
 const stamp = Date.now()
-const folder = path.join('/tmp/perchtail-e2e-fixtures', `redaction-${stamp}`)
+let folder = ''
 const fileName = 'app.log'
 
 interface RedactionRule {
@@ -32,7 +33,9 @@ async function setRedaction(request: APIRequestContext, enabled: boolean) {
 }
 
 test('redacted content in the viewer and in Tail', async ({ page }) => {
-  mkdirSync(folder, { recursive: true })
+  mkdirSync(fixtureRoot, { recursive: true })
+  // A private folder with an unpredictable name (0700), not a fixed path in /tmp.
+  folder = mkdtempSync(path.join(fixtureRoot, 'redaction-'))
   const filePath = path.join(folder, fileName)
   writeFileSync(
     filePath,
@@ -91,6 +94,6 @@ test('redacted content in the viewer and in Tail', async ({ page }) => {
       const deleted = await page.request.delete(`/sources/${sourceId}`)
       expect(deleted.ok()).toBeTruthy()
     }
-    rmSync(folder, { recursive: true, force: true })
+    if (folder) rmSync(folder, { recursive: true, force: true })
   }
 })
