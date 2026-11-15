@@ -45,7 +45,7 @@ A FastAPI app (`app/main.py`). The lifespan, in order:
 
 On shutdown it stops the scheduler and drains the worker pools within `SHUTDOWN_TIMEOUT_SECONDS` (`app/jobs.py`, `shutdown`).
 
-Routers in `app/api/`, by area: auth (login, logout, profile, password change, MFA, own sessions, SSO login), users, roles, SSO configuration, customers, folders, sources, rules, archive (browse, open, follow, close, download and folder ZIP under `/sources/{id}`), file-name search, alerts, audit log, YAML import and export, system settings, update check, severity patterns, redaction rules, the agent WebSocket and binaries, agent upgrades, and monitoring. `/healthz` and `/readyz` are defined in `app/main.py`. The HTTP API is internal to the frontend and may change before 1.0; don't document it as a public interface.
+Routers in `app/api/`, by area: auth (login, logout, profile, password change, MFA, own sessions, SSO login), users, roles, SSO configuration, customers, folders, sources, rules, archive (browse, open, follow, close, download and folder ZIP under `/sources/{id}`), file-name search, alerts, audit log, YAML import and export, the access report, system settings, update check, severity patterns, redaction rules, the agent WebSocket and binaries, agent upgrades, and monitoring. `/healthz` and `/readyz` are defined in `app/main.py`. The HTTP API is internal to the frontend and may change before 1.0; don't document it as a public interface.
 
 The built frontend (`frontend/dist`) is served by the backend at `/` when it exists.
 
@@ -114,9 +114,10 @@ Implemented in `app/rules.py`.
 Implemented in `app/auth/rbac.py`.
 
 - Each user has exactly one role (`User.role_id`).
-- A role has global capabilities: `manage_users`, `manage_roles`, `manage_sso`, `create_source`, `manage_system_settings`, `view_audit_log` and `manage_alerts`.
+- A role has global capabilities: `manage_users`, `manage_roles`, `manage_sso`, `create_source`, `manage_system_settings`, `view_audit_log`, `manage_alerts` and `view_access_report`.
 - A role's grants (`RoleGrant`) give scoped capabilities on a customer, a folder or a source: `view`, `download`, `manage_rules`, `run_now` and `manage_source`. `manage_rules` covers only the visibility rules; `manage_source` covers editing, moving and deleting sources, renaming, moving and deleting folders, renaming and deleting customers (with a grant on the customer itself), agent tokens, saved credentials and agent upgrades, and, together with `create_source`, adding sources and folders. `run_now` starts a file-name index pass.
 - A grant applies to everything below its scope, including sources added later. The most specific grant wins: source, then the nearest folder up the tree, then the customer. With no grant, access is denied.
+- One function decides: `resolve_access` returns the capabilities and the grant that decided them (`via`), reading grants and folders through a `GrantLookup` (the database, or the access report's in-memory snapshot). `resolve_capability`, `holds_capability_at` and the access report (`app/access_report.py`) all go through it.
 - A role holds at most one grant per scope (`uq_rolegrant_scope`).
 - Customers and folders are listed and reachable only within a role's grants (`org_reach`); one outside answers 404 (`concealed`), audited as `access.denied`. Only a super admin creates customers.
 - A super-admin role bypasses grants. The system log source (`is_system`) is reachable by super admins only.
@@ -174,7 +175,7 @@ Auth tables (`backend/app/auth/models.py`):
 
 - `Role`: name, built-in and super-admin flags, global capabilities.
 - `RoleGrant`: scoped capabilities of a role on a customer, folder or source.
-- `User`: username, profile, preferences, role, provider and SSO identity, password and MFA state.
+- `User`: username, profile, preferences, role, provider and SSO identity (with the IdP group whose mapping gave the role, `sso_role_group`), password and MFA state.
 - `MfaBackupCode`: a hashed one-time recovery code.
 - `PasswordHistory`: a previous password hash, kept only while the history rule needs it.
 - `SSOProviderConfig`: the OIDC provider, configuration encrypted.
@@ -209,7 +210,7 @@ backend/
     jobs.py, scheduler.py
     rules.py, scratch.py, archives.py, source_roots.py, limits.py
     alerts.py, name_index.py, name_index_store.py, source_status.py
-    audit.py, audit_hash_chain.py, audit_integrity.py, audit_purge.py, auth_events.py
+    audit.py, audit_hash_chain.py, audit_integrity.py, audit_purge.py, auth_events.py, access_report.py
     crypto.py, rotate_credential_key.py, backup.py, config_transfer.py
     agent_registry.py, agent_upgrades.py, agent_upgrade_policy.py
     monitoring_access.py, health.py, metrics.py, update_check.py

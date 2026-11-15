@@ -38,6 +38,7 @@
     { key: 'manage_system_settings', label: 'Manage system settings (feature toggles)' },
     { key: 'view_audit_log', label: 'View audit log' },
     { key: 'manage_alerts', label: 'Create and edit alerts (webhooks export log content)' },
+    { key: 'view_access_report', label: 'View access report' },
   ]
   const SCOPE_TYPES: ScopeType[] = ['customer', 'folder', 'source']
 

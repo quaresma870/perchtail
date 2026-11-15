@@ -930,3 +930,117 @@ def test_passwords_left_on_sso_accounts_are_cleared_and_audited(tmp_path, monkey
     _alembic(tmp_path, "downgrade", BEFORE_SSO_PASSWORDS_CLEARED)
     _alembic(tmp_path, "upgrade", "head")
     assert _outbox(db) == []
+
+
+# --- e5c2a8d71f43: user.sso_role_group added -----------------------------------------
+
+BEFORE_SSO_ROLE_GROUP = "e5c1b7a94d26"
+
+
+def _add_user(db: Path, username: str) -> None:
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO role (id, name, is_builtin, is_super_admin, "
+            "global_capabilities) VALUES (1, 'r', 0, 0, '[]')"
+        )
+        conn.execute(
+            'INSERT INTO "user" (username, role_id, active, auth_provider, '
+            "must_change_password, mfa_enabled) VALUES (?, 1, 1, 'oidc', 0, 0)",
+            (username,),
+        )
+
+
+def _usernames(db: Path) -> list[str]:
+    with sqlite3.connect(db) as conn:
+        return [row[0] for row in conn.execute('SELECT username FROM "user" ORDER BY id')]
+
+
+def test_sso_role_group_goes_down_and_up(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "head")
+    assert "sso_role_group" in _columns(db, "user")
+    _add_user(db, "a@example.com")
+
+    _alembic(tmp_path, "downgrade", BEFORE_SSO_ROLE_GROUP)
+    assert "sso_role_group" not in _columns(db, "user")
+    assert _usernames(db) == ["a@example.com"]
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert "sso_role_group" in _columns(db, "user")
+    assert _usernames(db) == ["a@example.com"]
+
+
+def test_the_sso_role_group_upgrade_runs_again_after_an_interruption(tmp_path):
+    # A leftover copy from an interrupted rebuild of user is dropped.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_SSO_ROLE_GROUP)
+    _add_user(db, "a@example.com")
+    _interrupt_rebuild(db, "user", after_drop=False)
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert "sso_role_group" in _columns(db, "user")
+    assert _usernames(db) == ["a@example.com"]
+    assert "_alembic_tmp_user" not in _tables(db)
+
+
+def test_an_sso_role_group_upgrade_interrupted_after_the_drop_is_finished(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_SSO_ROLE_GROUP)
+    _add_user(db, "a@example.com")
+    _add_user(db, "b@example.com")
+    _interrupt_rebuild(db, "user", after_drop=True)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    assert "interrupted rebuild of table user was finished" in result.stderr
+    assert _usernames(db) == ["a@example.com", "b@example.com"]
+    assert "sso_role_group" in _columns(db, "user")
+    assert "_alembic_tmp_user" not in _tables(db)
+
+
+def test_an_sso_role_group_upgrade_with_nothing_to_recover_stops(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_SSO_ROLE_GROUP)
+    with sqlite3.connect(db) as conn:
+        conn.execute('DROP TABLE "user"')
+    before = _tables(db)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode != 0
+    assert "Table user is missing" in result.stderr
+    assert "pre-upgrade backup" in result.stderr
+    assert _tables(db) == before
+    assert _version(db) == BEFORE_SSO_ROLE_GROUP
+
+
+def test_an_sso_role_group_upgrade_that_finished_before_the_interruption_runs_again(tmp_path):
+    # Interrupted after the column was added, before the version was recorded.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = ?", (BEFORE_SSO_ROLE_GROUP,))
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert _version(db) == "e5c2a8d71f43"
+    assert "sso_role_group" in _columns(db, "user")
+
+
+def test_an_sso_role_group_downgrade_runs_again_after_an_interruption(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "head")
+    _add_user(db, "a@example.com")
+    _interrupt_rebuild(db, "user", after_drop=True)
+
+    result = _alembic_run(tmp_path, "downgrade", BEFORE_SSO_ROLE_GROUP)
+    assert result.returncode == 0, result.stderr
+    assert "interrupted rebuild of table user was finished" in result.stderr
+    assert _usernames(db) == ["a@example.com"]
+    assert "sso_role_group" not in _columns(db, "user")
+    assert "_alembic_tmp_user" not in _tables(db)
+
+    # Interrupted after the column went, before the version was recorded.
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = 'e5c2a8d71f43'")
+    _alembic(tmp_path, "downgrade", BEFORE_SSO_ROLE_GROUP)
+    assert _version(db) == BEFORE_SSO_ROLE_GROUP
+    assert "sso_role_group" not in _columns(db, "user")

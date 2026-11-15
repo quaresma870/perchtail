@@ -19,6 +19,7 @@ Related guides:
 - [Rules](#rules)
 - [Roles and capabilities](#roles-and-capabilities)
 - [Users](#users)
+- [Access review](#access-review)
 - [Single sign-on](#single-sign-on)
 - [Email](#email)
 - [Audit log](#audit-log)
@@ -141,6 +142,7 @@ A role with no grants can't see any source.
 | **Manage system settings (feature toggles)** | `manage_system_settings` | **Settings → System** and **Settings → Severity indicators**, the monitoring token, and the system-wide agent upgrade policy and window. |
 | **View audit log** | `view_audit_log` | **Settings → Audit log**, including **Verify now**. |
 | **Create and edit alerts (webhooks export log content)** | `manage_alerts` | Create, edit, test, turn on and off your own alerts. Alerts send log lines to an outside URL, so viewing a source doesn't imply this. |
+| **View access report** | `view_access_report` | Generate the access report, see [Access review](#access-review). It only reads, so a reviewer can review access without being able to change it; **Manage users** and **Manage roles** don't include it. |
 
 Some actions are for super admins only, whatever the capabilities: **Settings → Import / export**, **Mark as known** on the audit log, the **Updates** card under **Settings → System**, the super-admin flag, and the built-in application-log source.
 
@@ -220,6 +222,73 @@ A role can't be deleted while users hold it or while an SSO group mapping points
 Users are never deleted, only deactivated. The last active super admin can't be deactivated or moved to a role without super admin.
 
 Users manage their own MFA in **My profile**. There is no way to reset another user's MFA from the Settings pages. Local accounts of super admins and of roles with any global capability must use MFA; **Require MFA for local accounts** under **Settings → System** extends that to every local account ([configuration.md](configuration.md#two-factor-authentication-card)). An account that must use MFA and hasn't set it up can only set it up after signing in.
+
+## Access review
+
+The access report answers who holds what, where, for periodic reviews of access rights. It is computed by the same grant resolution that decides every request (see [How a grant is chosen](#how-a-grant-is-chosen)), at the moment it is generated, so it shows what PerchTail actually enforces. Everything it reads comes from one read transaction, so a change saved while it is being generated is either wholly in the report or not at all. Generating it needs **View access report**; nothing is stored, and each report is generated anew.
+
+The report is available as `GET /access-report`, with these parameters:
+
+| Parameter | Values | Default |
+|---|---|---|
+| `view` | `users`: each user with their access per source. `sources`: each source with who holds what on it. | `users` |
+| `format` | `json`, or `csv` to download a file named `perchtail-access-report-<view>-<UTC date>.csv`. | `json` |
+| `inactive_days` | How many days without signing in make an account inactive, 1 to 3650. | `90` |
+
+Every report says when (UTC) and by whom it was generated: `generated_at` and `generated_by` at the top of the JSON, and as the first two columns of every CSV row. The JSON also says the `scope` (`full` or `delegated`, see below), the `view` and the `parameters`.
+
+### What it lists
+
+Only active accounts are listed. For each user:
+
+| Field | What it is |
+|---|---|
+| `username`, `display_name` | The account. Emails are not included. |
+| `role` | The user's role (id and name). |
+| `auth_provider` | `local` or `oidc`. |
+| `sso_role_group` | For an SSO account, the identity-provider group whose mapping gave the role at the user's last sign-in. Empty when no mapping matched, when an administrator changed the role by hand afterwards, and until the user's first sign-in after upgrading to the release that added it. Only this one group name is kept, never the account's other groups. |
+| `last_login_at` | The last sign-in, UTC; empty if the account never signed in. |
+| `mfa` | `enabled` or `disabled` for a local account; `idp` for an SSO account, whose second factor is the identity provider's. |
+| `global_capabilities` | The role's global capabilities; all of them for a super admin. |
+| `flags` | See below. |
+| `reaches_all_sources` | `capabilities`: the capabilities the user holds on every source in the report (the system source aside). `customer_grant_on_every_customer`: whether the role also has a grant on every customer, so that sources added later are reached too. |
+| `access` (`users` view) | One entry per source where the user holds at least one capability: the source, its customer and folders, the `capabilities`, and `via`. |
+
+The `sources` view lists every source in the report, with its customer and folders, and for each user who holds something on it the `capabilities` and `via`. A source nobody holds anything on is listed with no users.
+
+`via` says what decided an access, as a list, so that other ways of holding access can be added later without changing the format. Each entry has `principal_type` (today always `role`), `principal_id` and `principal_name` (the role), and the scope of the grant that decided: `scope_type` (`customer`, `folder` or `source`, or `super_admin` for a super admin, whom no grant decides), `scope_id` and `scope_name`. When the grant sits above what the person generating the report may see, the entry keeps its `scope_type`, has no `scope_id` or `scope_name`, and `above_your_scope` is `true`.
+
+### Flags
+
+| Flag | Meaning |
+|---|---|
+| `super_admin` | The role is a super-admin role: it passes every check. |
+| `global_capabilities` | The role has at least one global capability: a privileged account. |
+| `local_without_mfa` | A local account without MFA. |
+| `must_change_password` | An account created with a temporary password that hasn't chosen its own yet. |
+| `inactive` | Never signed in, or not for more than `inactive_days` days. |
+| `reaches_all_sources` | The user holds at least one capability on every source in the report; `reaches_all_sources.capabilities` says which. |
+
+### Delegated reviewers
+
+A super admin's report covers every user and every source, the built-in application-log source included (`scope` is `full`). Anyone else with **View access report** gets a report limited to their own scope (`scope` is `delegated`):
+
+- only the sources where they hold at least one capability themselves;
+- every active user who holds something on those sources, whatever their own privileges (super admins included), and only the access they hold there;
+- users without any access there only when the reviewer also has **Manage users**;
+- folder names above the reviewer's own grant are left out of a source's path (`folder_path_truncated` is `true`, and the CSV shows `…` in their place), and so are the id and name of a grant scope above it in `via`; `reaches_all_sources` and its customer detail only consider the sources and customers within that scope.
+- a source's customer is always shown in its place (`customer_id` and `customer_name`, and the start of `path`), even when the reviewer's grant is on a folder below it, because the reviewer already sees it in the Sources list; a grant on that customer still shows as `above_your_scope` in `via`, without its id or name.
+
+### CSV columns
+
+The CSV has one row per user and source (`view=users`) or per source and user (`view=sources`). A user without access, or a source without users, gets one row with the other side empty. Lists inside a cell are separated by `; `. A cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'`, so a spreadsheet doesn't run it as a formula.
+
+- `view=users`: `generated_at`, `generated_by`, `username`, `display_name`, `role`, `auth_provider`, `sso_role_group`, `last_login_at`, `mfa`, `global_capabilities`, `flags`, `source_id`, `source`, `path`, `capabilities`, `via`.
+- `view=sources`: `generated_at`, `generated_by`, `source_id`, `source`, `path`, `username`, `display_name`, `role`, `capabilities`, `via`.
+
+`path` is the customer and folders, separated by ` / `. `via` reads like `role Operators: folder Web servers`, `role Operators: customer above your scope` or `role Super Admin: super admin`.
+
+Every report generated, shown or downloaded, is recorded in the audit log as `access_report.generate`, with the view, format, scope, `inactive_days` and how many users and rows it held, never its content. A request without **View access report** is refused and recorded as `access.denied`.
 
 ## Single sign-on
 

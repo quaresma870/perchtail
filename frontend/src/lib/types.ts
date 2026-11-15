@@ -12,6 +12,7 @@ export type GlobalCapability =
   | 'manage_system_settings'
   | 'view_audit_log'
   | 'manage_alerts'
+  | 'view_access_report'
 
 export interface CurrentUser {
   id: number

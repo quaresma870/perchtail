@@ -672,6 +672,78 @@ def test_complete_login_leaves_role_unchanged_when_no_group_matches(
     )
 
     assert user.role_id == manually_promoted.id
+    assert user.sso_role_group is None
+
+
+def _login_with_groups(session, monkeypatch, discovery_document, no_access, groups):
+    key_set = _make_key_set()
+    id_token = _sign_claims(key_set, _valid_claims(groups=groups))
+    _patch_idp(
+        monkeypatch,
+        discovery=discovery_document,
+        tokens={"id_token": id_token},
+        jwks=key_set.as_dict(),
+    )
+    settings = oidc.OIDCSettings(
+        issuer=ISSUER, client_id=CLIENT_ID, client_secret="s3cret", group_claim="groups"
+    )
+    return oidc.OIDCProvider(settings).complete_login(
+        session,
+        code="the-code",
+        redirect_uri="https://app.example.com/auth/sso/callback",
+        nonce="the-nonce",
+        code_verifier="the-verifier",
+        no_access_role_id=no_access.id,
+    )
+
+
+def test_complete_login_records_only_the_group_whose_mapping_gave_the_role(
+    session, monkeypatch, discovery_document
+):
+    no_access = _no_access_role(session)
+    tier1 = create_role(session, actor_user_id=None, name="Tier1")
+    tier2 = create_role(session, actor_user_id=None, name="Tier2")
+    session.add(SSOGroupRoleMapping(order=0, group_name="staff", role_id=tier1.id))
+    session.add(SSOGroupRoleMapping(order=1, group_name="engineering", role_id=tier2.id))
+    session.commit()
+
+    user = _login_with_groups(
+        session, monkeypatch, discovery_document, no_access, ["staff", "engineering", "vpn"]
+    )
+
+    assert user.role_id == tier2.id
+    # Last match wins, and the token's other groups aren't kept.
+    assert user.sso_role_group == "engineering"
+
+
+def test_complete_login_clears_the_sso_role_group_when_no_mapping_matches(
+    session, monkeypatch, discovery_document
+):
+    no_access = _no_access_role(session)
+    tier2 = create_role(session, actor_user_id=None, name="Tier2")
+    session.add(SSOGroupRoleMapping(order=0, group_name="engineering", role_id=tier2.id))
+    session.commit()
+    user = _login_with_groups(session, monkeypatch, discovery_document, no_access, ["engineering"])
+    assert user.sso_role_group == "engineering"
+
+    user = _login_with_groups(session, monkeypatch, discovery_document, no_access, ["sales"])
+
+    assert user.role_id == tier2.id
+    assert user.sso_role_group is None
+
+
+def test_resolve_group_mapping_returns_the_last_matching_mapping(session):
+    tier1 = create_role(session, actor_user_id=None, name="Tier1")
+    tier2 = create_role(session, actor_user_id=None, name="Tier2")
+    session.add(SSOGroupRoleMapping(order=1, group_name="engineering", role_id=tier2.id))
+    session.add(SSOGroupRoleMapping(order=0, group_name="staff", role_id=tier1.id))
+    session.commit()
+
+    mapping = oidc.resolve_group_mapping(session, ["staff", "engineering"])
+
+    assert mapping is not None
+    assert (mapping.group_name, mapping.role_id) == ("engineering", tier2.id)
+    assert oidc.resolve_group_mapping(session, ["sales"]) is None
 
 
 # --- the IdP over HTTPS only ----------------------------------------------------------

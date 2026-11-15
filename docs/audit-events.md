@@ -87,6 +87,7 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 | `system_settings.update` | System settings changed: for each setting, its value before and after (`{"old": ..., "new": ...}`); a secret value is recorded only as `"changed"`. |
 | `monitoring_token.regenerate` | The monitoring token generated or replaced. |
 | `config.export`, `config.import` | Configuration exported or imported. |
+| `access_report.generate` | An access report generated, shown or downloaded: the `view` (`users` or `sources`), the `format` (`json` or `csv`), the `scope` (`full` for a super admin, `delegated` otherwise), `inactive_days`, and how many `users` and access `rows` it held. Never the report's content. |
 | `credential_key.rotate` | The credential encryption key rotated. |
 | `backup.create`, `backup.verify`, `backup.restore` | Backups made, checked and restored. |
 | `agent.upgrade`, `agent.upgrade_resume` | Push agents upgraded from the portal. |

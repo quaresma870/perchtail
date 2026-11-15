@@ -18,6 +18,7 @@ const GLOBAL_CAPABILITIES: GlobalCapability[] = [
   'manage_system_settings',
   'view_audit_log',
   'manage_alerts',
+  'view_access_report',
 ]
 
 describe('capability labels', () => {

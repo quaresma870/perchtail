@@ -48,4 +48,5 @@ export const GLOBAL_CAPABILITY_SHORT_LABELS: Record<GlobalCapability, string> = 
   manage_system_settings: 'Manage system settings',
   view_audit_log: 'View audit log',
   manage_alerts: 'Manage alerts',
+  view_access_report: 'View access report',
 }
