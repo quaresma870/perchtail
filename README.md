@@ -281,10 +281,16 @@ Installing and running PerchTail:
 - [docs/configuration.md](docs/configuration.md) — configuration reference: environment variables and Settings → System
 - [docs/backup-and-restore.md](docs/backup-and-restore.md) — encrypted backups, scheduled backups, restoring, rolling back an upgrade and testing a restore
 - [docs/monitoring.md](docs/monitoring.md) — the liveness and readiness probes and who may call them, the detailed health endpoint and its token, Prometheus `/metrics`, the Zabbix 7.0 and 8.0 templates, and the log events worth alerting on
-- [docs/audit-events.md](docs/audit-events.md) — every event the audit log records, the fields of an entry, the client address behind a proxy, retention and integrity checks
 - [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — rotating `CREDENTIAL_ENCRYPTION_KEY` without losing access to what's already encrypted
 - [docs/high-availability.md](docs/high-availability.md) — whether and how to run PerchTail behind a load balancer or on Kubernetes, and what lives in the process
 - [docs/troubleshooting.md](docs/troubleshooting.md) — troubleshooting and FAQ
+
+Security:
+
+- [docs/security-model.md](docs/security-model.md) — the trust boundaries, who can do what (capabilities, grants and the rule that administrators never widen access), sign-in, sessions and browser protections, keys and encryption, connections to sources, and what PerchTail expects from its environment
+- [docs/hardening.md](docs/hardening.md) — a production checklist: keys, reverse proxy and TLS, `TRUSTED_PROXIES`, outbound connections, file permissions, NTP, sources, emergency accounts, MFA, monitoring and backups
+- [docs/data-and-retention.md](docs/data-and-retention.md) — everything PerchTail keeps (database, files, scratch, logs, backups, the browser), how long and how it is removed, users' personal data, and every connection that leaves the installation and how to turn it off
+- [docs/audit-events.md](docs/audit-events.md) — every event the audit log records, the fields of an entry, the client address behind a proxy, retention and integrity checks
 
 Connecting sources:
 
