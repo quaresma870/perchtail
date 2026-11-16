@@ -50,7 +50,7 @@ def manage_roles_client(session, client_for):
 
 def test_manage_roles_capability_can_create_role(session, manage_roles_client):
     response = manage_roles_client.post(
-        "/roles", json={"name": "Tier 2 — Vodacom", "global_capabilities": []}
+        "/roles", json={"name": "Tier 2 — Northwind", "global_capabilities": []}
     )
     assert response.status_code == 201
     assert response.json()["is_super_admin"] is False
@@ -134,7 +134,7 @@ def test_delete_role_without_users(session, admin_client):
 
 
 def test_duplicate_role_clones_name_and_grants(session, admin_client):
-    customer = Customer(name="Vodacom Tanzania")
+    customer = Customer(name="Northwind Telecom")
     session.add(customer)
     session.commit()
     session.refresh(customer)
@@ -173,7 +173,7 @@ def test_grant_crud_validates_scope_existence(session, admin_client):
 
 
 def test_grant_update_and_delete(session, admin_client):
-    customer = Customer(name="Vodacom Tanzania")
+    customer = Customer(name="Northwind Telecom")
     session.add(customer)
     session.commit()
     session.refresh(customer)
@@ -197,7 +197,7 @@ def test_grant_update_and_delete(session, admin_client):
 
 
 def test_source_scoped_grant_via_api(session, admin_client):
-    customer = Customer(name="Vodacom Tanzania")
+    customer = Customer(name="Northwind Telecom")
     session.add(customer)
     session.commit()
     session.refresh(customer)
