@@ -34,6 +34,7 @@ Done:
 - Access hardening: customers and folders only within a role's grants, one grant per scope, delegated admins limited to their own authority, and a separate manage-sources capability.
 - Sign-in hardening: MFA required for administrators (and optionally for every local account), failed sign-ins limited per username and per address, PKCE and issuer checks for SSO, and no local passwords on SSO accounts.
 - Forgotten password, reset by email for local accounts (#244), off by default.
+- An access report of who holds what, where, for access reviews (#384), on its own Settings page and as JSON or CSV.
 - Secure defaults: the published port on the loopback address, container hardening, a warning for a weak credential encryption key, `Cache-Control: no-store` on file content, the API docs off by default, a daily backup on new installs, no test code in the image, private scratch and log folders, encrypted webhook URLs, SMB signing and encryption per source, and a warning for WinRM sources without JEA.
 - Security documentation: the response times and the support policy in [SECURITY.md](SECURITY.md), and the audited events in [docs/audit-events.md](docs/audit-events.md).
 - Property-based API tests and accessibility checks in the end-to-end tests (#376, #377).
@@ -41,7 +42,6 @@ Done:
 Started:
 
 - Redaction of secrets, payment card numbers and personal data in viewed and downloaded content (#382), and masking by role (#249): the viewer, Tail and downloads get redacted content, redacted on the push agent's host when the agent can; alerts and a settings screen are still to do.
-- An access report of who holds what, where, for access reviews (#384): the report, as JSON or CSV, and its capability exist; a page to view it is still to do.
 
 ## 1.0.0
 

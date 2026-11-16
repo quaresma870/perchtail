@@ -24,6 +24,7 @@ const entry = (overrides: Partial<AuditLogEntry> = {}): AuditLogEntry => ({
 describe('targetTypeLabel', () => {
   it('names known types and passes unknown ones through', () => {
     expect(targetTypeLabel('role_grant')).toBe('Grant')
+    expect(targetTypeLabel('access_report')).toBe('Access report')
     expect(targetTypeLabel('something_new')).toBe('something_new')
   })
 })

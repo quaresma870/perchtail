@@ -175,6 +175,19 @@ test('accessibility: Settings -> Audit log', async ({ page }) => {
   await expectNoSeriousViolations(page)
 })
 
+test('accessibility: Settings -> Access review', async ({ page }) => {
+  await page.goto('/#/settings/access-review')
+  await settled(page, 'Access review')
+  await expect(page.getByText(/^Generated at /)).toBeVisible()
+  // A user's access opened, so the customer/folder tree is checked too.
+  await page.locator('tr.user-row').first().getByRole('button', { name: /^Show access of / }).click()
+  await expect(page.locator('tr.access-row')).toBeVisible()
+  await expectNoSeriousViolations(page)
+  await page.getByRole('button', { name: 'By source' }).click()
+  await expect(page.getByLabel('Search sources')).toBeVisible()
+  await expectNoSeriousViolations(page)
+})
+
 test('accessibility: Alerts', async ({ page }) => {
   await page.goto('/#/alerts')
   await settled(page, 'Alerts')

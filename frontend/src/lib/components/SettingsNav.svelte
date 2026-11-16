@@ -36,6 +36,11 @@
   {#if hasCapability($currentUser, 'view_audit_log') && $systemSettings.audit_view_enabled}
     <a href="#/settings/audit-log" class:active={isActive('/settings/audit-log')}>Audit log</a>
   {/if}
+  {#if hasCapability($currentUser, 'view_access_report')}
+    <a href="#/settings/access-review" class:active={isActive('/settings/access-review')}
+      >Access review</a
+    >
+  {/if}
 </nav>
 
 <style>

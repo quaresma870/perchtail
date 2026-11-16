@@ -38,6 +38,7 @@
   import ConfirmHost from './lib/components/ConfirmHost.svelte'
   import AuditLogSettings from './routes/AuditLogSettings.svelte'
   import AgentsSettings from './routes/AgentsSettings.svelte'
+  import AccessReport from './routes/AccessReport.svelte'
 
   const routes = {
     '/login': Login,
@@ -66,6 +67,7 @@
     '/settings/system': SystemSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
     '/settings/audit-log': AuditLogSettings,
+    '/settings/access-review': AccessReport,
     '/settings/import-export': ImportExportSettings,
   }
 

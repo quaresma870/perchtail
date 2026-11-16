@@ -178,6 +178,93 @@ export interface AppUser {
   last_login_at: string | null
 }
 
+// The access report (#384, backend/app/access_report.py).
+export type AccessReportView = 'users' | 'sources'
+export type AccessReportFlag =
+  | 'super_admin'
+  | 'global_capabilities'
+  | 'local_without_mfa'
+  | 'must_change_password'
+  | 'inactive'
+  | 'reaches_all_sources'
+
+/** What decided one access. A scope above the generator's own has no id
+ * or name and `above_your_scope` set. */
+export interface AccessReportVia {
+  principal_type: string
+  principal_id: number
+  principal_name: string
+  scope_type: ScopeType | 'super_admin'
+  scope_id: number | null
+  scope_name: string | null
+  above_your_scope: boolean
+}
+
+/** A source and where it sits, cut at the generator's boundary. */
+export interface AccessReportPlace {
+  source_id: number
+  source_name: string
+  is_system: boolean
+  customer_id: number | null
+  customer_name: string | null
+  folder_path: string[]
+  folder_path_truncated: boolean
+}
+
+export interface AccessReportAccess extends AccessReportPlace {
+  capabilities: Capability[]
+  via: AccessReportVia[]
+}
+
+export interface AccessReportRoleRef {
+  id: number
+  name: string
+}
+
+export interface AccessReportUser {
+  id: number
+  username: string
+  display_name: string | null
+  role: AccessReportRoleRef
+  auth_provider: 'local' | 'oidc' | 'saml'
+  sso_role_group: string | null
+  last_login_at: string | null
+  mfa: 'enabled' | 'disabled' | 'idp'
+  global_capabilities: GlobalCapability[]
+  flags: AccessReportFlag[]
+  reaches_all_sources: { capabilities: Capability[]; customer_grant_on_every_customer: boolean }
+  access: AccessReportAccess[]
+}
+
+export interface AccessReportHolder {
+  id: number
+  username: string
+  display_name: string | null
+  role: AccessReportRoleRef
+  capabilities: Capability[]
+  via: AccessReportVia[]
+}
+
+export interface AccessReportSource extends AccessReportPlace {
+  users: AccessReportHolder[]
+}
+
+export interface AccessReportHeader {
+  generated_at: string
+  generated_by: { id: number; username: string }
+  scope: 'full' | 'delegated'
+  view: AccessReportView
+  parameters: { inactive_days: number }
+}
+
+export interface AccessReportByUser extends AccessReportHeader {
+  users: AccessReportUser[]
+}
+
+export interface AccessReportBySource extends AccessReportHeader {
+  sources: AccessReportSource[]
+}
+
 export interface BrowseEntry {
   name: string
   path: string
