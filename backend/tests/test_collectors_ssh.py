@@ -273,8 +273,8 @@ def test_a_connection_to_a_pinned_host_does_not_rewrite_known_hosts(monkeypatch,
     ssh_module._connect(_source())
 
     saved = paramiko.HostKeys(str(known_hosts))
-    assert "gone.example.com" not in saved
-    assert "app01.example.com" in saved
+    assert saved.lookup("gone.example.com") is None
+    assert saved.lookup("app01.example.com") is not None
 
 
 def test_connect_loads_previously_saved_host_keys_on_a_later_call(monkeypatch, tmp_path):
