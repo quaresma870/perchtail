@@ -229,6 +229,17 @@ export interface SSOStatus {
   name: string | null
 }
 
+// GET /auth/login-options: what the login page offers besides signing in.
+export interface LoginOptions {
+  password_reset: boolean
+}
+
+// POST /auth/password-reset/check (#244).
+export interface PasswordResetCheck {
+  valid: boolean
+  policy: PasswordPolicy | null
+}
+
 export interface GroupRoleMapping {
   id: number
   order: number
@@ -285,6 +296,11 @@ export interface SystemSettings {
   redaction_download_suffix: boolean
   // MFA for every local account, not only administrators; super admins only.
   require_mfa_local_accounts: boolean
+  // Password recovery by email (#244): super admins only.
+  password_reset_enabled: boolean
+  password_reset_minutes: number
+  // Why it can't be turned on or doesn't work now, or null when it can.
+  password_reset_unavailable: string | null
 }
 
 // GET /system-settings/backups (#334): the backups in BACKUP_DIR, newest

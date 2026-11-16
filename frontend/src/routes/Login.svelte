@@ -3,7 +3,8 @@
   import { push } from 'svelte-spa-router'
   import { login } from '../lib/auth'
   import { api, ApiError } from '../lib/api'
-  import type { SSOStatus } from '../lib/types'
+  import { loginNotice } from '../lib/login-notice'
+  import type { LoginOptions, SSOStatus } from '../lib/types'
 
   let username = ''
   let password = ''
@@ -11,6 +12,10 @@
   let error = ''
   let submitting = false
   let sso: SSOStatus = { enabled: false, name: null }
+  // "Forgot password?" (#244): only when recovery by email is on and ready.
+  let passwordReset = false
+  // Shown once, e.g. after a password reset.
+  let notice = ''
   // Set once the password step succeeds but the account needs a second
   // factor -- switches the form to asking for the TOTP/backup code instead
   // of restarting from username/password (see lib/auth.ts's login()).
@@ -20,7 +25,14 @@
     if (window.location.hash.includes('sso_error=1')) {
       error = 'SSO sign-in failed — please try again or use your local account.'
     }
-    sso = await api.get<SSOStatus>('/auth/sso/status').catch(() => ({ enabled: false, name: null }))
+    notice = $loginNotice
+    loginNotice.set('')
+    const [ssoStatus, options] = await Promise.all([
+      api.get<SSOStatus>('/auth/sso/status').catch(() => ({ enabled: false, name: null })),
+      api.get<LoginOptions>('/auth/login-options').catch(() => ({ password_reset: false })),
+    ])
+    sso = ssoStatus
+    passwordReset = options.password_reset
   })
 
   async function handleSubmit() {
@@ -85,6 +97,9 @@
         Back
       </button>
     {:else}
+      {#if notice}
+        <p class="notice" role="status">{notice}</p>
+      {/if}
       <label>
         Username
         <input class="input" type="text" bind:value={username} autocomplete="username" required />
@@ -105,6 +120,9 @@
       <button class="btn btn-primary" type="submit" disabled={submitting}>
         {submitting ? 'Signing in…' : 'Sign in'}
       </button>
+      {#if passwordReset}
+        <a class="forgot" href="#/forgot-password">Forgot password?</a>
+      {/if}
 
       {#if sso.enabled}
         <div class="divider"><span>or</span></div>
@@ -162,6 +180,16 @@
     color: var(--danger);
     font-size: 0.85rem;
     margin: 0;
+  }
+  .notice {
+    color: var(--success);
+    font-size: 0.85rem;
+    margin: 0;
+  }
+  .forgot {
+    align-self: center;
+    font-size: 0.82rem;
+    color: var(--accent-hover);
   }
   .hint {
     color: var(--text-faint);

@@ -49,7 +49,7 @@ The defaults below are the code's defaults. Relative paths are relative to the w
 | `LOGIN_LOCKOUT_SECONDS` | `300` | A whole number of seconds | How long the lockout lasts. The counts are kept in memory: a restart clears them. |
 | `INITIAL_ADMIN_USERNAME` | `admin` | A username | The break-glass super admin PerchTail creates on its first start, only when the database has no users. Its password is generated and written to `DATA_DIR/initial-admin-password`, readable only by PerchTail's user; the log only says where the file is (`initial_super_admin.seeded`, field `password_file`). The password must be changed at first sign-in, and the file is deleted when it is. Changing the variable later has no effect. |
 | `SSO_ALLOW_HTTP_LOCALHOST` | `false` | `true`, `false` | The OIDC issuer and the endpoints its discovery document names must be `https://`. `true` also accepts `http://` on `localhost`, `127.0.0.1` and `::1`, for local development with a test identity provider. Never on another host. |
-| `PUBLIC_BASE_URL` | `http://localhost:8080` | The external URL users reach PerchTail at, without a trailing slash | Builds the OIDC redirect URI, `<PUBLIC_BASE_URL>/auth/sso/callback`, and the address the browser returns to after an SSO sign-in. Must match the redirect URI registered at the identity provider ([sso-setup.md](sso-setup.md)). Only used for SSO. |
+| `PUBLIC_BASE_URL` | `http://localhost:8080` | The external URL users reach PerchTail at, without a trailing slash | Builds the OIDC redirect URI, `<PUBLIC_BASE_URL>/auth/sso/callback`, and the address the browser returns to after an SSO sign-in. Must match the redirect URI registered at the identity provider ([sso-setup.md](sso-setup.md)). Also the start of the links in password-reset emails, which can only be turned on while it starts with `https://`. |
 
 ## Sources and connectors
 
@@ -245,6 +245,15 @@ Local accounts of super admins and of roles with any global capability must alwa
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
 | `require_mfa_local_accounts` | **Require MFA for local accounts** | off | on, off | Extends the requirement to every local account. Applied at once: anyone covered without MFA is asked to set it up on their next request. Only a super admin can change it, either way. |
+
+### Password recovery card
+
+Lets users of local accounts reset a forgotten password through a link sent to their email ([user-guide.md](user-guide.md#forgotten-password), [admin-guide.md](admin-guide.md#password-recovery)). Off by default. It can be turned on only while email is set up and on under **Settings → Email** and `PUBLIC_BASE_URL` starts with `https://`; otherwise the switch is unavailable and the card says why. Accounts of super admins and of roles with any global capability, SSO accounts, and accounts without an email can't use it. Only a super admin can change these settings.
+
+| Key | On screen | Default | Accepted values | Effect |
+|---|---|---|---|---|
+| `password_reset_enabled` | **Password recovery by email** | off | on, off | Shows **Forgot password?** on the sign-in page and sends reset links. It stops working, without changing the setting, while email is off or removed or `PUBLIC_BASE_URL` isn't https. |
+| `password_reset_minutes` | **Links work for** | `30` | 5 to 60 minutes | How long a reset link works after it's sent. |
 
 ### Password policy card
 
