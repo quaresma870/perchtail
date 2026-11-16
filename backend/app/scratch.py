@@ -41,7 +41,19 @@ class ScratchStore:
         self.max_bytes = max_bytes
         self._entries: dict[str, ScratchEntry] = {}
         self._lock = threading.Lock()
-        self.root.mkdir(parents=True, exist_ok=True)
+        # Readable by the app's user only, like the files in it (see acquire).
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(self.root, 0o700)
+        except OSError:
+            # A folder of another owner (a mount point, say): the files in it
+            # are still created 0600. As in app/data_layout.py, don't refuse
+            # to start over it.
+            logger.warning(
+                "startup.scratch_dir_permissions_unchanged",
+                path=str(self.root),
+                hint="couldn't make it readable by PerchTail's user only; check its owner",
+            )
 
     def acquire(self, key: str) -> Path:
         """Marks key as in-use (refcount += 1) and returns a new, unique
@@ -55,6 +67,9 @@ class ScratchStore:
                 entry = ScratchEntry(key=key)
                 self._entries[key] = entry
             path = self.root / f"{key}-{uuid.uuid4().hex}"
+            # Created empty here, 0600, so the content written into it later
+            # is never readable by another user, whatever the umask.
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
             entry.paths.append(path)
             entry.refcount += 1
             entry.last_accessed = time.monotonic()

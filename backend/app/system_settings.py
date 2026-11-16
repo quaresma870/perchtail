@@ -36,9 +36,20 @@ BOOL_DEFAULTS: dict[str, str] = {
     # MFA for every local account, not only the administrators who always
     # need it (app/auth/mfa_policy.py). Off by default; super admins only.
     "require_mfa_local_accounts": "false",
+    # Password recovery by email for local accounts (#244,
+    # app/auth/password_reset.py). Off by default; super admins only
+    # (PASSWORD_RESET_SETTINGS). Only works while email is set up and on and
+    # PUBLIC_BASE_URL is https.
+    "password_reset_enabled": "false",
 }
 
-# The settings above that only a super admin may change (app/api/system_settings.py).
+# The password recovery settings, which only a super admin may change
+# (app/api/system_settings.py).
+PASSWORD_RESET_SETTINGS: frozenset[str] = frozenset(
+    {"password_reset_enabled", "password_reset_minutes"}
+)
+
+# The redaction settings, which only a super admin may change (app/api/system_settings.py).
 REDACTION_SETTINGS: frozenset[str] = frozenset(
     {"redaction_enabled", "redaction_downloads", "redaction_download_suffix"}
 )
@@ -122,8 +133,11 @@ INT_DEFAULTS: dict[str, str] = {
     "agent_upgrade_failure_limit": "3",
     "agent_upgrade_concurrency": "5",
     # Scheduled online backup (#334, app/backup.py), in hours, 1 to 168;
-    # 0 (the default) turns it off.
-    "backup_interval_hours": "0",
+    # 0 turns it off. Every 24 hours on a new install; an install from before
+    # this default keeps its own value (migration f7a2c4e9b351 stores 0 there).
+    "backup_interval_hours": "24",
+    # How long a password-reset link works (#244), in minutes, 5 to 60.
+    "password_reset_minutes": "30",
 }
 
 

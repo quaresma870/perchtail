@@ -41,7 +41,9 @@ The defaults below are the code's defaults. Relative paths are relative to the w
 
 | Variable | Default | Accepted values | Effect |
 |---|---|---|---|
-| `CREDENTIAL_ENCRYPTION_KEY` | `changeme` | Any string; generate one with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` | The root secret. With the salt, it encrypts source credentials, SSO provider settings and MFA secrets, keys the audit log's hash chain, and, unless `BACKUP_ENCRYPTION_KEY` is set, encrypts backups. PerchTail refuses to start while it is `changeme` (`startup.insecure_credential_encryption_key`). Changing it on an existing install needs a rotation, not just a new value: see [credential-key-rotation.md](credential-key-rotation.md). |
+| `CREDENTIAL_ENCRYPTION_KEY` | `changeme` | Any string; generate one with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` | The root secret. With the salt, it encrypts source credentials, SSO provider settings and MFA secrets, keys the audit log's hash chain, and, unless `BACKUP_ENCRYPTION_KEY` is set, encrypts backups. PerchTail refuses to start while it is `changeme` (`startup.insecure_credential_encryption_key`). Changing it on an existing install needs a rotation, not just a new value: see [credential-key-rotation.md](credential-key-rotation.md). A key shorter than 32 bytes, or with less than 128 bits of estimated entropy, is a warning at startup (`startup.weak_credential_encryption_key`) and at the top of Settings → System; see `CREDENTIAL_KEY_REFUSE_WEAK`. |
+| `CREDENTIAL_KEY_REFUSE_WEAK` | `false` | `true`, `false` | `true` refuses to start with a weak `CREDENTIAL_ENCRYPTION_KEY` instead of only warning. A key is weak when it is shorter than 32 bytes once decoded (a hex or base64 key counts the bytes it decodes to, any other key its UTF-8 bytes) or has less than 128 bits of estimated entropy (its length times the Shannon entropy of its characters, capped by its size compressed with zlib, so a repeated word or phrase doesn't pass). The keys the generator above makes always pass. Planned to become the default in 1.0; change a weak key with a rotation ([credential-key-rotation.md](credential-key-rotation.md)). |
+| `API_DOCS` | `false` | `true`, `false` | `true` serves the interactive API documentation at `/docs` and `/redoc` and the OpenAPI schema at `/openapi.json`. Off, they answer 404: the HTTP API is internal to the web UI and may change before 1.0, and the schema lists every endpoint for whoever can reach the server. |
 | `CREDENTIAL_SALT_ALLOW_REGENERATE` | `false` | `true`, `false` | Leave it `false`. When the salt file is missing and the database already holds encrypted data, PerchTail refuses to start (`startup.credential_salt_missing`) so that you can restore the salt. `true` lets it start with a new salt (`startup.credential_salt_regenerated`): every source credential, SSO secret and MFA secret must then be entered again, and older audit rows fail the integrity check. Set it back to `false` afterwards. |
 | `SESSION_TTL_HOURS` | `12` | A whole number of hours | How long a sign-in lasts. The session expires that long after sign-in, whatever the activity, and the cookie has the same lifetime. |
 | `SESSION_COOKIE_SECURE` | `true` | `true`, `false` | The `Secure` flag on the session cookie and the SSO sign-in cookie. Keep `true` behind HTTPS. Browsers drop a `Secure` cookie over plain HTTP, so sign-in fails without an error on `http://`; set `false` only for local tests over HTTP. |
@@ -49,7 +51,7 @@ The defaults below are the code's defaults. Relative paths are relative to the w
 | `LOGIN_LOCKOUT_SECONDS` | `300` | A whole number of seconds | How long the lockout lasts. The counts are kept in memory: a restart clears them. |
 | `INITIAL_ADMIN_USERNAME` | `admin` | A username | The break-glass super admin PerchTail creates on its first start, only when the database has no users. Its password is generated and written to `DATA_DIR/initial-admin-password`, readable only by PerchTail's user; the log only says where the file is (`initial_super_admin.seeded`, field `password_file`). The password must be changed at first sign-in, and the file is deleted when it is. Changing the variable later has no effect. |
 | `SSO_ALLOW_HTTP_LOCALHOST` | `false` | `true`, `false` | The OIDC issuer and the endpoints its discovery document names must be `https://`. `true` also accepts `http://` on `localhost`, `127.0.0.1` and `::1`, for local development with a test identity provider. Never on another host. |
-| `PUBLIC_BASE_URL` | `http://localhost:8080` | The external URL users reach PerchTail at, without a trailing slash | Builds the OIDC redirect URI, `<PUBLIC_BASE_URL>/auth/sso/callback`, and the address the browser returns to after an SSO sign-in. Must match the redirect URI registered at the identity provider ([sso-setup.md](sso-setup.md)). Only used for SSO. |
+| `PUBLIC_BASE_URL` | `http://localhost:8080` | The external URL users reach PerchTail at, without a trailing slash | Builds the OIDC redirect URI, `<PUBLIC_BASE_URL>/auth/sso/callback`, and the address the browser returns to after an SSO sign-in. Must match the redirect URI registered at the identity provider ([sso-setup.md](sso-setup.md)). Also the start of the links in password-reset emails, which can only be turned on while it starts with `https://`. |
 
 ## Sources and connectors
 
@@ -137,7 +139,7 @@ These aren't fields of `Settings`, but PerchTail, its commands or its libraries 
 | `PERCHTAIL_IMPORT_*` | YAML import (**Settings → Import / export**) | A credential in an import file may be written as `${env:PERCHTAIL_IMPORT_<NAME>}`; the server reads that variable at import time. Only names starting with `PERCHTAIL_IMPORT_` are read. See [bulk-import.md](bulk-import.md#credentials). |
 | `SEARCH_INDEX_*` | Nothing | The content index was removed in 0.7.0; these variables are ignored, and an old `.env` that sets them still starts. |
 
-**Test only.** `PERCHTAIL_TEST_PATCH_MODULE` (loads a test double at startup, used by the end-to-end test server), `E2E_ADMIN_USERNAME` and `E2E_ADMIN_PASSWORD` (the account `app.seed_e2e_admin` creates for the end-to-end tests) and `SCHEMATHESIS_MAX_EXAMPLES` (the property-based API tests) are for the test suites. Never set them on a deployment.
+**Test only.** `PERCHTAIL_TEST_PATCH_MODULE` (loads a test double at startup, used by the end-to-end test server, and only together with `PERCHTAIL_TEST_MODE=true`; set without it, PerchTail refuses to start, and the Docker image refuses either one), `E2E_ADMIN_USERNAME` and `E2E_ADMIN_PASSWORD` (the account `app.seed_e2e_admin` creates for the end-to-end tests) and `SCHEMATHESIS_MAX_EXAMPLES` (the property-based API tests) are for the test suites. Never set them on a deployment.
 
 The HTTP API behind the web interface is internal and may change before 1.0; only the operator endpoints `/healthz`, `/readyz`, `/monitoring/health` and `/metrics` are meant for other tools.
 
@@ -214,7 +216,7 @@ Shown to super admins only. See [upgrade.md](upgrade.md#the-updates-card) for wh
 
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
-| `backup_interval_hours` | **Back up every** | `0` (off) | `0` (off), or 1 to 168 hours | Makes a `scheduled` encrypted backup in `BACKUP_DIR` once this long has passed since the last one. After a failed attempt, the next one waits an hour, or the interval if that's shorter. The card also lists the backups on the server (**Backups on the server**). |
+| `backup_interval_hours` | **Back up every** | `24` on a new install; an install upgraded from before 0.7.0 keeps its value (`0`, off, unless it was set) | `0` (off), or 1 to 168 hours | Makes a `scheduled` encrypted backup in `BACKUP_DIR` once this long has passed since the last one. After a failed attempt, the next one waits an hour, or the interval if that's shorter. The card also lists the backups on the server (**Backups on the server**). |
 
 ### Audit log card
 
@@ -245,6 +247,15 @@ Local accounts of super admins and of roles with any global capability must alwa
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
 | `require_mfa_local_accounts` | **Require MFA for local accounts** | off | on, off | Extends the requirement to every local account. Applied at once: anyone covered without MFA is asked to set it up on their next request. Only a super admin can change it, either way. |
+
+### Password recovery card
+
+Lets users of local accounts reset a forgotten password through a link sent to their email ([user-guide.md](user-guide.md#forgotten-password), [admin-guide.md](admin-guide.md#password-recovery)). Off by default. It can be turned on only while email is set up and on under **Settings → Email** and `PUBLIC_BASE_URL` starts with `https://`; otherwise the switch is unavailable and the card says why. Accounts of super admins and of roles with any global capability, SSO accounts, and accounts without an email can't use it. Only a super admin can change these settings.
+
+| Key | On screen | Default | Accepted values | Effect |
+|---|---|---|---|---|
+| `password_reset_enabled` | **Password recovery by email** | off | on, off | Shows **Forgot password?** on the sign-in page and sends reset links. It stops working, without changing the setting, while email is off or removed or `PUBLIC_BASE_URL` isn't https. |
+| `password_reset_minutes` | **Links work for** | `30` | 5 to 60 minutes | How long a reset link works after it's sent. |
 
 ### Password policy card
 

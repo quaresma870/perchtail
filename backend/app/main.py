@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app import instance_lock, name_index, source_status
+from app import instance_lock, key_strength, name_index, source_status
 from app.agent_registry import get_agent_registry
 from app.agent_upgrades import run_scheduled_upgrades
 from app.alerts import run_alert_pass
@@ -95,10 +95,17 @@ logger = get_logger(__name__)
 # module to import once at startup, for wiring in a fake protocol connector
 # where no real target is available (real WinRM needs an actual Windows
 # host, unlike ssh/smb which the e2e suite points at real local test
-# servers). Absent everywhere else -- a normal deployment's .env has no
-# reason to ever set this, and this line does nothing unless it's set.
+# servers). It is honoured only with PERCHTAIL_TEST_MODE=true as well, which
+# only that script sets; set without it, startup is refused rather than the
+# setting silently ignored. The Docker image ships neither app/testing nor
+# a way in: its entrypoint refuses to start when either variable is set.
 _test_patch_module = os.environ.get("PERCHTAIL_TEST_PATCH_MODULE")
 if _test_patch_module:
+    if os.environ.get("PERCHTAIL_TEST_MODE", "").lower() != "true":
+        raise RuntimeError(
+            "PERCHTAIL_TEST_PATCH_MODULE is set without PERCHTAIL_TEST_MODE=true; "
+            "it is for the end-to-end tests only. Remove it from the environment."
+        )
     logger.warning("startup.test_patch_module_loaded", module=_test_patch_module)
     importlib.import_module(_test_patch_module)
 
@@ -267,6 +274,20 @@ async def lifespan(app: FastAPI):
             "real value in .env before starting (see README's Quick start / "
             ".env.example); every stored credential is encrypted with a key "
             "derived from it, so this can't be silently defaulted."
+        )
+    weak_key = key_strength.weaknesses(settings.credential_encryption_key)
+    if weak_key and settings.credential_key_refuse_weak:
+        logger.critical("startup.weak_credential_encryption_key", reasons=weak_key)
+        raise RuntimeError(
+            "CREDENTIAL_ENCRYPTION_KEY is too weak (" + "; ".join(weak_key) + ") and "
+            "CREDENTIAL_KEY_REFUSE_WEAK is true -- refusing to start. "
+            + key_strength.WEAK_KEY_ADVICE
+        )
+    if weak_key:
+        logger.warning(
+            "startup.weak_credential_encryption_key",
+            reasons=weak_key,
+            hint=key_strength.WEAK_KEY_ADVICE,
         )
 
     # One instance per DATA_DIR (#334): taken before anything moves files or
@@ -439,7 +460,17 @@ async def _started(app: FastAPI, settings):
     )
 
 
-app = FastAPI(title="PerchTail", version=APP_VERSION, lifespan=lifespan)
+# The API is internal to the web UI: its docs and schema are off unless
+# API_DOCS=true, so /docs, /redoc and /openapi.json answer 404 by default.
+_api_docs = get_settings().api_docs
+app = FastAPI(
+    title="PerchTail",
+    version=APP_VERSION,
+    lifespan=lifespan,
+    openapi_url="/openapi.json" if _api_docs else None,
+    docs_url="/docs" if _api_docs else None,
+    redoc_url="/redoc" if _api_docs else None,
+)
 app.add_middleware(OriginCheckMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)

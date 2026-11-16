@@ -26,6 +26,8 @@
   let scope = ''
   let fileGlob = DEFAULT_FILE_GLOB
   let webhookUrl = ''
+  // When editing: what is stored, masked. Left empty, the URL stays as it is.
+  let webhookMasked = ''
 
   let testResult: Record<number, 'sending' | AlertTestResult> = {}
 
@@ -127,6 +129,7 @@
     scope = ''
     fileGlob = DEFAULT_FILE_GLOB
     webhookUrl = ''
+    webhookMasked = ''
     formError = ''
     showForm = true
   }
@@ -138,7 +141,8 @@
     regex = alert.regex
     scope = scopeKeyOf(alert)
     fileGlob = alert.file_glob
-    webhookUrl = alert.webhook_url
+    webhookUrl = ''
+    webhookMasked = alert.webhook_url_masked
     formError = ''
     showForm = true
   }
@@ -152,9 +156,9 @@
     formError = ''
     saving = true
     try {
-      const fields = { name, query, regex, file_glob: fileGlob, webhook_url: webhookUrl }
+      const fields = { name, query, regex, file_glob: fileGlob }
       if (editingId === null) {
-        const payload: AlertCreate = { ...fields, ...scopePayload(scope) }
+        const payload: AlertCreate = { ...fields, webhook_url: webhookUrl, ...scopePayload(scope) }
         await api.post<Alert>('/alerts', payload)
       } else {
         const original = alerts.find((a) => a.id === editingId)
@@ -162,6 +166,8 @@
         const payload: Partial<AlertCreate> = Object.fromEntries(
           Object.entries(fields).filter(([key, value]) => original?.[key as keyof Alert] !== value),
         )
+        // The stored URL is never shown; a new one replaces it.
+        if (webhookUrl.trim()) payload.webhook_url = webhookUrl.trim()
         if (!original || scopeKeyOf(original) !== scope) Object.assign(payload, scopePayload(scope))
         if (Object.keys(payload).length > 0) await api.patch<Alert>(`/alerts/${editingId}`, payload)
       }
@@ -291,10 +297,17 @@
           class="input"
           type="url"
           bind:value={webhookUrl}
-          placeholder="https://example.com/hook"
-          required
+          placeholder={editingId === null ? 'https://example.com/hook' : 'Leave empty to keep it'}
+          required={editingId === null}
+          aria-describedby={editingId === null ? undefined : 'alert-webhook-hint'}
         />
       </label>
+      {#if editingId !== null}
+        <p class="hint field-hint" id="alert-webhook-hint">
+          Set to <code>{webhookMasked}</code>. It is stored encrypted and never shown again;
+          type a new URL to replace it.
+        </p>
+      {/if}
       <div class="form-actions">
         <button class="btn btn-primary" type="submit" disabled={saving}>
           {#if editingId === null}
@@ -329,7 +342,7 @@
               <code class="query">{alert.query}</code>
             </div>
             <div class="alert-sub">
-              files <code>{alert.file_glob}</code> · {alert.webhook_url}
+              files <code>{alert.file_glob}</code> · {alert.webhook_url_masked}
             </div>
             <div class="alert-sub">
               last checked {formatTime(alert.last_checked_at)} · last fired

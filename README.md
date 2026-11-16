@@ -23,7 +23,7 @@
 
 - **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
 - **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks.
-- **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults) and TOTP, required for administrators and optionally for everyone; OIDC single sign-on with group-to-role mapping; an access report of who holds what, where, with flags for privileged, inactive and MFA-less accounts, as JSON or CSV, for access reviews.
+- **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults), TOTP, required for administrators and optionally for everyone, and optional password recovery by email; OIDC single sign-on with group-to-role mapping; an access report of who holds what, where, with flags for privileged, inactive and MFA-less accounts, as JSON or CSV, for access reviews.
 - **Operations:** settings in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained, verified daily and records where each action came from, including refused requests, bulk YAML import and export, server-side limits on listings and downloads running at once (Settings → System), and a system SMTP server for email, always over verified TLS (Settings → Email).
 - **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
 
@@ -120,6 +120,16 @@ Then bring it up:
 docker compose up -d
 ```
 
+**Who can reach it.** `docker-compose.yml` publishes port 8080 on `127.0.0.1` only, so PerchTail answers on this host and nowhere else. Other machines reach it through a reverse proxy on this host that terminates TLS ([Deployment: reverse proxy + TLS](#deployment-reverse-proxy-nginx--tls)). To publish it on every address instead, for a test without a proxy, change the port in `docker-compose.yml` to `"8080:8000"`.
+
+**How it runs.** The container's root filesystem is read-only (PerchTail writes only under `/data` and to a `/tmp` in memory), it can't gain privileges (`no-new-privileges`), and it starts with every Linux capability dropped except the few its entrypoint needs for one step: handing `/data` over to PerchTail's user (uid 10001) when the container starts as root, before it drops them all and starts the app. The preferred way skips that step and runs as PerchTail's user from the start: uncomment `user: "10001:10001"` in `docker-compose.yml` and remove its `cap_add` list. A new volume already belongs to that user. A volume made by an older release may hold files that belong to root: fix them once, before the change, while `cap_add` is still there:
+
+```bash
+docker compose run --rm --user root --entrypoint chown perchtail -R 10001:10001 /data
+```
+
+With `docker run`, the same is `--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp`, with the volumes owned by uid 10001.
+
 This builds the image from the checkout. To run a published release
 instead, replace `build: .` in `docker-compose.yml` with the image of that
 version (amd64 and arm64), for example:
@@ -163,7 +173,7 @@ mode, which needs one. Upgrading from a release before 0.5.0 moves the database,
 `known_hosts` from `/data` into `/data/db` on first start; see the
 CHANGELOG's upgrade notes.
 
-Back up with `python -m app.backup` while PerchTail runs: it puts a consistent copy of the database, the salt and `known_hosts` into one file, always encrypted (with a key derived from `CREDENTIAL_ENCRYPTION_KEY`, or from an optional `BACKUP_ENCRYPTION_KEY`), checks it, and restores it with PerchTail stopped. Settings → System can also make one on a schedule. The database and `credential_salt` are useless without each other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`: keep the keys somewhere you can reach without this host. Before an upgrade, make a `pre-upgrade` backup; restoring it, with the previous image, rolls the upgrade back:
+Back up with `python -m app.backup` while PerchTail runs: it puts a consistent copy of the database, the salt and `known_hosts` into one file, always encrypted (with a key derived from `CREDENTIAL_ENCRYPTION_KEY`, or from an optional `BACKUP_ENCRYPTION_KEY`), checks it, and restores it with PerchTail stopped. Settings → System also makes one on a schedule: every 24 hours on a new install. The database and `credential_salt` are useless without each other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`: keep the keys somewhere you can reach without this host. Before an upgrade, make a `pre-upgrade` backup; restoring it, with the previous image, rolls the upgrade back:
 
 ```bash
 docker compose exec -u perchtail perchtail python -m app.backup create --reason pre-upgrade
@@ -192,21 +202,9 @@ older than the server.
 
 ## Deployment: reverse proxy (nginx) + TLS
 
-**Never expose PerchTail's admin/viewer UI to the public internet without
-TLS termination and something in front of it** — it's the entry point to
-every source's credentials and every source's log content across every
-customer configured, gated only by the session cookie. `docker-compose.yml`
-publishes the app directly on `8080` for the [Quick start](#quick-start)
-above; for anything beyond your own machine, put a reverse proxy in front
-of it and stop publishing that port to anything but `localhost`.
+**Never expose PerchTail's admin/viewer UI to the public internet without TLS termination and something in front of it** — it's the entry point to every source's credentials and every source's log content across every customer configured, gated only by the session cookie. `docker-compose.yml` publishes the app on `127.0.0.1:8080` only; for anything beyond this host, put a reverse proxy in front of it.
 
-1. Bind the published port to loopback only, so it's reachable through
-   nginx but not directly from outside the host — edit `docker-compose.yml`:
-
-   ```diff
-   -      - "8080:8000"
-   +      - "127.0.0.1:8080:8000"
-   ```
+1. Keep the published port on loopback, as `docker-compose.yml` has it (`"127.0.0.1:8080:8000"`), so it's reachable through nginx but not directly from outside the host.
 
 2. Set `PUBLIC_BASE_URL` in `.env` to the real external `https://` URL
    you're about to configure below (used to build the OIDC `redirect_uri`

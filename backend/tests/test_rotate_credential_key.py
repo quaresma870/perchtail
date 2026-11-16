@@ -402,3 +402,38 @@ def test_a_chain_with_recorded_known_breaks_can_still_be_rotated(rotation_engine
     assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 0
     with Session(rotation_engine) as session:
         assert verify_chain(build_audit_chain_key("new-key"), session).ok
+
+
+def test_rotate_re_encrypts_alert_webhook_urls(rotation_engine):
+    from app.auth.models import AuditLog, Role, User
+    from app.models import Alert
+    from app.timeutils import utcnow
+
+    old_fernet = build_fernet("old-key")
+    with Session(rotation_engine) as session:
+        role = Role(name="alerts")
+        session.add(role)
+        session.commit()
+        user = User(username="alerter", role_id=role.id)
+        session.add(user)
+        session.commit()
+        alert = Alert(
+            user_id=user.id,
+            name="a",
+            query="q",
+            webhook_url_encrypted=old_fernet.encrypt(b"https://hooks.example/s3cret").decode(),
+            created_at=utcnow(),
+        )
+        session.add(alert)
+        session.commit()
+        alert_id = alert.id
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 0
+
+    with Session(rotation_engine) as session:
+        stored = session.get(Alert, alert_id).webhook_url_encrypted
+        assert build_fernet("new-key").decrypt(stored.encode()) == b"https://hooks.example/s3cret"
+        with pytest.raises(InvalidToken):
+            old_fernet.decrypt(stored.encode())
+        last = session.exec(select(AuditLog).order_by(AuditLog.id.desc())).first()
+        assert last.event_metadata["webhook_urls"] == 1

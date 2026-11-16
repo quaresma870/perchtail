@@ -14,6 +14,8 @@
   import { closeAllTabs } from './lib/viewer-tabs'
   import { refreshSystemSettings, refreshSystemSettingsIfStale, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
+  import ForgotPassword from './routes/ForgotPassword.svelte'
+  import ResetPassword from './routes/ResetPassword.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
   import SetupMfa from './routes/SetupMfa.svelte'
   import Sources from './routes/Sources.svelte'
@@ -39,6 +41,9 @@
 
   const routes = {
     '/login': Login,
+    '/forgot-password': ForgotPassword,
+    '/reset-password': ResetPassword,
+    '/reset-password/:token': ResetPassword,
     '/change-password': ChangePassword,
     '/setup-mfa': SetupMfa,
     '/profile': Profile,
@@ -78,7 +83,12 @@
     if (document.visibilityState === 'visible' && $currentUser) refreshSystemSettingsIfStale()
   }
 
-  $: if ($authChecked && !$currentUser && $currentHash !== '/login') {
+  // Pages for someone who isn't signed in: the login and password recovery
+  // by email (#244). Every other page sends them to the login.
+  const PUBLIC_PATHS = ['/login', '/forgot-password', '/reset-password']
+  const isPublicPath = (path: string) =>
+    PUBLIC_PATHS.some((prefix) => path === prefix || path.startsWith(prefix + '/'))
+  $: if ($authChecked && !$currentUser && !isPublicPath($currentHash)) {
     push('/login')
   }
   $: if (
@@ -134,7 +144,7 @@
 <svelte:document on:visibilitychange={onVisibility} />
 
 <main>
-  {#if $authChecked && $currentUser && $currentHash !== '/login'}
+  {#if $authChecked && $currentUser && !isPublicPath($currentHash)}
     <nav>
       <div class="brand">
         <img src="/favicon.svg" alt="" width="26" height="26" />

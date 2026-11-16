@@ -32,8 +32,47 @@ test.describe('logged out', () => {
   test.use({ storageState: { cookies: [], origins: [] } })
 
   test('accessibility: login', async ({ page }) => {
+    // With "Forgot password?" shown (#244).
+    await page.route('**/auth/login-options', (route) =>
+      route.fulfill({ json: { password_reset: true } }),
+    )
     await page.goto('/#/login')
     await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Forgot password?' })).toBeVisible()
+    await expectNoSeriousViolations(page)
+  })
+
+  // Password recovery (#244), with the recovery API stubbed as on.
+  test('accessibility: forgot password', async ({ page }) => {
+    await page.route('**/auth/login-options', (route) =>
+      route.fulfill({ json: { password_reset: true } }),
+    )
+    await page.goto('/#/forgot-password')
+    await settled(page, 'Reset your password')
+    await expect(page.getByRole('button', { name: 'Send the link' })).toBeVisible()
+    await expectNoSeriousViolations(page)
+  })
+
+  test('accessibility: reset password', async ({ page }) => {
+    await page.route('**/auth/password-reset/check', (route) =>
+      route.fulfill({
+        json: {
+          valid: true,
+          policy: {
+            min_length: 12,
+            max_length: 128,
+            reject_simple: true,
+            reject_personal: true,
+            history: 0,
+            required_classes: 0,
+            max_age_days: 0,
+          },
+        },
+      }),
+    )
+    await page.goto('/#/reset-password/a11y-token')
+    await settled(page, 'Choose a new password')
+    await expect(page.getByRole('button', { name: 'Set the password' })).toBeVisible()
     await expectNoSeriousViolations(page)
   })
 })
