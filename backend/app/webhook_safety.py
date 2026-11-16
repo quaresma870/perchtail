@@ -121,7 +121,7 @@ def assert_webhook_url_is_safe(url: str) -> None:
     link-local, private, reserved, multicast, or unspecified."""
     hostname = urlparse(url).hostname
     if not hostname:
-        raise UnsafeWebhookURLError(f"webhook_url has no hostname: {url!r}")
+        raise UnsafeWebhookURLError("webhook_url has no hostname")
     _resolve_validated_ips(hostname)
 
 
@@ -148,7 +148,7 @@ def resolve_pinned_webhook_target(url: str) -> PinnedWebhookTarget:
     parsed = urlparse(url)
     hostname = parsed.hostname
     if not hostname:
-        raise UnsafeWebhookURLError(f"webhook_url has no hostname: {url!r}")
+        raise UnsafeWebhookURLError("webhook_url has no hostname")
 
     validated_ips = _resolve_validated_ips(hostname)
     pinned_ip = validated_ips[0]

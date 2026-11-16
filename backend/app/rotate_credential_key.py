@@ -2,7 +2,8 @@
 it protects (#326): source credentials (Source.credential_ref), SSO provider
 settings (SSOProviderConfig.config), users' MFA secrets
 (User.mfa_secret_encrypted), the SMTP password
-(SmtpSettings.password_encrypted), and the audit log's hash chain, whose HMAC key
+(SmtpSettings.password_encrypted), alert webhook URLs
+(Alert.webhook_url_encrypted), and the audit log's hash chain, whose HMAC key
 is derived from the same secret. The chain is verified under the old key
 first and the rotation stops if it's broken -- re-signing a tampered chain
 would vouch for the tampering -- then every row is re-signed under the new
@@ -43,7 +44,7 @@ from app.auth.models import AuditLog, SSOProviderConfig, User
 from app.backup import ROOT_REFUSAL
 from app.config import get_settings
 from app.crypto import build_audit_chain_key, build_fernet
-from app.models import SmtpSettings, Source
+from app.models import Alert, SmtpSettings, Source
 from app.timeutils import utcnow
 
 
@@ -133,6 +134,23 @@ def rotate(*, old_key: str, new_key: str, dry_run: bool) -> int:
                 session.add(smtp)
             rotated += 1
 
+        alerts = session.exec(select(Alert)).all()
+        for alert in alerts:
+            try:
+                plaintext = old_fernet.decrypt(alert.webhook_url_encrypted.encode("utf-8"))
+            except InvalidToken:
+                print(
+                    f"ERROR: the webhook URL of alert id={alert.id!r} did not decrypt under "
+                    "the old key -- wrong old key, or already rotated. Aborting without "
+                    "writing anything.",
+                    file=sys.stderr,
+                )
+                return 1
+            if not dry_run:
+                alert.webhook_url_encrypted = new_fernet.encrypt(plaintext).decode("utf-8")
+                session.add(alert)
+            rotated += 1
+
         # The audit chain: intact under the old key, or no rotation.
         chain = verify_chain(build_audit_chain_key(old_key), session)
         if not chain.ok:
@@ -148,8 +166,8 @@ def rotate(*, old_key: str, new_key: str, dry_run: bool) -> int:
 
         counts = (
             f"{len(sources)} source credential(s), {len(sso_configs)} SSO provider "
-            f"config(s), {len(mfa_users)} MFA secret(s), {len(smtp_rows)} SMTP password(s) "
-            f"and {chain.checked_count} audit log row(s)"
+            f"config(s), {len(mfa_users)} MFA secret(s), {len(smtp_rows)} SMTP password(s), "
+            f"{len(alerts)} webhook URL(s) and {chain.checked_count} audit log row(s)"
         )
         if dry_run:
             session.rollback()
@@ -170,6 +188,7 @@ def rotate(*, old_key: str, new_key: str, dry_run: bool) -> int:
                 "sso_configs": len(sso_configs),
                 "mfa_secrets": len(mfa_users),
                 "smtp_passwords": len(smtp_rows),
+                "webhook_urls": len(alerts),
                 "audit_rows_resigned": resigned,
             },
         )

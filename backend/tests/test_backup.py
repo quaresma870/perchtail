@@ -644,6 +644,7 @@ def _set_interval(engine, hours: int) -> None:
 
 
 def test_scheduled_backup_is_off_with_zero(env):
+    _set_interval(env.engine, 0)
     assert backup.run_scheduled_backup() is None
     assert not env.backups.exists() or not list(env.backups.iterdir())
 

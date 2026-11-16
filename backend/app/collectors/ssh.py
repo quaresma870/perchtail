@@ -38,6 +38,20 @@ logger = get_logger(__name__)
 # thread-safe) -- see _connect()'s docstring for why this file exists at
 # all.
 _host_keys_lock = threading.Lock()
+
+
+def host_keys_lock() -> threading.Lock:
+    """The lock above, for other code that rewrites known_hosts
+    (app/source_pins.py)."""
+    return _host_keys_lock
+
+
+def host_key_name(host: str, port: int | None) -> str:
+    """How paramiko names a host in known_hosts."""
+    port = port or 22
+    return host if port == 22 else f"[{host}]:{port}"
+
+
 # Keeps NAT and firewalls from dropping a connection during a long transfer.
 KEEPALIVE_SECONDS = 30
 
@@ -58,8 +72,13 @@ class TrustOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
     there's a record of which key was trusted and when. Set
     SSH_HOST_KEY_POLICY=strict to refuse unknown hosts instead."""
 
+    def __init__(self) -> None:
+        # What this connection pinned, for _connect to write to known_hosts.
+        self.pinned: list[tuple[str, paramiko.PKey]] = []
+
     def missing_host_key(self, client, hostname, key):
         client.get_host_keys().add(hostname, key.get_name(), key)
+        self.pinned.append((hostname, key))
         logger.warning(
             "ssh.host_key_pinned",
             host=hostname,
@@ -143,7 +162,8 @@ def _connect(source: Source) -> paramiko.SSHClient:
     creds = decrypt_credential(source.credential_ref)
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(_missing_host_key_policy())
+    policy = _missing_host_key_policy()
+    client.set_missing_host_key_policy(policy)
 
     read_timeout = get_settings().remote_read_timeout_seconds
     connect_kwargs: dict = {
@@ -167,12 +187,10 @@ def _connect(source: Source) -> paramiko.SSHClient:
     # Lock only guards the file read/write, not the network round-trip in
     # connect() below -- holding it across a potentially slow SSH handshake
     # would serialize every concurrent connection in the app onto one
-    # source at a time, even to unrelated hosts. The narrow gap this
-    # leaves (two hosts discovered for the very first time in the same
-    # instant could clobber each other's freshly-saved entry) only ever
-    # costs a redo of TOFU for the host that lost the race, next time it's
-    # connected to -- an already-pinned host's entry was already on disk
-    # before either connection started, so it can't be un-pinned this way.
+    # source at a time, even to unrelated hosts. What was loaded here is
+    # never written back: only a key this connection pinned is added, to
+    # the file as it is then (_save_pinned_host_keys), so a pin removed
+    # meanwhile (app/source_pins.py) stays removed.
     with _host_keys_lock:
         if known_hosts_path.exists():
             client.load_host_keys(str(known_hosts_path))
@@ -186,12 +204,24 @@ def _connect(source: Source) -> paramiko.SSHClient:
     if transport is not None:
         transport.set_keepalive(KEEPALIVE_SECONDS)
 
-    with _host_keys_lock:
-        client.save_host_keys(str(known_hosts_path))
-        if known_hosts_path.exists():
-            os.chmod(known_hosts_path, 0o600)  # #193: which hosts are trusted
+    if isinstance(policy, TrustOnFirstUsePolicy) and policy.pinned:
+        _save_pinned_host_keys(known_hosts_path, policy.pinned)
 
     return client
+
+
+def _save_pinned_host_keys(path: Path, pinned: list[tuple[str, paramiko.PKey]]) -> None:
+    """Adds the keys a connection pinned to known_hosts, reloaded under the
+    lock: the rest of the file is kept as it is now, not as the connection
+    loaded it."""
+    with _host_keys_lock:
+        keys = paramiko.HostKeys()
+        if path.exists():
+            keys.load(str(path))
+        for hostname, key in pinned:
+            keys.add(hostname, key.get_name(), key)
+        keys.save(str(path))
+        os.chmod(path, 0o600)  # #193: which hosts are trusted
 
 
 def _open_sftp(client: paramiko.SSHClient) -> paramiko.SFTPClient:

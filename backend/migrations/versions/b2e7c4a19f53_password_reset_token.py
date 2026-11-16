@@ -1,7 +1,7 @@
 """password reset token
 
 Revision ID: b2e7c4a19f53
-Revises: e5c2a8d71f43
+Revises: f7a2c4e9b351
 Create Date: 2026-11-15 10:00:00.000000
 
 Adds the password_reset_token table (app.auth.models.PasswordResetToken):
@@ -17,7 +17,7 @@ import sqlmodel
 from alembic import op
 
 revision: str = "b2e7c4a19f53"
-down_revision: str | Sequence[str] | None = "e5c2a8d71f43"
+down_revision: str | Sequence[str] | None = "f7a2c4e9b351"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

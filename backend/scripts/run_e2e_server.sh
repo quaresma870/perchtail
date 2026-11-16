@@ -23,10 +23,11 @@ export DATABASE_URL="sqlite:///./data/e2e/perchtail.db"
 # Its own DATA_DIR, so the single-instance lock (DATA_DIR/.perchtail.lock)
 # never collides with a dev backend running from the same worktree.
 export DATA_DIR="./data/e2e"
-# Anything non-empty and not the insecure "changeme" default main.py refuses
-# to start with -- this DB is thrown away after every run, so there's no
-# real secret to protect here.
-export CREDENTIAL_ENCRYPTION_KEY="${CREDENTIAL_ENCRYPTION_KEY:-e2e-test-key-not-for-production-use}"
+# A strong key generated for this run (app/key_strength.py), so the run sees
+# what a correctly set up install sees, without the weak-key warning; the
+# DB is thrown away after every run, so nothing needs it afterwards.
+CREDENTIAL_ENCRYPTION_KEY="${CREDENTIAL_ENCRYPTION_KEY:-$(python -c 'import secrets; print(secrets.token_urlsafe(32))')}"
+export CREDENTIAL_ENCRYPTION_KEY
 export CREDENTIAL_SALT_PATH="./data/e2e/credential_salt"
 export SSH_KNOWN_HOSTS_PATH="./data/e2e/ssh_known_hosts"
 export LOG_DIR="./data/e2e/logs"
@@ -42,6 +43,8 @@ export E2E_ADMIN_TOTP_SECRET="${E2E_ADMIN_TOTP_SECRET:-JBSWY3DPEHPK3PXPJBSWY3DPE
 # See app/testing/fake_winrm.py -- there's no real WinRM target available in
 # CI or a dev sandbox, unlike ssh/smb below, which run against real local
 # test servers.
+# PERCHTAIL_TEST_MODE=true is what lets app/main.py honour the hook at all.
+export PERCHTAIL_TEST_MODE="true"
 export PERCHTAIL_TEST_PATCH_MODULE="app.testing.fake_winrm"
 # Lets a spec point a local-disk source at a fixture tree under this folder
 # -- see LOCAL_SOURCE_ROOTS in .env.example.

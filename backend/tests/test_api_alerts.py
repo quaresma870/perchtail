@@ -354,3 +354,47 @@ def test_a_folder_scope_counts_sources_in_its_subfolders(session, client_for):
         },
     )
     assert response.status_code == 201, response.text
+
+
+def test_the_webhook_url_is_encrypted_at_rest_and_never_returned(session, client_for):
+    from app.alerts import webhook_url
+    from app.models import Alert
+
+    client = client_for(_make_user(session))
+    secret_url = "https://example.com:8443/hook?token=SECRET"
+    created = client.post("/alerts", json={"name": "a", "query": "q", "webhook_url": secret_url})
+    assert created.status_code == 201
+    body = created.json()
+    assert "webhook_url" not in body
+    assert body["webhook_url_masked"] == "https://example.com:8443/…"
+    listed = client.get("/alerts").json()
+    assert "SECRET" not in str(listed)
+
+    alert = session.get(Alert, body["id"])
+    session.refresh(alert)
+    assert "SECRET" not in alert.webhook_url_encrypted
+    assert "example.com" not in alert.webhook_url_encrypted
+    assert webhook_url(alert) == secret_url
+
+
+def test_an_update_without_the_webhook_url_keeps_it(session, client_for):
+    from app.alerts import webhook_url
+    from app.models import Alert
+
+    client = client_for(_make_user(session))
+    created = client.post(
+        "/alerts", json={"name": "a", "query": "q", "webhook_url": "https://example.com/one"}
+    ).json()
+
+    assert client.patch(f"/alerts/{created['id']}", json={"name": "b"}).status_code == 200
+    assert client.patch(f"/alerts/{created['id']}", json={"webhook_url": None}).status_code == 200
+    alert = session.get(Alert, created["id"])
+    session.refresh(alert)
+    assert webhook_url(alert) == "https://example.com/one"
+
+    changed = client.patch(
+        f"/alerts/{created['id']}", json={"webhook_url": "https://other.example.com/two"}
+    )
+    assert changed.json()["webhook_url_masked"] == "https://other.example.com/…"
+    session.refresh(alert)
+    assert webhook_url(alert) == "https://other.example.com/two"

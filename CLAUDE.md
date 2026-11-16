@@ -15,7 +15,7 @@ Stack: Python 3.12, FastAPI, SQLModel/SQLAlchemy, Alembic and SQLite on the back
 The SQLite database (`DATA_DIR/perchtail.db` unless `DATABASE_URL` is set) holds:
 
 - configuration: customers, folders, sources and their connection settings, rules, severity patterns, redaction rules, system settings (`system_setting`), the SSO provider and the SSO group-to-role mappings;
-- encrypted secrets: source credentials (`Source.credential_ref`), the SSO provider configuration (`SSOProviderConfig.config`) and users' TOTP secrets (`User.mfa_secret_encrypted`);
+- encrypted secrets: source credentials (`Source.credential_ref`), the SSO provider configuration (`SSOProviderConfig.config`), users' TOTP secrets (`User.mfa_secret_encrypted`) and alert webhook URLs (`Alert.webhook_url_encrypted`, never returned by the API);
 - hashes only, never the plain value: local passwords, previous passwords and MFA backup codes (argon2id), session tokens, password-reset tokens, agent enrollment tokens and the monitoring token (SHA-256);
 - users, roles and grants;
 - the audit log with its HMAC hash chain, and the chain's state (anchor after purges, last verification result);
@@ -75,7 +75,7 @@ One in-process APScheduler `BackgroundScheduler` (`app/scheduler.py`; coalesce, 
 | `session_purge` | 1 h, catch-up | Deletes expired sessions and expired password-reset links. |
 | `update_check` | 1 h, catch-up | Asks GitHub for the latest release, at most once a day. Off with `UPDATE_CHECK=false` or the switch in Settings → System. |
 | `audit_integrity_check` | `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` (1 day), catch-up | Verifies the audit hash chain. |
-| `backup` | 5 min tick | Makes an encrypted backup once the backup interval (Settings → System) has passed; 0, the default, is off. |
+| `backup` | 5 min tick | Makes an encrypted backup once the backup interval (Settings → System) has passed: 24 hours on a new install, 0 (off) kept on an install upgraded from before 0.7.0. |
 | `wal_checkpoint` | 1 h | Checkpoints and truncates the SQLite WAL (`app/db.py`). |
 
 ### Connectors (`backend/app/collectors/`)
@@ -83,7 +83,7 @@ One in-process APScheduler `BackgroundScheduler` (`app/scheduler.py`; coalesce, 
 `registry.py` maps each `Protocol` to its module; every caller goes through it, and `errors.py` turns each library's exceptions into the `SourceError` types in `base.py`.
 
 - `ssh.py`: SSH/SFTP with `paramiko`. Host keys are pinned in `SSH_KNOWN_HOSTS_PATH`; `SSH_HOST_KEY_POLICY` is `tofu` (pin on first connect) or `strict` (refuse unknown hosts).
-- `smb.py`: SMB with `smbprotocol`. `smb_shares.py` lists a server's disk shares for the share picker.
+- `smb.py`: SMB with `smbprotocol`, with signing required unless the source turns it off (`smb_require_signing`) and SMB 3 encryption when it asks for it (`smb_encrypt`). `smb_shares.py` lists a server's disk shares for the share picker.
 - `winrm.py`: WinRM with `pywinrm`, running scripts in a WinRS shell. When the source names a session configuration (`winrm_configuration`), `winrm_jea.py` speaks PSRP (`pypsrp`) to a JEA endpoint instead and only calls the read-only functions of the reference role in `docs/examples/jea`.
 - `local.py`: files on the PerchTail host. Used by the system log source and by admin-created local sources, which must sit under `LOCAL_SOURCE_ROOTS` (empty by default, which disables them). Local files are served in place, without scratch.
 - `agent.py`: relays commands to a connected push agent through `app/agent_registry.py`.
@@ -138,6 +138,7 @@ Implemented in `app/auth/rbac.py`.
 - **Monitoring token** (`app/monitoring_access.py`, `MonitoringToken`): one deployment-wide bearer token, stored as a SHA-256 hash. `/monitoring/health` and `/metrics` always need it, plus an address in `MONITORING_ALLOWED_NETWORKS` when that is set. `/healthz` and `/readyz` answer a loopback caller without proxy headers, a caller in `PROBE_ALLOWED_NETWORKS`, or a caller with the token.
 - **Agent token**: one enrollment token per agent source, shown once and stored as a SHA-256 hash (`Source.agent_token_hash`). The agent sends it as a bearer token on the WebSocket handshake and when downloading binaries.
 - **Other guards**: alert webhook URLs must resolve to public addresses, checked again at send time (`app/webhook_safety.py`); archive extraction and fetches are size-limited; paths are checked for containment in every connector and in the agent (`internal/agent/pathsafety.go`).
+- **Secure defaults**: `CREDENTIAL_ENCRYPTION_KEY` is checked at startup (`app/key_strength.py`: at least 32 bytes once decoded and 128 bits of estimated entropy); a weak key is a warning in the log and Settings → System, and a refusal only with `CREDENTIAL_KEY_REFUSE_WEAK=true`. `/docs`, `/redoc` and `/openapi.json` answer 404 unless `API_DOCS=true`. File content (open, follow, download, folder ZIP) is sent with `Cache-Control: no-store`. `DATA_DIR`, `LOG_DIR`, `SCRATCH_DIR` and `BACKUP_DIR` are made `0700` at startup (`app/data_layout.py`), and scratch files are created `0600`. Deleting a source removes its SSH host key and WinRM CA file when no other source uses them (`app/source_pins.py`).
 
 ## Application logging
 
@@ -232,7 +233,7 @@ README.md, CHANGELOG.md, ROADMAP.md, CONTRIBUTING.md, SECURITY.md, CLA.md, CODE_
 
 ## Deployment shape
 
-The Docker image builds the frontend with Node 22 and runs the backend on `python:3.12-slim` as an unprivileged user (uid 10001). `backend/docker-entrypoint.sh` runs `python -m app.data_layout`, `python -m alembic upgrade head` and `uvicorn app.main:app --host 0.0.0.0 --port 8000`. `docker-compose.yml` publishes port 8080 and keeps state in the `/data` volume. PerchTail is meant to sit behind a TLS-terminating reverse proxy. It runs as a single process per `DATA_DIR`; SQLite runs in WAL mode, so `DATA_DIR` must be on a local disk.
+The Docker image builds the frontend with Node 22 and runs the backend on `python:3.12-slim` as an unprivileged user (uid 10001). `backend/docker-entrypoint.sh` runs `python -m app.data_layout`, `python -m alembic upgrade head` and `uvicorn app.main:app --host 0.0.0.0 --port 8000`. `docker-compose.yml` keeps state in the `/data` volume. PerchTail is meant to sit behind a TLS-terminating reverse proxy. It runs as a single process per `DATA_DIR`; SQLite runs in WAL mode, so `DATA_DIR` must be on a local disk. `docker-compose.yml` publishes port 8080 on `127.0.0.1` only, with a read-only root filesystem, `no-new-privileges` and every capability dropped except the few the entrypoint's root step needs; running with `user: "10001:10001"` needs none. The image ships no test code (`.dockerignore`), and its entrypoint refuses the test hooks (`PERCHTAIL_TEST_PATCH_MODULE`, `PERCHTAIL_TEST_MODE`).
 
 ## How to test
 

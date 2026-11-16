@@ -370,6 +370,8 @@ def test_the_redaction_migration_adds_its_tables_and_clears_alert_heads(tmp_path
             "INSERT INTO alert_file_state (alert_id, source_id, file_path, offset, head) "
             "VALUES (1, 1, 'app.log', 1234, 'abcd')"
         )
+    # f7a2c4e9b351 encrypts the webhook URL and refuses without the salt.
+    (tmp_path / "credential_salt").write_bytes(os.urandom(16))
 
     _alembic(tmp_path, "upgrade", "head")
     with sqlite3.connect(db) as conn:
@@ -391,6 +393,89 @@ def test_the_redaction_migration_adds_its_tables_and_clears_alert_heads(tmp_path
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
     assert not {"redaction_rule", "source_redaction_override"} & tables
     _alembic(tmp_path, "upgrade", "head")
+
+
+def test_the_secure_defaults_migration_keeps_an_existing_install_as_it_was(tmp_path):
+    # f7a2c4e9b351: an install with users keeps the scheduled backup off and
+    # SMB signing required (what smbprotocol always asked for), without SMB
+    # encryption; its webhook URLs are encrypted, and decrypted going down.
+    db = tmp_path / "perchtail.db"
+    secret_url = "https://example.com/hook?token=SECRET"
+    _alembic(tmp_path, "upgrade", "e5c2a8d71f43")
+    salt = os.urandom(16)
+    (tmp_path / "credential_salt").write_bytes(salt)
+    _insert_alert_with_a_plain_webhook(db, secret_url)
+
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(db) as conn:
+        backup = conn.execute(
+            "SELECT value FROM system_setting WHERE key = 'backup_interval_hours'"
+        ).fetchone()
+        smb = conn.execute("SELECT smb_require_signing, smb_encrypt FROM source").fetchone()
+        stored = conn.execute("SELECT webhook_url FROM alert").fetchone()[0]
+    assert backup == ("0",)
+    assert smb == (1, 0)
+    assert "SECRET" not in stored and "example.com" not in stored
+    assert (tmp_path / "credential_salt").read_bytes() == salt
+
+    _alembic(tmp_path, "downgrade", "e5c2a8d71f43")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT webhook_url FROM alert").fetchone()[0] == secret_url
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(source)")}
+    assert not {"smb_require_signing", "smb_encrypt"} & columns
+    assert _autoincrement_tables(db)["source"] is True
+
+
+def test_the_secure_defaults_migration_stops_without_the_credential_salt(tmp_path):
+    # A lost salt must not be replaced by a new one before the app's own
+    # check runs: the migration refuses, leaves the webhook as it was and
+    # creates no salt file.
+    db = tmp_path / "perchtail.db"
+    secret_url = "https://example.com/hook?token=SECRET"
+    _alembic(tmp_path, "upgrade", "e5c2a8d71f43")
+    _insert_alert_with_a_plain_webhook(db, secret_url)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode != 0
+    assert "CREDENTIAL_SALT_PATH" in result.stderr
+    assert not (tmp_path / "credential_salt").exists()
+    assert _version(db) == "e5c2a8d71f43"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT webhook_url FROM alert").fetchone()[0] == secret_url
+
+
+def _insert_alert_with_a_plain_webhook(db: Path, url: str) -> None:
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source (id, name, protocol, host, base_path, enabled, is_system, "
+            "check_failures, name_index_enabled, agent_upgrade_policy, agent_upgrade_failures) "
+            "VALUES (1, 'a', 'smb', 'h', 'share', 1, 0, 0, 1, 'inherit', 0)"
+        )
+        conn.execute(
+            "INSERT INTO role (id, name, is_builtin, is_super_admin, global_capabilities) "
+            "VALUES (1, 'r', 0, 0, '[]')"
+        )
+        conn.execute(
+            "INSERT INTO user (id, username, role_id, auth_provider, active, "
+            "must_change_password) VALUES (1, 'u', 1, 'local', 1, 0)"
+        )
+        conn.execute(
+            "INSERT INTO alert (id, user_id, name, query, regex, file_glob, webhook_url, "
+            "enabled, failed_deliveries, created_at) "
+            "VALUES (1, 1, 'x', 'q', 0, '**/*.log', ?, 1, 0, '2026-11-14 00:00:00')",
+            (url,),
+        )
+
+
+def test_a_new_install_gets_the_daily_scheduled_backup(tmp_path):
+    # A new install runs every migration on an empty database: nothing is
+    # stored, so the code's default (every 24 hours) applies.
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(tmp_path / "perchtail.db") as conn:
+        stored = conn.execute(
+            "SELECT value FROM system_setting WHERE key = 'backup_interval_hours'"
+        ).fetchone()
+    assert stored is None
 
 
 def _alembic_run(data_dir: Path, *args: str) -> subprocess.CompletedProcess:

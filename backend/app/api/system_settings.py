@@ -5,12 +5,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
-from app import backup, password_policy, system_settings
+from app import backup, key_strength, password_policy, system_settings
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth import password_reset
 from app.auth.models import GlobalCapability, User
 from app.auth.rbac import forbidden, require_global_capability
+from app.config import get_settings
 from app.db import get_session
 from app.source_roots import HARD_MAX_ROOTS, max_roots
 
@@ -233,6 +234,31 @@ def list_system_backups(user: User = Depends(require_manage)):
         )
         for info in backup.list_backups()
     ]
+
+
+class SystemWarning(BaseModel):
+    code: str
+    message: str
+    advice: str
+
+
+@router.get("/warnings", response_model=list[SystemWarning])
+def list_system_warnings(user: User = Depends(require_manage)):
+    """Problems with how this instance is set up that only its operator can
+    fix, shown at the top of Settings -> System."""
+    warnings: list[SystemWarning] = []
+    # No length or estimated bits here: manage_system_settings can be
+    # delegated, and those numbers narrow the search for the root secret.
+    # They are in the startup log, which is the operator's.
+    if key_strength.is_weak(get_settings().credential_encryption_key):
+        warnings.append(
+            SystemWarning(
+                code="weak_credential_encryption_key",
+                message="CREDENTIAL_ENCRYPTION_KEY is weaker than recommended.",
+                advice=key_strength.WEAK_KEY_ADVICE,
+            )
+        )
+    return warnings
 
 
 @router.patch("", response_model=SystemSettingsPublic)

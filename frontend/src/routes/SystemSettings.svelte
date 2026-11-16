@@ -10,6 +10,7 @@
   import { formatSize } from '../lib/file-details'
   import type {
     BackupInfo,
+    SystemWarning,
     ExplorerSort,
     MonitoringTokenResult,
     MonitoringTokenStatus,
@@ -190,6 +191,12 @@
     }
 
     try {
+      warnings = await api.get<SystemWarning[]>('/system-settings/warnings')
+    } catch {
+      // Non-fatal: the page works without them.
+    }
+
+    try {
       backups = await api.get<BackupInfo[]>('/system-settings/backups')
     } catch (err) {
       backupsError = err instanceof ApiError ? err.detail : 'Failed to list the backups'
@@ -283,6 +290,8 @@
   let backupIntervalError = ''
   let backups: BackupInfo[] = []
   let backupsError = ''
+  // Setup problems only the operator can fix (a weak encryption key...).
+  let warnings: SystemWarning[] = []
 
   async function saveBackupInterval() {
     const parsed = Number(backupIntervalInput)
@@ -558,6 +567,12 @@
     {#if error}
       <p class="error">{error}</p>
     {/if}
+    {#each warnings as warning (warning.code)}
+      <div class="setup-warning card" role="alert" data-testid={`system-warning-${warning.code}`}>
+        <strong>{warning.message}</strong>
+        <p>{warning.advice}</p>
+      </div>
+    {/each}
 
     <div class="grid">
     <section class="card">
@@ -1359,6 +1374,13 @@
     font-size: 0.8rem;
     word-break: break-all;
     width: 100%;
+  }
+  .setup-warning {
+    border-left: 3px solid var(--warning, #b58105);
+    margin-bottom: 1rem;
+  }
+  .setup-warning p {
+    margin: 0.4rem 0 0;
   }
   .error {
     color: var(--danger);

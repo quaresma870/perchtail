@@ -133,8 +133,9 @@ INT_DEFAULTS: dict[str, str] = {
     "agent_upgrade_failure_limit": "3",
     "agent_upgrade_concurrency": "5",
     # Scheduled online backup (#334, app/backup.py), in hours, 1 to 168;
-    # 0 (the default) turns it off.
-    "backup_interval_hours": "0",
+    # 0 turns it off. Every 24 hours on a new install; an install from before
+    # this default keeps its own value (migration f7a2c4e9b351 stores 0 there).
+    "backup_interval_hours": "24",
     # How long a password-reset link works (#244), in minutes, 5 to 60.
     "password_reset_minutes": "30",
 }
