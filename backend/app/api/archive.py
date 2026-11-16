@@ -8,6 +8,7 @@ import tarfile
 import zipfile
 import zlib
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
@@ -21,6 +22,7 @@ from sqlmodel import Session, select
 from starlette.types import Receive, Scope, Send
 
 from app import request_context, source_roots, system_settings
+from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.archives import (
     SKIP_ENCRYPTED,
@@ -38,16 +40,22 @@ from app.archives import (
     rebuild_archive,
     resolve_member_name,
     tree_children,
+    write_archive,
 )
 from app.audit import record_audit_event
 from app.auth.models import Capability, User
 from app.auth.rbac import require_capability
 from app.collectors import local as local_collector
+from app.collectors.agent import AgentRedactionError, redaction_block
 from app.collectors.base import (
     RANGE_MAX_BYTES,
     DirEntry,
     FetchTooLargeError,
     RangeNotSupportedError,
+    SourceError,
+    SourceNotFoundError,
+    SourcePermissionError,
+    SourceUnreachableError,
     is_truncated,
     max_fetch_bytes,
 )
@@ -74,7 +82,7 @@ from app.redaction import (
     redact_stream,
     redact_window,
 )
-from app.redaction_rules import effective_redaction_rules, engine_rules
+from app.redaction_rules import effective_redaction_rules, engine_rules, redaction_applies
 from app.rules import (
     is_dir_visible,
     is_entry_visible,
@@ -639,19 +647,27 @@ def _browse(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         if member_dir and not _dir_visible(source, path, rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
-        with connector.local_copy(source, archive_path) as archive_local:
-            members = list_members(archive_local, archive_name)
+        listing_cut = False
+        if _lists_on_agent(session, source):
+            # Redaction applies and the agent redacts on its host: it lists
+            # the archive itself, so the archive never leaves the host only
+            # to be listed (#382, #249).
+            members, listing_cut = connector.call("list_archive", source, archive_path)
+        else:
+            with connector.local_copy(source, archive_path) as archive_local:
+                members = list_members(archive_local, archive_name)
         if all_members:
             if member_dir:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="all is for an archive itself, not a folder inside it",
                 )
-            return _capped(
+            flat, truncated = _capped(
                 _archive_flat_entries(source, archive_path, members, rules), limit, flat=True
             )
+            return flat, truncated or listing_cut
         children = tree_children(members, member_dir)
-        return _capped(
+        listed, truncated = _capped(
             [
                 BrowseEntry(
                     name=child.name.rsplit("/", 1)[-1],
@@ -670,6 +686,7 @@ def _browse(
             ],
             limit,
         )
+        return listed, truncated or listing_cut
 
     if all_members:
         raise HTTPException(
@@ -720,18 +737,93 @@ def redaction_rules_for(session: Session, source: Source) -> CompiledRules | Non
         ) from exc
 
 
+# Where redaction ran, as the audit log says it (metadata.redaction_at).
+REDACTED_ON_SERVER = "server"
+REDACTED_ON_AGENT = "agent"
+
+
+def agent_redaction_rules(session: Session, source: Source) -> list[dict] | None:
+    """For content redaction applies to: the rules to send the source's
+    agent, in its `redact` block, when the agent redacts on its host (it
+    announced redaction/1 on this connection), so the original never leaves
+    the host (#382, #249). None when the content is redacted on the server:
+    a source that isn't an agent, or an agent that can't redact on the host
+    (an older one), which falls back to the server, logged once per
+    connection."""
+    if source.protocol != Protocol.agent:
+        return None
+    registry = get_agent_registry()
+    if registry.redacts_on_host(source.id):
+        return engine_rules(effective_redaction_rules(session, source.id))
+    if registry.first_redaction_fallback(source.id):
+        logger.warning(
+            "agent.redaction_fallback",
+            source_id=source.id,
+            message="the agent can't redact on its host; content is redacted on the server",
+        )
+    return None
+
+
+def _lists_on_agent(session: Session, source: Source) -> bool:
+    """Whether an archive of `source` is listed on its agent (list_archive)
+    rather than fetched whole to be listed here: redaction applies and the
+    agent redacts on its host."""
+    return (
+        source.protocol == Protocol.agent
+        and get_agent_registry().redacts_on_host(source.id)
+        and redaction_applies(session, source)
+    )
+
+
+def _agent_refusal(exc: AgentRedactionError, agent_rules: list[dict]) -> Exception:
+    """What the agent refusing to redact means for the request: the same
+    refusals as when the server redacts (UTF-32, an unsupported compressed
+    format, an archive that can't be redacted whole), or 502, never the
+    content. A rule the agent can't run is named, without falling back to
+    the server, which would take the original off a host that redacts."""
+    if exc.code == "unsupported_encoding":
+        return RedactionEncodingRefused()
+    if exc.code == "unsupported_format":
+        return RedactionFormatRefused()
+    if exc.code == "not_redactable":
+        return WholeArchiveRefused(_AUDIT_REDACTION_ARCHIVE_REASON)
+    if exc.code == "rule_unsupported":
+        name = next((rule["name"] for rule in agent_rules if rule.get("id") == exc.rule), None)
+        logger.error("agent.redaction_rule_unsupported", rule_id=exc.rule, error=str(exc))
+        exc.public_message = (
+            f"The redaction rule \"{name}\" can't run on this source's agent: "
+            "upgrade the agent or change the rule."
+            if name is not None
+            else "A redaction rule can't run on this source's agent: "
+            "upgrade the agent or change the rule."
+        )
+    return exc
+
+
+@contextmanager
+def _agent_refusals(agent_rules: list[dict]) -> Iterator[None]:
+    try:
+        yield
+    except AgentRedactionError as exc:
+        raise _agent_refusal(exc, agent_rules) from exc
+
+
 @dataclass(frozen=True)
 class RedactedRead:
     """What redacting a file's content for the viewer gave: the count per
     rule, how many bytes of the original the content covers (where the Tail
     goes on from), how many bytes at the end of the content stand for an
     unfinished last line, and the original's first HEAD_BYTES (to identify
-    the file for the Tail)."""
+    the file for the Tail). Redacted on the agent, the server never has
+    those bytes: `head_hash` is the agent's digest of them, and `at` says
+    where it was redacted."""
 
     counts: dict[str, int]
     source_offset: int
     trailing_partial: int
     head: bytes
+    head_hash: str | None = None
+    at: str = REDACTED_ON_SERVER
 
     @property
     def count(self) -> int:
@@ -769,8 +861,10 @@ def _resolve_redacted(
     rules: list[Rule],
     limits: Limits,
     redaction: CompiledRules,
+    agent_rules: list[dict] | None = None,
 ) -> _Resolved:
-    """_resolve_content when redaction applies: the content is fetched (or,
+    """_resolve_content when redaction applies: with `agent_rules`, the
+    agent redacts on its host (_resolve_on_agent); otherwise the content is fetched (or,
     for a local plain file, read in place), redacted into scratch, and the
     fetched original deleted before the response goes out, so scratch only
     ever keeps the redacted copy. A whole archive (or an archive inside
@@ -793,6 +887,8 @@ def _resolve_redacted(
     if whole_archive:
         logger.warning("archive.redaction_whole_archive_refused", source_id=source.id, path=path)
         raise WholeArchiveRefused(_AUDIT_REDACTION_ARCHIVE_REASON)
+    if agent_rules is not None:
+        return _resolve_on_agent(source, path, member, limits, agent_rules)
 
     complete = member is not None or is_transparent_gzip(filename)
     store = get_scratch_store()
@@ -829,6 +925,66 @@ def _resolve_redacted(
     return _Resolved(destination, served_filename, key, redacted)
 
 
+def _resolve_on_agent(
+    source: Source,
+    path: str,
+    member: str | None,
+    limits: Limits,
+    agent_rules: list[dict],
+) -> _Resolved:
+    """_resolve_redacted when the agent redacts on its host (#382, #249):
+    it reads the file, the archive member or the .gz file (decompressed)
+    and sends only what it redacted, straight into scratch, so the original
+    never reaches the server. A plain file's unfinished last line comes as
+    the incomplete-line marker, as when the server redacts; the head digest
+    the Tail starts from is the agent's."""
+    filename = path.rsplit("/", 1)[-1]
+    if member is not None and not is_archive(filename):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="not an archive")
+    target = member.rsplit("/", 1)[-1] if member is not None else filename
+    decompress = is_transparent_gzip(target)
+    followable = member is None and not decompress
+    served_filename = target[: -len(".gz")] if decompress else target
+    block = redaction_block(source.id, agent_rules, "utf-8")
+    connector = _connector(source)
+    store = get_scratch_store()
+    with get_limiter().connector(limits, source.id):
+        store.ensure_room()
+        key = _scratch_key(source.id, path, member)
+        destination = store.acquire(key)
+        try:
+            with _agent_refusals(agent_rules):
+                fetched = connector.call(
+                    "fetch_redacted",
+                    source,
+                    path,
+                    destination,
+                    block,
+                    member=member,
+                    decompress=decompress,
+                )
+                if followable and fetched.head_digest is None:
+                    raise AgentRedactionError("the agent sent no head digest", code="unverified")
+        except FetchTooLargeError as exc:
+            store.release(key)
+            raise _fetch_too_large(exc) from exc
+        except DecompressionLimitError as exc:
+            store.release(key)
+            raise _too_large(exc) from exc
+        except BaseException:
+            store.release(key)
+            raise
+    redacted = RedactedRead(
+        fetched.counts,
+        fetched.source_offset,
+        fetched.trailing_partial,
+        b"",
+        head_hash=fetched.head_digest,
+        at=REDACTED_ON_AGENT,
+    )
+    return _Resolved(destination, served_filename, key, redacted)
+
+
 def _decompress_gzip_member(compressed: Path, destination: Path) -> None:
     """A .gz archive member decompressed into `destination` for redaction,
     up to MAX_DECOMPRESSED_MB (413 past it); 409 (RedactionUnreadableRefused)
@@ -856,9 +1012,11 @@ def _resolve_content(
     rules: list[Rule],
     limits: Limits,
     redaction: CompiledRules | None = None,
+    agent_rules: list[dict] | None = None,
 ) -> _Resolved:
     """Returns (path_to_serve, filename, scratch_key, redacted). With
-    `redaction`, the content is redacted (_resolve_redacted). scratch_key is None
+    `redaction`, the content is redacted (_resolve_redacted), on the agent
+    with `agent_rules`. scratch_key is None
     when nothing was fetched/copied — currently only a local, plain file
     (not an archive member, not transparent-gzip), served straight from its
     real path with no ephemeral scratch involved at all (CLAUDE.md's Built-
@@ -876,7 +1034,7 @@ def _resolve_content(
     if not _visible(source, path, rules):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
     if redaction is not None:
-        return _resolve_redacted(source, path, member, rules, limits, redaction)
+        return _resolve_redacted(source, path, member, rules, limits, redaction, agent_rules)
 
     filename = path.rsplit("/", 1)[-1]
     needs_scratch = (
@@ -940,6 +1098,7 @@ def _resolve_content_audited(
     session: Session,
     denied_action: str,
     redaction: CompiledRules | None = None,
+    agent_rules: list[dict] | None = None,
 ) -> _Resolved:
     """_resolve_content, recording a refused whole archive (or content
     redaction can't read) in the audit log (`denied_action`) before the
@@ -947,7 +1106,7 @@ def _resolve_content_audited(
     inside an archive (`member=`), the path recorded is the refused
     archive's virtual path, `<archive>/<member>`."""
     try:
-        return _resolve_content(source, path, member, rules, limits, redaction)
+        return _resolve_content(source, path, member, rules, limits, redaction, agent_rules)
     except AuditedRefusal as exc:
         refused_path = path if member is None else f"{path}/{normalize_member_name(member)}"
         _audit_refusal(session, user, source, denied_action, refused_path, exc.reason)
@@ -959,11 +1118,13 @@ def _redaction_metadata(redacted: RedactedRead | None) -> dict:
     didn't apply."""
     if redacted is None:
         return {}
-    return dict(_REDACTION_APPLIED)
+    return _redaction_applied(redacted.at)
 
 
-# What the audit entry of a read redacted on the server says.
-_REDACTION_APPLIED = {"redaction": "applied", "redaction_at": "server"}
+def _redaction_applied(at: str) -> dict:
+    """What the audit entry of a read redacted on the server or the agent
+    (`at`) says."""
+    return {"redaction": "applied", "redaction_at": at}
 
 
 def _redaction_headers(redacted: RedactedRead) -> dict[str, str]:
@@ -1066,6 +1227,7 @@ def open_file(
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     redaction = redaction_rules_for(session, source)
+    agent_rules = agent_redaction_rules(session, source) if redaction is not None else None
     served_path, filename, key, redacted = _resolve_content_audited(
         source,
         path,
@@ -1076,6 +1238,7 @@ def open_file(
         session,
         "file.open_denied",
         redaction,
+        agent_rules,
     )
     metadata: dict = {"path": path, "member": member} if member else {"path": path}
     record_audit_event(
@@ -1092,8 +1255,13 @@ def open_file(
     if redacted is not None:
         headers.update(_redaction_headers(redacted))
         if followable:
-            # Over the original's start, up to where the Tail goes on from.
-            headers["X-Follow-Head"] = _head_hash(source.id, redacted.head, redacted.source_offset)
+            # Over the original's start, up to where the Tail goes on from;
+            # redacted on the agent, the agent's digest of it.
+            headers["X-Follow-Head"] = (
+                redacted.head_hash
+                if redacted.head_hash is not None
+                else _head_hash(source.id, redacted.head, redacted.source_offset)
+            )
     elif followable:
         # What the first Follow poll compares against (#254), so a file
         # rotated between this open and that poll is caught too.
@@ -1185,6 +1353,23 @@ def follow_file(
 
     redaction = redaction_rules_for(session, source)
     connector = _connector(source)
+    agent_rules = agent_redaction_rules(session, source) if redaction is not None else None
+    if agent_rules is not None:
+        answer = _follow_on_agent(connector, source, path, offset, head, agent_rules, user, session)
+        if isinstance(answer, Response):
+            return answer
+        body, headers = answer
+        if start or offset == 0:
+            record_audit_event(
+                session,
+                user_id=user.id,
+                action="file.follow",
+                target_type="source",
+                target_id=source.id,
+                metadata={"path": path, **_redaction_applied(REDACTED_ON_AGENT)},
+            )
+            session.commit()
+        return Response(content=body, media_type="application/octet-stream", headers=headers)
     # Redacted, the read starts a little before the offset (context only).
     read_from = max(0, offset - FOLLOW_CONTEXT_BYTES) if redaction is not None else offset
     try:
@@ -1257,11 +1442,57 @@ def follow_file(
             target_id=source.id,
             metadata={
                 "path": path,
-                **({"redaction": "applied", "redaction_at": "server"} if redaction else {}),
+                **(_redaction_applied(REDACTED_ON_SERVER) if redaction else {}),
             },
         )
         session.commit()
     return Response(content=body, media_type="application/octet-stream", headers=headers)
+
+
+def _follow_on_agent(
+    connector,
+    source: Source,
+    path: str,
+    offset: int,
+    head: str | None,
+    agent_rules: list[dict],
+    user: User,
+    session: Session,
+) -> tuple[bytes, dict[str, str]] | Response:
+    """The redacted Tail when the agent redacts on its host (#382, #249):
+    the agent reads, from a little before `offset`, only whole lines and
+    redacts them (the same answer as _follow_redacted), and never sends the
+    start of the file, only its digests. A refusal (UTF-32, a compressed
+    format) is audited as when the server redacts."""
+    block = redaction_block(source.id, agent_rules, "utf-8")
+    try:
+        with _agent_refusals(agent_rules):
+            read = connector.call(
+                "read_range_redacted", source, path, offset, RANGE_MAX_BYTES, block
+            )
+    except AuditedRefusal as exc:
+        _audit_refusal(session, user, source, "file.open_denied", path, exc.reason, follow=True)
+        raise
+    changed = head is not None and offset > 0 and head != read.head_digest
+    if offset > read.size or changed:
+        return Response(
+            content=b"",
+            media_type="application/octet-stream",
+            headers={"X-Follow-Reset": "1", "X-File-Size": str(read.size)},
+        )
+    headers = {
+        "X-File-Size": str(read.size),
+        "X-Follow-Offset": str(read.next_offset),
+        "X-Follow-Head": read.next_head_digest,
+        "X-Redacted": "1",
+        "X-Redaction-Count": str(sum(read.counts.values())),
+        "X-Follow-Partial": str(read.trailing_partial),
+    }
+    if read.aligned:
+        headers["X-Follow-Aligned"] = "1"
+    if read.read_end < read.size:
+        headers["X-Follow-More"] = "1"
+    return read.data, headers
 
 
 def _follow_redacted(
@@ -1573,6 +1804,202 @@ class _RedactedDownload(NamedTuple):
     # For a rebuilt archive, the (member, reason) of each member left out.
     skipped: list[tuple[str, str]] | None
     work_dir: Path
+    at: str = REDACTED_ON_SERVER
+
+
+# Why the agent left a member of an archive out (fetch_archive), as the
+# reasons a server-side rebuild gives.
+_AGENT_MEMBER_SKIPS = {
+    "not_found": _SKIP_UNREADABLE,
+    "encrypted": SKIP_ENCRYPTED,
+    "nested_archive": SKIP_NESTED_ARCHIVE,
+    "unsupported_encoding": _SKIP_ENCODING,
+    "unsupported_format": _SKIP_FORMAT,
+    "too_large": _SKIP_TOO_LARGE,
+    "unreadable": _SKIP_UNREADABLE,
+}
+# A redaction refusal of the agent that leaves one file out of a folder ZIP
+# rather than failing it.
+_AGENT_FILE_SKIPS = {
+    "unsupported_encoding": _SKIP_ENCODING,
+    "unsupported_format": _SKIP_FORMAT,
+}
+# Errors of the agent on a whole archive that keep their own answer rather
+# than refusing the archive as one it can't read.
+_AGENT_ARCHIVE_ERRORS_KEPT = (
+    AgentRedactionError,
+    SourceUnreachableError,
+    SourcePermissionError,
+    SourceNotFoundError,
+)
+
+
+def _gzip_file(plain: Path, destination: Path) -> None:
+    with plain.open("rb") as src, gzip.open(destination, "wb") as dst:
+        shutil.copyfileobj(src, dst, CHUNK_BYTES)
+
+
+def _rebuild_on_agent(
+    connector,
+    source: Source,
+    virtual_path: str,
+    filename: str,
+    destination: Path,
+    rules: list[Rule],
+    agent_rules: list[dict],
+    work_dir: Path,
+) -> list[tuple[str, str]]:
+    """_rebuild_redacted when the agent redacts on its host (#382, #249):
+    the agent lists the archive (list_archive), the members the rules don't
+    hide on purpose are asked for (an archive inside it is left out and
+    listed, as the agent can't redact it), and the agent sends them
+    redacted, in one pass (fetch_archive). The archive is rebuilt here in
+    the same format, a .gz member compressed again under its name; what the
+    agent left out is listed in REDACTION-SKIPPED.txt. The original never
+    reaches the server. Raises _ArchiveUnreadable when the listing was cut,
+    so the archive would be missing members without saying so."""
+    members, cut = connector.call("list_archive", source, virtual_path)
+    if cut:
+        logger.warning(
+            "archive.redaction_archive_listing_cut", source_id=source.id, path=virtual_path
+        )
+        raise _ArchiveUnreadable()
+    case_insensitive = rules_case_insensitive(source)
+    skipped: list[tuple[str, str]] = []
+    wanted: list[str] = []
+    for member in members:
+        name = normalize_member_name(member.name)
+        if member.is_dir or not name:
+            continue
+        hidden = is_explicitly_excluded(
+            f"{virtual_path}/{name}", rules, case_insensitive=case_insensitive
+        )
+        if hidden:
+            continue
+        if is_archive(name.rsplit("/", 1)[-1]):
+            skipped.append((name, SKIP_NESTED_ARCHIVE))
+            continue
+        if member.name not in wanted:
+            wanted.append(member.name)
+    member_dir = work_dir / "agent-members"
+    member_dir.mkdir(exist_ok=True)
+    try:
+        received, _ = connector.call(
+            "fetch_archive",
+            source,
+            virtual_path,
+            wanted,
+            member_dir,
+            redaction_block(source.id, agent_rules, "source"),
+        )
+        entries: list[tuple[str, Path, float | None]] = []
+        for index, item in enumerate(received):
+            name = normalize_member_name(item.name)
+            if item.skipped is not None or item.path is None:
+                reason = _AGENT_MEMBER_SKIPS.get(item.skipped or "", _SKIP_UNREADABLE)
+                skipped.append((name, reason))
+                continue
+            content = item.path
+            if item.gunzipped:
+                # Sent decompressed to be redacted: compressed again, under
+                # the name it has in the archive.
+                content = member_dir / f"gz-{index}"
+                _gzip_file(item.path, content)
+                item.path.unlink(missing_ok=True)
+            entries.append((name, content, item.mtime))
+        write_archive(filename, destination, entries, skipped, _redaction_skipped_list)
+    finally:
+        shutil.rmtree(member_dir, ignore_errors=True)
+    return skipped
+
+
+def _prepare_on_agent(
+    source: Source,
+    path: str,
+    member: str | None,
+    rules: list[Rule],
+    limits: Limits,
+    agent_rules: list[dict],
+) -> _RedactedDownload:
+    """_prepare_redacted_download when the agent redacts on its host (#382,
+    #249): everything arrives redacted, in the file's own encoding, and is
+    sent as it is. A file or member as it is; a .gz file decompressed (as
+    without redaction); a .gz member decompressed on the agent and
+    compressed again here; a whole archive rebuilt here from the members
+    the agent sent redacted (_rebuild_on_agent). An archive inside an
+    archive can't be redacted on the agent, so it is refused (403), as is
+    one that can't be read whole or that the agent can't read. Takes a
+    connector slot while it fetches."""
+    filename = path.rsplit("/", 1)[-1]
+    if member is not None and not is_archive(filename):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="not an archive")
+    target = member.rsplit("/", 1)[-1] if member is not None else filename
+    if is_archive(target) and member is not None:
+        logger.warning("archive.redaction_nested_archive_refused", source_id=source.id, path=path)
+        raise WholeArchiveRefused(_AUDIT_REDACTION_ARCHIVE_REASON)
+    connector = _connector(source)
+    store = get_scratch_store()
+    with get_limiter().connector(limits, source.id):
+        store.ensure_room()
+        work_dir = make_scratch_dir("perchtail-download-")
+        try:
+            with _agent_refusals(agent_rules):
+                if is_archive(target):
+                    rebuilt = work_dir / "rebuilt"
+                    try:
+                        skipped = _rebuild_on_agent(
+                            connector, source, path, target, rebuilt, rules, agent_rules, work_dir
+                        )
+                    except _ArchiveUnreadable as exc:
+                        raise WholeArchiveRefused(_AUDIT_REDACTION_ARCHIVE_REASON) from exc
+                    except _AGENT_ARCHIVE_ERRORS_KEPT:
+                        raise
+                    except SourceError as exc:
+                        # The agent couldn't read the archive (a corrupt zip
+                        # or tar.gz): refused as a server-side rebuild
+                        # refuses one it can't read (_rebuild_redacted).
+                        logger.warning(
+                            "archive.redaction_archive_unreadable",
+                            source_id=source.id,
+                            path=path,
+                            error_type=type(exc).__name__,
+                        )
+                        raise WholeArchiveRefused(_AUDIT_REDACTION_ARCHIVE_REASON) from exc
+                    return _RedactedDownload(
+                        rebuilt, target, None, True, skipped, work_dir, REDACTED_ON_AGENT
+                    )
+                decompress = is_transparent_gzip(target)
+                content = work_dir / "redacted"
+                connector.call(
+                    "fetch_redacted",
+                    source,
+                    path,
+                    content,
+                    redaction_block(source.id, agent_rules, "source"),
+                    member=member,
+                    decompress=decompress,
+                )
+                if member is not None and decompress:
+                    # A .gz member is sent as it is in the archive: compressed.
+                    rebuilt = work_dir / "rebuilt"
+                    _gzip_file(content, rebuilt)
+                    content.unlink()
+                    return _RedactedDownload(
+                        rebuilt, target, None, True, None, work_dir, REDACTED_ON_AGENT
+                    )
+                served = target[: -len(".gz")] if decompress else target
+                return _RedactedDownload(
+                    content, served, None, True, None, work_dir, REDACTED_ON_AGENT
+                )
+        except FetchTooLargeError as exc:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise _fetch_too_large(exc) from exc
+        except DecompressionLimitError as exc:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise _too_large(exc) from exc
+        except BaseException:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise
 
 
 def _prepare_redacted_download(
@@ -1582,6 +2009,7 @@ def _prepare_redacted_download(
     rules: list[Rule],
     limits: Limits,
     redaction: CompiledRules,
+    agent_rules: list[dict] | None = None,
 ) -> _RedactedDownload:
     """A download when redaction applies to it. A file, a .gz file (sent
     decompressed, as without redaction) or an archive member is fetched
@@ -1604,6 +2032,8 @@ def _prepare_redacted_download(
         target, virtual_path = member.rsplit("/", 1)[-1], f"{path}/{member}"
     else:
         target, virtual_path = filename, path
+    if agent_rules is not None:
+        return _prepare_on_agent(source, path, member, rules, limits, agent_rules)
     whole_archive = is_archive(target)
     in_place = (
         source.protocol == Protocol.local
@@ -1691,12 +2121,16 @@ def _download_redacted(
     redaction: CompiledRules,
     user: User,
     session: Session,
+    agent_rules: list[dict] | None = None,
 ) -> Response:
-    """download_file when the download is redacted (#382, #249)."""
+    """download_file when the download is redacted (#382, #249), on the
+    agent with `agent_rules`."""
     transfer = get_limiter().transfer(limits, user.id)
     try:
         try:
-            prepared = _prepare_redacted_download(source, path, member, rules, limits, redaction)
+            prepared = _prepare_redacted_download(
+                source, path, member, rules, limits, redaction, agent_rules
+            )
         except AuditedRefusal as exc:
             refused_path = path if member is None else f"{path}/{normalize_member_name(member)}"
             _audit_refusal(session, user, source, "file.download_denied", refused_path, exc.reason)
@@ -1711,7 +2145,7 @@ def _download_redacted(
 
     try:
         metadata: dict = {"path": path, "member": member} if member else {"path": path}
-        metadata.update(_REDACTION_APPLIED)
+        metadata.update(_redaction_applied(prepared.at))
         if prepared.skipped is not None:
             metadata["skipped_count"] = len(prepared.skipped)
         record_audit_event(
@@ -1777,7 +2211,17 @@ def download_file(
     limits = current_limits(session)
     redaction = download_redaction_rules_for(session, source)
     if redaction is not None:
-        return _download_redacted(source, path, member, rules, limits, redaction, user, session)
+        return _download_redacted(
+            source,
+            path,
+            member,
+            rules,
+            limits,
+            redaction,
+            user,
+            session,
+            agent_redaction_rules(session, source),
+        )
     transfer = get_limiter().transfer(limits, user.id)
     try:
         served_path, filename, key, _ = _resolve_content_audited(
@@ -2029,6 +2473,7 @@ def _prepare_redacted_folder(
     tmp_dir: Path,
     redaction: CompiledRules,
     limit: int,
+    agent_rules: list[dict] | None = None,
 ) -> tuple[list[_RedactedEntry], list[tuple[str, str]], int]:
     """Before a redacted folder ZIP starts: fetches each archive and .gz
     file among `entries` into `tmp_dir` and redacts it there: an archive is
@@ -2038,7 +2483,8 @@ def _prepare_redacted_folder(
     returned as (arcname, reason), a member of an archive as
     `<archive>/<member>`. Returns the entries to zip, those left out and the
     bytes fetched, which count against `limit` (MAX_FETCH_MB) as fetched
-    from the source, not as redacted."""
+    from the source, not as redacted. With `agent_rules`, the agent redacts
+    on its host (_prepare_folder_entry_on_agent)."""
     planned: list[_RedactedEntry] = []
     skipped: list[tuple[str, str]] = []
     fetched_total = 0
@@ -2048,6 +2494,24 @@ def _prepare_redacted_folder(
             planned.append(_RedactedEntry(entry, None))
             continue
         arcname = _arcname(entry.path, request_root)
+        if agent_rules is not None:
+            # As stored on the source (the agent refuses more than the
+            # limit), as the server counts what it fetched.
+            fetched_total += entry.size
+            if fetched_total > limit:
+                raise FetchTooLargeError(
+                    "folder is over the MAX_FETCH_MB limit", size=fetched_total, limit=limit
+                )
+            prepared = tmp_dir / f"prepared-{index}"
+            inner = _prepare_folder_entry_on_agent(
+                connector, source, entry, prepared, rules, agent_rules, tmp_dir
+            )
+            if isinstance(inner, str):
+                skipped.append((arcname, inner))
+                continue
+            skipped.extend((f"{arcname}/{name}", reason) for name, reason in inner)
+            planned.append(_RedactedEntry(entry, prepared))
+            continue
         original = tmp_dir / f"source-{index}"
         prepared = tmp_dir / f"prepared-{index}"
         try:
@@ -2085,6 +2549,67 @@ def _prepare_redacted_folder(
     return planned, skipped, fetched_total
 
 
+def _prepare_folder_entry_on_agent(
+    connector,
+    source: Source,
+    entry: DirEntry,
+    prepared: Path,
+    rules: list[Rule],
+    agent_rules: list[dict],
+    tmp_dir: Path,
+) -> list[tuple[str, str]] | str:
+    """An archive or .gz file of a redacted folder ZIP when the agent
+    redacts on its host, into `prepared`: an archive rebuilt from the
+    members the agent sent redacted (_rebuild_on_agent), a .gz file
+    decompressed and redacted on the agent and compressed again here.
+    Returns the (member, reason) of what an archive left out, or why the
+    whole file is left out: as when the server redacts, content redaction
+    can't read, past MAX_DECOMPRESSED_MB, or unreadable. Anything else (the
+    agent gone, a rule it can't run) fails the ZIP."""
+    try:
+        if is_archive(entry.name):
+            return _rebuild_on_agent(
+                connector, source, entry.path, entry.name, prepared, rules, agent_rules, tmp_dir
+            )
+        plain = tmp_dir / "agent-gz"
+        try:
+            connector.call(
+                "fetch_redacted",
+                source,
+                entry.path,
+                plain,
+                redaction_block(source.id, agent_rules, "source"),
+                decompress=True,
+            )
+            _gzip_file(plain, prepared)
+        finally:
+            plain.unlink(missing_ok=True)
+        return []
+    except _ArchiveUnreadable:
+        return _SKIP_UNREADABLE
+    except DecompressionLimitError:
+        prepared.unlink(missing_ok=True)
+        return _SKIP_TOO_LARGE
+    except AgentRedactionError as exc:
+        prepared.unlink(missing_ok=True)
+        if exc.code in _AGENT_FILE_SKIPS:
+            return _AGENT_FILE_SKIPS[exc.code]
+        raise _agent_refusal(exc, agent_rules) from exc
+    except SourceUnreachableError:
+        raise
+    except SourceError as exc:
+        # The agent couldn't read it (a corrupt archive or .gz file), as a
+        # server-side rebuild leaves out what it can't read.
+        prepared.unlink(missing_ok=True)
+        logger.warning(
+            "archive.redaction_agent_unreadable",
+            source_id=source.id,
+            path=entry.path,
+            error_type=type(exc).__name__,
+        )
+        return _SKIP_UNREADABLE
+
+
 def _stream_redacted_zip(
     connector,
     source: Source,
@@ -2096,9 +2621,12 @@ def _stream_redacted_zip(
     skipped: list[tuple[str, str]],
     skipped_name: str,
     record_late_skips: Callable[[list[str]], None],
+    agent_rules: list[dict] | None = None,
 ) -> Iterator[bytes]:
     """_stream_zip for a redacted folder ZIP. Each plain file is fetched
-    fresh, one at a time, redacted into scratch and written into the ZIP;
+    fresh, one at a time, redacted into scratch (with `agent_rules`, on the
+    agent, which sends it redacted, counted by the bytes of the original it
+    read) and written into the ZIP;
     one redaction can't read (UTF-32, or compressed in a format it doesn't
     support) is left out. The archives and .gz files prepared beforehand
     (_prepare_redacted_folder) are stored as they are, without compressing
@@ -2119,13 +2647,20 @@ def _stream_redacted_zip(
                     compress = zipfile.ZIP_STORED
                     if prepared is None:
                         compress = zipfile.ZIP_DEFLATED
-                        connector.fetch_file(source, entry.path, original)
-                        remaining -= original.stat().st_size
+                        if agent_rules is not None:
+                            fetched, reason = _fetch_redacted_file_on_agent(
+                                connector, source, entry.path, redacted, agent_rules
+                            )
+                            remaining -= fetched
+                        else:
+                            connector.fetch_file(source, entry.path, original)
+                            remaining -= original.stat().st_size
                         if remaining < 0:
                             raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
-                        with original.open("rb") as src:
-                            reason = _redact_into(src, redacted, redaction, None)
-                        original.unlink()
+                        if agent_rules is None:
+                            with original.open("rb") as src:
+                                reason = _redact_into(src, redacted, redaction, None)
+                            original.unlink()
                         if reason is not None:
                             logger.warning(
                                 "archive.redaction_skipped",
@@ -2164,6 +2699,27 @@ def _stream_redacted_zip(
         shutil.rmtree(tmp_dir, ignore_errors=True)
         if late:
             record_late_skips(late)
+
+
+def _fetch_redacted_file_on_agent(
+    connector, source: Source, path: str, destination: Path, agent_rules: list[dict]
+) -> tuple[int, str | None]:
+    """A plain file of a redacted folder ZIP, redacted on the agent into
+    `destination`. Returns the bytes of the original the agent read, and
+    None, or why the file is left out (content redaction can't read)."""
+    try:
+        fetched = connector.call(
+            "fetch_redacted",
+            source,
+            path,
+            destination,
+            redaction_block(source.id, agent_rules, "source"),
+        )
+    except AgentRedactionError as exc:
+        if exc.code in _AGENT_FILE_SKIPS:
+            return 0, _AGENT_FILE_SKIPS[exc.code]
+        raise _agent_refusal(exc, agent_rules) from exc
+    return fetched.source_size, None
 
 
 def _late_skips_recorder(
@@ -2211,12 +2767,14 @@ def _download_folder_zip_redacted(
     limits: Limits,
     user: User,
     session: Session,
+    agent_rules: list[dict] | None = None,
 ) -> StreamingResponse:
     """download_folder_zip when the download is redacted (#382, #249): every
     file in the ZIP is redacted (_prepare_redacted_folder,
-    _stream_redacted_zip), what can't be is listed in REDACTION-SKIPPED.txt,
-    and the ZIP says so in X-PerchTail-Redacted and, with
-    redaction_download_suffix on, in its name."""
+    _stream_redacted_zip), on the agent with `agent_rules`, what can't be is
+    listed in REDACTION-SKIPPED.txt, and the ZIP says so in
+    X-PerchTail-Redacted and, with redaction_download_suffix on, in its
+    name."""
     slots: list[Slot] = [get_limiter().transfer(limits, user.id)]
 
     def finish() -> None:
@@ -2256,14 +2814,16 @@ def _download_folder_zip_redacted(
         tmp_dir = make_scratch_dir("perchtail-zip-")
         try:
             planned, skipped, fetched = _prepare_redacted_folder(
-                connector, source, rules, entries, path, tmp_dir, redaction, limit
+                connector, source, rules, entries, path, tmp_dir, redaction, limit, agent_rules
             )
         except FetchTooLargeError as exc:
             raise _fetch_too_large(exc, folder=True) from exc
         metadata: dict = {
             "path": path,
             "file_count": len(planned),
-            **_REDACTION_APPLIED,
+            **_redaction_applied(
+                REDACTED_ON_AGENT if agent_rules is not None else REDACTED_ON_SERVER
+            ),
             "skipped_count": len(skipped),
         }
         record_audit_event(
@@ -2293,6 +2853,7 @@ def _download_folder_zip_redacted(
         skipped,
         _redaction_skipped_name(root_names),
         _late_skips_recorder(session, user, source, path),
+        agent_rules,
     )
 
     def finish_stream() -> None:
@@ -2356,7 +2917,15 @@ def download_folder_zip(
     redaction = download_redaction_rules_for(session, source)
     if redaction is not None:
         return _download_folder_zip_redacted(
-            connector, source, rules, path, redaction, limits, user, session
+            connector,
+            source,
+            rules,
+            path,
+            redaction,
+            limits,
+            user,
+            session,
+            agent_redaction_rules(session, source),
         )
     slots: list[Slot] = [get_limiter().transfer(limits, user.id)]
 

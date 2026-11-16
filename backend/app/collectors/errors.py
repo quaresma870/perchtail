@@ -342,6 +342,14 @@ class TranslatingConnector:
                 source, relative_path = source_roots.split(source, relative_path)
             return self._module.read_range(source, relative_path, offset, length, head)
 
+    def call(self, name: str, source, *args, **kwargs):
+        """One of the collector's own functions that take the source first
+        (the agent's redacted commands, #382, #249), with its errors
+        translated and the source's reachability tracked like the calls
+        above. Single-root sources only (push agents)."""
+        with tracked(source), translated(self._translate):
+            return getattr(self._module, name)(source, *args, **kwargs)
+
     @contextmanager
     def local_copy(self, source, relative_path: str):
         # Only the fetch is translated; exceptions from the caller's `with`

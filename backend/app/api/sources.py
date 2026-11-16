@@ -119,6 +119,10 @@ class SourcePublic(BaseModel):
     # files, for example).
     agent_version: str | None
     agent_outdated: bool
+    # What the agent last announced it can do (#382, #249): "redaction/1"
+    # when it redacts on its host; empty for an older agent, which leaves
+    # redaction to the server.
+    agent_features: list[str] = []
     # Reachability (#276): "ok", "failing" or "unknown"; for an agent source,
     # its live connection ("ok" connected, "failing" not). When it was last
     # known, and the public reason when failing.
@@ -266,6 +270,7 @@ def _to_public(
         agent_os=source.agent_os,
         agent_version=source.agent_version,
         agent_outdated=is_newer(APP_VERSION, source.agent_version),
+        agent_features=source.agent_features.split(",") if source.agent_features else [],
         **_status_fields(source),
         name_index_enabled=source.name_index_enabled,
         name_indexed_at=source.name_indexed_at,

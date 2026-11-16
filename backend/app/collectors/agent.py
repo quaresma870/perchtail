@@ -1,15 +1,35 @@
 import base64
+import re
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO, NoReturn
 
-from app.agent_registry import AgentCommandError, get_agent_registry
+from app.agent_registry import FEATURE_REDACTION, AgentCommandError, get_agent_registry
+from app.archives import ArchiveMember, DecompressionLimitError
 from app.collectors import base as collector_base
-from app.collectors.base import DirEntry, DirListing
+from app.collectors.base import DirEntry, DirListing, SourceError
+from app.config import get_settings
+from app.crypto import follow_head_key
+from app.json_values import as_int
 from app.models import Rule, Source
+from app.redaction import ENGINE_VERSION, MAX_LINE_BYTES, PEM_MAX_LINES, rules_digest
 from app.rules import is_entry_visible, rules_case_insensitive
 from app.scratch import scratch_temp_dir
 
-__all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy", "read_range"]
+__all__ = [
+    "AgentRedactionError",
+    "DirEntry",
+    "fetch_archive",
+    "fetch_file",
+    "fetch_redacted",
+    "list_archive",
+    "list_directory",
+    "local_copy",
+    "read_range",
+    "read_range_redacted",
+    "redaction_block",
+]
 
 # Size of each fetch_chunk the agent sends (#205): about 1.4 MB once
 # base64-encoded, well under uvicorn's 16 MiB WebSocket message limit.
@@ -137,3 +157,482 @@ def read_range(
     ):
         raise collector_base.SourceError("the agent sent more than it was asked for")
     return collector_base.RangeRead(int(result.get("size", 0)), head_bytes, data)
+
+
+# --- Redaction on the host (#382, #249) --------------------------------------
+#
+# An agent that announced FEATURE_REDACTION gets the source's redaction rules
+# in a `redact` block with every command that returns content, redacts on its
+# host, and lists and extracts archives and .gz files itself, so the original
+# never leaves the host. Its answers are checked before anything is used: a
+# content answer must say it was redacted, with the digest of the rules sent
+# (fail closed: anything else is discarded and nothing is served). Commands
+# are only ever sent to a connection that announced the feature.
+
+# Redacted, content can be longer than the original (a short value becomes a
+# longer marker). What the server accepts from the agent is still bounded, as
+# a guard against an agent that misbehaves: this many times the limit on the
+# original.
+REDACTED_GROWTH_LIMIT = 4
+
+# The codes of a redaction_error (agent/internal/agent/redaction.go).
+_REFUSAL_CODES = frozenset(
+    {
+        "rule_unsupported",
+        "unsupported_encoding",
+        "unsupported_format",
+        "not_redactable",
+        "invalid_redact",
+    }
+)
+# Why a fetch_archive left a member out (ArchiveMember.Skipped in the agent).
+SKIPPED_REASONS = frozenset(
+    {
+        "not_found",
+        "encrypted",
+        "nested_archive",
+        "unsupported_encoding",
+        "unsupported_format",
+        "too_large",
+        "unreadable",
+    }
+)
+# Left out once part of it was sent: the agent announces the member again,
+# right after its content, which withdraws what was sent of it.
+_WITHDRAWN_REASONS = frozenset({"too_large", "unreadable"})
+_HEAD_DIGEST_RE = re.compile(r"^[0-9a-f]{32}$")
+_LIMIT_RE = re.compile(r"over the (\d+)-byte limit")
+
+
+class AgentRedactionError(SourceError):
+    """Content the agent didn't redact, so nothing of it is served: it
+    refused (a redaction_error; `code` says why, `rule` is the id of a rule
+    it can't run), or its answer doesn't prove it was redacted with the
+    rules sent (`code` "unverified"), or the connection no longer redacts
+    on the host ("feature_missing"). 502 unless the caller answers the code
+    with a refusal of its own."""
+
+    public_message = "The content couldn't be redacted on the agent, so it isn't shown"
+
+    def __init__(self, detail: str, *, code: str, rule: int | None = None):
+        super().__init__(detail)
+        self.code = code
+        self.rule = rule
+
+
+def _unverified(detail: str) -> AgentRedactionError:
+    return AgentRedactionError(
+        f"the agent's answer isn't redacted as asked: {detail}", code="unverified"
+    )
+
+
+def redaction_block(source_id: int, rules: list[dict], output_encoding: str) -> dict:
+    """The `redact` block of a command: the rules (in the engine's format,
+    app.redaction_rules.engine_rules) and their digest, the source's key for
+    the Tail's head digest, the engine's limits, and the output encoding:
+    "utf-8" for the viewer, "source" for a download (UTF-16 content encoded
+    back, and the end of the content ends its last line)."""
+    return {
+        "engine": ENGINE_VERSION,
+        "digest": rules_digest(rules),
+        "rules": [dict(rule) for rule in rules],
+        "head_key": base64.b64encode(follow_head_key(source_id)).decode("ascii"),
+        "max_line_bytes": MAX_LINE_BYTES,
+        "pem_max_lines": PEM_MAX_LINES,
+        "output_encoding": output_encoding,
+    }
+
+
+def _max_decompressed_bytes() -> int:
+    return int(get_settings().max_decompressed_mb * 1024**2)
+
+
+def _raise_command_error(exc: AgentCommandError, *, expanding: bool) -> NoReturn:
+    """Raises what an agent's refusal of a redacted command means here."""
+    if exc.message_type == "redaction_error":
+        code = exc.code if exc.code in _REFUSAL_CODES else "invalid_redact"
+        raise AgentRedactionError(str(exc), code=code, rule=exc.rule) from exc
+    if exc.message_type == "feature_error":
+        raise AgentRedactionError(str(exc), code="feature_missing") from exc
+    if exc.code == "too_large":
+        # The agent says which limit: the file as stored (max_bytes) or what
+        # extracting or decompressing it produced (max_decompressed).
+        match = _LIMIT_RE.search(str(exc))
+        limit = int(match.group(1)) if match else collector_base.max_fetch_bytes()
+        if expanding and limit == _max_decompressed_bytes():
+            raise DecompressionLimitError(str(exc)) from exc
+        raise collector_base.too_large(exc.size or limit + 1, limit) from exc
+    raise exc
+
+
+@dataclass(frozen=True)
+class RedactedFetch:
+    """What the agent says redacting a fetch gave: the values replaced by
+    rule name, how many bytes of the original it read (`source_size`),
+    where a Tail goes on from (`source_offset`), how many bytes at the end
+    stand for an unfinished last line, and the head digest of the original
+    up to `source_offset` (None for an archive's members)."""
+
+    counts: dict[str, int]
+    source_size: int
+    source_offset: int
+    trailing_partial: int
+    head_digest: str | None
+    size: int
+
+
+def _counts(value) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise _unverified("counts")
+    counts: dict[str, int] = {}
+    for name, count in value.items():
+        number = as_int(count)
+        if not isinstance(name, str) or number is None or number < 0:
+            raise _unverified("counts")
+        counts[name] = number
+    return counts
+
+
+def _verified(result: dict, block: dict) -> RedactedFetch:
+    """The redaction a streamed fetch's closing message reports, once it
+    proves the content was redacted with the block's rules."""
+    if result.get("redacted") is not True or result.get("digest") != block["digest"]:
+        raise _unverified("no redaction with the rules sent")
+    if result.get("streamed") is not True:
+        raise _unverified("not streamed")
+    size = as_int(result.get("size"))
+    source_size = as_int(result.get("source_size"))
+    source_offset = as_int(result.get("source_offset"))
+    partial = as_int(result.get("trailing_partial"))
+    head = result.get("head_digest")
+    if (
+        size is None
+        or source_size is None
+        or source_offset is None
+        or partial is None
+        or size < 0
+        or not 0 <= source_offset <= source_size
+        or not 0 <= partial <= size
+        or (head is not None and not (isinstance(head, str) and _HEAD_DIGEST_RE.match(head)))
+    ):
+        raise _unverified("closing message")
+    counts = _counts(result.get("counts"))
+    return RedactedFetch(counts, source_size, source_offset, partial, head, size)
+
+
+def fetch_redacted(
+    source: Source,
+    relative_path: str,
+    destination: Path,
+    block: dict,
+    *,
+    member: str | None = None,
+    decompress: bool = False,
+) -> RedactedFetch:
+    """Fetches `relative_path` into `destination`, redacted on the agent with
+    `block`: the archive member `member` of it, and/or decompressed (a .gz
+    file or member), when asked. Only redacted content ever arrives; an
+    answer that doesn't prove it is deleted (AgentRedactionError). A
+    refusal raises AgentRedactionError with the agent's code; past
+    MAX_FETCH_MB, FetchTooLargeError; past MAX_DECOMPRESSED_MB once
+    extracted or decompressed, DecompressionLimitError."""
+    limit = collector_base.max_fetch_bytes()
+    max_decompressed = _max_decompressed_bytes()
+    expanding = member is not None or decompress
+    fields: dict = {
+        "path": relative_path,
+        "chunk_size": FETCH_CHUNK_BYTES,
+        "max_bytes": limit,
+        "redact": block,
+    }
+    if member is not None:
+        fields["member"] = member
+    if decompress:
+        fields["decompress"] = "gzip"
+    if expanding:
+        fields["max_decompressed"] = max_decompressed
+    sink_limit = (max_decompressed if expanding else limit) * REDACTED_GROWTH_LIMIT
+    try:
+        with destination.open("wb") as sink:
+            result = get_agent_registry().send_command_sync(
+                source.id,
+                "fetch",
+                sink=sink,
+                limit=sink_limit,
+                require_feature=FEATURE_REDACTION,
+                **fields,
+            )
+        return _verified(result, block)
+    except AgentCommandError as exc:
+        destination.unlink(missing_ok=True)
+        _raise_command_error(exc, expanding=expanding)
+    except AgentRedactionError:
+        destination.unlink(missing_ok=True)
+        raise
+    except BaseException as exc:
+        destination.unlink(missing_ok=True)
+        if _is_agent_error(exc):
+            # A stream cut short or out of order: nothing of it is used.
+            raise _unverified(str(exc)) from exc
+        raise
+
+
+def _is_agent_error(exc: BaseException) -> bool:
+    from app.agent_registry import AgentError, AgentNotConnectedError, AgentTimeoutError
+
+    return isinstance(exc, AgentError) and not isinstance(
+        exc, AgentNotConnectedError | AgentTimeoutError
+    )
+
+
+@dataclass(frozen=True)
+class RedactedRange:
+    """A redacted read_range answer (agent's RedactedReadRangeResult): the
+    file's size, the redacted whole lines, where the next poll starts and
+    where the read stopped (in bytes of the original), the head digests at
+    the offset asked and at `next_offset`, the values replaced, how many
+    bytes at the end stand for an unfinished last line, and whether the
+    content starts at the line after the offset."""
+
+    size: int
+    data: bytes
+    next_offset: int
+    read_end: int
+    head_digest: str
+    next_head_digest: str
+    counts: dict[str, int]
+    trailing_partial: int
+    aligned: bool
+
+
+def read_range_redacted(
+    source: Source, relative_path: str, offset: int, length: int, block: dict
+) -> RedactedRange:
+    """The redacted Tail on the agent: up to `length` bytes from `offset`
+    (plus context before it, never sent), only whole lines, redacted on the
+    host. The file's first bytes are never asked for, only their digests."""
+    offset = max(int(offset), 0)
+    try:
+        result = get_agent_registry().send_command_sync(
+            source.id,
+            "read_range",
+            path=relative_path,
+            offset=offset,
+            length=max(min(int(length), collector_base.RANGE_MAX_BYTES), 0),
+            redact=block,
+            require_feature=FEATURE_REDACTION,
+        )
+    except AgentCommandError as exc:
+        _raise_command_error(exc, expanding=False)
+    if result.get("redacted") is not True or result.get("digest") != block["digest"]:
+        raise _unverified("no redaction with the rules sent")
+    if result.get("head_b64"):
+        raise _unverified("the start of the file was sent")
+    try:
+        data = base64.b64decode(str(result.get("data_b64") or ""), validate=True)
+    except ValueError as exc:
+        raise _unverified("content") from exc
+    size = as_int(result.get("size"))
+    next_offset = as_int(result.get("next_offset"))
+    read_end = as_int(result.get("read_end"))
+    partial = as_int(result.get("trailing_partial"))
+    head = result.get("head_digest")
+    next_head = result.get("next_head_digest")
+    if (
+        len(data) > collector_base.RANGE_MAX_BYTES
+        or size is None
+        or next_offset is None
+        or read_end is None
+        or partial is None
+        or size < 0
+        or next_offset < offset
+        or read_end < 0
+        or not 0 <= partial <= len(data)
+        or not (isinstance(head, str) and _HEAD_DIGEST_RE.match(head))
+        or not (isinstance(next_head, str) and _HEAD_DIGEST_RE.match(next_head))
+    ):
+        raise _unverified("read_range answer")
+    return RedactedRange(
+        size=size,
+        data=data,
+        next_offset=next_offset,
+        read_end=read_end,
+        head_digest=head,
+        next_head_digest=next_head,
+        counts=_counts(result.get("counts")),
+        trailing_partial=partial,
+        aligned=result.get("aligned") is True,
+    )
+
+
+def list_archive(source: Source, relative_path: str) -> tuple[list[ArchiveMember], bool]:
+    """The members of the archive at `relative_path`, listed on the agent
+    (app.archives.list_members's answer), so the archive never leaves the
+    host just to be listed. Returns them and whether the listing was cut."""
+    try:
+        result = get_agent_registry().send_command_sync(
+            source.id,
+            "list_archive",
+            path=relative_path,
+            max_entries=AGENT_LIST_MAX_ENTRIES,
+            require_feature=FEATURE_REDACTION,
+        )
+    except AgentCommandError as exc:
+        if exc.message_type == "feature_error":
+            _raise_command_error(exc, expanding=False)
+        raise
+    raw_members = result.get("members") or []
+    if not isinstance(raw_members, list):
+        raise SourceError("the agent sent an invalid archive listing")
+    members: list[ArchiveMember] = []
+    for raw in raw_members[:AGENT_LIST_MAX_ENTRIES]:
+        name = raw.get("name") if isinstance(raw, dict) else None
+        size = as_int(raw.get("size")) if isinstance(raw, dict) else None
+        if not isinstance(name, str) or size is None or size < 0:
+            raise SourceError("the agent sent an invalid archive listing")
+        mtime_ms = as_int(raw.get("mtime_ms"))
+        members.append(
+            ArchiveMember(
+                name=name,
+                size=size,
+                is_dir=raw.get("is_dir") is True,
+                mtime=mtime_ms / 1000 if mtime_ms else None,
+            )
+        )
+    truncated = bool(result.get("truncated")) or len(raw_members) > AGENT_LIST_MAX_ENTRIES
+    return members, truncated
+
+
+@dataclass
+class ReceivedMember:
+    """One member a fetch_archive sent: its name as stored, its modification
+    time, whether it was a .gz file sent decompressed, why it was left out
+    (None when sent), and the file its redacted content is in."""
+
+    name: str
+    mtime: float | None
+    gunzipped: bool
+    skipped: str | None
+    path: Path | None
+    size: int = 0
+
+
+class _MemberFiles:
+    """The ArchiveSink of a fetch_archive: each member asked for, announced
+    once, goes to a file of its own in `directory`, at most `member_limit`
+    bytes."""
+
+    def __init__(self, directory: Path, wanted: set[str], member_limit: int):
+        self.directory = directory
+        self.wanted = wanted
+        self.member_limit = member_limit
+        self.members: list[ReceivedMember] = []
+        self._seen: set[str] = set()
+        self._file: BinaryIO | None = None
+
+    def _close_file(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+    def start_member(self, message: dict) -> None:
+        self._close_file()
+        name = message.get("name")
+        skipped = message.get("skipped") or None
+        last = self.members[-1] if self.members else None
+        if (
+            skipped in _WITHDRAWN_REASONS
+            and last is not None
+            and last.name == name
+            and last.skipped is None
+            and last.path is not None
+        ):
+            # The member just sent couldn't be read to its end: what was
+            # sent of it is dropped and it is left out.
+            last.path.unlink(missing_ok=True)
+            last.path, last.size, last.skipped = None, 0, skipped
+            return
+        if not isinstance(name, str) or name not in self.wanted or name in self._seen:
+            raise ValueError("a member that wasn't asked for")
+        if skipped is not None and skipped not in SKIPPED_REASONS:
+            raise ValueError("an unknown reason to leave a member out")
+        self._seen.add(name)
+        mtime_ms = as_int(message.get("mtime_ms"))
+        path = None
+        if skipped is None:
+            path = self.directory / f"member-{len(self.members)}"
+            self._file = path.open("wb")
+        self.members.append(
+            ReceivedMember(
+                name=name,
+                mtime=mtime_ms / 1000 if mtime_ms else None,
+                gunzipped=message.get("gunzipped") is True,
+                skipped=skipped,
+                path=path,
+            )
+        )
+
+    def write(self, data: bytes) -> int:
+        if self._file is None:
+            raise ValueError("content for a member left out")
+        member = self.members[-1]
+        member.size += len(data)
+        if member.size > self.member_limit:
+            raise ValueError("a member is over the limit")
+        return self._file.write(data)
+
+    def complete(self) -> bool:
+        return self._seen == self.wanted
+
+    def close(self) -> None:
+        self._close_file()
+
+    def discard(self) -> None:
+        self._close_file()
+        for member in self.members:
+            if member.path is not None:
+                member.path.unlink(missing_ok=True)
+
+
+def fetch_archive(
+    source: Source, relative_path: str, members: list[str], directory: Path, block: dict
+) -> tuple[list[ReceivedMember], RedactedFetch]:
+    """The members `members` (names as list_archive gave them) of the
+    archive at `relative_path`, each redacted on the agent, in one pass
+    over the archive, into files in `directory`. A .gz member arrives
+    decompressed (`gunzipped`), and one the agent can't redact is announced
+    as skipped, with no content. Every member asked for must be accounted
+    for; otherwise, or for an answer that doesn't prove it was redacted,
+    every file is deleted (AgentRedactionError)."""
+    max_decompressed = _max_decompressed_bytes()
+    files = _MemberFiles(directory, set(members), max_decompressed * REDACTED_GROWTH_LIMIT)
+    try:
+        result = get_agent_registry().send_command_sync(
+            source.id,
+            "fetch_archive",
+            path=relative_path,
+            members=list(dict.fromkeys(members)),
+            chunk_size=FETCH_CHUNK_BYTES,
+            max_bytes=collector_base.max_fetch_bytes(),
+            max_decompressed=max_decompressed,
+            redact=block,
+            sink=files,
+            archive=True,
+            require_feature=FEATURE_REDACTION,
+        )
+        files.close()
+        total = _verified(result, block)
+        if not files.complete():
+            raise _unverified("a member asked for wasn't accounted for")
+    except AgentCommandError as exc:
+        files.discard()
+        _raise_command_error(exc, expanding=True)
+    except AgentRedactionError:
+        files.discard()
+        raise
+    except BaseException as exc:
+        files.discard()
+        if _is_agent_error(exc):
+            raise _unverified(str(exc)) from exc
+        raise
+    return files.members, total

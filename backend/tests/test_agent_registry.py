@@ -4,6 +4,7 @@ import time
 
 import pytest
 from app.agent_registry import (
+    FEATURE_REDACTION,
     AgentCommandError,
     AgentError,
     AgentNotConnectedError,
@@ -464,3 +465,193 @@ def test_a_failed_ping_drops_the_connection(loop_in_thread):
     )
     assert watch.result(timeout=3) is True
     assert not registry.is_connected(1)
+
+
+# --- #382, #249: what an agent can do, and fetch_archive ---------------------
+
+
+def test_features_are_those_of_the_live_connection(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    assert registry.features(1) == frozenset()
+    assert not registry.redacts_on_host(1)
+
+    registry.register(1, FakeWebSocket(), frozenset({FEATURE_REDACTION}))
+    assert registry.redacts_on_host(1)
+
+    # An older agent replacing it brings no feature with it.
+    registry.register(1, FakeWebSocket())
+    assert not registry.redacts_on_host(1)
+    registry.unregister(1)
+    assert registry.features(1) == frozenset()
+
+
+def test_the_fallback_to_the_server_is_reported_once_per_connection(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    assert registry.first_redaction_fallback(1) is False  # nothing connected
+    registry.register(1, FakeWebSocket())
+    assert registry.first_redaction_fallback(1) is True
+    assert registry.first_redaction_fallback(1) is False
+    registry.register(1, FakeWebSocket())
+    assert registry.first_redaction_fallback(1) is True
+    registry.unregister(1)
+
+
+def test_a_command_that_needs_a_feature_is_never_sent_without_it(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = FakeWebSocket()
+    registry.register(1, ws)
+    with pytest.raises(AgentCommandError) as caught:
+        registry.send_command_sync(
+            1, "fetch", timeout=1, path="app.log", redact={}, require_feature=FEATURE_REDACTION
+        )
+    assert caught.value.code == "feature_missing"
+    assert ws.sent == []
+    registry.unregister(1)
+
+
+def test_a_redaction_error_keeps_its_code_and_rule(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = FakeWebSocket()
+    registry.register(1, ws, frozenset({FEATURE_REDACTION}))
+
+    def agent():
+        assert _wait_until(lambda: len(ws.sent) > 0)
+        message = {
+            "type": "redaction_error",
+            "id": ws.sent[0]["id"],
+            "error": "the rule can't run",
+            "code": "rule_unsupported",
+            "rule": 31,
+        }
+        loop_in_thread.call_soon_threadsafe(registry.resolve_response, 1, message)
+
+    thread = threading.Thread(target=agent)
+    thread.start()
+    try:
+        with pytest.raises(AgentCommandError) as caught:
+            registry.send_command_sync(1, "fetch", timeout=2, path="app.log")
+    finally:
+        thread.join(timeout=5)
+    assert caught.value.message_type == "redaction_error"
+    assert caught.value.code == "rule_unsupported"
+    assert caught.value.rule == 31
+    registry.unregister(1)
+
+
+class _Members:
+    """An ArchiveSink that keeps each member's content in memory."""
+
+    def __init__(self):
+        self.members: list[tuple[dict, bytearray]] = []
+
+    def start_member(self, message):
+        if message.get("name") == "refused":
+            raise ValueError("not asked for")
+        self.members.append((message, bytearray()))
+
+    def write(self, data):
+        if not self.members:
+            raise ValueError("no member")
+        self.members[-1][1].extend(data)
+        return len(data)
+
+
+def _member(seq, name, **extra):
+    return lambda request_id: {
+        "type": "archive_member",
+        "id": request_id,
+        "seq": seq,
+        "name": name,
+        **extra,
+    }
+
+
+def _fetch_archive(loop, registry, ws, messages, sink, archive=True):
+    def agent():
+        assert _wait_until(lambda: len(ws.sent) > 0)
+        request_id = ws.sent[0]["id"]
+        for build in messages:
+            message = build(request_id)
+            kind = message.get("type")
+            if kind == "fetch_chunk":
+                coroutine = registry.receive_chunk(1, message)
+            elif kind == "archive_member":
+                coroutine = registry.receive_archive_member(1, message)
+            else:
+                loop.call_soon_threadsafe(registry.resolve_response, 1, message)
+                continue
+            asyncio.run_coroutine_threadsafe(coroutine, loop).result(timeout=2)
+
+    thread = threading.Thread(target=agent)
+    thread.start()
+    try:
+        return registry.send_command_sync(
+            1, "fetch_archive", timeout=2, sink=sink, archive=archive, path="logs.zip"
+        )
+    finally:
+        thread.join(timeout=5)
+
+
+def test_a_fetch_archive_hands_each_member_to_the_sink(loop_in_thread, streaming_registry):
+    registry, ws = streaming_registry
+    sink = _Members()
+    result = _fetch_archive(
+        loop_in_thread,
+        registry,
+        ws,
+        [
+            _member(0, "a.log"),
+            _chunk(1, b"abcd"),
+            _chunk(2, b"ef"),
+            _member(3, "gone.log", skipped="not_found"),
+            _member(4, "b.log"),
+            _chunk(5, b"gh"),
+            # chunks counts the fetch_chunk messages only.
+            _end(3, 8),
+        ],
+        sink,
+    )
+    assert result["streamed"] is True
+    assert [(m["name"], bytes(data)) for m, data in sink.members] == [
+        ("a.log", b"abcdef"),
+        ("gone.log", b""),
+        ("b.log", b"gh"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        # Content before any member.
+        [_chunk(0, b"abcd"), _end(1, 4)],
+        # A member out of order.
+        [_member(1, "a.log"), _end(0, 0)],
+        # A member the sink refuses.
+        [_member(0, "refused"), _end(0, 0)],
+        # Chunks counted wrong at the end.
+        [_member(0, "a.log"), _chunk(1, b"ab"), _end(2, 2)],
+    ],
+)
+def test_a_fetch_archive_out_of_line_fails(loop_in_thread, streaming_registry, messages):
+    registry, ws = streaming_registry
+    with pytest.raises(AgentError):
+        _fetch_archive(loop_in_thread, registry, ws, messages, _Members())
+
+
+def test_an_archive_member_for_a_plain_fetch_fails_it(loop_in_thread, streaming_registry):
+    import io
+
+    registry, ws = streaming_registry
+    with pytest.raises(AgentError):
+        _fetch_archive(
+            loop_in_thread,
+            registry,
+            ws,
+            [_member(0, "a.log"), _chunk(1, b"ab"), _end(1, 2)],
+            io.BytesIO(),
+            archive=False,
+        )
