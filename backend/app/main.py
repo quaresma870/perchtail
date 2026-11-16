@@ -168,7 +168,7 @@ _PERMISSIONS_POLICY = (
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Applies to every response, API and static frontend alike -- see
-    ROADMAP.md's security hardening backlog. Cheap and blanket rather than
+    docs/design-decisions.md, "Sessions and CSRF". Cheap and blanket rather than
     tuned per-route: none of these headers restrict anything this app
     actually needs (no inline scripts, no third-party embeds, no framing by
     another origin)."""
@@ -209,7 +209,7 @@ def _is_same_origin(candidate: str, expected_netloc: str) -> bool:
 class OriginCheckMiddleware(BaseHTTPMiddleware):
     """Defense-in-depth CSRF protection layered on top of the session
     cookie's SameSite=strict attribute (app/api/auth.py's
-    _set_session_cookie) -- see ROADMAP.md's security hardening backlog.
+    _set_session_cookie) -- see docs/design-decisions.md, "Sessions and CSRF".
     SameSite=Strict is already sufficient CSRF protection on its own in any
     standards-compliant browser: it blocks the cookie on every cross-site
     request, including top-level navigation (unlike Lax), so a forged

@@ -310,8 +310,8 @@
     return text.includes('\n') ? '' : text
   }
 
-  // "Next/previous problem" step command (ROADMAP.md's severity-indicators
-  // navigation item): steps through lines matching a navigation-eligible
+  // "Next/previous problem" step command (docs/design-decisions.md,
+  // "Frontend and UI", severity patterns): steps through lines matching a navigation-eligible
   // severity pattern, wrapping around at either end. Uses the cursor's
   // current line as the starting point, same as an IDE's "next diagnostic".
   function jumpToProblem(step: typeof nextProblemLine | typeof previousProblemLine) {

@@ -6,6 +6,8 @@ Related guides: [admin-guide.md](admin-guide.md), [configuration.md](configurati
 
 **Contents:** [Before you upgrade](#before-you-upgrade) · [Upgrading with Docker](#upgrading-with-docker) · [Upgrading an install from source](#upgrading-an-install-from-source) · [Database migrations](#database-migrations) · [Upgrading push agents](#upgrading-push-agents) · [The Updates card](#the-updates-card) · [Rolling back](#rolling-back)
 
+Which releases still get fixes, and for how long, is in [Support and end of life](../SECURITY.md#support-and-end-of-life).
+
 ## Before you upgrade
 
 1. **Read the release notes.** Each release in [CHANGELOG.md](../CHANGELOG.md) (also on the [GitHub release page](https://github.com/quaresma870/perchtail/releases)) has an `### Upgrading` section when an upgrade needs more than replacing the version: a setting to add, a behaviour that changed, an agent to upgrade by hand. Read it for every release between yours and the target. For example, 0.7.0's notes say that `/healthz` and `/readyz` now need authorization, and that push agents older than 0.7 must be upgraded by hand once.

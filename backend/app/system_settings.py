@@ -79,8 +79,8 @@ CHOICE_DEFAULTS: dict[str, tuple[str, tuple[str, ...]]] = {
 INT_DEFAULTS: dict[str, str] = {
     # Admin-configurable from Settings -> System (see app/audit_purge.py's
     # scheduled sweep), not just an env var -- this was an explicit open
-    # decision in ROADMAP.md ("audit log retention -- keep forever, or
-    # expire after N months?"), resolved as: admin picks a number, default
+    # decision ("audit log retention -- keep forever, or expire after N
+    # months?", docs/design-decisions.md, "Audit log"), resolved as: admin picks a number, default
     # 365. 0 means "keep forever" (the purge sweep no-ops).
     "audit_retention_days": "365",
     # How many folders one source may read (#161): 1 turns the feature off.

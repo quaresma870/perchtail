@@ -1,5 +1,5 @@
 """Optional TOTP-based multi-factor authentication for local accounts
-(ROADMAP.md's Security hardening section) -- SSO already delegates a second
+(docs/design-decisions.md, "Authentication and SSO") -- SSO already delegates a second
 factor to the IdP, so this exists only for auth_provider=local: the local
 break-glass account, and any deployment that doesn't enable SSO at all.
 

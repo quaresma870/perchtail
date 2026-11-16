@@ -1,4 +1,5 @@
-// Command perchtail-agent is the Phase 2 push-agent (see ROADMAP.md): a
+// Command perchtail-agent is the push agent (see docs/design-decisions.md,
+// "Push agent"): a
 // small binary that dials out to a PerchTail server and holds a persistent
 // connection open, answering live list/fetch commands against a local
 // directory tree, for hosts that can't be reached inbound over

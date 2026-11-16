@@ -27,7 +27,9 @@
 - **Operations:** settings in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained, verified daily and records where each action came from, including refused requests, bulk YAML import and export, server-side limits on listings and downloads running at once (Settings → System), and a system SMTP server for email, always over verified TLS (Settings → Email).
 - **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
 
-**What's next.** 0.7 is the last feature release before 1.0. It removes the content index and the full-text Search page, so nothing from the logs is stored, and adds a file-name index with one search across sources, folders and files, live alerts, PostgreSQL support, push-agent upgrades from the portal, user groups and temporary access, notifications and API tokens. 1.0 adds no features: load tests and a sizing guide, OWASP ZAP, OpenSSF Scorecard and provenance in CI, and an external pentest. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+**What's next.** 0.7 is the last feature release before 1.0. It removes the content index and the full-text Search page, so nothing from the logs is stored, and adds a file-name index with one search across sources, folders and files, live alerts, bulk credentials, push-agent upgrades from the portal, backups, redaction of sensitive data, password recovery and an access report. 1.0 adds no features: load tests and a sizing guide, security controls in CI and releases, and an internal pentest. PostgreSQL, high availability, user groups, temporary access, notifications, API tokens and an external pentest come after 1.0. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+
+**Support.** Which releases get fixes, and for how long, is in [SECURITY.md](SECURITY.md#support-and-end-of-life).
 
 Tested with `pytest` (backend), `vitest` (frontend units) and a Playwright suite that drives the real UI against real SSH and SMB servers, and every release candidate is retested in a lab with Linux, Windows and push-agent sources before the release. SAML isn't built (OIDC covers Entra ID, Okta, Google Workspace and Keycloak), and PerchTail hasn't seen production traffic beyond the maintainer's own use.
 
@@ -253,7 +255,7 @@ older than the server.
    PerchTail doesn't need `X-Forwarded-Proto` trusted to behave correctly —
    its CSRF Origin-check only ever compares `Host`, deliberately never
    scheme, precisely so it works the same whether or not a proxy sits in
-   front (see ROADMAP.md's CSRF-review notes if you're curious why). It's
+   front (see the CSRF notes in docs/design-decisions.md if you're curious why). It's
    sent above anyway since it's a generally useful signal for nginx's own
    access logs.
 
