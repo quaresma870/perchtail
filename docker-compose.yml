@@ -6,9 +6,40 @@ services:
     # can finish on a stop (docs/high-availability.md).
     stop_grace_period: 30s
     ports:
-      - "8080:8000"
+      # Published on this host's loopback address only: other machines reach
+      # PerchTail through a reverse proxy on this host that terminates TLS
+      # (README, "Quick start"). To publish it on every address instead,
+      # for a test without a proxy, use "8080:8000".
+      - "127.0.0.1:8080:8000"
     env_file:
       - .env
+    # The preferred way to run it: as PerchTail's own user from the start,
+    # with no step as root. A new volume already belongs to that user; an
+    # older one may need `chown -R 10001:10001` once (README). With it set,
+    # remove the cap_add list below: nothing in the container needs a
+    # capability then.
+    # user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Only for the entrypoint's first step, when the container starts as
+    # root: CHOWN and DAC_READ_SEARCH to hand /data over to PerchTail's user
+    # (volumes made by images before 0.4.0 belong to root, and the app's own
+    # folders are 0700), SETUID, SETGID and SETPCAP to switch to that user
+    # and drop every capability before the app starts. The app itself runs
+    # with none.
+    cap_add:
+      - CHOWN
+      - DAC_READ_SEARCH
+      - SETUID
+      - SETGID
+      - SETPCAP
+    # The image is read-only; everything PerchTail writes is under /data
+    # (database, logs, scratch, backups) or in /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - perchtail-data:/data
       # Recommended in production: the database, the scratch space and the

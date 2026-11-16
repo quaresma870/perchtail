@@ -9,6 +9,7 @@ from app import alerts
 from app.alerts import check_alert, deliver_due, post_webhook, queue_delivery, run_alert_pass
 from app.auth.models import Capability, Role, ScopeType, User
 from app.auth.rbac import create_role_grant
+from app.crypto import encrypt_secret
 from app.models import (
     Alert,
     AlertDelivery,
@@ -93,7 +94,7 @@ def _alert(session, user, **overrides) -> Alert:
         user_id=user.id,
         name="my alert",
         query="refused",
-        webhook_url="https://example.com/hook",
+        webhook_url_encrypted=encrypt_secret("https://example.com/hook"),
         created_at=utcnow(),
     )
     values.update(overrides)

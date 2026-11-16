@@ -50,7 +50,12 @@ def _connect_kwargs(source: Source) -> dict:
     all (no /etc/krb5.conf) can fail the whole SPNEGO negotiation outright
     -- pyspnego.exceptions.BadMechanismError ("unable to negotiate common
     mechanism") -- instead of ever falling back to the NTLM this app
-    actually authenticates with."""
+    actually authenticates with.
+
+    require_signing and encrypt are the source's own choices: signing is
+    required unless the source turns it off (smbprotocol's default, which
+    the connector always used), and encryption is asked for only when the
+    source wants it; otherwise the server decides, as before."""
     collector_base.require_credential(source)
     creds = decrypt_credential(source.credential_ref)
     return {
@@ -58,6 +63,8 @@ def _connect_kwargs(source: Source) -> dict:
         "password": creds["password"],
         "port": source.port or 445,
         "auth_protocol": "ntlm",
+        "require_signing": source.smb_require_signing,
+        "encrypt": True if source.smb_encrypt else None,
     }
 
 

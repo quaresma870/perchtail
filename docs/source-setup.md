@@ -150,7 +150,7 @@ icacls "C:\ProgramData\AppName\Logs" /grant "DOMAIN\svc-perchtail:(OI)(CI)RX"
 
 - Require SMB3+; disable SMBv1 on the host entirely if it's still enabled anywhere — it's deprecated and insecure.
 - PerchTail's connector authenticates over NTLM regardless of whether the source is domain-joined — the stored credential is only a username and password, with no way to supply a realm or keytab for Kerberos. Require NTLMv2 as the minimum on the share side.
-- Enable SMB signing.
+- Enable SMB signing. PerchTail requires signed messages by default (**Require signing** in the source editor, `smb_require_signing` in a bulk import) and refuses a server that doesn't sign; turn it off only for a server that can't sign, and the source's page then warns about it. **Encrypt** (`smb_encrypt`) also asks for SMB 3 encryption of the whole session and refuses a server that can't encrypt; without it the server decides.
 
 ### 5. Firewall
 

@@ -6,6 +6,7 @@
 - SSO provider settings, including client secrets (`SSOProviderConfig.config`);
 - users' MFA secrets (`User.mfa_secret_encrypted`), so MFA keeps working after the rotation;
 - the SMTP server's password (`SmtpSettings.password_encrypted`, **Settings → Email**);
+- alert webhook URLs (`Alert.webhook_url_encrypted`), so alerts keep reaching their receivers;
 - the audit log's hash chain, whose HMAC key is derived from the same secret: every row is re-signed under the new key.
 
 The audit chain is verified under the old key first. If it doesn't verify (a row was changed or removed), the rotation stops and nothing is written, because re-signing a broken chain would vouch for whatever broke it: check the audit log's integrity banner and resolve that first. After a successful rotation the audit log has a `credential_key.rotate` entry with the counts.

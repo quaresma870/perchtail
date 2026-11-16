@@ -71,6 +71,8 @@ def test_only_the_appended_bytes_come_back(follow):
     assert response.headers["x-follow-offset"] == "28"
     assert "x-follow-more" not in response.headers
     assert "x-follow-reset" not in response.headers
+    # File content is never cached by the browser or a proxy.
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_a_large_append_comes_in_pieces(follow):
@@ -93,6 +95,7 @@ def test_a_truncated_file_resets(follow):
     log.write_bytes(b"short\n")
     response = _poll(client, source, 32, head)
     assert response.headers["x-follow-reset"] == "1"
+    assert response.headers["cache-control"] == "no-store"
     assert response.content == b""
 
 

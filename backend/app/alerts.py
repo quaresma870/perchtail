@@ -23,6 +23,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import timedelta
+from urllib.parse import urlparse
 
 import httpx
 from sqlmodel import Session, col, delete, select
@@ -32,7 +33,7 @@ from app.archives import is_archive, is_transparent_gzip
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, User
 from app.auth.rbac import visible_source_ids
-from app.crypto import follow_head_key
+from app.crypto import decrypt_secret, encrypt_secret, follow_head_key
 from app.logging_config import get_logger
 from app.models import (
     Alert,
@@ -335,6 +336,28 @@ def _payload(alert: Alert, hits: list[Hit]) -> dict:
     }
 
 
+def webhook_url(alert: Alert) -> str:
+    """The alert's webhook URL, decrypted. It is kept encrypted at rest and
+    never returned by the API, since its path or query often carries the
+    receiver's secret."""
+    return decrypt_secret(alert.webhook_url_encrypted)
+
+
+def set_webhook_url(alert: Alert, url: str) -> None:
+    alert.webhook_url_encrypted = encrypt_secret(url)
+
+
+def masked_webhook_url(url: str) -> str:
+    """What the API shows of a webhook URL: its scheme, host and port, with
+    the path and query left out (`https://hooks.example.com/…`)."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme}://{host}{port}/…"
+
+
 def post_webhook(url: str, payload: dict) -> str | None:
     """Sends one webhook call; None when it worked, else why it didn't.
     The target is resolved and validated here, and pinned to the address
@@ -383,7 +406,7 @@ def deliver_due(session: Session) -> None:
             session.delete(delivery)
             session.commit()
             continue
-        error = post_webhook(alert.webhook_url, delivery.payload)
+        error = post_webhook(webhook_url(alert), delivery.payload)
         delivery.attempts += 1
         if error is None:
             logger.info("alert.webhook_sent", alert_id=alert.id, attempts=delivery.attempts)
