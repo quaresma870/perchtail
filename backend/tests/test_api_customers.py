@@ -40,7 +40,7 @@ def test_create_source_capability_lists_only_reached_customers_and_cannot_create
     session, client_for
 ):
     user = _make_user(session, global_capabilities=[GlobalCapability.create_source])
-    reached = Customer(name="Vodacom Tanzania")
+    reached = Customer(name="Northwind Telecom")
     other = Customer(name="Elsewhere")
     session.add_all([reached, other])
     session.commit()
@@ -60,7 +60,7 @@ def test_create_source_capability_lists_only_reached_customers_and_cannot_create
 
     listed = client.get("/customers")
     assert listed.status_code == 200
-    assert [c["name"] for c in listed.json()] == ["Vodacom Tanzania"]
+    assert [c["name"] for c in listed.json()] == ["Northwind Telecom"]
 
 
 def test_plain_user_cannot_manage_customers(session, client_for):
@@ -75,7 +75,7 @@ def test_super_admin_can_manage_customers(session, client_for):
     user = _make_user(session, is_super_admin=True)
     client = client_for(user)
 
-    create = client.post("/customers", json={"name": "Fidelidade"})
+    create = client.post("/customers", json={"name": "Globex Insurance"})
     assert create.status_code == 201
 
 
@@ -83,8 +83,8 @@ def test_duplicate_customer_name_rejected(session, client_for):
     user = _make_user(session, is_super_admin=True)
     client = client_for(user)
 
-    client.post("/customers", json={"name": "GermanCloud"})
-    dupe = client.post("/customers", json={"name": "GermanCloud"})
+    client.post("/customers", json={"name": "Initech Cloud"})
+    dupe = client.post("/customers", json={"name": "Initech Cloud"})
     assert dupe.status_code == 409
 
 

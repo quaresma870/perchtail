@@ -19,9 +19,9 @@ afterEach(() => {
 
 describe('api.get', () => {
   it('returns the parsed JSON body on success', async () => {
-    mockFetchOnce({ ok: true, status: 200, json: async () => ({ id: 1, name: 'vodacom' }) })
+    mockFetchOnce({ ok: true, status: 200, json: async () => ({ id: 1, name: 'northwind' }) })
     const result = await api.get('/customers/1')
-    expect(result).toEqual({ id: 1, name: 'vodacom' })
+    expect(result).toEqual({ id: 1, name: 'northwind' })
   })
 
   it('sends credentials and a JSON content-type header', async () => {

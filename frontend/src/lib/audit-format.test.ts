@@ -15,7 +15,7 @@ const entry = (overrides: Partial<AuditLogEntry> = {}): AuditLogEntry => ({
   user_agent: 'Mozilla/5.0',
   session_id: '0123456789abcdef',
   target_name: 'app01',
-  target_context: 'Vodacom / prod',
+  target_context: 'Northwind / prod',
   target_name_is_current: false,
   target_exists: true,
   ...overrides,
@@ -65,7 +65,7 @@ describe('detailPairs', () => {
     expect(
       detailPairs({
         target_name: 'app01',
-        target_context: 'Vodacom',
+        target_context: 'Northwind',
         path: 'app/app.log',
         file_count: 2,
         changes: { host: ['a', 'b'] },

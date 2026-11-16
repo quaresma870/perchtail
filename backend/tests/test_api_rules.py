@@ -23,7 +23,7 @@ def _make_role_and_user(session, *, is_super_admin=False) -> tuple[Role, User]:
 
 
 def _make_source(session, *, is_system=False) -> Source:
-    customer = Customer(name="Vodacom Tanzania")
+    customer = Customer(name="Northwind Telecom")
     session.add(customer)
     session.commit()
     session.refresh(customer)
