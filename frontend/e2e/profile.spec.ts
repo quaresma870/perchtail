@@ -1,7 +1,11 @@
 import { expect, test } from '@playwright/test'
 
+// Must match backend/scripts/run_e2e_server.sh's defaults, as in auth.setup.ts.
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD ?? 'e2e-test-password-123!'
+
 // My profile (#243): name and email, and the sessions list moved from
 // Settings -> Sessions. Runs as the seeded admin and puts the profile back.
+// Changing the email needs the current password (#244).
 test('profile: set name and email, see sessions, old links land here', async ({ page }) => {
   await page.goto('/#/settings/sessions')
   await expect(page).toHaveURL(/#\/profile$/)
@@ -13,25 +17,33 @@ test('profile: set name and email, see sessions, old links land here', async ({ 
   const currentSessionRow = sessions.locator('.session-row', { hasText: 'This device' })
   await expect(currentSessionRow.getByRole('button', { name: 'Log out' })).toBeVisible()
 
+  const email = page.getByLabel('Email', { exact: true })
+  const emailPassword = page.getByLabel('Current password, to change your email')
+  await expect(emailPassword).toHaveCount(0)
+
   const name = `E2E Admin ${Date.now()}`
   await page.getByLabel('Display name').fill(name)
-  await page.getByLabel('Email').fill(`E2E-${Date.now()}@Example.com`)
+  await email.fill(`E2E-${Date.now()}@Example.com`)
+  await emailPassword.fill(ADMIN_PASSWORD)
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page.getByText('Saved.')).toBeVisible()
   await expect(page.locator('nav .user-menu-name')).toHaveText(name)
-  await expect(page.getByLabel('Email')).toHaveValue(/^e2e-\d+@example\.com$/)
+  await expect(email).toHaveValue(/^e2e-\d+@example\.com$/)
+  await expect(emailPassword).toHaveCount(0)
 
   await page.reload()
   await expect(page.getByLabel('Display name')).toHaveValue(name)
 
   // Passes the browser's own check (type=email), not the server's.
-  await page.getByLabel('Email').fill('e2e-admin@example')
+  await email.fill('e2e-admin@example')
+  await emailPassword.fill(ADMIN_PASSWORD)
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page.getByText('Enter a valid email address.')).toBeVisible()
 
   // Back to how it was, for the other specs.
   await page.getByLabel('Display name').fill('')
-  await page.getByLabel('Email').fill('')
+  await email.fill('')
+  await emailPassword.fill(ADMIN_PASSWORD)
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page.locator('nav .user-menu-name')).toHaveText(/e2e-admin/)
 })

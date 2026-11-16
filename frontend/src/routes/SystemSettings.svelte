@@ -32,6 +32,15 @@
   let requireMfa = false
   const REQUIRE_MFA_LOCKED_HINT = 'Only a super admin can change it.'
   $: requireMfaLocked = !$currentUser?.is_super_admin
+  // Password recovery by email (#244): super admins only, and only while
+  // email is set up and on and PUBLIC_BASE_URL is https (the server says why
+  // not in password_reset_unavailable).
+  let passwordResetEnabled = false
+  let passwordResetUnavailable: string | null = null
+  let passwordResetMinutesSaved = 30
+  let passwordResetMinutesInput = '30'
+  let passwordResetError = ''
+  $: passwordResetLocked = !$currentUser?.is_super_admin
   // The shortest retention the server accepts, besides 0 (forever).
   const AUDIT_RETENTION_MIN_DAYS = 90
   let auditRetentionDays = 365
@@ -149,6 +158,7 @@
       auditViewEnabled = settings.audit_view_enabled
       auditFolderListings = settings.audit_folder_listings
       requireMfa = settings.require_mfa_local_accounts
+      applyPasswordReset(settings)
       auditRetentionDays = settings.audit_retention_days
       retentionInput = String(settings.audit_retention_days)
       maxRoots = settings.source_max_roots
@@ -481,6 +491,38 @@
     } finally {
       saving = false
     }
+  }
+
+  function applyPasswordReset(settings: SystemSettings) {
+    passwordResetEnabled = settings.password_reset_enabled
+    passwordResetUnavailable = settings.password_reset_unavailable
+    passwordResetMinutesSaved = settings.password_reset_minutes
+    passwordResetMinutesInput = String(settings.password_reset_minutes)
+  }
+
+  async function patchPasswordReset(patch: Partial<SystemSettings>, input?: HTMLInputElement) {
+    saving = true
+    passwordResetError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', patch)
+      applyPasswordReset(settings)
+      systemSettings.set(settings)
+    } catch (err) {
+      if (input) input.checked = passwordResetEnabled
+      passwordResetError =
+        err instanceof ApiError ? err.detail : 'Failed to update password recovery'
+    } finally {
+      saving = false
+    }
+  }
+
+  function savePasswordResetMinutes() {
+    const parsed = Number(passwordResetMinutesInput)
+    if (!Number.isInteger(parsed) || parsed < 5 || parsed > 60) {
+      passwordResetError = 'Enter a whole number of minutes from 5 to 60.'
+      return
+    }
+    patchPasswordReset({ password_reset_minutes: parsed })
   }
 
   async function saveRetention() {
@@ -1085,6 +1127,73 @@
       </div>
     </section>
 
+    <section class="card">
+      <h2 class="section-title">Password recovery</h2>
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Password recovery by email</div>
+          <p class="hint">
+            Shows <strong>Forgot password?</strong> on the sign-in page: users of local accounts get
+            a link by email to choose a new password, which signs them out everywhere. Super admins,
+            roles with any global capability, SSO accounts and accounts without an email can't use
+            it. Needs email under Settings → Email and an https PUBLIC_BASE_URL. Only a super admin
+            can change it.
+          </p>
+          {#if passwordResetUnavailable}
+            <p class="warning" role="status">
+              {passwordResetEnabled ? "It's on but doesn't work now: " : 'Unavailable: '}
+              {passwordResetUnavailable}.
+            </p>
+          {/if}
+        </div>
+        <label class="switch" title={passwordResetLocked ? REQUIRE_MFA_LOCKED_HINT : undefined}>
+          <input
+            type="checkbox"
+            aria-label="Password recovery by email"
+            checked={passwordResetEnabled}
+            disabled={saving ||
+              passwordResetLocked ||
+              (!passwordResetEnabled && passwordResetUnavailable !== null)}
+            on:change={(e) =>
+              patchPasswordReset({ password_reset_enabled: !passwordResetEnabled }, e.currentTarget)}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Links work for</div>
+          <p class="hint">How long a reset link works after it's sent, from 5 to 60 minutes.</p>
+        </div>
+        {#if passwordResetError}
+          <p class="error">{passwordResetError}</p>
+        {/if}
+        <div class="interval-row">
+          <input
+            class="input interval-input"
+            type="number"
+            min="5"
+            max="60"
+            step="1"
+            aria-label="Reset links work for, in minutes"
+            bind:value={passwordResetMinutesInput}
+            disabled={passwordResetLocked}
+          />
+          <span class="hint">minutes</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={savePasswordResetMinutes}
+            disabled={saving ||
+              passwordResetLocked ||
+              Number(passwordResetMinutesInput) === passwordResetMinutesSaved}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </section>
+
     {#if policyDraft}
       <div class="card">
         <div class="setting-row column">
@@ -1276,6 +1385,11 @@
   .error {
     color: var(--danger);
     margin: 0;
+  }
+  .warning {
+    color: var(--warning);
+    margin: 0.35rem 0 0;
+    font-size: 0.85rem;
   }
   .policy-grid {
     display: grid;

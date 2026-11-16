@@ -16,7 +16,7 @@ The SQLite database (`DATA_DIR/perchtail.db` unless `DATABASE_URL` is set) holds
 
 - configuration: customers, folders, sources and their connection settings, rules, severity patterns, redaction rules, system settings (`system_setting`), the SSO provider and the SSO group-to-role mappings;
 - encrypted secrets: source credentials (`Source.credential_ref`), the SSO provider configuration (`SSOProviderConfig.config`), users' TOTP secrets (`User.mfa_secret_encrypted`) and alert webhook URLs (`Alert.webhook_url_encrypted`, never returned by the API);
-- hashes only, never the plain value: local passwords, previous passwords and MFA backup codes (argon2id), session tokens, agent enrollment tokens and the monitoring token (SHA-256);
+- hashes only, never the plain value: local passwords, previous passwords and MFA backup codes (argon2id), session tokens, password-reset tokens, agent enrollment tokens and the monitoring token (SHA-256);
 - users, roles and grants;
 - the audit log with its HMAC hash chain, and the chain's state (anchor after purges, last verification result);
 - the file-name index: path, size and modification time of each rule-visible file, never content (`file_name_entry`, searched through the `file_name_fts` FTS5 table);
@@ -72,7 +72,7 @@ One in-process APScheduler `BackgroundScheduler` (`app/scheduler.py`; coalesce, 
 | `source_checks` | 1 min | Checks the reachability of sources that are due (every 10 min, with backoff after failures) on the source-check worker pool. |
 | `agent_upgrades` | 1 min | Ends upgrade attempts that timed out and, inside the window, upgrades agents set to automatic. |
 | `audit_purge` | `AUDIT_PURGE_INTERVAL_SECONDS` (1 day), catch-up | Deletes audit rows older than the retention (Settings → System, 365 days, at least 90; 0 keeps everything). |
-| `session_purge` | 1 h, catch-up | Deletes expired sessions. |
+| `session_purge` | 1 h, catch-up | Deletes expired sessions and expired password-reset links. |
 | `update_check` | 1 h, catch-up | Asks GitHub for the latest release, at most once a day. Off with `UPDATE_CHECK=false` or the switch in Settings → System. |
 | `audit_integrity_check` | `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` (1 day), catch-up | Verifies the audit hash chain. |
 | `backup` | 5 min tick | Makes an encrypted backup once the backup interval (Settings → System) has passed: 24 hours on a new install, 0 (off) kept on an install upgraded from before 0.7.0. |
@@ -134,6 +134,7 @@ Implemented in `app/auth/rbac.py`.
 - **Login throttle** (`app/login_throttle.py`): in memory, per username and per client address; `LOGIN_MAX_ATTEMPTS` (5) failures lock the account for `LOGIN_LOCKOUT_SECONDS` (300), and as many from one address, whatever the usernames, lock that address. An active local super admin with MFA on is locked per username and address. Failed logins for unknown accounts cost the same argon2 work as real ones.
 - **MFA** (`app/auth/mfa.py`): TOTP for local accounts, with 10 one-time backup codes and replay protection (`mfa_last_used_step`). Required of super admins and roles with any global capability, and of every local account with the `require_mfa_local_accounts` setting (`app/auth/mfa_policy.py`); until a covered account sets it up, `get_current_active_user` answers 403 `mfa_setup_required`. SSO accounts rely on the identity provider and can't sign in locally.
 - **Password policy** (`app/password_policy.py`, Settings → System): minimum and maximum length (12 and 128 by default), rejection of simple and personal passwords, and optional history, character classes and maximum age. Passwords are hashed with argon2id. Admin-created local accounts must change their password at first login.
+- **Password recovery by email** (`app/auth/password_reset.py`, `app/password_reset_limits.py`): off by default; a super admin turns it on (`password_reset_enabled`), and it works only while email is on and `PUBLIC_BASE_URL` is https. Local accounts only, never super admins or roles with a global capability, checked when the link is asked for and when it's used. `/auth/password-reset/request` always answers 202 at once and does the lookup and the email in the background. The token (32 random bytes) travels in the link's fragment, is stored as its SHA-256, works once, expires, and dies when the password or email changes. Using it revokes every session and opens none. Changing one's own email needs the current password.
 - **Monitoring token** (`app/monitoring_access.py`, `MonitoringToken`): one deployment-wide bearer token, stored as a SHA-256 hash. `/monitoring/health` and `/metrics` always need it, plus an address in `MONITORING_ALLOWED_NETWORKS` when that is set. `/healthz` and `/readyz` answer a loopback caller without proxy headers, a caller in `PROBE_ALLOWED_NETWORKS`, or a caller with the token.
 - **Agent token**: one enrollment token per agent source, shown once and stored as a SHA-256 hash (`Source.agent_token_hash`). The agent sends it as a bearer token on the WebSocket handshake and when downloading binaries.
 - **Other guards**: alert webhook URLs must resolve to public addresses, checked again at send time (`app/webhook_safety.py`); archive extraction and fetches are size-limited; paths are checked for containment in every connector and in the agent (`internal/agent/pathsafety.go`).
@@ -182,6 +183,7 @@ Auth tables (`backend/app/auth/models.py`):
 - `SSOProviderConfig`: the OIDC provider, configuration encrypted.
 - `SSOGroupRoleMapping`: an ordered identity-provider group to role mapping.
 - `AuthSession`: a hashed session token with expiry, last use and user agent.
+- `PasswordResetToken`: a pending password-reset link (`app/auth/password_reset.py`): the token's hash, expiry, and fingerprints of the password hash and email it was issued for.
 - `AuditLog`: who did what to which target, with metadata and hash-chain fields.
 - `AuditChainState`: the hash chain's anchor and last verification result (single row).
 

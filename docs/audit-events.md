@@ -37,15 +37,19 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 | `user.login_throttled` | A sign-in attempt while the account or the address was locked out. |
 | `user.sso_login_failed` | A sign-in through the identity provider that didn't end in a session, with the `reason` (`idp_error`, `state_cookie_mismatch`, `invalid_state`, `sso_disabled`, `issuer_mismatch`, `login_failed`...) and, for `idp_error`, the provider's error code. Folded like failed logins. |
 | `user.logout` | A sign-out. |
-| `session.revoke` | Sessions ended before they expired: one the user ended from their sessions list (`revoked_session_id`), all the others after a password change or an admin's password reset, or all of them when an admin deactivated the account (`count`, `reason`: `password_change`, `password_reset`, `deactivated`). |
+| `session.revoke` | Sessions ended before they expired: one the user ended from their sessions list (`revoked_session_id`), all the others after a password change or an admin's password reset, all of them after a password reset by email, or all of them when an admin deactivated the account (`count`, `reason`: `password_change`, `password_reset`, `deactivated`). |
 | `user.sso_provision` | An account created on a first SSO sign-in. |
 | `user.sso_role_synced` | A role set from the identity provider's groups on sign-in. |
 | `user.change_password` | A user changed their own password. |
 | `user.mfa_enable`, `user.mfa_disable`, `user.mfa_backup_codes_regenerated` | Changes to a user's own second factor. `user.mfa_enable` says whether the account had to set it up (`required`). |
 | `user.mfa_required` | A sign-in by an account that must use MFA and hasn't set it up: until it does, it can only set it up. The `reason` is `admin_account` (a super admin or a role with a global capability) or `setting` (**Require MFA for local accounts**). |
 | `user.mfa_secret_unreadable` | A sign-in whose TOTP code couldn't be checked because the account's MFA secret can't be decrypted (the encryption key or salt changed). The sign-in is refused like a wrong code; backup codes still work. |
-| `user.reauth_failed` | A wrong current password, or a wrong authentication code when turning MFA off, given to confirm a sensitive change to the user's own account, with the `action` it was meant to allow (`change_password`, `mfa_enroll`, `mfa_disable`, `mfa_regenerate_backup_codes`). |
+| `user.reauth_failed` | A wrong current password, or a wrong authentication code when turning MFA off, given to confirm a sensitive change to the user's own account, with the `action` it was meant to allow (`change_password`, `mfa_enroll`, `mfa_disable`, `mfa_regenerate_backup_codes`, `email_change`). |
 | `user.profile_update`, `user.email_change` | Changes to a user's own name or email. |
+| `user.email_change_notice` | The notice sent to the previous address after a user changed their own email, while email is on: the `recipient` and the `result` (`sent`, or `send_failed` with the `error`). Never the message. |
+| `user.password_reset_requested` | A request for a password-reset link ([admin-guide.md](admin-guide.md#password-recovery)), with the `result`: `sent`, `no_match`, `not_eligible` (with the `reason`: `inactive`, `sso_account`, `no_password`, `no_email` or `privileged`), `rate_limited` or `send_failed` (with the `reason`). A matching account is named by `username`; with no match, the username or email that was entered is kept as `identifier`. Everything but `sent` is folded like failed logins. Never the token or the link. |
+| `user.password_reset_completed` | A password set through a reset link. Followed by a `session.revoke` (`reason`: `password_reset`) when the account had sessions. |
+| `user.password_reset_failed` | A reset link that was refused, when it was opened or used, with the `reason`: `invalid_token`, `expired`, `superseded` (the password or email changed since it was sent), `not_eligible`, `policy` (the new password broke the password policy; the link still works) or `rate_limited`. Folded like failed logins. |
 
 ### Access to sources and files
 

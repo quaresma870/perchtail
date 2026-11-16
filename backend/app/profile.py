@@ -2,9 +2,10 @@
 check, shared by My profile (PATCH /auth/me), the Users admin API and the
 SSO claim sync.
 
-Emails are stored lowercased, so uniqueness is case-insensitive. No
-delivery check: there's no SMTP yet, so the email isn't verified, only
-well-formed."""
+Emails are stored lowercased, so uniqueness is case-insensitive. The email
+isn't verified with a confirmation link, only well-formed. It's where a
+password-reset link goes (#244, app/auth/password_reset.py), so a user
+changing their own needs their current password (PATCH /auth/me)."""
 
 import re
 import unicodedata
@@ -94,7 +95,9 @@ def apply_profile(session: Session, user: User, *, actor_id: int | None, changes
             metadata={"display_name": name},
         )
     if email != user.email:
-        # Once SMTP exists, the old address is told about this (#243).
+        # A user changing their own is told at the old address when email
+        # is on (PATCH /auth/me). Pending password-reset links stop working,
+        # as they were issued for the old address (#244).
         record_audit_event(
             session,
             user_id=actor_id,

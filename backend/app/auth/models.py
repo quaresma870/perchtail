@@ -197,6 +197,25 @@ class PasswordHistory(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class PasswordResetToken(SQLModel, table=True):
+    """A pending password-reset link (#244, app/auth/password_reset.py).
+    Only the SHA-256 of the token is stored, never the token. It works once
+    (the row is deleted when it's used, and when a new link is asked for),
+    until expires_at, and only while the account's password hash and email
+    are still the ones it was issued for: each fingerprint is the SHA-256 of
+    that value at the time of the request."""
+
+    __tablename__ = "password_reset_token"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    token_hash: str = Field(unique=True, index=True)
+    password_fingerprint: str
+    email_fingerprint: str
+    created_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime
+
+
 class SSOProviderConfig(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     protocol: SSOProtocol

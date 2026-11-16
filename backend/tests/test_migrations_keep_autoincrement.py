@@ -1129,3 +1129,70 @@ def test_an_sso_role_group_downgrade_runs_again_after_an_interruption(tmp_path):
     _alembic(tmp_path, "downgrade", BEFORE_SSO_ROLE_GROUP)
     assert _version(db) == BEFORE_SSO_ROLE_GROUP
     assert "sso_role_group" not in _columns(db, "user")
+
+
+# --- b2e7c4a19f53: password reset tokens ---------------------------------------------
+
+PASSWORD_RESET = "b2e7c4a19f53"
+PASSWORD_RESET_INDEXES = {"ix_password_reset_token_user_id", "ix_password_reset_token_token_hash"}
+
+
+def _before_password_reset() -> str:
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
+    return script.get_revision(PASSWORD_RESET).down_revision
+
+
+def _indexes(db: Path, table: str) -> set[str]:
+    with sqlite3.connect(db) as conn:
+        return {row[1] for row in conn.execute(f'PRAGMA index_list("{table}")')}
+
+
+def test_an_interrupted_password_reset_migration_runs_again(tmp_path):
+    # Stopped after CREATE TABLE password_reset_token, before its indexes and
+    # the version were written.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", PASSWORD_RESET)
+    with sqlite3.connect(db) as conn:
+        for index in PASSWORD_RESET_INDEXES:
+            conn.execute(f"DROP INDEX {index}")
+        conn.execute(
+            "INSERT INTO password_reset_token (user_id, token_hash, password_fingerprint, "
+            "email_fingerprint, created_at, expires_at) "
+            "VALUES (1, 'h', 'p', 'e', '2026-11-16 00:00:00', '2026-11-16 00:30:00')"
+        )
+        conn.execute("UPDATE alembic_version SET version_num = ?", (_before_password_reset(),))
+
+    _alembic(tmp_path, "upgrade", PASSWORD_RESET)
+    assert _version(db) == PASSWORD_RESET
+    assert PASSWORD_RESET_INDEXES <= _indexes(db, "password_reset_token")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT token_hash FROM password_reset_token").fetchall() == [("h",)]
+        unique = {row[1]: row[2] for row in conn.execute("PRAGMA index_list(password_reset_token)")}
+    assert unique["ix_password_reset_token_token_hash"] == 1
+    assert unique["ix_password_reset_token_user_id"] == 0
+
+
+def test_an_interrupted_password_reset_downgrade_runs_again(tmp_path):
+    db = tmp_path / "perchtail.db"
+    before = _before_password_reset()
+    _alembic(tmp_path, "upgrade", PASSWORD_RESET)
+
+    # Stopped after dropping one index, before the table and the version.
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP INDEX ix_password_reset_token_token_hash")
+    _alembic(tmp_path, "downgrade", before)
+    assert "password_reset_token" not in _tables(db)
+    assert _version(db) == before
+
+    # Stopped after dropping the table, before the version: down again.
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = ?", (PASSWORD_RESET,))
+    _alembic(tmp_path, "downgrade", before)
+    assert "password_reset_token" not in _tables(db)
+    assert _version(db) == before
+
+    _alembic(tmp_path, "upgrade", PASSWORD_RESET)
+    assert PASSWORD_RESET_INDEXES <= _indexes(db, "password_reset_token")
