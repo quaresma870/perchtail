@@ -23,7 +23,7 @@ const remoteUpgradeEnv = "PERCHTAIL_REMOTE_UPGRADE"
 
 // Config holds everything the agent needs to dial out to a PerchTail
 // connector and answer live list/fetch commands against a local directory
-// tree. Per ROADMAP.md's Phase 2 design, the agent only ever dials out and
+// tree. Per docs/design-decisions.md ("Push agent"), the agent only ever dials out and
 // waits — nothing is synced ahead of time, so there is nothing here beyond
 // where to connect, how to authenticate, and which local root to serve.
 type Config struct {

@@ -1,14 +1,33 @@
 import math
 import secrets
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Cookie,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, ConfigDict
+from fastapi.routing import APIRoute
+from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import Session, select
 
-from app import auth_events, password_policy, preferences, profile, request_context
+from app import (
+    auth_events,
+    password_policy,
+    password_reset_limits,
+    preferences,
+    profile,
+    request_context,
+)
 from app.audit import record_audit_event
-from app.auth import mfa, mfa_policy
+from app.auth import mfa, mfa_policy, password_reset
 from app.auth.models import (
     AuthProviderType,
     AuthSession,
@@ -109,10 +128,12 @@ class PreferencesUpdate(BaseModel):
 
 class ProfileUpdate(BaseModel):
     """PATCH /auth/me: an omitted field is left as it is; an empty string
-    clears it."""
+    clears it. Changing the email needs the current password, since the
+    email is where a password-reset link goes (#244)."""
 
     display_name: str | None = None
     email: str | None = None
+    current_password: str | None = None
 
 
 def profile_error(exc: profile.ProfileError) -> HTTPException:
@@ -472,16 +493,27 @@ def change_password_endpoint(
     return UserPublic.from_user(user, session)
 
 
+# An error code, not a password (Bandit B105).
+CURRENT_PASSWORD_REQUIRED = "current_password_required"  # nosec B105
+
+
 @router.patch("/me", response_model=UserPublic)
 def update_my_profile(
     payload: ProfileUpdate,
+    background: BackgroundTasks,
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
     """My profile (#243): the user's own display name and email. An SSO
     account's come from the IdP on every sign-in, so they can't be edited
-    here."""
+    here.
+
+    Changing the email takes the current password, throttled like the MFA
+    calls: otherwise a stolen session could point the account at another
+    mailbox and take it over through password recovery (#244). The old
+    address is told, when email is set up and on."""
     changes = payload.model_dump(exclude_unset=True)
+    current_password = changes.pop("current_password", None)
     if not changes:
         return UserPublic.from_user(user, session)
     if user.auth_provider != AuthProviderType.local:
@@ -489,12 +521,33 @@ def update_my_profile(
             status_code=status.HTTP_409_CONFLICT,
             detail="Your name and email come from your identity provider",
         )
+    email_changing = False
+    if "email" in changes:
+        try:
+            email_changing = profile.normalize_email(changes["email"]) != user.email
+        except profile.ProfileError as exc:
+            raise profile_error(exc) from exc
+    old_email = user.email
+    if email_changing:
+        if not current_password:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Enter your current password to change your email",
+                    "error_code": CURRENT_PASSWORD_REQUIRED,
+                },
+            )
+        _require_password_reconfirmation(session, user, current_password, action="email_change")
     try:
         profile.apply_profile(session, user, actor_id=user.id, changes=changes)
     except profile.ProfileError as exc:
         raise profile_error(exc) from exc
     session.commit()
     session.refresh(user)
+    if email_changing and old_email:
+        background.add_task(
+            password_reset.notify_email_changed, session.get_bind(), user.id, old_email
+        )
     return UserPublic.from_user(user, session)
 
 
@@ -979,3 +1032,182 @@ def sso_callback(
     _clear_sso_state_cookie(response)
     _set_session_cookie(response, token)
     return response
+
+
+# --- Password recovery by email (#244, app/auth/password_reset.py) -----------
+
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+class _NoStoreRoute(APIRoute):
+    """Every answer of these routes, errors included, carries
+    Cache-Control: no-store: they handle reset tokens and passwords."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def no_store_handler(request: Request) -> Response:
+            try:
+                response = await handler(request)
+            except HTTPException as exc:
+                exc.headers = {**(exc.headers or {}), **_NO_STORE}
+                raise
+            except RequestValidationError as exc:
+                response = await request_validation_exception_handler(request, exc)
+            response.headers.update(_NO_STORE)
+            return response
+
+        return no_store_handler
+
+
+_reset_router = APIRouter(route_class=_NoStoreRoute)
+
+INVALID_RESET_LINK = "This link is invalid or has expired. Ask for a new one."
+
+
+class LoginOptions(BaseModel):
+    # Whether the login page offers "Forgot password?": recovery is turned
+    # on and email is ready for it.
+    password_reset: bool
+
+
+class PasswordResetRequest(BaseModel):
+    # A username or an email address.
+    identifier: str = Field(max_length=1024)
+
+
+class PasswordResetAccepted(BaseModel):
+    # The same whatever the identifier matched.
+    status: str = "accepted"
+
+
+class PasswordResetTokenBody(BaseModel):
+    token: str = Field(max_length=256)
+
+
+class PasswordResetCheck(BaseModel):
+    valid: bool
+    # The rules the new password must follow; only with a valid token.
+    policy: PasswordPolicyPublic | None = None
+
+
+class PasswordResetComplete(PasswordResetTokenBody):
+    new_password: str = Field(max_length=4096)
+
+
+def _client_ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
+
+
+def _require_password_reset(session: Session) -> None:
+    """Off, or not usable (no email, no https): the routes don't exist."""
+    if not password_reset.is_active(session):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+
+def _limit_token_attempts(session: Session, client_ip: str | None) -> None:
+    retry_after = password_reset_limits.token_attempt_from_address(client_ip)
+    if retry_after is not None:
+        auth_events.password_reset_failed(session, client_ip=client_ip, reason="rate_limited")
+        raise _too_many_attempts(retry_after, "Too many attempts. Try again later.")
+
+
+def _invalid_reset_link() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={"message": INVALID_RESET_LINK, "error_code": "reset_link_invalid"},
+    )
+
+
+@_reset_router.get("/login-options", response_model=LoginOptions)
+def login_options(session: Session = Depends(get_session)):
+    """Public (no auth): what the login page offers besides signing in."""
+    return LoginOptions(password_reset=password_reset.is_active(session))
+
+
+@_reset_router.post(
+    "/password-reset/request",
+    response_model=PasswordResetAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_password_reset(
+    payload: PasswordResetRequest,
+    request: Request,
+    background: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    """Public: asks for a reset link. Always the same answer, at once,
+    whether or not an account matched; finding it, the per-account limit,
+    the link and the email happen after the response
+    (password_reset.request_reset), so neither the answer nor its timing
+    says whether the account exists."""
+    _require_password_reset(session)
+    identifier = password_reset.valid_identifier(payload.identifier)
+    if identifier is None:
+        raise HTTPException(status_code=422, detail="Enter your username or email address")
+    client_ip = _client_ip(request)
+    retry_after = password_reset_limits.request_from_address(client_ip)
+    if retry_after is not None:
+        auth_events.password_reset_requested(
+            session, client_ip=client_ip, result="rate_limited", identifier=identifier
+        )
+        raise _too_many_attempts(retry_after, "Too many requests. Try again later.")
+    background.add_task(password_reset.request_reset, session.get_bind(), identifier, client_ip)
+    return PasswordResetAccepted()
+
+
+@_reset_router.post("/password-reset/check", response_model=PasswordResetCheck)
+def check_password_reset(
+    payload: PasswordResetTokenBody, request: Request, session: Session = Depends(get_session)
+):
+    """Public: whether a reset link can still be used, and the password
+    rules when it can. A link that can't be used is audited like a refused
+    completion."""
+    _require_password_reset(session)
+    client_ip = _client_ip(request)
+    _limit_token_attempts(session, client_ip)
+    result = password_reset.check_token(session, payload.token)
+    session.commit()
+    if result.failure is not None:
+        auth_events.password_reset_failed(
+            session, client_ip=client_ip, reason=result.failure, user=result.user
+        )
+        return PasswordResetCheck(valid=False)
+    return PasswordResetCheck(
+        valid=True, policy=PasswordPolicyPublic(**password_policy.get_policy(session).as_dict())
+    )
+
+
+@_reset_router.post("/password-reset/complete", status_code=status.HTTP_204_NO_CONTENT)
+def complete_password_reset(
+    payload: PasswordResetComplete, request: Request, session: Session = Depends(get_session)
+):
+    """Public: sets a new password through a reset link. Ends every session
+    of the account and opens none: the user signs in again, second factor
+    included. Every refusal of the link gets the same answer."""
+    _require_password_reset(session)
+    client_ip = _client_ip(request)
+    _limit_token_attempts(session, client_ip)
+    result = password_reset.check_token(session, payload.token)
+    if result.failure is not None or result.user is None or result.row is None:
+        session.commit()
+        auth_events.password_reset_failed(
+            session, client_ip=client_ip, reason=result.failure or "invalid_token", user=result.user
+        )
+        raise _invalid_reset_link()
+    user = result.user
+    try:
+        password_reset.complete_reset(session, user, result.row, payload.new_password)
+    except password_policy.PasswordPolicyError as exc:
+        session.rollback()
+        auth_events.password_reset_failed(session, client_ip=client_ip, reason="policy", user=user)
+        raise password_policy_error(exc) from exc
+    except password_reset.TokenAlreadyUsedError:
+        session.rollback()
+        auth_events.password_reset_failed(
+            session, client_ip=client_ip, reason="invalid_token", user=user
+        )
+        raise _invalid_reset_link() from None
+
+
+router.include_router(_reset_router)

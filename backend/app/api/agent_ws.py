@@ -69,6 +69,21 @@ def _reported_version(websocket: WebSocket) -> str | None:
     return value if _AGENT_VERSION_RE.match(value) else None
 
 
+AGENT_FEATURES_HEADER = "x-perchtail-agent-features"
+_AGENT_FEATURE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}/[0-9]{1,4}$")
+_MAX_AGENT_FEATURES = 16
+
+
+def _reported_features(websocket: WebSocket) -> frozenset[str]:
+    """What the agent says it can do (#382, #249), from its connect header:
+    a comma-separated list such as `redaction/1`. Empty when absent (an
+    agent older than 0.7); anything that isn't a plain `name/version` is
+    ignored, so a feature is only ever used when it was announced as one."""
+    raw = websocket.headers.get(AGENT_FEATURES_HEADER, "")
+    features = (item.strip().lower() for item in raw.split(",")[:_MAX_AGENT_FEATURES])
+    return frozenset(item for item in features if _AGENT_FEATURE_RE.match(item))
+
+
 @router.websocket("/agent/connect")
 async def agent_connect(websocket: WebSocket, session: Session = Depends(get_session)):
     """The push-agent's persistent connection (Protocol.agent — see
@@ -85,7 +100,8 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
 
     await websocket.accept()
     registry = get_agent_registry()
-    replaced = registry.register(source.id, websocket)
+    features = _reported_features(websocket)
+    replaced = registry.register(source.id, websocket, features)
     if replaced is not None:
         # Close the superseded socket so a half-dead connection doesn't
         # linger; its own receive loop then ends, and its unregister below
@@ -115,6 +131,17 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
             previous=source.agent_version,
         )
         source.agent_version = agent_version
+    # Recorded for the UI only, missing included (an older agent replacing
+    # a newer one); requests go by the live connection's features.
+    agent_features = ",".join(sorted(features)) or None
+    if agent_features != source.agent_features:
+        logger.info(
+            "agent.features_reported",
+            source_id=source.id,
+            agent_features=agent_features,
+            previous=source.agent_features,
+        )
+        source.agent_features = agent_features
     source_id = source.id
     bind = session.get_bind()
     session.add(source)
@@ -192,6 +219,10 @@ async def _receive(websocket: WebSocket, registry: AgentRegistry, bind, source_i
                 # Awaited before reading on, so the file is written as it
                 # arrives and a slow disk slows the agent down (#205).
                 await registry.receive_chunk(source_id, message, websocket)
+            elif kind == "archive_member":
+                # The start of the next member of a fetch_archive (#382,
+                # #249), in order with its chunks.
+                await registry.receive_archive_member(source_id, message, websocket)
             elif kind in ("upgrade_progress", "upgrade_failed"):
                 # An accepted upgrade's progress (#319), from the current
                 # connection only, written to its attempt off the loop.

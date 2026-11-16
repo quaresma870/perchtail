@@ -79,6 +79,9 @@ export interface Source {
   winrm_configuration: string | null
   winrm_effective_scheme: 'https' | 'http' | null
   tls_ca_pem: string | null
+  // SMB: require signed messages; ask for SMB 3 encryption.
+  smb_require_signing: boolean
+  smb_encrypt: boolean
   enabled: boolean
   is_system: boolean
   rule_count: number
@@ -316,6 +319,17 @@ export interface SSOStatus {
   name: string | null
 }
 
+// GET /auth/login-options: what the login page offers besides signing in.
+export interface LoginOptions {
+  password_reset: boolean
+}
+
+// POST /auth/password-reset/check (#244).
+export interface PasswordResetCheck {
+  valid: boolean
+  policy: PasswordPolicy | null
+}
+
 export interface GroupRoleMapping {
   id: number
   order: number
@@ -372,6 +386,19 @@ export interface SystemSettings {
   redaction_download_suffix: boolean
   // MFA for every local account, not only administrators; super admins only.
   require_mfa_local_accounts: boolean
+  // Password recovery by email (#244): super admins only.
+  password_reset_enabled: boolean
+  password_reset_minutes: number
+  // Why it can't be turned on or doesn't work now, or null when it can.
+  password_reset_unavailable: string | null
+}
+
+// A problem with how the instance is set up that only its operator can fix
+// (GET /system-settings/warnings), such as a weak CREDENTIAL_ENCRYPTION_KEY.
+export interface SystemWarning {
+  code: string
+  message: string
+  advice: string
 }
 
 // GET /system-settings/backups (#334): the backups in BACKUP_DIR, newest
@@ -486,7 +513,9 @@ export interface Alert {
   folder_id: number | null
   customer_id: number | null
   file_glob: string
-  webhook_url: string
+  // The webhook URL is never sent back: only its scheme, host and port
+  // (`https://hooks.example.com/…`).
+  webhook_url_masked: string
   enabled: boolean
   last_checked_at: string | null
   last_fired_at: string | null

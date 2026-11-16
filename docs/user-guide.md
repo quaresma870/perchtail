@@ -29,6 +29,14 @@ What you can see and do depends on your role. If a source, a button or a page de
 - If an administrator created your account or reset your password, or your password expired, PerchTail asks you to **Set a new password** before anything else. Enter the temporary or current password, then the new one. The rules it must follow are shown under the field.
 - After 5 failed attempts in a row, sign-in for that username is refused for 5 minutes (the defaults; your administrator may have changed them).
 
+### Forgotten password
+
+If your administrator has turned on password recovery, the sign-in page shows **Forgot password?**. Click it, enter your **Username or email** and click **Send the link**. If your account can use it, you get an email with a link to choose a new password; the page says the same whatever you entered, so it doesn't tell you whether an account was found.
+
+- Open the link within the time the email says (30 minutes by default). It works once, and asking for another link ends the earlier one.
+- On **Choose a new password**, enter the **New password** (the rules are shown under the field) and click **Set the password**. You're signed out everywhere and taken back to the sign-in page: sign in with the new password, and with your authentication code if you use two-factor authentication.
+- Accounts that sign in with SSO, administrator accounts and accounts without an email address can't use it: ask an administrator to reset your password instead. If no email arrives, check your spam folder or ask your administrator.
+
 **With single sign-on:** click **Sign in with** followed by your organisation's provider. Your password and any second factor are handled by the provider, not by PerchTail. The first time you sign in, PerchTail creates your account. It may see nothing until an administrator gives it a role.
 
 A session lasts 12 hours from sign-in by default, then you sign in again. To sign out, open the menu with your name at the top right and click **Log out**. Signing out closes your open tabs.
@@ -210,7 +218,7 @@ Open the menu with your name at the top right and click **My profile**.
 
 ### Name and email
 
-For a PerchTail account, change your **Display name** and **Email** and click **Save**. The display name is shown in the top bar. Your **Username** can't be changed. For an SSO account, these come from your identity provider and are updated each time you sign in.
+For a PerchTail account, change your **Display name** and **Email** and click **Save**. To change your email, also enter your current password in the field that appears (**Current password, to change your email**); when PerchTail sends email, your previous address is told of the change. The display name is shown in the top bar. Your **Username** can't be changed. For an SSO account, these come from your identity provider and are updated each time you sign in.
 
 ### Password
 

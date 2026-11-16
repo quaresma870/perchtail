@@ -22,6 +22,13 @@ PUBLIC_OPERATIONS = {
     ("GET", "/auth/sso/callback"),
     # The login page asks whether to show the SSO button before anyone signs in.
     ("GET", "/auth/sso/status"),
+    # The login page asks whether to offer "Forgot password?" (#244).
+    ("GET", "/auth/login-options"),
+    # Password recovery (#244) is for someone who can't sign in: asking for
+    # a link, checking it and setting the new password. 404 while it's off.
+    ("POST", "/auth/password-reset/request"),
+    ("POST", "/auth/password-reset/check"),
+    ("POST", "/auth/password-reset/complete"),
 }
 
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")

@@ -37,6 +37,8 @@ function source(overrides: Partial<Source> & { id: number; name: string }): Sour
     winrm_configuration: null,
     winrm_effective_scheme: null,
     tls_ca_pem: null,
+    smb_require_signing: true,
+    smb_encrypt: false,
     ...overrides,
   }
 }

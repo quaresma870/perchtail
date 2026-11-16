@@ -717,3 +717,47 @@ def test_an_unknown_system_rule_name_is_a_problem_and_nothing_is_written(session
     items, problems = _run(session, text)
     assert [p.where for p in problems] == ["sources[0].redaction_disable"]
     assert "'nope'" in problems[0].message
+
+
+SMB_SOURCE = textwrap.dedent("""
+    version: 1
+    customers:
+      - name: Acme
+        sources:
+          - name: fs09
+            protocol: smb
+            host: fs09.acme.example
+            base_path: Logs
+    """)
+
+
+def test_smb_signing_and_encryption_import_and_export(session, client):
+    _import(client, text=SMB_SOURCE, dry_run=False)
+    fs09 = session.exec(select(Source).where(Source.name == "fs09")).one()
+    assert (fs09.smb_require_signing, fs09.smb_encrypt) == (True, False)
+    exported = yaml.safe_load(client.get("/admin/config/export").text)
+    out = exported["customers"][0]["sources"][0]
+    assert "smb_require_signing" not in out and "smb_encrypt" not in out
+
+    changed = SMB_SOURCE + "        smb_require_signing: false\n        smb_encrypt: true\n"
+    result = _import(client, text=changed, dry_run=False)
+    assert result["problems"] == []
+    session.refresh(fs09)
+    assert (fs09.smb_require_signing, fs09.smb_encrypt) == (False, True)
+    out = yaml.safe_load(client.get("/admin/config/export").text)["customers"][0]["sources"][0]
+    assert (out["smb_require_signing"], out["smb_encrypt"]) == (False, True)
+
+    # A file without the keys keeps what the source has.
+    result = _import(client, text=SMB_SOURCE, dry_run=False)
+    assert {i["action"] for i in result["items"] if i["kind"] == "source"} == {"unchanged"}
+    session.refresh(fs09)
+    assert (fs09.smb_require_signing, fs09.smb_encrypt) == (False, True)
+
+
+def test_smb_options_on_another_protocol_are_a_problem(session, client):
+    text = TEMPLATE.replace(
+        "                base_path: /var/log/app\n",
+        "                base_path: /var/log/app\n                smb_encrypt: true\n",
+    )
+    result = _import(client, text=text, dry_run=True)
+    assert any(p["where"].endswith(".smb_encrypt") for p in result["problems"])

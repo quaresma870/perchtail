@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Optional
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, String
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
@@ -113,6 +113,12 @@ class Source(SQLModel, table=True):
     # over HTTPS) -- internal PKI or a self-signed certificate, without a
     # server-wide REQUESTS_CA_BUNDLE. Public data, not a secret.
     tls_ca_pem: str | None = None
+    # SMB only: refuse a session whose messages aren't signed, and ask for
+    # SMB 3 encryption (refused by a server that can't encrypt). Signing,
+    # which smbprotocol always asked for, is on by default; turning it off
+    # is for a server that can't sign, and the source's page warns about it.
+    smb_require_signing: bool = True
+    smb_encrypt: bool = False
     enabled: bool = True
     is_system: bool = False
     # Push-agent (protocol=agent) enrollment: only the SHA-256 hash of the
@@ -134,6 +140,14 @@ class Source(SQLModel, table=True):
     # sends on connect (#215). Null until an agent that reports it (0.6 or
     # later) has connected.
     agent_version: str | None = None
+    # What the agent says it can do beyond the basic commands, from the
+    # X-PerchTail-Agent-Features header it sends on connect (#382, #249):
+    # comma-separated, "redaction/1" when it redacts on its host. Kept so the
+    # UI can say an agent doesn't redact on the host while it's offline too;
+    # whether a request is redacted on the agent goes by the live
+    # connection's features (app.agent_registry), never by this. Null until
+    # an agent has connected, and for an agent that announces nothing.
+    agent_features: str | None = None
     # Remote upgrades (#319, app/agent_upgrades.py): this source's own
     # policy -- "inherit" (follow Settings -> Agents), "off", "manual" or
     # "automatic" -- and its consecutive failed upgrades. At the failure
@@ -211,7 +225,7 @@ class SeverityPattern(SQLModel, table=True):
     # when stepping through "next problem" navigation. A pattern can be
     # visually highlighted without cluttering that step-through, or vice
     # versa -- deliberately not reusing `enabled` for both meanings (see
-    # ROADMAP.md's open-decision note on this).
+    # docs/design-decisions.md, "Frontend and UI").
     include_in_navigation: bool = True
 
 
@@ -307,7 +321,9 @@ class Alert(SQLModel, table=True):
     folder_id: int | None = Field(default=None, foreign_key="folder.id")
     customer_id: int | None = Field(default=None, foreign_key="customer.id")
     file_glob: str = "**/*.log"
-    webhook_url: str
+    # The webhook URL, Fernet-encrypted (app/crypto.py): its path or query
+    # often carries the receiver's secret. The API never returns it.
+    webhook_url_encrypted: str = Field(sa_column=Column("webhook_url", String, nullable=False))
     enabled: bool = True
     last_checked_at: datetime | None = None
     last_fired_at: datetime | None = None

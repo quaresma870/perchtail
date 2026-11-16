@@ -120,7 +120,12 @@ def test_a_user_sets_their_name_and_email(session, me_client):
     user = me_client.holder["user"] = _local(session)
 
     response = me_client.patch(
-        "/auth/me", json={"display_name": " Jo Doe ", "email": "JDoe@Example.com"}
+        "/auth/me",
+        json={
+            "display_name": " Jo Doe ",
+            "email": "JDoe@Example.com",
+            "current_password": PASSWORD,
+        },
     )
     assert response.status_code == 200
     body = response.json()
@@ -140,7 +145,7 @@ def test_an_omitted_field_is_kept_and_an_empty_one_cleared(session, me_client):
     body = me_client.patch("/auth/me", json={"display_name": "Joana"}).json()
     assert (body["display_name"], body["email"]) == ("Joana", "jo@example.com")
 
-    body = me_client.patch("/auth/me", json={"email": ""}).json()
+    body = me_client.patch("/auth/me", json={"email": "", "current_password": PASSWORD}).json()
     assert body["email"] is None
     assert len(_events(session, "user.email_change")) == 1
 
@@ -155,11 +160,103 @@ def test_an_email_is_unique_whatever_its_case(session, me_client):
     _local(session, username="other", email="taken@example.com")
     me_client.holder["user"] = _local(session)
 
-    response = me_client.patch("/auth/me", json={"email": "Taken@Example.com"})
+    response = me_client.patch(
+        "/auth/me", json={"email": "Taken@Example.com", "current_password": PASSWORD}
+    )
     assert response.status_code == 409
     response = me_client.patch("/auth/me", json={"email": "not-an-email"})
     assert response.status_code == 422
     assert response.json()["detail"] == "Enter a valid email address."
+
+
+def test_changing_the_email_needs_the_current_password(session, me_client):
+    """#244: the email is where a reset link goes, so a stolen session alone
+    mustn't be enough to change it."""
+    user = me_client.holder["user"] = _local(session, email="jo@example.com")
+
+    missing = me_client.patch("/auth/me", json={"email": "new@example.com"})
+    assert missing.status_code == 422
+    assert missing.json()["detail"]["error_code"] == "current_password_required"
+    wrong = me_client.patch(
+        "/auth/me", json={"email": "new@example.com", "current_password": "wrong-password-1"}
+    )
+    assert wrong.status_code == 401
+    (refused,) = _events(session, "user.reauth_failed")
+    assert refused.event_metadata["action"] == "email_change"
+    session.refresh(user)
+    assert user.email == "jo@example.com"
+    assert _events(session, "user.email_change") == []
+
+    # The name alone, or the same email, needs no password.
+    assert me_client.patch("/auth/me", json={"display_name": "Jo"}).status_code == 200
+    assert me_client.patch("/auth/me", json={"email": "JO@example.com"}).status_code == 200
+
+    ok = me_client.patch(
+        "/auth/me", json={"email": "new@example.com", "current_password": PASSWORD}
+    )
+    assert ok.status_code == 200
+    assert ok.json()["email"] == "new@example.com"
+
+
+def test_changing_the_email_is_throttled_like_the_mfa_calls(session, me_client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "login_max_attempts", 2)
+    me_client.holder["user"] = _local(session, email="jo@example.com")
+    for _ in range(2):
+        response = me_client.patch(
+            "/auth/me", json={"email": "new@example.com", "current_password": "wrong-password-1"}
+        )
+        assert response.status_code == 401
+    locked = me_client.patch(
+        "/auth/me", json={"email": "new@example.com", "current_password": PASSWORD}
+    )
+    assert locked.status_code == 429
+    assert "Retry-After" in locked.headers
+
+
+def test_the_old_address_is_told_when_email_is_on(session, me_client, monkeypatch):
+    from app.auth import password_reset
+    from app.models import SmtpSettings
+    from app.timeutils import utcnow
+
+    sent: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        password_reset, "send_email", lambda _s, to, subject, body: sent.append((to, subject, body))
+    )
+    me_client.holder["user"] = _local(session, email="jo@example.com")
+
+    # Email off: nothing is sent.
+    assert (
+        me_client.patch(
+            "/auth/me", json={"email": "jo2@example.com", "current_password": PASSWORD}
+        ).status_code
+        == 200
+    )
+    assert sent == []
+
+    session.add(
+        SmtpSettings(
+            host="smtp.example.test",
+            port=587,
+            from_address="perchtail@example.test",
+            enabled=True,
+            updated_at=utcnow(),
+        )
+    )
+    session.commit()
+    assert (
+        me_client.patch(
+            "/auth/me", json={"email": "jo3@example.com", "current_password": PASSWORD}
+        ).status_code
+        == 200
+    )
+    ((to, subject, body),) = sent
+    assert to == "jo2@example.com"
+    assert subject == "Your PerchTail email address was changed"
+    assert "jo3@example.com" not in body and "jdoe" not in body
+    session.expire_all()
+    (notice,) = _events(session, "user.email_change_notice")
+    assert notice.event_metadata["recipient"] == "jo2@example.com"
+    assert notice.event_metadata["result"] == "sent"
 
 
 def test_an_sso_account_cant_edit_its_profile(session, me_client):

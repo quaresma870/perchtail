@@ -180,8 +180,12 @@ type ListArchiveResult struct {
 // a .gz file sent decompressed (redacted, it can't be sent as stored).
 // Skipped, with no content after it, says why a member asked for isn't
 // sent: "not_found" (missing, a folder, or a link or device in a tar),
-// "encrypted", "nested_archive" (an archive can't be redacted as it is) or
-// "unsupported_encoding" (UTF-32).
+// "encrypted", "nested_archive" (an archive can't be redacted as it is),
+// "unsupported_encoding" (UTF-32), "unsupported_format" (compressed in a
+// format redaction doesn't decompress), "too_large" (over max_decompressed
+// once decompressed) or "unreadable" (a corrupt member or .gz member). A
+// member found too large or unreadable while it is sent is announced again,
+// right after its content, as skipped: that withdraws what was sent of it.
 type ArchiveMember struct {
 	Type      string `json:"type"`
 	ID        string `json:"id"`

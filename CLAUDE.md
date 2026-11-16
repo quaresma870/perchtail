@@ -15,8 +15,8 @@ Stack: Python 3.12, FastAPI, SQLModel/SQLAlchemy, Alembic and SQLite on the back
 The SQLite database (`DATA_DIR/perchtail.db` unless `DATABASE_URL` is set) holds:
 
 - configuration: customers, folders, sources and their connection settings, rules, severity patterns, redaction rules, system settings (`system_setting`), the SSO provider and the SSO group-to-role mappings;
-- encrypted secrets: source credentials (`Source.credential_ref`), the SSO provider configuration (`SSOProviderConfig.config`) and users' TOTP secrets (`User.mfa_secret_encrypted`);
-- hashes only, never the plain value: local passwords, previous passwords and MFA backup codes (argon2id), session tokens, agent enrollment tokens and the monitoring token (SHA-256);
+- encrypted secrets: source credentials (`Source.credential_ref`), the SSO provider configuration (`SSOProviderConfig.config`), users' TOTP secrets (`User.mfa_secret_encrypted`) and alert webhook URLs (`Alert.webhook_url_encrypted`, never returned by the API);
+- hashes only, never the plain value: local passwords, previous passwords and MFA backup codes (argon2id), session tokens, password-reset tokens, agent enrollment tokens and the monitoring token (SHA-256);
 - users, roles and grants;
 - the audit log with its HMAC hash chain, and the chain's state (anchor after purges, last verification result);
 - the file-name index: path, size and modification time of each rule-visible file, never content (`file_name_entry`, searched through the `file_name_fts` FTS5 table);
@@ -72,10 +72,10 @@ One in-process APScheduler `BackgroundScheduler` (`app/scheduler.py`; coalesce, 
 | `source_checks` | 1 min | Checks the reachability of sources that are due (every 10 min, with backoff after failures) on the source-check worker pool. |
 | `agent_upgrades` | 1 min | Ends upgrade attempts that timed out and, inside the window, upgrades agents set to automatic. |
 | `audit_purge` | `AUDIT_PURGE_INTERVAL_SECONDS` (1 day), catch-up | Deletes audit rows older than the retention (Settings → System, 365 days, at least 90; 0 keeps everything). |
-| `session_purge` | 1 h, catch-up | Deletes expired sessions. |
+| `session_purge` | 1 h, catch-up | Deletes expired sessions and expired password-reset links. |
 | `update_check` | 1 h, catch-up | Asks GitHub for the latest release, at most once a day. Off with `UPDATE_CHECK=false` or the switch in Settings → System. |
 | `audit_integrity_check` | `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` (1 day), catch-up | Verifies the audit hash chain. |
-| `backup` | 5 min tick | Makes an encrypted backup once the backup interval (Settings → System) has passed; 0, the default, is off. |
+| `backup` | 5 min tick | Makes an encrypted backup once the backup interval (Settings → System) has passed: 24 hours on a new install, 0 (off) kept on an install upgraded from before 0.7.0. |
 | `wal_checkpoint` | 1 h | Checkpoints and truncates the SQLite WAL (`app/db.py`). |
 
 ### Connectors (`backend/app/collectors/`)
@@ -83,7 +83,7 @@ One in-process APScheduler `BackgroundScheduler` (`app/scheduler.py`; coalesce, 
 `registry.py` maps each `Protocol` to its module; every caller goes through it, and `errors.py` turns each library's exceptions into the `SourceError` types in `base.py`.
 
 - `ssh.py`: SSH/SFTP with `paramiko`. Host keys are pinned in `SSH_KNOWN_HOSTS_PATH`; `SSH_HOST_KEY_POLICY` is `tofu` (pin on first connect) or `strict` (refuse unknown hosts).
-- `smb.py`: SMB with `smbprotocol`. `smb_shares.py` lists a server's disk shares for the share picker.
+- `smb.py`: SMB with `smbprotocol`, with signing required unless the source turns it off (`smb_require_signing`) and SMB 3 encryption when it asks for it (`smb_encrypt`). `smb_shares.py` lists a server's disk shares for the share picker.
 - `winrm.py`: WinRM with `pywinrm`, running scripts in a WinRS shell. When the source names a session configuration (`winrm_configuration`), `winrm_jea.py` speaks PSRP (`pypsrp`) to a JEA endpoint instead and only calls the read-only functions of the reference role in `docs/examples/jea`.
 - `local.py`: files on the PerchTail host. Used by the system log source and by admin-created local sources, which must sit under `LOCAL_SOURCE_ROOTS` (empty by default, which disables them). Local files are served in place, without scratch.
 - `agent.py`: relays commands to a connected push agent through `app/agent_registry.py`.
@@ -107,7 +107,7 @@ Implemented in `app/rules.py`.
 - `.zip`, `.tar.gz` and `.tgz` files appear as folders; opening a member extracts only that member (`app/archives.py`). A plain `.gz` file is decompressed and opens like any other file.
 - Fetched files go to `SCRATCH_DIR`, tracked in memory by `app/scratch.py`'s `ScratchStore`. Each open gets its own file, reference-counted by key. A file is deleted when the viewer closes it and no other viewer holds it, when the idle sweep finds it untouched past `SCRATCH_IDLE_SECONDS`, or when the size guard evicts it (oldest unreferenced first). A new fetch is refused with 507 when scratch is full or its filesystem is below `SCRATCH_MIN_FREE_GB` / `SCRATCH_MIN_FREE_PERCENT`. Scratch is emptied at startup.
 - Follow (tail) polls with ranged reads of what was appended and detects rotation by the file's first bytes (an HMAC of them with a per-source key, `app/redaction/engine.py`, `head_digest`, shared with the alerts); it doesn't fetch the whole file again.
-- When redaction applies to a source (`redaction_enabled` and an effective redaction rule, `app/redaction_rules.py`), `/open` and `/follow` send content redacted on the server (`app/redaction/`), for every user: `/open` fetches into scratch, redacts into the scratch file it serves and deletes the fetched original before answering; `/follow` reads a little before the offset for context and sends only redacted whole lines. Offsets stay in bytes of the original (`X-Source-Offset`, `X-Follow-Offset`), an unfinished last line is sent as `[redacted: incomplete line]` (`X-Follow-Partial`), a `.gz` archive member is decompressed before it is redacted, and whole archives, UTF-32 files and content compressed in a format PerchTail doesn't decompress (bzip2, xz, zstd, 7z, rar, and gzip or zip in a file not named as one, told by its first bytes) are refused. While the `redaction_downloads` setting is on, `/download` and `/download-zip` are redacted too: a file, `.gz` file or member is redacted as it is sent (UTF-16 kept), a whole `.zip`/`.tar.gz` is rebuilt in the same format without the members the rules hide (`app/archives.py`, `rebuild_archive`), a folder ZIP holds every file redacted, what can't be redacted is listed in `REDACTION-SKIPPED.txt`, and the response says so in `X-PerchTail-Redacted` (and in the file name with `redaction_download_suffix`). Alerts and agents don't apply it yet.
+- When redaction applies to a source (`redaction_enabled` and an effective redaction rule, `app/redaction_rules.py`), `/open` and `/follow` send content redacted on the server (`app/redaction/`), for every user: `/open` fetches into scratch, redacts into the scratch file it serves and deletes the fetched original before answering; `/follow` reads a little before the offset for context and sends only redacted whole lines. Offsets stay in bytes of the original (`X-Source-Offset`, `X-Follow-Offset`), an unfinished last line is sent as `[redacted: incomplete line]` (`X-Follow-Partial`), a `.gz` archive member is decompressed before it is redacted, and whole archives, UTF-32 files and content compressed in a format PerchTail doesn't decompress (bzip2, xz, zstd, 7z, rar, and gzip or zip in a file not named as one, told by its first bytes) are refused. While the `redaction_downloads` setting is on, `/download` and `/download-zip` are redacted too: a file, `.gz` file or member is redacted as it is sent (UTF-16 kept), a whole `.zip`/`.tar.gz` is rebuilt in the same format without the members the rules hide (`app/archives.py`, `rebuild_archive`), a folder ZIP holds every file redacted, what can't be redacted is listed in `REDACTION-SKIPPED.txt`, and the response says so in `X-PerchTail-Redacted` (and in the file name with `redaction_download_suffix`). On an agent source whose connection announced `redaction/1` (`X-PerchTail-Agent-Features`, kept in `app/agent_registry.py` per connection and in `Source.agent_features`), the agent redacts instead: every content command (`fetch`, `read_range`, `fetch_archive`) carries a `redact` block with the rules, archives are listed and read on the host (`list_archive`, `fetch_archive`, `fetch` with `member`/`decompress`), and the server only rebuilds archives and ZIPs (`app/archives.py`, `write_archive`) from what arrived redacted; `app/collectors/agent.py` discards any answer that doesn't say it was redacted with the digest of the rules sent. An agent without the feature falls back to redaction on the server (`agent.redaction_fallback`). Alerts don't apply it yet.
 
 ## Access control (RBAC + SSO)
 
@@ -134,9 +134,11 @@ Implemented in `app/auth/rbac.py`.
 - **Login throttle** (`app/login_throttle.py`): in memory, per username and per client address; `LOGIN_MAX_ATTEMPTS` (5) failures lock the account for `LOGIN_LOCKOUT_SECONDS` (300), and as many from one address, whatever the usernames, lock that address. An active local super admin with MFA on is locked per username and address. Failed logins for unknown accounts cost the same argon2 work as real ones.
 - **MFA** (`app/auth/mfa.py`): TOTP for local accounts, with 10 one-time backup codes and replay protection (`mfa_last_used_step`). Required of super admins and roles with any global capability, and of every local account with the `require_mfa_local_accounts` setting (`app/auth/mfa_policy.py`); until a covered account sets it up, `get_current_active_user` answers 403 `mfa_setup_required`. SSO accounts rely on the identity provider and can't sign in locally.
 - **Password policy** (`app/password_policy.py`, Settings → System): minimum and maximum length (12 and 128 by default), rejection of simple and personal passwords, and optional history, character classes and maximum age. Passwords are hashed with argon2id. Admin-created local accounts must change their password at first login.
+- **Password recovery by email** (`app/auth/password_reset.py`, `app/password_reset_limits.py`): off by default; a super admin turns it on (`password_reset_enabled`), and it works only while email is on and `PUBLIC_BASE_URL` is https. Local accounts only, never super admins or roles with a global capability, checked when the link is asked for and when it's used. `/auth/password-reset/request` always answers 202 at once and does the lookup and the email in the background. The token (32 random bytes) travels in the link's fragment, is stored as its SHA-256, works once, expires, and dies when the password or email changes. Using it revokes every session and opens none. Changing one's own email needs the current password.
 - **Monitoring token** (`app/monitoring_access.py`, `MonitoringToken`): one deployment-wide bearer token, stored as a SHA-256 hash. `/monitoring/health` and `/metrics` always need it, plus an address in `MONITORING_ALLOWED_NETWORKS` when that is set. `/healthz` and `/readyz` answer a loopback caller without proxy headers, a caller in `PROBE_ALLOWED_NETWORKS`, or a caller with the token.
 - **Agent token**: one enrollment token per agent source, shown once and stored as a SHA-256 hash (`Source.agent_token_hash`). The agent sends it as a bearer token on the WebSocket handshake and when downloading binaries.
 - **Other guards**: alert webhook URLs must resolve to public addresses, checked again at send time (`app/webhook_safety.py`); archive extraction and fetches are size-limited; paths are checked for containment in every connector and in the agent (`internal/agent/pathsafety.go`).
+- **Secure defaults**: `CREDENTIAL_ENCRYPTION_KEY` is checked at startup (`app/key_strength.py`: at least 32 bytes once decoded and 128 bits of estimated entropy); a weak key is a warning in the log and Settings → System, and a refusal only with `CREDENTIAL_KEY_REFUSE_WEAK=true`. `/docs`, `/redoc` and `/openapi.json` answer 404 unless `API_DOCS=true`. File content (open, follow, download, folder ZIP) is sent with `Cache-Control: no-store`. `DATA_DIR`, `LOG_DIR`, `SCRATCH_DIR` and `BACKUP_DIR` are made `0700` at startup (`app/data_layout.py`), and scratch files are created `0600`. Deleting a source removes its SSH host key and WinRM CA file when no other source uses them (`app/source_pins.py`).
 
 ## Application logging
 
@@ -156,7 +158,7 @@ Core tables (`backend/app/models.py`):
 
 - `Customer`: top-level grouping; every non-system source and every folder belongs to one.
 - `Folder`: nested grouping of a customer's sources, for browsing and grant scopes.
-- `Source`: a host and how to reach it (protocol, host, port, base path or roots, encrypted credential, WinRM and TLS options), plus agent, reachability and file-name index state.
+- `Source`: a host and how to reach it (protocol, host, port, base path or roots, encrypted credential, WinRM and TLS options), plus agent (OS, version, announced features), reachability and file-name index state.
 - `Rule`: an ordered include or exclude pattern on a source.
 - `SeverityPattern`: a line-highlighting pattern for the viewer, global or per source; matching runs in the browser.
 - `RedactionRule`: a redaction rule, system-wide or a source's own: a built-in detector or a custom RE2 pattern (`app/redaction_rules.py`); configured by super admins only.
@@ -181,6 +183,7 @@ Auth tables (`backend/app/auth/models.py`):
 - `SSOProviderConfig`: the OIDC provider, configuration encrypted.
 - `SSOGroupRoleMapping`: an ordered identity-provider group to role mapping.
 - `AuthSession`: a hashed session token with expiry, last use and user agent.
+- `PasswordResetToken`: a pending password-reset link (`app/auth/password_reset.py`): the token's hash, expiry, and fingerprints of the password hash and email it was issued for.
 - `AuditLog`: who did what to which target, with metadata and hash-chain fields.
 - `AuditChainState`: the hash chain's anchor and last verification result (single row).
 
@@ -230,7 +233,7 @@ README.md, CHANGELOG.md, ROADMAP.md, CONTRIBUTING.md, SECURITY.md, CLA.md, CODE_
 
 ## Deployment shape
 
-The Docker image builds the frontend with Node 22 and runs the backend on `python:3.12-slim` as an unprivileged user (uid 10001). `backend/docker-entrypoint.sh` runs `python -m app.data_layout`, `python -m alembic upgrade head` and `uvicorn app.main:app --host 0.0.0.0 --port 8000`. `docker-compose.yml` publishes port 8080 and keeps state in the `/data` volume. PerchTail is meant to sit behind a TLS-terminating reverse proxy. It runs as a single process per `DATA_DIR`; SQLite runs in WAL mode, so `DATA_DIR` must be on a local disk.
+The Docker image builds the frontend with Node 22 and runs the backend on `python:3.12-slim` as an unprivileged user (uid 10001). `backend/docker-entrypoint.sh` runs `python -m app.data_layout`, `python -m alembic upgrade head` and `uvicorn app.main:app --host 0.0.0.0 --port 8000`. `docker-compose.yml` keeps state in the `/data` volume. PerchTail is meant to sit behind a TLS-terminating reverse proxy. It runs as a single process per `DATA_DIR`; SQLite runs in WAL mode, so `DATA_DIR` must be on a local disk. `docker-compose.yml` publishes port 8080 on `127.0.0.1` only, with a read-only root filesystem, `no-new-privileges` and every capability dropped except the few the entrypoint's root step needs; running with `user: "10001:10001"` needs none. The image ships no test code (`.dockerignore`), and its entrypoint refuses the test hooks (`PERCHTAIL_TEST_PATCH_MODULE`, `PERCHTAIL_TEST_MODE`).
 
 ## How to test
 

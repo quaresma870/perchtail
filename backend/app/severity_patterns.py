@@ -4,7 +4,8 @@ from app.models import PatternKind, SeverityLevel, SeverityPattern
 
 # Seeded once on first startup (see app.bootstrap.seed_default_severity_patterns)
 # so the global set isn't empty out of the box -- covers the common markers
-# ROADMAP.md calls out beyond the old hardcoded [error]/[warn] tokens:
+# (docs/design-decisions.md, "Frontend and UI") beyond the old hardcoded
+# [error]/[warn] tokens:
 # critical/severe/panic/exception/traceback-style words other ecosystems use.
 DEFAULT_GLOBAL_PATTERNS: list[dict] = [
     {

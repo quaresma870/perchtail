@@ -1,6 +1,7 @@
 """Moving the pre-0.5.0 /data layout into DATA_DIR (#172)."""
 
 import sqlite3
+from pathlib import Path
 
 from app.config import Settings
 from app.data_layout import leftover_legacy_database, legacy_moves, migrate_legacy_layout
@@ -9,6 +10,8 @@ from app.data_layout import leftover_legacy_database, legacy_moves, migrate_lega
 def _settings(data_dir, **overrides):
     values = dict(
         data_dir=str(data_dir),
+        log_dir=str(Path(data_dir).parent / "logs"),
+        scratch_dir=str(Path(data_dir).parent / "scratch"),
         database_url="",
         credential_salt_path="",
         ssh_known_hosts_path="",
@@ -141,3 +144,19 @@ def test_report_logs_moves_as_structured_events(tmp_path, monkeypatch):
 
     moved = [kw["dest"] for event, kw in events if event == "startup.data_layout.moved"]
     assert any(dest.endswith("perchtail.db") for dest in moved)
+
+
+def test_log_and_scratch_dirs_are_readable_by_the_app_user_only(tmp_path):
+    import stat
+
+    from app.data_layout import secure_data_dir
+
+    data_dir = tmp_path / "db"
+    data_dir.mkdir()
+    for name in ("logs", "scratch"):
+        (tmp_path / name).mkdir(mode=0o755)
+
+    assert secure_data_dir(_settings(data_dir)) == []
+
+    for name in ("logs", "scratch"):
+        assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o700, name

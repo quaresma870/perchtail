@@ -10,6 +10,7 @@ No request leaves the machine: operations that talk to sources, agents,
 webhooks, the SMTP server, the SSO provider or GitHub are excluded, and any connection to an
 address other than 127.0.0.1 fails the test while it runs."""
 
+import json
 import os
 import socket
 
@@ -61,7 +62,9 @@ LOCAL_ADDRESSES = {"127.0.0.1"}
 
 class _NoLifespan:
     """The app without its lifespan: Schemathesis would otherwise start it,
-    and with it the real database, the scheduler and its jobs."""
+    and with it the real database, the scheduler and its jobs. It also
+    serves the app's OpenAPI schema at /openapi.json, which the app itself
+    answers with 404 unless API_DOCS is true."""
 
     def __init__(self, asgi_app):
         self.app = asgi_app
@@ -70,6 +73,12 @@ class _NoLifespan:
         if scope["type"] == "lifespan":
             # Refusing the scope before reading a message means "no lifespan".
             raise RuntimeError("lifespan disabled in tests")
+        if scope["type"] == "http" and scope["path"] == "/openapi.json":
+            body = json.dumps(self.app.openapi()).encode()
+            headers = [(b"content-type", b"application/json")]
+            await send({"type": "http.response.start", "status": 200, "headers": headers})
+            await send({"type": "http.response.body", "body": body})
+            return
         await self.app(scope, receive, send)
 
 

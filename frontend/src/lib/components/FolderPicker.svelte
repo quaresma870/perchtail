@@ -12,9 +12,10 @@
   export let port: number | null
   export let credential: Record<string, string> | null
   export let sourceId: number | null = null
-  // WinRM scheme and CA certificate from the form, so browsing uses the
-  // same connection settings as the source will.
-  export let winrm: Record<string, string> | null = null
+  // Connection settings from the form (the WinRM scheme and CA
+  // certificate, SMB signing and encryption), so browsing connects the same
+  // way the source will.
+  export let connection: Record<string, string | boolean> | null = null
   export let startPath = ''
 
   const dispatch = createEventDispatcher<{ pick: string; close: void }>()
@@ -32,7 +33,7 @@
         host,
         port,
         ...(credential ? { credential } : {}),
-        ...(winrm ?? {}),
+        ...(connection ?? {}),
         path,
       })
     } catch (err) {

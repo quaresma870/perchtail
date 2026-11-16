@@ -49,13 +49,15 @@ A source:
 | `name_index_enabled` | no | default `true`: the source's file names (never content) go into the file-name index |
 | `winrm_scheme` | no | WinRM sources only: `https` or `http`. Left out: `https` when `port` is left out or is 5986, `http` for any other port |
 | `tls_ca_pem` | no | WinRM sources only: the CA certificate (PEM) of an HTTPS listener whose certificate comes from an internal CA or is self-signed, as **CA certificate** in the source editor |
+| `smb_require_signing` | no | SMB sources only: `false` lets the source connect to a server that doesn't sign its messages, as **Require signing** in the source editor. Left out: a new source requires signing; an existing one keeps its setting |
+| `smb_encrypt` | no | SMB sources only: `true` asks for SMB 3 encryption and refuses a server that can't encrypt, as **Encrypt** in the source editor. Left out: a new source leaves encryption to the server; an existing one keeps its setting |
 | `agent_upgrade_policy` | no | push-agent sources only: `inherit` (default, follows Settings → Agents), `off`, `manual` or `automatic`; see [agent upgrades](../agent/README.md#upgrades-from-the-portal) |
 | `credential` | no | `username` plus `password` or `private_key`; see below |
 | `rules` | no | replaces the source's rules when given; leave it out to keep the rules it has |
 | `redaction_rules` | no | the source's own redaction rules; replaces them when given, leave it out to keep them; see below |
 | `redaction_disable` | no | names of the system redaction rules the source turns off; replaces that list when given, leave it out to keep it |
 
-**Updating an existing source:** apart from `credential`, `rules`, `redaction_rules` and `redaction_disable`, every setting in the table takes the value in the file, or its default when the file leaves it out. For example, a source that's disabled in PerchTail is enabled again by a file without `enabled: false`, and a WinRM source loses its CA certificate when the file has no `tls_ca_pem`. Export first, and edit the exported file, to keep what's set. A source's **JEA endpoint** isn't in the file (see below) and is kept.
+**Updating an existing source:** apart from `credential`, `rules`, `redaction_rules`, `redaction_disable`, `smb_require_signing` and `smb_encrypt`, every setting in the table takes the value in the file, or its default when the file leaves it out. For example, a source that's disabled in PerchTail is enabled again by a file without `enabled: false`, and a WinRM source loses its CA certificate when the file has no `tls_ca_pem`. Export first, and edit the exported file, to keep what's set. A source's **JEA endpoint** isn't in the file (see below) and is kept.
 
 Rules are evaluated in order and the **last match wins**, as everywhere in PerchTail. Write each as `include <pattern>` or `exclude <pattern>`; patterns are globs, or regexes when they start with `re:`. To add a note, use the long form:
 

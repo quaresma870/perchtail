@@ -137,8 +137,8 @@ class User(SQLModel, table=True):
     # When the local password was last set (#245), for the optional expiry
     # under Settings -> System. Null for SSO accounts.
     password_changed_at: datetime | None = None
-    # Optional TOTP second factor for local accounts (ROADMAP.md's Security
-    # hardening section) -- SSO accounts delegate MFA to the IdP instead, so
+    # Optional TOTP second factor for local accounts (docs/design-decisions.md,
+    # "Authentication and SSO") -- SSO accounts delegate MFA to the IdP instead, so
     # this is only ever meaningful for auth_provider=local. mfa_enabled is
     # False both before enrollment starts and while a pending secret hasn't
     # been confirmed yet (see auth/mfa.py's start_enrollment/
@@ -195,6 +195,25 @@ class PasswordHistory(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", index=True)
     password_hash: str
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class PasswordResetToken(SQLModel, table=True):
+    """A pending password-reset link (#244, app/auth/password_reset.py).
+    Only the SHA-256 of the token is stored, never the token. It works once
+    (the row is deleted when it's used, and when a new link is asked for),
+    until expires_at, and only while the account's password hash and email
+    are still the ones it was issued for: each fingerprint is the SHA-256 of
+    that value at the time of the request."""
+
+    __tablename__ = "password_reset_token"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    token_hash: str = Field(unique=True, index=True)
+    password_fingerprint: str
+    email_fingerprint: str
+    created_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime
 
 
 class SSOProviderConfig(SQLModel, table=True):

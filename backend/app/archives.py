@@ -259,6 +259,78 @@ def rebuild_archive(
         raise
 
 
+# The earliest and latest dates a zip member can carry (MS-DOS time).
+_ZIP_EARLIEST = (1980, 1, 1, 0, 0, 0)
+_ZIP_LATEST = (2107, 12, 31, 23, 59, 58)
+
+
+def _zip_date_time(mtime: float | None) -> tuple[int, int, int, int, int, int]:
+    """A modification time (seconds since the epoch, as list_members gives
+    it, a zip's taken as UTC) as a zip member's date and time."""
+    if mtime is None:
+        return _ZIP_EARLIEST
+    try:
+        moment = datetime.fromtimestamp(mtime, UTC)
+    except (OverflowError, OSError, ValueError):
+        return _ZIP_EARLIEST
+    stamp = (moment.year, moment.month, moment.day, moment.hour, moment.minute, moment.second)
+    return min(max(stamp, _ZIP_EARLIEST), _ZIP_LATEST)
+
+
+def write_archive(
+    filename: str,
+    destination: Path,
+    members: list[tuple[str, Path, float | None]],
+    skipped: list[tuple[str, str]],
+    skipped_list: SkippedList,
+) -> None:
+    """Writes to `destination` a new archive in the format `filename` names
+    (zip, or tar.gz) holding `members`, each (name, file holding its
+    content, modification time in seconds or None), in order, and, when
+    `skipped` isn't empty, the list `skipped_list` gives for it. For an
+    archive whose members were read and redacted elsewhere (an agent's
+    fetch_archive), as rebuild_archive writes one read here."""
+    try:
+        if _is_zip(filename):
+            with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as rebuilt:
+                written: set[str] = set()
+                for name, path, mtime in members:
+                    out = zipfile.ZipInfo(name, date_time=_zip_date_time(mtime))
+                    out.compress_type = zipfile.ZIP_DEFLATED
+                    out.external_attr = 0o644 << 16
+                    out.file_size = path.stat().st_size
+                    with path.open("rb") as src, rebuilt.open(out, "w") as dst:
+                        shutil.copyfileobj(src, dst, _CHUNK)
+                    written.add(name)
+                if skipped:
+                    list_name, content = skipped_list(skipped, written)
+                    rebuilt.writestr(list_name, content)
+            return
+        if _is_tar_gz(filename):
+            with tarfile.open(destination, mode="w:gz") as rebuilt:
+                written = set()
+                for name, path, mtime in members:
+                    out = tarfile.TarInfo(name)
+                    out.size = path.stat().st_size
+                    out.mtime = int(mtime) if mtime else 0
+                    out.mode = 0o644
+                    with path.open("rb") as src:
+                        rebuilt.addfile(out, src)
+                    written.add(name)
+                if skipped:
+                    list_name, content = skipped_list(skipped, written)
+                    out = tarfile.TarInfo(list_name)
+                    out.size = len(content)
+                    out.mtime = int(datetime.now(UTC).timestamp())
+                    out.mode = 0o644
+                    rebuilt.addfile(out, io.BytesIO(content))
+            return
+        raise ValueError(f"Not a supported archive: {filename}")
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+
+
 def _skip_reason(name: str) -> str | None:
     return SKIP_NESTED_ARCHIVE if is_archive(name.rsplit("/", 1)[-1]) else None
 

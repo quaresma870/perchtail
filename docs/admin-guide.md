@@ -323,7 +323,7 @@ A delegated administrator can only map a group to a role within their own access
 
 ## Email
 
-**Settings → Email**, for super admins only, sets the SMTP server PerchTail sends email through. Nothing is configured by default, and nothing is sent until a server is saved with **Enabled** on. Today PerchTail only sends the test message from this page.
+**Settings → Email**, for super admins only, sets the SMTP server PerchTail sends email through. Nothing is configured by default, and nothing is sent until a server is saved with **Enabled** on. PerchTail sends three kinds of message: the test message from this page, password-reset links when [password recovery](#password-recovery) is on, and a notice to a user's previous address when they change their own email.
 
 | Field | What it is |
 |---|---|
@@ -341,6 +341,22 @@ The server can be on a private network (an internal relay is the usual case) or 
 Every message is plain text and carries `Auto-Submitted: auto-generated`, so autoresponders don't answer it. It holds only what the feature sending it needs; no log content is ever sent by email.
 
 Saving, removing and testing are recorded in the audit log (`smtp_settings.*`), without the password and without the message. See [Audit log events](audit-events.md).
+
+### Password recovery
+
+**Password recovery by email**, in the **Password recovery** card of **Settings → System**, lets users of local accounts choose a new password when they've forgotten theirs, without an administrator. It's off by default, and only a super admin can turn it on or change how long links work (**Links work for**, 5 to 60 minutes, 30 by default). It can be turned on only while email is set up and on here and `PUBLIC_BASE_URL` starts with `https://`, since the link carries a secret; if email is later turned off or removed, recovery stops working until it's back, and the card says why.
+
+While it's on, the sign-in page shows **Forgot password?**. A user enters their username or email address and PerchTail answers the same way whether or not an account matches; the lookup and the email happen after the answer, so neither the answer nor its timing says whether the account exists.
+
+- Only an active local account with an email address can use it. Super admins, roles with any global capability, SSO accounts and accounts without an email never get a link. This is checked again when the link is used, so an account that changes role, is deactivated or moves to SSO in the meantime can't use a link it already has.
+- The email holds only the link and how long it works, and says to ignore it if you didn't ask: no username, name or address. The link is `<PUBLIC_BASE_URL>/#/reset-password/<token>`: the token, 32 random bytes, sits after `#`, so browsers never send it to PerchTail or a reverse proxy when the page opens, and the page removes it from the address bar at once. PerchTail keeps only its SHA-256.
+- A link works once, for the configured minutes. It also stops working when the user's password changes (their own change or an administrator's **Reset password**), when their email changes, and when they ask for another link.
+- The new password must follow the password policy, can't be the current one or, with history on, a recent one. Setting it ends every session of the account and signs nobody in: the user signs in again, with their second factor if they use MFA. It doesn't lift a sign-in lockout.
+- Limits, fixed: 10 requests per 15 minutes from one address (more get `429` and wait); 3 links per hour for one account, or for one entered username or email that matches no account (more are answered as usual, but nothing is sent); 20 link checks and uses per 15 minutes from one address.
+
+Every request is recorded as `user.password_reset_requested` with its result, including requests that match no account, which keep the username or email that was entered, as failed sign-ins keep the username. Repeats within a minute are folded into one entry. Using a link is recorded as `user.password_reset_completed`, and a link refused when it is opened or used as `user.password_reset_failed` with the reason. No token, link or password is ever logged or audited. See [Audit log events](audit-events.md).
+
+Because the email address is where a reset link goes, users must enter their current password to change their own email in **My profile**, and when email is on, the previous address is told of the change (`user.email_change_notice`). An administrator can still change a user's email under **Settings → Users**; any reset link already sent stops working.
 
 ## Audit log
 

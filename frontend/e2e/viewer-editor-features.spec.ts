@@ -3,8 +3,8 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { fileURLToPath } from 'node:url'
 
-// Compare, Beautify/Minify, Follow, and Highlight (ROADMAP.md's "Viewer:
-// toward an advanced editor" toolbar items) are exercised here against the
+// Compare, Beautify/Minify, Follow, and Highlight (docs/design-decisions.md,
+// "Live browsing, scratch and the viewer") are exercised here against the
 // built-in super-admin log-viewer system source (same one viewer.spec.ts
 // already uses), with two small JSON fixture files written directly into
 // LOG_DIR -- the `local` connector reads straight off disk with no caching

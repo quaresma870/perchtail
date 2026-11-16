@@ -1,5 +1,5 @@
-"""Tracks live push-agent WebSocket connections (Phase 2 — see ROADMAP.md
-and Protocol.agent's docstring in app/models.py) and lets synchronous
+"""Tracks live push-agent WebSocket connections (see docs/design-decisions.md,
+"Push agent", and Protocol.agent's docstring in app/models.py) and lets synchronous
 connector code (collectors/agent.py, called from FastAPI's thread pool like
 every other connector) send a command to a connected agent and block for its
 response, even though the WebSocket itself is only ever touched from the
@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import BinaryIO
+from typing import BinaryIO, Protocol
 
 from fastapi import WebSocket
 
@@ -58,7 +58,8 @@ class AgentCommandError(AgentError):
     fetch is over the limit (#205); None otherwise, and from older agents.
     `message_type` is the message's own type: "unknown_error" means the
     agent doesn't know the command (#319: an agent older than 0.7 asked to
-    upgrade)."""
+    upgrade); "redaction_error" that it refused to redact (#382, #249), with
+    `rule` the id of the rule it can't run, when that's why."""
 
     def __init__(
         self,
@@ -67,11 +68,30 @@ class AgentCommandError(AgentError):
         code: str | None = None,
         size: int | None = None,
         message_type: str | None = None,
+        rule: int | None = None,
     ):
         super().__init__(message)
         self.code = code
         self.size = size
         self.message_type = message_type
+        self.rule = rule
+
+
+# What a connection announced it can do (X-PerchTail-Agent-Features): the
+# agent redacts on its host what it sends for a command with a `redact`
+# block, and lists and extracts archives itself (#382, #249).
+FEATURE_REDACTION = "redaction/1"
+
+
+class ArchiveSink(Protocol):
+    """Where a fetch_archive's members go (#382, #249): `start_member` is
+    called with each archive_member message, in order, and `write` with the
+    content of the member last started. Either raises ValueError for
+    something it won't accept, which fails the command."""
+
+    def start_member(self, message: dict) -> None: ...
+
+    def write(self, data: bytes) -> object: ...
 
 
 @dataclass
@@ -79,9 +99,14 @@ class _Stream:
     """A fetch the agent sends in `fetch_chunk` messages (#205), written to
     `sink` as each chunk arrives so the file is never held in memory."""
 
-    sink: BinaryIO
+    sink: BinaryIO | ArchiveSink
     limit: int | None
+    # A fetch_archive (#382, #249): archive_member messages share `seq`
+    # with the chunks, and every chunk belongs to the member last started.
+    archive: bool = False
+    member_started: bool = False
     next_seq: int = 0
+    chunks: int = 0
     written: int = 0
     last_activity: float = field(default_factory=time.monotonic)
 
@@ -89,6 +114,11 @@ class _Stream:
 @dataclass
 class _AgentConnection:
     websocket: WebSocket
+    # What the agent announced on connect (X-PerchTail-Agent-Features).
+    features: frozenset[str] = frozenset()
+    # Whether falling back to redacting on the server was logged already:
+    # once per connection (#382, #249).
+    fallback_logged: bool = False
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
     streams: dict[str, _Stream] = field(default_factory=dict)
     # When the agent last sent anything (#333), for the keepalive.
@@ -145,15 +175,44 @@ class AgentRegistry:
         with self._lock:
             return len(self._connections)
 
-    def register(self, source_id: int, websocket: WebSocket) -> "_AgentConnection | None":
-        """Makes `websocket` the source's connection. If one was already
+    def features(self, source_id: int) -> frozenset[str]:
+        """What the source's connected agent announced it can do; empty when
+        none is connected."""
+        with self._lock:
+            connection = self._connections.get(source_id)
+        return connection.features if connection is not None else frozenset()
+
+    def redacts_on_host(self, source_id: int) -> bool:
+        """Whether the source's connected agent redacts on its host
+        (FEATURE_REDACTION), so content with redaction never leaves it
+        unredacted (#382, #249)."""
+        return FEATURE_REDACTION in self.features(source_id)
+
+    def first_redaction_fallback(self, source_id: int) -> bool:
+        """True the first time a connection's content is redacted on the
+        server because its agent can't redact on the host, so that is
+        logged once per connection, not on every request."""
+        with self._lock:
+            connection = self._connections.get(source_id)
+            if connection is None or connection.fallback_logged:
+                return False
+            connection.fallback_logged = True
+            return True
+
+    def register(
+        self, source_id: int, websocket: WebSocket, features: frozenset[str] = frozenset()
+    ) -> "_AgentConnection | None":
+        """Makes `websocket` the source's connection, with the `features` its
+        agent announced. If one was already
         registered (the agent reconnected before the old socket was noticed
         as dead, or a second agent is using the same token), it's replaced:
         its pending commands fail now instead of waiting out their timeout,
         and it is returned so the caller can close it."""
         with self._lock:
             replaced = self._connections.get(source_id)
-            self._connections[source_id] = _AgentConnection(websocket=websocket)
+            self._connections[source_id] = _AgentConnection(
+                websocket=websocket, features=frozenset(features)
+            )
         if replaced is not None:
             _fail_pending(replaced, "agent connection replaced by a newer one")
             logger.warning("agent.connection_replaced", source_id=source_id)
@@ -271,12 +330,15 @@ class AgentRegistry:
                     code=code if isinstance(code, str) else None,
                     size=as_int(message.get("size")),
                     message_type=message_type,
+                    rule=as_int(message.get("rule")),
                 )
             )
             return
         stream = connection.streams.get(request_id)
         if stream is not None and message.get("streamed"):
-            complete = as_int(message.get("chunks")) == stream.next_seq and (
+            # `chunks` counts the fetch_chunk messages only, not a
+            # fetch_archive's archive_member messages.
+            complete = as_int(message.get("chunks")) == stream.chunks and (
                 as_int(message.get("size")) == stream.written
             )
             if not complete:
@@ -307,6 +369,9 @@ class AgentRegistry:
         if as_int(message.get("seq")) != stream.next_seq:
             future.set_exception(AgentError("agent sent fetch chunks out of order"))
             return
+        if stream.archive and not stream.member_started:
+            future.set_exception(AgentError("agent sent archive content before its member"))
+            return
         try:
             data = base64.b64decode(str(message.get("data_b64", "")), validate=True)
         except (binascii.Error, ValueError):
@@ -329,6 +394,39 @@ class AgentRegistry:
             return
         stream.written += len(data)
         stream.next_seq += 1
+        stream.chunks += 1
+        stream.last_activity = time.monotonic()
+
+    async def receive_archive_member(
+        self, source_id: int, message: dict, websocket: WebSocket | None = None
+    ) -> None:
+        """Called from the WS endpoint's receive loop for each
+        `archive_member` of a fetch_archive (#382, #249): hands it to the
+        command's sink, which starts the member's file. Numbered with the
+        chunks; out of order, or for a command that isn't a fetch_archive,
+        it fails the command."""
+        with self._lock:
+            connection = self._connections.get(source_id)
+        if connection is None:
+            return
+        if websocket is not None and connection.websocket is not websocket:
+            return
+        request_id = message.get("id", "")
+        future = connection.pending.get(request_id)
+        stream = connection.streams.get(request_id)
+        if future is None or future.done() or stream is None:
+            return
+        if not stream.archive or as_int(message.get("seq")) != stream.next_seq:
+            future.set_exception(AgentError("agent sent an archive member out of order"))
+            return
+        try:
+            await asyncio.to_thread(stream.sink.start_member, message)  # type: ignore[union-attr]
+        except (OSError, ValueError) as exc:
+            if not future.done():
+                future.set_exception(AgentError(f"agent sent an archive member refused: {exc}"))
+            return
+        stream.member_started = True
+        stream.next_seq += 1
         stream.last_activity = time.monotonic()
 
     async def _send_command(
@@ -336,13 +434,24 @@ class AgentRegistry:
         source_id: int,
         command: dict,
         timeout: float,
-        sink: BinaryIO | None = None,
+        sink: BinaryIO | ArchiveSink | None = None,
         limit: int | None = None,
+        archive: bool = False,
+        require_feature: str | None = None,
     ) -> dict:
         with self._lock:
             connection = self._connections.get(source_id)
         if connection is None:
             raise AgentNotConnectedError(f"no agent connected for source {source_id}")
+        if require_feature is not None and require_feature not in connection.features:
+            # The agent reconnected without it since the caller checked: the
+            # command is never sent, so an agent that would ignore it can't
+            # answer with what it was meant to keep on its host.
+            raise AgentCommandError(
+                f"the agent doesn't support {require_feature}",
+                code="feature_missing",
+                message_type="feature_error",
+            )
 
         request_id = command["id"]
         future: asyncio.Future = self._loop.create_future()
@@ -350,7 +459,7 @@ class AgentRegistry:
         stream = None
         completed = False
         if sink is not None:
-            stream = _Stream(sink=sink, limit=limit)
+            stream = _Stream(sink=sink, limit=limit, archive=archive)
             connection.streams[request_id] = stream
         try:
             await connection.websocket.send_json(command)
@@ -393,8 +502,10 @@ class AgentRegistry:
         command_type: str,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         *,
-        sink: BinaryIO | None = None,
+        sink: BinaryIO | ArchiveSink | None = None,
         limit: int | None = None,
+        archive: bool = False,
+        require_feature: str | None = None,
         command_id: str | None = None,
         **fields,
     ) -> dict:
@@ -406,14 +517,28 @@ class AgentRegistry:
         With `sink`, `fetch_chunk` messages for this command are written to
         it as they arrive, refusing more than `limit` bytes (#205); the
         timeout then applies to the wait for each chunk, not to the whole
-        transfer. `command_id` sets the command's id, for a caller that
-        tracks later messages about it (an upgrade's progress, #319)."""
+        transfer. With `archive` (a fetch_archive, #382, #249), `sink` is an
+        ArchiveSink and also gets the archive_member messages, and `limit`
+        counts the content of every member. With `require_feature`, the
+        command is only sent to a connection that announced that feature
+        (AgentCommandError coded "feature_missing" otherwise). `command_id`
+        sets the command's id, for a caller that tracks later messages about
+        it (an upgrade's progress, #319)."""
         if self._loop is None:
             raise AgentNotConnectedError("agent registry has no event loop bound yet")
 
         command = {**fields, "type": command_type, "id": command_id or str(uuid.uuid4())}
         future = asyncio.run_coroutine_threadsafe(
-            self._send_command(source_id, command, timeout, sink=sink, limit=limit), self._loop
+            self._send_command(
+                source_id,
+                command,
+                timeout,
+                sink=sink,
+                limit=limit,
+                archive=archive,
+                require_feature=require_feature,
+            ),
+            self._loop,
         )
         if sink is not None:
             # No overall deadline: the in-loop wait times out when chunks stop.

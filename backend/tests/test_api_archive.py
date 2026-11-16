@@ -230,6 +230,8 @@ def test_open_fetches_file_and_returns_scratch_key(app_client, session, fake_sft
     assert response.status_code == 200
     assert response.content == b"hello world"
     assert "x-scratch-key" in response.headers
+    # File content is never cached by the browser or a proxy.
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_open_denies_file_not_matched_by_rules(app_client, session, fake_sftp, scratch_store):
@@ -351,6 +353,7 @@ def test_download_releases_automatically_without_explicit_close(
     response = client.get(f"/sources/{source.id}/download", params={"path": "app.log"})
     assert response.status_code == 200
     assert response.content == b"hello world"
+    assert response.headers["cache-control"] == "no-store"
     assert len(scratch_store._entries) == 0
 
 
@@ -431,6 +434,7 @@ def test_download_zip_bundles_only_rule_visible_files(app_client, session, tmp_p
     response = client.get(f"/sources/{source.id}/download-zip")
     assert response.status_code == 200
     assert response.headers["content-disposition"].startswith("attachment")
+    assert response.headers["cache-control"] == "no-store"
 
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
         names = set(zf.namelist())

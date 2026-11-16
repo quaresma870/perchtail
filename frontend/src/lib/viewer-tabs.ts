@@ -17,8 +17,8 @@ export interface Tab {
   scratchKey: string | null
   wrapEnabled: boolean
   showWhitespace: boolean
-  // Pure client-side/session state (ROADMAP.md: never written to the file,
-  // never persisted server-side) -- 1-indexed line numbers, sorted.
+  // Pure client-side/session state (docs/design-decisions.md, "Scope and
+  // principles": never written to the file, never persisted server-side) -- 1-indexed line numbers, sorted.
   bookmarks: number[]
   markPatterns: MarkPattern[]
   // Display-only reformat for JSON/XML tabs; 'none' = raw content.

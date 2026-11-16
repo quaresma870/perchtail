@@ -17,22 +17,27 @@
   let profileError = ''
   let profileSaved = false
 
-  $: profileDirty =
-    displayName.trim() !== ($currentUser?.display_name ?? '') ||
-    email.trim().toLowerCase() !== ($currentUser?.email ?? '')
+  // Changing the email needs the current password (#244): it's where a
+  // password-reset link would go.
+  let emailPassword = ''
+  $: emailChanging = email.trim().toLowerCase() !== ($currentUser?.email ?? '')
+  $: profileDirty = displayName.trim() !== ($currentUser?.display_name ?? '') || emailChanging
 
   async function saveProfile() {
     profileSaving = true
     profileError = ''
     profileSaved = false
     try {
-      const user = await api.patch<CurrentUser>('/auth/me', {
-        display_name: displayName,
-        email,
-      })
+      const body: Record<string, string> = { display_name: displayName }
+      if (emailChanging) {
+        body.email = email
+        body.current_password = emailPassword
+      }
+      const user = await api.patch<CurrentUser>('/auth/me', body)
       currentUser.set(user)
       displayName = user.display_name ?? ''
       email = user.email ?? ''
+      emailPassword = ''
       profileSaved = true
     } catch (err) {
       profileError = err instanceof ApiError ? err.detail : 'Could not save your profile'
@@ -88,6 +93,18 @@
           Email
           <input class="input" type="email" bind:value={email} autocomplete="email" />
         </label>
+        {#if emailChanging}
+          <label>
+            Current password, to change your email
+            <input
+              class="input"
+              type="password"
+              autocomplete="current-password"
+              bind:value={emailPassword}
+              required
+            />
+          </label>
+        {/if}
         {#if profileError}
           <p class="error">{profileError}</p>
         {:else if profileSaved && !profileDirty}

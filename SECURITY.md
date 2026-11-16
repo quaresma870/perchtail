@@ -2,16 +2,27 @@
 
 PerchTail is designed to hold credentials for production systems (SSH keys, SMB and WinRM passwords) and to gate access to potentially sensitive log content via RBAC. Security issues here have real consequences — please report them responsibly rather than as a public issue or PR.
 
-## Supported versions
+## Support and end of life
 
-Until 1.0, only the latest release gets security fixes, shipped as a patch release within the time below; upgrading to the latest release is how an install stays supported.
+A release line is in one of three states:
 
-From 1.0 on, the latest minor release always gets security fixes, and the previous minor keeps getting them for 6 months after the next one is published.
+- **Active support:** it gets bug fixes and security fixes.
+- **End of support:** it gets security fixes only.
+- **End of life:** it gets no fixes. Its release, container image, signatures and SBOM stay available, so it can still be installed, rolled back to and verified.
 
-| Version | Supported |
+No release is ever deleted. Fixes ship as a new patch release of a supported line, within the times in [Response times](#response-times), so an install stays supported by running the latest patch release of its line.
+
+**Until 1.0**, only the latest release is supported. Each earlier release reaches end of life when the next one is published.
+
+**From 1.0 on**, the latest minor release is always in active support. When the next minor is published, the previous one keeps active support for 6 more months, gets security fixes only until 12 months, and then reaches end of life. Both periods count from the release of the minor that replaced it. For example, if 1.1 is released on day D, 1.0 is in active support until D + 6 months, gets security fixes only until D + 12 months, and reaches end of life after that.
+
+| Release line | State |
 |---|---|
-| Latest release | ✅ |
-| Any earlier 0.x | ❌, upgrade to the latest release |
+| 0.7 | The next release, not published yet. Once released, it is the only supported line until the release after it (0.8.0 or 1.0.0) is published. |
+| 0.6 | Active support, as the latest release. It reaches end of life when 0.7.0 is released. |
+| 0.5 and earlier | End of life since 0.6.0 was released on 2026-11-07. |
+
+Releases up to 0.6.1 are under the MIT license; later releases are under the AGPL-3.0-only.
 
 ## Reporting a vulnerability
 

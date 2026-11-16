@@ -3,8 +3,8 @@ import type { FileLanguage } from './file-language'
 export type FormatMode = 'none' | 'pretty' | 'minified'
 
 /** Languages the "Beautify"/"Minify" toolbar actions support -- JS is
- * ROADMAP.md's explicitly lower-priority third case, deliberately deferred
- * (see ROADMAP.md's notes): a real JS beautifier needs an actual parser
+ * the explicitly lower-priority third case, deliberately deferred
+ * (see docs/design-decisions.md, "Open items"): a real JS beautifier needs an actual parser
  * (e.g. `prettier/standalone`), a meaningfully heavier dependency than the
  * couple of regex/DOM passes JSON and XML need, for a format this tool's
  * logs rarely embed compared to JSON/XML payloads. */
@@ -106,8 +106,8 @@ function minifyXml(text: string): string | null {
   return text.trim().replace(/>\s+</g, '><')
 }
 
-/** Applies a display-only reformat (ROADMAP.md: "never touches the file on
- * disk") for the given language and mode. Returns null when the language
+/** Applies a display-only reformat (docs/design-decisions.md, "Scope and
+ * principles": never touches the file on disk) for the given language and mode. Returns null when the language
  * isn't supported or the content isn't valid for it (e.g. a `.json` file
  * that's actually corrupt/truncated) -- the caller falls back to the raw
  * content and surfaces that as a toolbar error rather than silently doing

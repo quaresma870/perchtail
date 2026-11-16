@@ -33,8 +33,13 @@ test('alerts: create, edit, test webhook, toggle enabled, delete', async ({ page
   await expect(row.locator('.query')).toHaveText('connection refused')
   await expect(row).toContainText('Every source you can view')
   await expect(row).toContainText('**/*.log')
+  // The webhook URL is stored encrypted and only its host is shown.
+  await expect(row).toContainText('https://example.com/…')
+  await expect(row).not.toContainText('e2e-webhook-test')
 
   await row.getByRole('button', { name: 'Edit' }).click()
+  // Left empty, the stored URL is kept.
+  await expect(page.getByLabel('Webhook URL')).toHaveValue('')
   await page.getByLabel('Files').fill('**/*.txt')
   await page.getByRole('button', { name: 'Save changes' }).click()
   await expect(page.locator('.alert-row', { hasText: alertName })).toContainText('**/*.txt')
