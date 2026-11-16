@@ -76,6 +76,9 @@ type Command struct {
 	// by the names list_archive gave. The server picks them after applying
 	// the visibility rules, which stay on the server.
 	Members []string `json:"members,omitempty"`
+	// Set on a "read_range" with a `redact` block, for the alerts: also say
+	// where each redacted line was in the original (ChangedLines).
+	WithLineOffsets bool `json:"with_line_offsets,omitempty"`
 }
 
 // DirEntryWire mirrors what collectors/agent.py's list_directory expects
@@ -222,6 +225,14 @@ type ReadRangeResult struct {
 // starts at the line after Offset (Offset wasn't the start of a line);
 // TrailingPartial is how many bytes at its end stand for an unfinished
 // last line, which the next poll sends again.
+//
+// ChangedLines, only when the command asked WithLineOffsets (the alerts),
+// maps the redacted whole lines (those before the trailing partial) back to
+// the original: [index, original length] for each line whose length, newline
+// included, isn't the original's (a value replaced, UTF-16 sent as UTF-8, a
+// line with no end skipped), in order; every other line is as long as its
+// original. The lines are the original's from NextOffset back, so the
+// server knows where each one starts in the file.
 type RedactedReadRangeResult struct {
 	Type            string         `json:"type"`
 	ID              string         `json:"id"`
@@ -236,6 +247,7 @@ type RedactedReadRangeResult struct {
 	Counts          map[string]int `json:"counts"`
 	TrailingPartial int            `json:"trailing_partial"`
 	Aligned         bool           `json:"aligned"`
+	ChangedLines    *[][2]int64    `json:"changed_lines,omitempty"`
 }
 
 // ErrorResult reports a command failure. AgentRegistry.resolve_response

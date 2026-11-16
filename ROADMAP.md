@@ -41,7 +41,7 @@ Done:
 
 Started:
 
-- Redaction of secrets, payment card numbers and personal data in viewed and downloaded content (#382), and masking by role (#249): the viewer, Tail and downloads get redacted content, redacted on the push agent's host when the agent can; alerts and a settings screen are still to do.
+- Redaction of secrets, payment card numbers and personal data in viewed and downloaded content (#382), and masking by role (#249): the viewer, Tail, downloads and alerts get redacted content, redacted on the push agent's host when the agent can; a settings screen is still to do.
 
 ## 1.0.0
 

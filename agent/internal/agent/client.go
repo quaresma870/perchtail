@@ -387,7 +387,7 @@ func handleCommand(cfg Config, cmd Command) any {
 			if err != nil {
 				return errorResult(cmd, "read_range_error", err)
 			}
-			result, err := HandleReadRangeRedacted(cfg.BasePath, cmd.Path, cmd.Offset, cmd.Length, red)
+			result, err := HandleReadRangeRedacted(cfg.BasePath, cmd.Path, cmd.Offset, cmd.Length, red, cmd.WithLineOffsets)
 			if err != nil {
 				return errorResult(cmd, "read_range_error", err)
 			}

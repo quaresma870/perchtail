@@ -103,7 +103,13 @@ func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) e
 				mtimeMs:   zipMTimeMs(zf),
 				regular:   !strings.HasSuffix(entryName, "/"),
 				encrypted: zf.Flags&0x1 != 0,
-				open:      func() (io.Reader, error) { return zf.Open() },
+				open: func() (io.Reader, error) {
+					r, err := zf.Open()
+					if err != nil {
+						return nil, err
+					}
+					return &strictMemberReader{r: r}, nil
+				},
 			})
 			if err != nil || !more {
 				return err
@@ -122,7 +128,10 @@ func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) e
 		tr := tar.NewReader(gz)
 		for {
 			header, err := tr.Next()
-			if errors.Is(err, io.EOF) {
+			// io.ErrUnexpectedEOF: the archive ends inside the last member,
+			// whose reads then fail with errTruncatedMember (unreadable, as a
+			// truncated zip member); the members before it are whole.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil
 			}
 			if err != nil && !errors.Is(err, tar.ErrInsecurePath) {
@@ -133,7 +142,7 @@ func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) e
 				size:    header.Size,
 				isDir:   header.Typeflag == tar.TypeDir,
 				regular: tarRegular(header.Typeflag),
-				open:    func() (io.Reader, error) { return tr, nil },
+				open:    func() (io.Reader, error) { return &strictMemberReader{r: tr}, nil },
 			}
 			if entry.isDir {
 				entry.size = 0
@@ -148,6 +157,24 @@ func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) e
 		}
 	}
 	return fmt.Errorf("not a supported archive: %s", lastSegment(name))
+}
+
+// errTruncatedMember is a zip or tar member whose content ends before the
+// size its header declares, which archive/zip and archive/tar report as
+// io.ErrUnexpectedEOF:
+// redactStream and chunkSender.copy would take that for the end of the
+// content. It is unreadable, as on the server: a fetch of it is refused and
+// a fetch_archive leaves it out.
+var errTruncatedMember = errors.New("archive member ended before its declared size")
+
+type strictMemberReader struct{ r io.Reader }
+
+func (s *strictMemberReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		err = errTruncatedMember
+	}
+	return n, err
 }
 
 // clampSize is a zip header's size as an int64 (a crafted header can claim

@@ -667,7 +667,9 @@ func sendArchiveMember(
 // by a marker, going on after it. When the redacted lines would take more
 // than maxRangeLength bytes, it reads less, so the answer always fits.
 // The file's first bytes are only used for the digests, never sent.
-func HandleReadRangeRedacted(basePath, relPath string, offset, length int64, red *redaction) (RedactedReadRangeResult, error) {
+// withLineOffsets (the alerts) adds ChangedLines, so the server knows where
+// each redacted line starts in the original.
+func HandleReadRangeRedacted(basePath, relPath string, offset, length int64, red *redaction, withLineOffsets bool) (RedactedReadRangeResult, error) {
 	if offset < 0 || length < 0 {
 		return RedactedReadRangeResult{}, fmt.Errorf("invalid range: offset %d, length %d", offset, length)
 	}
@@ -701,6 +703,10 @@ func HandleReadRangeRedacted(basePath, relPath string, offset, length int64, red
 		ReadEnd:    offset,
 		HeadDigest: redact.HeadDigest(red.headKey, head, offset),
 		Counts:     map[string]int{},
+	}
+	if withLineOffsets {
+		none := [][2]int64{}
+		result.ChangedLines = &none
 	}
 	if offset > size {
 		// Rotated or truncated: the server starts over.
@@ -739,7 +745,8 @@ func HandleReadRangeRedacted(basePath, relPath string, offset, length int64, red
 		body, counts, partial := read.Data, read.Counts, read.TrailingPartial
 		readEnd := readFrom + int64(len(data))
 		next := readFrom + int64(read.End)
-		if next <= offset && readEnd < size {
+		skipped := next <= offset && readEnd < size
+		if skipped {
 			// No line ends within what was read: skip it, fail closed. The
 			// label is what was skipped, as the server's when it reads a
 			// whole window.
@@ -754,6 +761,19 @@ func HandleReadRangeRedacted(basePath, relPath string, offset, length int64, red
 			return RedactedReadRangeResult{}, errors.New("the redacted read doesn't fit in one answer")
 		}
 		if len(body) <= maxRangeLength {
+			if withLineOffsets {
+				// The original lines the redacted ones stand for: those read,
+				// or the line with no end that was skipped.
+				originals := []int64{next - offset}
+				if !skipped {
+					originals = lineLengths(data[read.Begin:read.End], encoding, readFrom+int64(read.Begin))
+				}
+				changed, err := changedLines(body[:len(body)-partial], originals)
+				if err != nil {
+					return RedactedReadRangeResult{}, err
+				}
+				result.ChangedLines = &changed
+			}
 			result.DataB64 = base64.StdEncoding.EncodeToString(body)
 			result.NextOffset = next
 			result.ReadEnd = readEnd
@@ -767,4 +787,58 @@ func HandleReadRangeRedacted(basePath, relPath string, offset, length int64, red
 		// values, longer markers): read half as much after the offset.
 		window = before + (window-before)/2
 	}
+}
+
+// lineLengths splits block, whole lines of the original in encoding that
+// start at file offset at, into the length of each line, its newline
+// included (a UTF-16 newline counts only on an even offset, as the engine
+// reads it).
+func lineLengths(block []byte, encoding string, at int64) []int64 {
+	newline, unit := []byte("\n"), int64(1)
+	switch encoding {
+	case redact.UTF16LE:
+		newline, unit = []byte("\n\x00"), 2
+	case redact.UTF16BE:
+		newline, unit = []byte("\x00\n"), 2
+	}
+	var lengths []int64
+	start, from := 0, 0
+	for {
+		i := bytes.Index(block[from:], newline)
+		if i < 0 {
+			return lengths
+		}
+		i += from
+		if (at+int64(i))%unit != 0 {
+			from = i + 1
+			continue
+		}
+		end := i + len(newline)
+		lengths = append(lengths, int64(end-start))
+		start, from = end, end
+	}
+}
+
+// changedLines pairs the redacted whole lines of output with the original
+// lines they stand for (one for one: redaction never adds or removes a line
+// break) and lists those whose length changed. Anything else is refused
+// rather than sent with positions that would be wrong.
+func changedLines(output []byte, originals []int64) ([][2]int64, error) {
+	changed := [][2]int64{}
+	index := 0
+	for len(output) > 0 {
+		i := bytes.IndexByte(output, '\n')
+		if i < 0 || index >= len(originals) {
+			return nil, errors.New("the redacted lines don't match the lines read")
+		}
+		if int64(i+1) != originals[index] {
+			changed = append(changed, [2]int64{int64(index), originals[index]})
+		}
+		output = output[i+1:]
+		index++
+	}
+	if index != len(originals) {
+		return nil, errors.New("the redacted lines don't match the lines read")
+	}
+	return changed, nil
 }

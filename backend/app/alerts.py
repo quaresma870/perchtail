@@ -17,10 +17,24 @@ rest come round on the next passes, and the backlog shows in monitoring.
 
 Matches are sent as one webhook call per alert per pass (#328): sent
 right away, retried with backoff while it fails for up to an hour
-(AlertDelivery), then dropped and counted on the alert."""
+(AlertDelivery), then dropped and counted on the alert.
+
+When redaction applies to a source (#382, #249), its lines are redacted
+before the query runs on them, for every alert: a value that was replaced
+can't be matched, and only redacted lines are queued and sent. They are
+redacted as the Tail's (a little is read before the offset, to know whether
+it falls inside a private key), on the agent's host for an agent that
+redacts there; offsets and the file's identity stay those of the original,
+so turning redaction on or off neither restarts a file nor repeats a match,
+and each hit's offset is where its line starts in the original. A delivery
+is redacted again as it is sent, with the rules that apply to its sources
+then, so one queued before redaction was turned on doesn't go out in clear.
+A file redaction can't read (an encoding or a compression it doesn't
+support) waits where it is, and is logged once until it changes."""
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from urllib.parse import urlparse
@@ -44,7 +58,20 @@ from app.models import (
     Rule,
     Source,
 )
-from app.redaction import head_digest
+from app.redaction import (
+    UTF16_BE,
+    UTF16_LE,
+    CompiledRules,
+    UnsupportedEncodingError,
+    compile_rules,
+    detect_encoding,
+    head_digest,
+    long_line_label,
+    marker,
+    redact_bytes,
+    redact_window,
+)
+from app.redaction_rules import effective_redaction_rules, engine_rules
 from app.rules import compile_linear, glob_matches, is_visible, rules_case_insensitive
 from app.timeutils import utcnow
 from app.webhook_safety import UnsafeWebhookURLError, resolve_pinned_webhook_target
@@ -62,6 +89,10 @@ MAX_LINE_CHARS = 2000
 MAX_HITS_PER_DELIVERY = 50
 RETRY_FOR = timedelta(hours=1)
 _WEBHOOK_TIMEOUT_SECONDS = 10.0
+# Redacted, a read starts this much before the offset, as the Tail's
+# (app.api.archive.FOLLOW_CONTEXT_BYTES): only to know whether the offset
+# falls inside a private-key block. Never matched or sent.
+CONTEXT_BYTES = 16 * 1024
 
 
 @dataclass
@@ -85,6 +116,47 @@ class PassStats:
 # What the last pass found, for /monitoring/health.
 _last_pass: dict = {"at": None, "stats": None}
 _pass_lock = threading.Lock()
+# The files redaction couldn't read, by (alert id, source id, path): what
+# the file looked like then (its listed size and modification time, and the
+# identity of its start when it was read), so alert.file_read_failed is
+# logged once until the file changes. In memory only, like the scratch
+# bookkeeping: after a restart it is logged once again. Written by the pass
+# and cleared from request threads (forget_alert, forget_source), so every
+# access holds _unreadable_lock.
+_unreadable: dict[tuple[int, int, str], tuple] = {}
+_unreadable_lock = threading.Lock()
+
+
+def _note_unreadable(key: tuple[int, int, str], seen: tuple) -> bool:
+    """Records how an unreadable file looked; True when it looked the same
+    the last time, so it was already logged."""
+    with _unreadable_lock:
+        repeated = _unreadable.get(key) == seen
+        _unreadable[key] = seen
+        return repeated
+
+
+def _clear_unreadable(key: tuple[int, int, str]) -> None:
+    """Drops one file, read again or failing for another reason."""
+    with _unreadable_lock:
+        _unreadable.pop(key, None)
+
+
+def _forget_unreadable(match: Callable[[tuple[int, int, str]], bool]) -> None:
+    """Drops the unreadable files whose key matches."""
+    with _unreadable_lock:
+        for key in [k for k in _unreadable if match(k)]:
+            del _unreadable[key]
+
+
+class UnreadableContentError(ValueError):
+    """Content redaction can't read: an encoding or a compressed format it
+    doesn't support. `head` is the identity of the file's start, when the
+    read got that far (on the server; an agent doesn't send it)."""
+
+    def __init__(self, message: str, head: str | None = None):
+        super().__init__(message)
+        self.head = head
 
 
 def last_pass() -> dict:
@@ -164,9 +236,193 @@ def _complete_lines(data: bytes, at_limit: bool) -> bytes:
     return data[: end + 1]
 
 
-def _read_file(connector, source: Source, state: AlertFileState, matches, stats: PassStats):
+@dataclass(frozen=True)
+class SourceRedaction:
+    """How a source's lines are redacted for the alerts: the compiled rules
+    (on the server), and the `redact` block to send its agent instead when
+    the agent redacts on its host."""
+
+    rules: CompiledRules
+    block: dict | None = None
+
+
+def source_redaction(session: Session, source: Source) -> SourceRedaction | None:
+    """None when redaction doesn't apply to the source (off, or no
+    effective rule), the same for every alert. A stored rule the engine
+    can't run raises (RedactionRuleError): check_alert then leaves the
+    source's files waiting, rather than matching or sending lines
+    unredacted."""
+    from app.api.archive import agent_redaction_rules
+    from app.collectors.agent import redaction_block
+
+    compiled = redaction_rules_now(session, source.id)
+    if compiled is None:
+        return None
+    agent_rules = agent_redaction_rules(session, source)
+    block = None if agent_rules is None else redaction_block(source.id, agent_rules, "utf-8")
+    return SourceRedaction(compiled, block)
+
+
+def redaction_rules_now(session: Session, source_id: int) -> CompiledRules | None:
+    """The compiled rules redaction applies to a source's content now, or
+    None when it doesn't apply (off, or no effective rule). A source that
+    no longer exists gets the system rules. Raises when a stored rule can't
+    run (RedactionRuleError)."""
+    if not system_settings.get_bool(session, "redaction_enabled"):
+        return None
+    rules = engine_rules(effective_redaction_rules(session, source_id))
+    return compile_rules(rules) if rules else None
+
+
+def _line_lengths(block: bytes, encoding: str | None, at: int) -> list[int]:
+    """The length of each line of `block`, whole lines of the original in
+    `encoding` starting at file offset `at`, newline included (a UTF-16
+    newline counts only on an even offset, as the engine reads it)."""
+    newline, unit = {UTF16_LE: (b"\n\x00", 2), UTF16_BE: (b"\x00\n", 2)}.get(encoding, (b"\n", 1))
+    lengths: list[int] = []
+    start = 0
+    index = block.find(newline)
+    while index >= 0:
+        if (at + index) % unit:
+            index = block.find(newline, index + 1)
+            continue
+        end = index + len(newline)
+        lengths.append(end - start)
+        start = end
+        index = block.find(newline, end)
+    return lengths
+
+
+def _redacted_lines(output: bytes, lengths: list[int], begin: int) -> list[tuple[int, bytes]]:
+    """Pairs the redacted whole lines of `output` with the original lines
+    they stand for (one for one: redaction never adds or removes a line
+    break), starting at file offset `begin`: (offset, redacted line)."""
+    lines = output.split(b"\n")[:-1] if output else []
+    if (output and not output.endswith(b"\n")) or len(lines) != len(lengths):
+        raise ValueError("the redacted lines don't match the lines read")
+    positioned = []
+    for line, length in zip(lines, lengths, strict=True):
+        positioned.append((begin, line))
+        begin += length
+    return positioned
+
+
+def _read_redacted(
+    connector, source: Source, state: AlertFileState, rules: CompiledRules
+) -> list[tuple[int, bytes]]:
+    """Redacted on the server: what was appended since `state`, as
+    (offset in the original, redacted line) for each whole line, as the
+    Tail's (app.api.archive._follow_redacted). Moves `state` on."""
+    from app.api.archive import unsupported_compressed_format
+
+    offset = state.offset
+    read_from = max(0, offset - CONTEXT_BYTES)
+    size, first, data = connector.read_range(
+        source, state.file_path, read_from, READ_BYTES, HEAD_BYTES
+    )
+    if offset > size or (
+        state.head is not None and offset > 0 and head_hash(source.id, first, offset) != state.head
+    ):
+        # Rotated or rewritten: everything in it is new.
+        offset = read_from = 0
+        size, first, data = connector.read_range(source, state.file_path, 0, READ_BYTES, HEAD_BYTES)
+    if unsupported_compressed_format(first):
+        raise UnreadableContentError(
+            "content compressed in a format redaction doesn't read",
+            head_hash(source.id, first, len(first)),
+        )
+    try:
+        encoding = detect_encoding(first)
+    except UnsupportedEncodingError as exc:
+        raise UnreadableContentError(
+            "content in an encoding redaction doesn't support",
+            head_hash(source.id, first, len(first)),
+        ) from exc
+    window = redact_window(
+        data,
+        min(offset - read_from, len(data)),
+        rules,
+        base_offset=read_from,
+        final=False,
+        source_encoding=encoding,
+    )
+    read_end = read_from + len(data)
+    next_offset = read_from + window.end
+    if next_offset <= offset and read_end < size:
+        # No line ends within what one read takes: it can't be redacted
+        # whole, so it becomes a marker and the next pass goes on after it.
+        lines = [(offset, marker(long_line_label(read_end - offset)))]
+        next_offset = read_end
+    else:
+        output = window.data[: len(window.data) - window.trailing_partial]
+        lengths = _line_lengths(data[window.begin : window.end], encoding, read_from + window.begin)
+        lines = _redacted_lines(output, lengths, read_from + window.begin)
+    state.offset = next_offset
+    state.head = head_hash(source.id, first, next_offset) if next_offset else None
+    return lines
+
+
+def _read_on_agent(
+    connector, source: Source, state: AlertFileState, block: dict
+) -> list[tuple[int, bytes]]:
+    """Redacted on the agent's host: the same answer as _read_redacted,
+    with where each line starts in the original worked out from the
+    agent's line offsets; the original never leaves the host. Moves
+    `state` on."""
+    from app.collectors.agent import AgentRedactionError
+
+    def read_from(offset: int):
+        try:
+            return connector.call(
+                "read_range_redacted",
+                source,
+                state.file_path,
+                offset,
+                READ_BYTES,
+                block,
+                line_offsets=True,
+            )
+        except AgentRedactionError as exc:
+            if exc.code in ("unsupported_encoding", "unsupported_format"):
+                raise UnreadableContentError(str(exc)) from exc
+            raise
+
+    read = read_from(state.offset)
+    if state.offset > read.size or (
+        state.head is not None and state.offset > 0 and read.head_digest != state.head
+    ):
+        # Rotated or rewritten: everything in it is new.
+        read = read_from(0)
+    state.offset = read.next_offset
+    state.head = read.next_head_digest if read.next_offset else None
+    return list(read.lines or ())
+
+
+def _read_file(
+    connector,
+    source: Source,
+    state: AlertFileState,
+    matches,
+    stats: PassStats,
+    redaction: SourceRedaction | None = None,
+):
     """Reads what was appended to one file since `state` and returns the
-    matching lines; moves `state` on."""
+    matching lines; moves `state` on. With `redaction`, the query runs on
+    the redacted lines and only those are kept."""
+    if redaction is not None:
+        if redaction.block is not None:
+            lines = _read_on_agent(connector, source, state, redaction.block)
+        else:
+            lines = _read_redacted(connector, source, state, redaction.rules)
+        hits = []
+        for position, raw in lines:
+            line = raw.decode("utf-8", errors="replace").rstrip("\r")
+            if line and matches(line):
+                hits.append(
+                    Hit(source.id, source.name, state.file_path, position, line[:MAX_LINE_CHARS])
+                )
+        stats.files_read += 1
+        return hits
     size, first, data = connector.read_range(
         source, state.file_path, state.offset, READ_BYTES, HEAD_BYTES
     )
@@ -196,15 +452,16 @@ def _read_file(connector, source: Source, state: AlertFileState, matches, stats:
 
 def _current_sizes(
     connector, source: Source, rules: list[Rule], states: list[AlertFileState], started: float
-) -> tuple[dict[str, int], set[str]]:
-    """The size of each watched file now, from one listing per folder they
-    sit in. A file whose folder couldn't be listed (an error, or the time
-    budget ran out) is returned in the second set, to be read directly."""
+) -> tuple[dict[str, tuple[int, float | None]], set[str]]:
+    """The size and modification time of each watched file now, from one
+    listing per folder they sit in. A file whose folder couldn't be listed
+    (an error, or the time budget ran out) is returned in the second set, to
+    be read directly."""
     folders: dict[str, list[str]] = {}
     for state in states:
         folder = state.file_path.rsplit("/", 1)[0] if "/" in state.file_path else ""
         folders.setdefault(folder, []).append(state.file_path)
-    sizes: dict[str, int] = {}
+    sizes: dict[str, tuple[int, float | None]] = {}
     unlisted: set[str] = set()
     for folder, paths in folders.items():
         if time.monotonic() - started > SOURCE_BUDGET_SECONDS:
@@ -213,7 +470,7 @@ def _current_sizes(
         try:
             for entry in connector.list_directory(source, rules, folder):
                 if not entry.is_dir:
-                    sizes[entry.path] = entry.size
+                    sizes[entry.path] = (entry.size, entry.mtime)
         except Exception as exc:  # noqa: BLE001 - its files are read directly instead
             logger.info(
                 "alert.folder_list_failed", source_id=source.id, path=folder, error=str(exc)
@@ -249,6 +506,13 @@ def check_alert(session: Session, alert: Alert, stats: PassStats | None = None) 
     for source in session.exec(select(Source).where(col(Source.id).in_(source_ids))).all():
         connector = CONNECTORS.get(source.protocol)
         if connector is None:
+            continue
+        try:
+            redaction = source_redaction(session, source)
+        except Exception as exc:  # noqa: BLE001 - fail closed: the source waits, the rest go on
+            logger.error(
+                "alert.redaction_failed", alert_id=alert.id, source_id=source.id, error=str(exc)
+            )
             continue
         rules = list(session.exec(select(Rule).where(Rule.source_id == source.id)).all())
         case_insensitive = rules_case_insensitive(source)
@@ -288,7 +552,9 @@ def check_alert(session: Session, alert: Alert, stats: PassStats | None = None) 
         # is a connection of its own on SSH, SMB and WinRM.
         sizes, unlisted = _current_sizes(connector, source, rules, known, started)
         changed = [
-            s for s in known if s.file_path in unlisted or sizes.get(s.file_path) != s.offset
+            s
+            for s in known
+            if s.file_path in unlisted or sizes.get(s.file_path, (None,))[0] != s.offset
         ]
         changed_paths = {s.file_path for s in changed}
         for state in known:
@@ -300,16 +566,26 @@ def check_alert(session: Session, alert: Alert, stats: PassStats | None = None) 
             if index >= FILES_PER_SOURCE or time.monotonic() - started > SOURCE_BUDGET_SECONDS:
                 stats.files_waiting += len(changed) - index
                 break
+            key = (alert.id, source.id, state.file_path)
             try:
-                hits.extend(_read_file(connector, source, state, matches, stats))
+                hits.extend(_read_file(connector, source, state, matches, stats, redaction))
             except Exception as exc:  # noqa: BLE001 - one file never stops the pass
-                logger.info(
-                    "alert.file_read_failed",
-                    alert_id=alert.id,
-                    source_id=source.id,
-                    path=state.file_path,
-                    error=str(exc),
-                )
+                if isinstance(exc, UnreadableContentError):
+                    # It waits where it is; logged again only once it changed.
+                    repeated = _note_unreadable(key, (sizes.get(state.file_path), exc.head))
+                else:
+                    repeated = False
+                    _clear_unreadable(key)
+                if not repeated:
+                    logger.info(
+                        "alert.file_read_failed",
+                        alert_id=alert.id,
+                        source_id=source.id,
+                        path=state.file_path,
+                        error=str(exc),
+                    )
+            else:
+                _clear_unreadable(key)
             state.checked_at = now
             session.add(state)
         session.commit()
@@ -391,10 +667,42 @@ def _backoff(attempts: int) -> timedelta:
     return timedelta(minutes=min(15, 2 ** max(0, attempts - 1)))
 
 
+def _payload_as_sent(
+    session: Session, payload: dict, rules_by_source: dict[int, CompiledRules | None]
+) -> dict:
+    """The payload as it goes out now: the hits' lines redacted with the
+    rules that apply to their source at this moment, so a delivery queued
+    before redaction was turned on doesn't go out in clear. The lines of
+    each file are redacted together, in order, so a private key whose BEGIN
+    line is among them stays redacted to its END. Lines already redacted
+    when they were matched only hold markers where values were. Raises when
+    the rules can't run (the delivery then isn't sent)."""
+    hits = [dict(hit) for hit in payload.get("hits", [])]
+    files: dict[tuple[int, str], list[dict]] = {}
+    for hit in hits:
+        files.setdefault((hit["source_id"], hit["file_path"]), []).append(hit)
+    for (source_id, _), file_hits in files.items():
+        if source_id not in rules_by_source:
+            rules_by_source[source_id] = redaction_rules_now(session, source_id)
+        rules = rules_by_source[source_id]
+        if rules is None:
+            continue
+        lines = b"".join(hit["line"].encode("utf-8") + b"\n" for hit in file_hits)
+        redacted, _ = redact_bytes(lines, rules, final=True)
+        out = redacted.split(b"\n")
+        if out[-1] != b"" or len(out) - 1 != len(file_hits):
+            raise ValueError("the redacted lines don't match the lines queued")
+        for hit, line in zip(file_hits, out, strict=False):
+            hit["line"] = line.decode("utf-8", errors="replace")[:MAX_LINE_CHARS]
+    return {**payload, "hits": hits}
+
+
 def deliver_due(session: Session) -> None:
-    """Sends (again) every delivery that's due. One older than RETRY_FOR is
-    dropped and counted on its alert."""
+    """Sends (again) every delivery that's due, its lines redacted as they
+    go out when redaction applies to their source. One older than RETRY_FOR
+    is dropped and counted on its alert."""
     now = utcnow()
+    rules_by_source: dict[int, CompiledRules | None] = {}
     for delivery in session.exec(
         select(AlertDelivery).where(AlertDelivery.next_attempt_at <= now)
     ).all():
@@ -406,7 +714,13 @@ def deliver_due(session: Session) -> None:
             session.delete(delivery)
             session.commit()
             continue
-        error = post_webhook(webhook_url(alert), delivery.payload)
+        try:
+            payload = _payload_as_sent(session, delivery.payload, rules_by_source)
+        except Exception as exc:  # noqa: BLE001 - fail closed: nothing goes out unredacted
+            logger.error("alert.redaction_failed", alert_id=alert.id, error=str(exc))
+            error = "redaction failed"
+        else:
+            error = post_webhook(webhook_url(alert), payload)
         delivery.attempts += 1
         if error is None:
             logger.info("alert.webhook_sent", alert_id=alert.id, attempts=delivery.attempts)
@@ -493,6 +807,7 @@ def forget_alert(session: Session, alert_id: int) -> None:
     caller deletes the alert and commits)."""
     session.execute(delete(AlertFileState).where(AlertFileState.alert_id == alert_id))
     session.execute(delete(AlertDelivery).where(AlertDelivery.alert_id == alert_id))
+    _forget_unreadable(lambda k: k[0] == alert_id)
 
 
 def drop_scoped_alerts(session: Session, **scope: int) -> None:
@@ -510,3 +825,4 @@ def forget_source(session: Session, source_id: int) -> None:
     """Drops every alert's positions in a source that's deleted or now
     reads somewhere else (the caller commits)."""
     session.execute(delete(AlertFileState).where(AlertFileState.source_id == source_id))
+    _forget_unreadable(lambda k: k[1] == source_id)

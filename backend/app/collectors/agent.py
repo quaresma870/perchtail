@@ -392,7 +392,9 @@ class RedactedRange:
     where the read stopped (in bytes of the original), the head digests at
     the offset asked and at `next_offset`, the values replaced, how many
     bytes at the end stand for an unfinished last line, and whether the
-    content starts at the line after the offset."""
+    content starts at the line after the offset. With line offsets asked
+    (the alerts), `lines` is each whole redacted line with where it starts
+    in the original."""
 
     size: int
     data: bytes
@@ -403,15 +405,60 @@ class RedactedRange:
     counts: dict[str, int]
     trailing_partial: int
     aligned: bool
+    lines: tuple[tuple[int, bytes], ...] | None = None
+
+
+def _line_positions(
+    data: bytes, partial: int, offset: int, next_offset: int, aligned: bool, changed
+) -> tuple[tuple[int, bytes], ...]:
+    """Where each whole redacted line of a read_range answer starts in the
+    original, from the agent's `changed_lines` ([index, original length] of
+    each line whose length isn't the original's, in order): the lines are
+    the original's from `next_offset` back, and must start at `offset` (or
+    after it, when the answer was aligned to the next line). Anything else
+    isn't used."""
+    whole = data[: len(data) - partial]
+    lines = whole.split(b"\n")[:-1] if whole else []
+    if (whole and not whole.endswith(b"\n")) or not isinstance(changed, list):
+        raise _unverified("line offsets")
+    lengths = [len(line) + 1 for line in lines]
+    previous = -1
+    for item in changed:
+        if not isinstance(item, list) or len(item) != 2:
+            raise _unverified("line offsets")
+        index, length = as_int(item[0]), as_int(item[1])
+        if index is None or length is None or not previous < index < len(lines) or length < 1:
+            raise _unverified("line offsets")
+        lengths[index] = length
+        previous = index
+    position = next_offset - sum(lengths)
+    if position < offset or (not aligned and position != offset):
+        raise _unverified("line offsets")
+    positioned = []
+    for line, length in zip(lines, lengths, strict=True):
+        positioned.append((position, line))
+        position += length
+    return tuple(positioned)
 
 
 def read_range_redacted(
-    source: Source, relative_path: str, offset: int, length: int, block: dict
+    source: Source,
+    relative_path: str,
+    offset: int,
+    length: int,
+    block: dict,
+    *,
+    line_offsets: bool = False,
 ) -> RedactedRange:
     """The redacted Tail on the agent: up to `length` bytes from `offset`
     (plus context before it, never sent), only whole lines, redacted on the
-    host. The file's first bytes are never asked for, only their digests."""
+    host. The file's first bytes are never asked for, only their digests.
+    `line_offsets` (the alerts) also asks where each line starts in the
+    original (RedactedRange.lines); an answer without them isn't used."""
     offset = max(int(offset), 0)
+    fields: dict = {}
+    if line_offsets:
+        fields["with_line_offsets"] = True
     try:
         result = get_agent_registry().send_command_sync(
             source.id,
@@ -421,6 +468,7 @@ def read_range_redacted(
             length=max(min(int(length), collector_base.RANGE_MAX_BYTES), 0),
             redact=block,
             require_feature=FEATURE_REDACTION,
+            **fields,
         )
     except AgentCommandError as exc:
         _raise_command_error(exc, expanding=False)
@@ -452,6 +500,12 @@ def read_range_redacted(
         or not (isinstance(next_head, str) and _HEAD_DIGEST_RE.match(next_head))
     ):
         raise _unverified("read_range answer")
+    aligned = result.get("aligned") is True
+    lines = None
+    if line_offsets:
+        lines = _line_positions(
+            data, partial, offset, next_offset, aligned, result.get("changed_lines")
+        )
     return RedactedRange(
         size=size,
         data=data,
@@ -461,7 +515,8 @@ def read_range_redacted(
         next_head_digest=next_head,
         counts=_counts(result.get("counts")),
         trailing_partial=partial,
-        aligned=result.get("aligned") is True,
+        aligned=aligned,
+        lines=lines,
     )
 
 

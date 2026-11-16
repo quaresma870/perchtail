@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 import pytest
 from app import system_settings
 from app.agent_registry import FEATURE_REDACTION, AgentCommandError, get_agent_registry
+from app.alerts import _line_lengths
 from app.api.archive import FOLLOW_CONTEXT_BYTES, FOLLOW_WINDOW_BYTES, unsupported_compressed_format
 from app.api.archive import router as archive_router
 from app.api.auth import get_current_active_user
@@ -257,6 +258,8 @@ class FakeAgent:
             "read_end": offset,
             "next_head_digest": head_digest(key, head, offset),
         }
+        if fields.get("with_line_offsets"):
+            answer["changed_lines"] = []
         if offset > size:
             return answer
         if unsupported_compressed_format(head):
@@ -279,10 +282,27 @@ class FakeAgent:
         body, counts, partial = window.data, window.counts, window.trailing_partial
         read_end = read_from + len(data)
         next_offset = read_from + window.end
-        if next_offset <= offset and read_end < size:
+        skipped = next_offset <= offset and read_end < size
+        if skipped:
             body = marker(long_line_label(min(read_end - offset, FOLLOW_WINDOW_BYTES))) + b"\n"
             counts, partial, next_offset = {}, 0, read_end
         next_offset = max(next_offset, offset)
+        if fields.get("with_line_offsets"):
+            # As the agent's changedLines: the original length of each whole
+            # redacted line whose length changed.
+            begin = window.begin
+            originals = (
+                [next_offset - offset]
+                if skipped
+                else _line_lengths(data[begin : window.end], encoding, read_from + begin)
+            )
+            lines = body[: len(body) - partial].split(b"\n")[:-1]
+            assert len(lines) == len(originals)
+            answer["changed_lines"] = [
+                [index, original]
+                for index, (line, original) in enumerate(zip(lines, originals, strict=True))
+                if len(line) + 1 != original
+            ]
         answer.update(
             data_b64=base64.b64encode(body).decode(),
             next_offset=next_offset,

@@ -4,10 +4,13 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"hash/crc32"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -773,6 +776,160 @@ func TestFetchArchiveLeavesOutAMemberItCantRead(t *testing.T) {
 	}
 }
 
+// A zip member whose content ends before the size its header declares is
+// unreadable, as on the server: refused when fetched, left out of a
+// fetch_archive (archive/zip reports it as io.ErrUnexpectedEOF, which the
+// readers would otherwise take for the end of the content).
+func TestATruncatedZipMemberIsUnreadable(t *testing.T) {
+	var compressed bytes.Buffer
+	fw, err := flate.NewWriter(&compressed, flate.DefaultCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte(secretLog)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	cut, err := w.CreateRaw(&zip.FileHeader{
+		Name: "cut.log", Method: zip.Deflate, CRC32: crc32.ChecksumIEEE([]byte(secretLog)),
+		CompressedSize64: uint64(compressed.Len()), UncompressedSize64: uint64(len(secretLog) + 100),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cut.Write(compressed.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	good, err := w.Create("good.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := good.Write([]byte(secretLog)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", buf.Bytes())
+
+	for _, redacting := range []bool{true, false} {
+		cmd := Command{
+			Type: "fetch", ID: "f", Path: "logs.zip", Member: "cut.log", ChunkSize: minChunkSize,
+			MaxDecompressed: 1 << 20,
+		}
+		if redacting {
+			cmd.Redact = redactJSON(t, testRules, "")
+		}
+		sent := collect(t, base, cmd)
+		if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Type != "fetch_error" ||
+			!strings.Contains(result.Error, "declared size") {
+			t.Errorf("fetch (redacting %v) ended with %#v", redacting, sent[len(sent)-1])
+		}
+	}
+
+	sent := collect(t, base, Command{
+		Type: "fetch_archive", ID: "z", Path: "logs.zip", Members: []string{"cut.log", "good.log"},
+		ChunkSize: minChunkSize, MaxDecompressed: 1 << 20, Redact: redactJSON(t, testRules, "source"),
+	})
+	skipped := map[string]string{}
+	for _, msg := range sent {
+		if m, ok := msg.(ArchiveMember); ok {
+			skipped[m.Name] = m.Skipped
+		}
+	}
+	if skipped["cut.log"] != skipUnreadable || skipped["good.log"] != "" {
+		t.Errorf("skipped = %v", skipped)
+	}
+	if _, ok := sent[len(sent)-1].(RedactedFetchEnd); !ok {
+		t.Errorf("ended with %#v", sent[len(sent)-1])
+	}
+}
+
+// A tar member whose content ends before the size its header declares is
+// unreadable too, as a zip member's: archive/tar reports it as
+// io.ErrUnexpectedEOF. Nothing of it is sent, in a fetch or a fetch_archive.
+func TestATruncatedTarMemberIsUnreadable(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	w := tar.NewWriter(gz)
+	if err := w.WriteHeader(&tar.Header{
+		Name: "good.log", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(secretLog)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(secretLog)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteHeader(&tar.Header{
+		Name: "cut.log", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(secretLog) + 4096),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(secretLog)); err != nil {
+		t.Fatal(err)
+	}
+	// The tar stream ends inside cut.log (the tar writer isn't closed); the
+	// gzip stream around it is whole.
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	writeFile(t, base, "logs.tar.gz", buf.Bytes())
+
+	for _, redacting := range []bool{true, false} {
+		cmd := Command{
+			Type: "fetch", ID: "f", Path: "logs.tar.gz", Member: "cut.log", ChunkSize: minChunkSize,
+			MaxDecompressed: 1 << 20,
+		}
+		if redacting {
+			cmd.Redact = redactJSON(t, testRules, "")
+		}
+		sent := collect(t, base, cmd)
+		if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Type != "fetch_error" ||
+			!strings.Contains(result.Error, "declared size") {
+			t.Errorf("fetch (redacting %v) ended with %#v", redacting, sent[len(sent)-1])
+		}
+		for _, msg := range sent {
+			// Unredacted, what was read is streamed before the error, as for
+			// a zip member; redacted, nothing of a value goes out in clear.
+			if chunk, ok := msg.(FetchChunk); ok && redacting {
+				piece, _ := base64.StdEncoding.DecodeString(chunk.DataB64)
+				if bytes.Contains(piece, []byte("4111")) {
+					t.Errorf("fetch sent a value in clear: %q", piece)
+				}
+			}
+		}
+	}
+
+	sent := collect(t, base, Command{
+		Type: "fetch_archive", ID: "z", Path: "logs.tar.gz", Members: []string{"good.log", "cut.log"},
+		ChunkSize: minChunkSize, MaxDecompressed: 1 << 20, Redact: redactJSON(t, testRules, "source"),
+	})
+	skipped := map[string]string{}
+	for _, msg := range sent {
+		switch m := msg.(type) {
+		case ArchiveMember:
+			skipped[m.Name] = m.Skipped
+		case FetchChunk:
+			piece, _ := base64.StdEncoding.DecodeString(m.DataB64)
+			if bytes.Contains(piece, []byte("4111")) {
+				t.Errorf("fetch_archive sent a value in clear: %q", piece)
+			}
+		}
+	}
+	if skipped["cut.log"] != skipUnreadable || skipped["good.log"] != "" {
+		t.Errorf("skipped = %v", skipped)
+	}
+	if _, ok := sent[len(sent)-1].(RedactedFetchEnd); !ok {
+		t.Errorf("ended with %#v", sent[len(sent)-1])
+	}
+}
+
 func TestFetchArchiveWithoutRedaction(t *testing.T) {
 	base := t.TempDir()
 	writeFile(t, base, "logs.zip", zipArchive(t, map[string]string{"a.log": "one\n", "b.log": "two\n"}))
@@ -898,6 +1055,138 @@ func TestRedactedReadRangeSkipsALineWithNoEnd(t *testing.T) {
 	result, data := readRange(t, base, "app.log", 0)
 	if string(data) != "[redacted: line over 1008 KiB]\n" || result.NextOffset != maxRangeLength || result.ReadEnd != maxRangeLength {
 		t.Errorf("result %+v, data %q", result, data)
+	}
+}
+
+// readRangeLines runs a redacted read_range for the alerts (with line
+// offsets) and returns its answer, content, and where each whole redacted
+// line starts in the original, worked out as the server does
+// (collectors/agent.py, _line_positions): from NextOffset back.
+func readRangeLines(t *testing.T, base, path string, offset int64) (RedactedReadRangeResult, []byte, []int64) {
+	t.Helper()
+	answer := handleCommand(Config{BasePath: base}, Command{
+		Type: "read_range", ID: "r", Path: path, Offset: offset, Length: maxRangeLength,
+		Redact: redactJSON(t, testRules, ""), WithLineOffsets: true,
+	})
+	result, ok := answer.(RedactedReadRangeResult)
+	if !ok {
+		t.Fatalf("answer = %#v", answer)
+	}
+	if result.ChangedLines == nil {
+		t.Fatal("no changed_lines")
+	}
+	data, _ := base64.StdEncoding.DecodeString(result.DataB64)
+	whole := data[:len(data)-result.TrailingPartial]
+	var lengths []int64
+	for len(whole) > 0 {
+		i := bytes.IndexByte(whole, '\n')
+		if i < 0 {
+			t.Fatalf("redacted lines don't end with a newline: %q", data)
+		}
+		lengths = append(lengths, int64(i+1))
+		whole = whole[i+1:]
+	}
+	previous := int64(-1)
+	for _, c := range *result.ChangedLines {
+		if c[0] <= previous || c[0] >= int64(len(lengths)) || c[1] < 1 {
+			t.Fatalf("changed_lines %v for %d lines", *result.ChangedLines, len(lengths))
+		}
+		lengths[c[0]], previous = c[1], c[0]
+	}
+	var total int64
+	for _, length := range lengths {
+		total += length
+	}
+	position := result.NextOffset - total
+	if position < offset || (!result.Aligned && position != offset) {
+		t.Fatalf("the lines start at %d, offset %d (aligned %v)", position, offset, result.Aligned)
+	}
+	positions := []int64{}
+	for _, length := range lengths {
+		positions = append(positions, position)
+		position += length
+	}
+	return result, data, positions
+}
+
+// lineStarts is where each line of content that starts in [from, to)
+// starts (a UTF-16 newline only on an even offset).
+func lineStarts(content []byte, newline string, from, to int64) []int64 {
+	starts := []int64{}
+	start := int64(0)
+	for i := 0; i <= len(content)-len(newline); i++ {
+		if string(content[i:i+len(newline)]) != newline || i%len(newline) != 0 {
+			continue
+		}
+		if start >= from && start < to {
+			starts = append(starts, start)
+		}
+		start = int64(i + len(newline))
+	}
+	return starts
+}
+
+// The alerts (#382, #249) match the redacted lines and report where each
+// one is in the original file: ChangedLines gives the server the original
+// length of each line redaction changed, so it can tell, whatever was
+// replaced, where every line starts.
+func TestRedactedReadRangeSaysWhereEachLineStarts(t *testing.T) {
+	base := t.TempDir()
+	unfinished := secretLog + "partial 4111 1111"
+	writeFile(t, base, "app.log", []byte(unfinished))
+	wide := append([]byte{0xff, 0xfe}, utf16LE(secretLog)...)
+	writeFile(t, base, "wide.log", wide)
+	for _, tc := range []struct {
+		name, path, newline string
+		content             []byte
+		offset              int64
+	}{
+		{"from the start", "app.log", "\n", []byte(unfinished), 0},
+		{"from a line", "app.log", "\n", []byte(unfinished), int64(strings.Index(secretLog, "password"))},
+		{"from the middle of a line", "app.log", "\n", []byte(unfinished), int64(strings.Index(secretLog, "hunter2"))},
+		{"UTF-16", "wide.log", "\n\x00", wide, 0},
+		{"UTF-16 from a line", "wide.log", "\n\x00", wide, int64(2 + 2*strings.Index(secretLog, "card"))},
+	} {
+		result, data, positions := readRangeLines(t, base, tc.path, tc.offset)
+		assertNoSecret(t, tc.name, data)
+		want := lineStarts(tc.content, tc.newline, tc.offset, result.NextOffset)
+		if fmt.Sprint(positions) != fmt.Sprint(want) {
+			t.Errorf("%s: lines at %v, want %v", tc.name, positions, want)
+		}
+		if len(*result.ChangedLines) == 0 {
+			t.Errorf("%s: no line changed", tc.name)
+		}
+	}
+	// A line with no end within the read stands for what was skipped.
+	writeFile(t, base, "long.log", append(bytes.Repeat([]byte("x"), 2*maxRangeLength), "\nok\n"...))
+	result, _, positions := readRangeLines(t, base, "long.log", 0)
+	if fmt.Sprint(positions) != "[0]" || fmt.Sprint(*result.ChangedLines) != fmt.Sprintf("[[0 %d]]", maxRangeLength) {
+		t.Errorf("long line: lines at %v, changed %v", positions, *result.ChangedLines)
+	}
+	// Nothing new: an empty list, still there.
+	result, data, positions := readRangeLines(t, base, "app.log", int64(len(secretLog)))
+	if len(positions) != 0 || result.TrailingPartial != len(data) {
+		t.Errorf("nothing new: %v %+v", positions, result)
+	}
+	// Not asked for: not sent.
+	plain, _ := readRange(t, base, "app.log", 0)
+	if encoded, _ := json.Marshal(plain); strings.Contains(string(encoded), "changed_lines") {
+		t.Errorf("changed_lines sent unasked: %s", encoded)
+	}
+}
+
+func TestChangedLinesRefusesLinesThatDontMatch(t *testing.T) {
+	for _, tc := range []struct {
+		output    string
+		originals []int64
+	}{
+		{"a\nb\n", []int64{2}},
+		{"a\n", []int64{2, 2}},
+		{"a\nb", []int64{2, 2}},
+	} {
+		if _, err := changedLines([]byte(tc.output), tc.originals); err == nil {
+			t.Errorf("%q against %v: no error", tc.output, tc.originals)
+		}
 	}
 }
 

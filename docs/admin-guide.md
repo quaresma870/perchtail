@@ -416,6 +416,7 @@ Each alert in the list shows its scope, query, files, webhook URL, when it was l
 - A file that shrank or whose first bytes changed (rotated or rewritten) is read again from the beginning.
 - Each source gets at most 20 files and 15 seconds per alert per pass. Files that don't fit wait for the next passes, the least recently checked first, and the backlog shows in `/monitoring/health`.
 - Nothing of the files' content is kept, apart from the matching lines of a call waiting to be retried.
+- When [redaction](configuration.md#redaction) is on for a source, the query runs on its lines as redacted, for every alert, so a value that was replaced can't be matched, and only redacted lines are kept and sent. A line with no end within one read is replaced by a `[redacted: ...]` marker, and a file in an encoding or compressed format redaction can't read isn't matched at all: it waits where it is, logged once as `alert.file_read_failed` until its size, modification time or first bytes change. A call still waiting to be sent or retried is redacted again as it goes out, with the rules that apply then, so turning redaction on also covers calls queued before; while the rules can't run, it isn't sent.
 
 ### Webhook calls
 
