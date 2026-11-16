@@ -7,15 +7,16 @@ import shutil
 import tarfile
 import zipfile
 import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 from urllib.parse import quote
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from sqlmodel import Session, select
 from starlette.types import Receive, Scope, Send
@@ -86,7 +87,28 @@ from app.rules import (
 )
 from app.scratch import get_scratch_store, make_scratch_dir
 
-router = APIRouter(prefix="/sources/{source_id}", tags=["archive"])
+# The routes that send a file's content: whatever they answer goes out with
+# Cache-Control: no-store, so neither the browser nor a proxy in front keeps
+# a copy after the viewer closes it. Set here, on the route, so every
+# response those routes build (plain, redacted, streamed) carries it.
+_FILE_CONTENT_ROUTES = {"open", "follow", "download", "download-zip"}
+
+
+class _FileContentRoute(APIRoute):
+    def get_route_handler(self) -> Callable[[Request], Coroutine[object, object, Response]]:
+        handler = super().get_route_handler()
+        if self.path.rsplit("/", 1)[-1] not in _FILE_CONTENT_ROUTES:
+            return handler
+
+        async def no_store(request: Request) -> Response:
+            response = await handler(request)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+
+        return no_store
+
+
+router = APIRouter(prefix="/sources/{source_id}", tags=["archive"], route_class=_FileContentRoute)
 
 
 def readable_source(capability: Capability):

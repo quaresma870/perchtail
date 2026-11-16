@@ -5,11 +5,20 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator, model_validator
 from sqlmodel import Session, select
 
-from app.alerts import compile_query, folder_subtree, forget_alert, post_webhook
+from app.alerts import (
+    compile_query,
+    folder_subtree,
+    forget_alert,
+    masked_webhook_url,
+    post_webhook,
+    set_webhook_url,
+    webhook_url,
+)
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, User
 from app.auth.rbac import require_global_capability, visible_source_ids
+from app.crypto import encrypt_secret
 from app.db import get_session
 from app.models import Alert, Customer, Folder, Source
 from app.timeutils import utcnow
@@ -33,7 +42,8 @@ class AlertPublic(BaseModel):
     folder_id: int | None
     customer_id: int | None
     file_glob: str
-    webhook_url: str
+    # The URL itself is never returned: only its scheme, host and port.
+    webhook_url_masked: str
     enabled: bool
     last_checked_at: str | None
     last_fired_at: str | None
@@ -51,7 +61,7 @@ class AlertPublic(BaseModel):
             folder_id=alert.folder_id,
             customer_id=alert.customer_id,
             file_glob=alert.file_glob,
-            webhook_url=alert.webhook_url,
+            webhook_url_masked=masked_webhook_url(webhook_url(alert)),
             enabled=alert.enabled,
             last_checked_at=alert.last_checked_at.isoformat() if alert.last_checked_at else None,
             last_fired_at=alert.last_fired_at.isoformat() if alert.last_fired_at else None,
@@ -208,7 +218,12 @@ def create_alert(
     session: Session = Depends(get_session),
 ):
     _require_valid_query(payload.query, payload.regex)
-    alert = Alert(user_id=user.id, created_at=utcnow(), **payload.model_dump())
+    alert = Alert(
+        user_id=user.id,
+        created_at=utcnow(),
+        webhook_url_encrypted=encrypt_secret(payload.webhook_url),
+        **payload.model_dump(exclude={"webhook_url"}),
+    )
     _require_scope_allowed(session, user, alert)
     session.add(alert)
     session.flush()
@@ -222,7 +237,7 @@ def create_alert(
             "name": alert.name,
             **_scope_metadata(alert),
             "file_glob": alert.file_glob,
-            "webhook_host": _webhook_host(alert.webhook_url),
+            "webhook_host": _webhook_host(payload.webhook_url),
         },
     )
     session.commit()
@@ -246,13 +261,19 @@ def update_alert(
 ):
     alert = _get_owned_alert(session, user, alert_id)
     changed = payload.model_dump(exclude_unset=True)
+    # Leaving the URL out, or sending null, keeps the one stored: the API
+    # never returns it, so the web UI can't send it back unchanged.
+    new_webhook_url = changed.pop("webhook_url", None)
+    if new_webhook_url is not None:
+        set_webhook_url(alert, new_webhook_url)
+        changed["webhook_url"] = "replaced"
     if any(key in changed for key in _SCOPE_FIELDS):
         # A new scope replaces the old one whole.
         for key in _SCOPE_FIELDS:
             setattr(alert, key, changed.pop(key, None))
         changed["scope"] = _scope_metadata(alert)
     for key, value in changed.items():
-        if key != "scope":
+        if key not in ("scope", "webhook_url"):
             setattr(alert, key, value)
     _require_valid_query(alert.query, alert.regex)
     _require_scope_allowed(session, user, alert)
@@ -264,7 +285,7 @@ def update_alert(
     session.add(alert)
     metadata: dict = {"fields": sorted(changed)}
     if "webhook_url" in changed:
-        metadata["webhook_host"] = _webhook_host(alert.webhook_url)
+        metadata["webhook_host"] = _webhook_host(new_webhook_url)
     record_audit_event(
         session,
         user_id=user.id,
@@ -316,7 +337,7 @@ def test_alert_webhook(
     matching line."""
     alert = _get_owned_alert(session, user, alert_id)
     error = post_webhook(
-        alert.webhook_url,
+        webhook_url(alert),
         {
             "alert_id": alert.id,
             "alert_name": alert.name,

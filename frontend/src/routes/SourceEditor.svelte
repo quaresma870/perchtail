@@ -24,6 +24,11 @@
     SourceRoot,
   } from '../lib/types'
 
+  // The WinRM part of the source setup guide, which explains the read-only
+  // JEA endpoint.
+  const WINRM_SETUP_GUIDE =
+    'https://github.com/quaresma870/perchtail/blob/main/docs/source-setup.md#winrm-windows-fallback-when-smb-isnt-open'
+
   export let params: { id?: string } = {}
   /** In a popup over the sources (#302): no settings navigation or page
    * header, a Cancel button, and `saved` / `cancel` instead of moving on. */
@@ -66,6 +71,10 @@
   // JEA endpoint (#169): the PowerShell session configuration name; empty =
   // the WinRS shell.
   let winrmConfiguration = ''
+  // SMB: signing required unless turned off for a server that can't sign;
+  // encryption only when asked for.
+  let smbRequireSigning = true
+  let smbEncrypt = false
   let enabled = true
   let nameIndexEnabled = true
   let username = ''
@@ -208,6 +217,8 @@
           winrmScheme = source.winrm_effective_scheme ?? 'https'
           tlsCaPem = source.tls_ca_pem ?? ''
           winrmConfiguration = source.winrm_configuration ?? ''
+          smbRequireSigning = source.smb_require_signing
+          smbEncrypt = source.smb_encrypt
           originalPaths = JSON.stringify(roots.map((r) => r.path))
           originalHostPort = `${source.host}:${source.port ?? ''}`
           enabled = source.enabled
@@ -238,6 +249,8 @@
       winrmScheme,
       tlsCaPem,
       winrmConfiguration,
+      smbRequireSigning,
+      smbEncrypt,
       enabled,
       nameIndexEnabled,
       username,
@@ -298,6 +311,11 @@
     }
   }
 
+  function smbPayload(): Record<string, boolean> {
+    if (protocol !== 'smb') return {}
+    return { smb_require_signing: smbRequireSigning, smb_encrypt: smbEncrypt }
+  }
+
   function locationPayload() {
     const cleaned = roots.map((r) => ({ label: r.label.trim(), path: r.path.trim() }))
     if (cleaned.length > 1) return { base_path: cleaned[0].path, roots: cleaned }
@@ -321,6 +339,7 @@
           port,
           ...locationPayload(),
           ...winrmPayload(),
+          ...smbPayload(),
           enabled,
           name_index_enabled: nameIndexEnabled,
           ...(credential ? { credential } : {}),
@@ -338,6 +357,7 @@
           port,
           ...locationPayload(),
           ...winrmPayload(),
+          ...smbPayload(),
           enabled,
           name_index_enabled: nameIndexEnabled,
           ...(credential ? { credential } : {}),
@@ -585,6 +605,40 @@
             which needs an account with remote-shell rights.
           </span>
         </label>
+        {#if !winrmConfiguration.trim()}
+          <p class="warning small" data-testid="winrm-no-jea-warning">
+            Without a JEA endpoint the account must be able to open a remote shell, which in
+            practice means an administrator on the server, and it can then do anything an
+            administrator can. Prefer the read-only JEA endpoint:
+            <a href={WINRM_SETUP_GUIDE} target="_blank" rel="noopener noreferrer"
+              >how to set it up</a
+            >.
+          </p>
+        {/if}
+      {/if}
+      {#if protocol === 'smb'}
+        <fieldset>
+          <legend>SMB security</legend>
+          <label class="checkbox">
+            <input type="checkbox" bind:checked={smbRequireSigning} />
+            Require signing
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" bind:checked={smbEncrypt} />
+            Encrypt (SMB 3)
+          </label>
+          <span class="hint small">
+            Signing stops the messages from being changed on the way; turn it off only for a
+            server that can't sign. Encryption also hides the content on the network, and is
+            refused by a server that can't encrypt.
+          </span>
+          {#if !smbRequireSigning}
+            <p class="warning small" data-testid="smb-signing-off-warning">
+              Signing is off: someone on the network between PerchTail and this server could
+              change what it reads. Turn it on unless the server can't sign.
+            </p>
+          {/if}
+        </fieldset>
       {/if}
 
       <div class="roots">
@@ -639,7 +693,11 @@
               {port}
               credential={buildCredential()}
               sourceId={isNew ? null : sourceId}
-              winrm={protocol === 'winrm' ? winrmPayload() : null}
+              connection={protocol === 'winrm'
+                ? winrmPayload()
+                : protocol === 'smb'
+                  ? smbPayload()
+                  : null}
               startPath={root.path}
               on:pick={(e) => pickedFolder(index, e.detail)}
               on:close={() => (pickerFor = null)}

@@ -119,23 +119,32 @@ class FakeParamikoClient:
     def __init__(self):
         self.policy = None
         self.loaded_from: list[str] = []
-        self.saved_to: list[str] = []
         self.connect_calls: list[tuple] = []
         self.connect_raises: Exception | None = None
+        # A key the server presents for a host with none on file: connect()
+        # hands it to the policy, as paramiko does.
+        self.presented_key: paramiko.PKey | None = None
+        self.during_connect = None
+        self.host_keys = paramiko.HostKeys()
 
     def set_missing_host_key_policy(self, policy):
         self.policy = policy
+
+    def get_host_keys(self):
+        return self.host_keys
 
     def load_host_keys(self, path):
         self.loaded_from.append(path)
 
     def connect(self, hostname, port=22, **kwargs):
         self.connect_calls.append((hostname, port, kwargs))
+        if self.during_connect is not None:
+            self.during_connect()
         if self.connect_raises is not None:
             raise self.connect_raises
-
-    def save_host_keys(self, path):
-        self.saved_to.append(path)
+        if self.presented_key is not None:
+            name = ssh_module.host_key_name(hostname, port)
+            self.policy.missing_host_key(self, name, self.presented_key)
 
     def get_transport(self):
         if not hasattr(self, "transport"):
@@ -147,7 +156,15 @@ class FakeParamikoClient:
         pass
 
 
-def _patch_ssh_infra(monkeypatch, tmp_path, *, connect_raises=None, policy="tofu"):
+def _patch_ssh_infra(
+    monkeypatch,
+    tmp_path,
+    *,
+    connect_raises=None,
+    policy="tofu",
+    presented_key=None,
+    during_connect=None,
+):
     """Patches paramiko.SSHClient to FakeParamikoClient (registering every
     created instance so a test can inspect it afterward) and points
     ssh_known_hosts_path at a fresh tmp_path location. Returns the list of
@@ -169,6 +186,8 @@ def _patch_ssh_infra(monkeypatch, tmp_path, *, connect_raises=None, policy="tofu
     def _factory():
         client = FakeParamikoClient()
         client.connect_raises = connect_raises
+        client.presented_key = presented_key
+        client.during_connect = during_connect
         created.append(client)
         return client
 
@@ -202,10 +221,60 @@ def test_trust_on_first_use_pins_the_key_and_logs_its_fingerprint():
 
 
 def test_connect_skips_loading_a_known_hosts_file_that_does_not_exist_yet(monkeypatch, tmp_path):
-    created = _patch_ssh_infra(monkeypatch, tmp_path)
+    key = paramiko.ECDSAKey.generate()
+    created = _patch_ssh_infra(monkeypatch, tmp_path, presented_key=key)
     ssh_module._connect(_source())
     assert created[0].loaded_from == []
-    assert created[0].saved_to == [str(tmp_path / "known_hosts")]
+    saved = paramiko.HostKeys(str(tmp_path / "known_hosts"))
+    assert saved.lookup("app01.example.com")[key.get_name()] == key
+    assert stat_module.S_IMODE((tmp_path / "known_hosts").stat().st_mode) == 0o600
+
+
+def _write_known_hosts(path, entries: dict[str, paramiko.PKey]) -> None:
+    keys = paramiko.HostKeys()
+    for name, key in entries.items():
+        keys.add(name, key.get_name(), key)
+    keys.save(str(path))
+
+
+def test_a_pin_removed_during_a_connection_stays_removed(monkeypatch, tmp_path):
+    # Another source's pin is removed (app/source_pins.py) while a
+    # connection that loaded the file is in its handshake; the connection
+    # pins its own new host without writing the removed pin back.
+    known_hosts = tmp_path / "known_hosts"
+    removed, kept, new = (paramiko.ECDSAKey.generate() for _ in range(3))
+    _write_known_hosts(known_hosts, {"gone.example.com": removed, "kept.example.com": kept})
+
+    def remove_gone():
+        keys = paramiko.HostKeys(str(known_hosts))
+        del keys["gone.example.com"]
+        keys.save(str(known_hosts))
+
+    _patch_ssh_infra(monkeypatch, tmp_path, presented_key=new, during_connect=remove_gone)
+    ssh_module._connect(_source())
+
+    saved = paramiko.HostKeys(str(known_hosts))
+    assert "gone.example.com" not in saved
+    assert saved.lookup("kept.example.com")[kept.get_name()] == kept
+    assert saved.lookup("app01.example.com")[new.get_name()] == new
+
+
+def test_a_connection_to_a_pinned_host_does_not_rewrite_known_hosts(monkeypatch, tmp_path):
+    known_hosts = tmp_path / "known_hosts"
+    removed, pinned = paramiko.ECDSAKey.generate(), paramiko.ECDSAKey.generate()
+    _write_known_hosts(known_hosts, {"gone.example.com": removed, "app01.example.com": pinned})
+
+    def remove_gone():
+        keys = paramiko.HostKeys(str(known_hosts))
+        del keys["gone.example.com"]
+        keys.save(str(known_hosts))
+
+    _patch_ssh_infra(monkeypatch, tmp_path, during_connect=remove_gone)
+    ssh_module._connect(_source())
+
+    saved = paramiko.HostKeys(str(known_hosts))
+    assert "gone.example.com" not in saved
+    assert "app01.example.com" in saved
 
 
 def test_connect_loads_previously_saved_host_keys_on_a_later_call(monkeypatch, tmp_path):
@@ -250,7 +319,8 @@ def test_connect_propagates_bad_host_key_exception_without_saving(monkeypatch, t
 
     # A key mismatch is a real MITM-detection signal -- nothing should be
     # (re)written to disk when connect() itself rejected the host.
-    assert created[0].saved_to == []
+    assert created[0].connect_calls
+    assert not (tmp_path / "known_hosts").exists()
 
 
 def test_list_directory_always_shows_directories_but_filters_files(monkeypatch):

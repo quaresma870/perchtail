@@ -79,6 +79,9 @@ export interface Source {
   winrm_configuration: string | null
   winrm_effective_scheme: 'https' | 'http' | null
   tls_ca_pem: string | null
+  // SMB: require signed messages; ask for SMB 3 encryption.
+  smb_require_signing: boolean
+  smb_encrypt: boolean
   enabled: boolean
   is_system: boolean
   rule_count: number
@@ -287,6 +290,14 @@ export interface SystemSettings {
   require_mfa_local_accounts: boolean
 }
 
+// A problem with how the instance is set up that only its operator can fix
+// (GET /system-settings/warnings), such as a weak CREDENTIAL_ENCRYPTION_KEY.
+export interface SystemWarning {
+  code: string
+  message: string
+  advice: string
+}
+
 // GET /system-settings/backups (#334): the backups in BACKUP_DIR, newest
 // first. Listed only, never downloadable.
 export interface BackupInfo {
@@ -399,7 +410,9 @@ export interface Alert {
   folder_id: number | null
   customer_id: number | null
   file_glob: string
-  webhook_url: string
+  // The webhook URL is never sent back: only its scheme, host and port
+  // (`https://hooks.example.com/…`).
+  webhook_url_masked: string
   enabled: boolean
   last_checked_at: string | null
   last_fired_at: string | null

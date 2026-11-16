@@ -88,7 +88,7 @@ def test_deleting_a_source_removes_everything_pointing_at_it(session, client):
             name="a",
             query="q",
             source_id=source.id,
-            webhook_url="https://example.com",
+            webhook_url_encrypted="not checked here",
             created_at=datetime.now(),
         )
     )

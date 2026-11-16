@@ -195,6 +195,8 @@ def test_download_of_a_plain_file_is_redacted(session, downloads, store):
     assert response.content == _redacted(content)
     assert response.content.endswith(b"password=[redacted: password]")
     assert response.headers["x-perchtail-redacted"] == "1"
+    # Content of a log: never kept by the browser or a proxy.
+    assert response.headers["cache-control"] == "no-store"
     assert _disposition_name(response) == "app.redacted.log"
     event = _audit(session, "file.download")
     assert event.event_metadata["path"] == "app.log"
@@ -513,6 +515,7 @@ def test_a_whole_zip_is_rebuilt_redacted(session, downloads, store):
     response = _download(client, source, "bundle.zip")
     assert response.status_code == 200
     assert response.headers["x-perchtail-redacted"] == "1"
+    assert response.headers["cache-control"] == "no-store"
     assert _disposition_name(response) == "bundle.redacted.zip"
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
         names = zf.namelist()
@@ -709,6 +712,7 @@ def test_a_folder_zip_is_redacted(session, downloads, store):
     response = _download_zip(client, source)
     assert response.status_code == 200
     assert response.headers["x-perchtail-redacted"] == "1"
+    assert response.headers["cache-control"] == "no-store"
     assert _disposition_name(response) == "local.redacted.zip"
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
         assert sorted(zf.namelist()) == [

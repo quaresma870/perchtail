@@ -205,3 +205,33 @@ def test_remote_copies_live_under_the_scratch_directory(tmp_path, monkeypatch):
     assert not tmp.exists()
     made = make_scratch_dir("perchtail-zip-")
     assert made.parent == tmp_path / "scratch"
+
+
+def test_scratch_is_readable_by_the_app_user_only(tmp_path):
+    import os
+    import stat
+
+    root = tmp_path / "scratch"
+    root.mkdir(mode=0o755)
+    os.chmod(root, 0o755)
+    store = ScratchStore(root, 10_000_000)
+    path = store.acquire("k")
+
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert path.exists()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_scratch_folder_it_cant_chmod_still_starts(tmp_path, monkeypatch):
+    # SCRATCH_DIR owned by someone else (a mount point): a warning, not a
+    # failure to start; the files are still created 0600.
+    import os
+    import stat
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("not the owner")
+
+    monkeypatch.setattr("app.scratch.os.chmod", refuse)
+    store = ScratchStore(tmp_path / "scratch", 10_000_000)
+    path = store.acquire("k")
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600

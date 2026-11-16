@@ -1,6 +1,13 @@
 #!/bin/sh
 set -e
 
+# The test hooks (app/main.py) are for the end-to-end run from a source
+# checkout; the image ships no test code, and a deployment never sets them.
+if [ -n "${PERCHTAIL_TEST_PATCH_MODULE:-}" ] || [ -n "${PERCHTAIL_TEST_MODE:-}" ]; then
+  echo "PERCHTAIL_TEST_PATCH_MODULE and PERCHTAIL_TEST_MODE are for the tests only; remove them from the environment." >&2
+  exit 1
+fi
+
 # Started as root only long enough to make sure /data belongs to the
 # unprivileged perchtail user -- volumes created by images before 0.4.0 are
 # root-owned -- then re-exec this script without root and without any
