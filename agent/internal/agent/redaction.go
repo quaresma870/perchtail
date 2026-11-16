@@ -404,7 +404,9 @@ func withContent(basePath string, cmd Command, redacting bool, fn func(io.Reader
 			return err
 		}
 		defer gz.Close()
-		return fn(&limitedReader{r: gz, limit: cmd.MaxDecompressed})
+		// Strict, as the server's decompress_gzip: a .gz cut short is
+		// refused, not passed on up to the cut.
+		return fn(&limitedReader{r: &strictGzipReader{r: gz}, limit: cmd.MaxDecompressed})
 	}
 	if cmd.Member != "" {
 		if !isArchiveName(name) {
@@ -562,6 +564,37 @@ func fetchArchive(basePath string, cmd Command, red *redaction, out *chunkSender
 	return nil
 }
 
+// Why a member of a redacted fetch_archive that couldn't be read is left
+// out: over max_decompressed once decompressed, or unreadable.
+const (
+	skipTooLarge   = "too_large"
+	skipUnreadable = "unreadable"
+)
+
+func memberSkip(err error) string {
+	var tooLarge *TooLargeError
+	if errors.As(err, &tooLarge) {
+		return skipTooLarge
+	}
+	return skipUnreadable
+}
+
+// errTruncatedGzip is a .gz file or member that ends before its
+// end-of-stream marker, which gzip.Reader reports as io.ErrUnexpectedEOF:
+// redactStream and chunkSender.copy would take that for the end of the
+// content.
+var errTruncatedGzip = errors.New("compressed content ended before the end-of-stream marker")
+
+type strictGzipReader struct{ r io.Reader }
+
+func (s *strictGzipReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		err = errTruncatedGzip
+	}
+	return n, err
+}
+
 func sendArchiveMember(
 	e archiveEntry, maxDecompressed int64, red *redaction, out *chunkSender, total *RedactionInfo,
 	announce func(archiveEntry, bool, string) error,
@@ -574,6 +607,9 @@ func sendArchiveMember(
 	}
 	r, err := e.open()
 	if err != nil {
+		if red != nil {
+			return announce(e, false, skipUnreadable)
+		}
 		return err
 	}
 	var src io.Reader = &limitedReader{r: r, limit: maxDecompressed}
@@ -581,10 +617,10 @@ func sendArchiveMember(
 	if red != nil && isTransparentGzipName(lastSegment(e.name)) {
 		gz, err := gunzip(src)
 		if err != nil {
-			return err
+			return announce(e, false, memberSkip(err))
 		}
 		defer gz.Close()
-		src, gunzipped = &limitedReader{r: gz, limit: maxDecompressed}, true
+		src, gunzipped = &limitedReader{r: &strictGzipReader{r: gz}, limit: maxDecompressed}, true
 	}
 	if red == nil {
 		if err := announce(e, false, ""); err != nil {
@@ -601,9 +637,18 @@ func sendArchiveMember(
 		case codeUnsupportedFormat:
 			return announce(e, gunzipped, "unsupported_format")
 		}
+		return err
 	}
 	if err != nil {
-		return err
+		if out.sendErr != nil || errors.Is(err, errCancelled) {
+			return err
+		}
+		// Reading the member failed (over max_decompressed, or a corrupt
+		// member or .gz member), maybe after part of it was sent: it is
+		// announced again as skipped, which withdraws what was sent of it,
+		// and the other members go on, as the server leaves out a member
+		// it can't read.
+		return announce(e, gunzipped, memberSkip(err))
 	}
 	total.SourceSize += info.SourceSize
 	for rule, count := range info.Counts {

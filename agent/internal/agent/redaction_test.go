@@ -683,6 +683,96 @@ func TestFetchArchiveSendsTheMembersAskedForRedacted(t *testing.T) {
 	}
 }
 
+// As the server's _redact_content: a member over max_decompressed once
+// decompressed, or a corrupt .gz member, is left out (announced again as
+// skipped when part of it was already sent) and the other members go on.
+func TestFetchArchiveLeavesOutAMemberItCantRead(t *testing.T) {
+	content := secretLog + "tail 4111 1111 1111 1111"
+	long := strings.Repeat("a line of the log\n", 300) // 5400 bytes: two chunks
+	corrupt := gzipped(t, long)
+	corrupt[len(corrupt)-8] ^= 0xff // CRC-32
+	truncated := gzipped(t, long)
+	truncated = truncated[:len(truncated)-4]
+	members := []struct{ name, content string }{
+		{"a.log", content},
+		{"big.log", strings.Repeat("a line of the log\n", 1000)},
+		{"crc.log.gz", string(corrupt)},
+		{"cut.log.gz", string(truncated)},
+		{"header.log.gz", "not gzip at all\n"},
+		{"c.log", content},
+	}
+	var zipped []zipMember
+	var tarred []tarMember
+	var names []string
+	for _, m := range members {
+		zipped = append(zipped, zipMember{name: m.name, content: m.content})
+		tarred = append(tarred, tarMember{name: m.name, content: m.content})
+		names = append(names, m.name)
+	}
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipOf(t, zipped))
+	writeFile(t, base, "logs.tgz", tarGzOf(t, tarred))
+	want, _, _ := redact.RedactBytes([]byte(content), compiled(t, testRules), true, redact.Options{})
+
+	for _, archive := range []string{"logs.zip", "logs.tgz"} {
+		sent := collect(t, base, Command{
+			Type: "fetch_archive", ID: "z", Path: archive, ChunkSize: minChunkSize, MaxDecompressed: 6000,
+			Members: names, Redact: redactJSON(t, testRules, "source"),
+		})
+		end, ok := sent[len(sent)-1].(RedactedFetchEnd)
+		if !ok {
+			t.Fatalf("%s: ended with %#v", archive, sent[len(sent)-1])
+		}
+		// The content of each member, from its last announcement on, and
+		// the reason it was left out, if it was.
+		got := map[string][]byte{}
+		skipped := map[string]string{}
+		withdrawn := map[string]bool{}
+		current := ""
+		for i, msg := range sent[:len(sent)-1] {
+			switch m := msg.(type) {
+			case ArchiveMember:
+				if m.Seq != i {
+					t.Fatalf("%s: message %d has seq %d", archive, i, m.Seq)
+				}
+				if _, seen := skipped[m.Name]; seen {
+					if current != m.Name || m.Skipped == "" {
+						t.Fatalf("%s: %s announced again out of place: %+v", archive, m.Name, m)
+					}
+					withdrawn[m.Name] = true
+				}
+				current = m.Name
+				skipped[m.Name] = m.Skipped
+				delete(got, m.Name)
+			case FetchChunk:
+				if m.Seq != i || skipped[current] != "" {
+					t.Fatalf("%s: chunk %d (seq %d) for %s", archive, i, m.Seq, current)
+				}
+				piece, _ := base64.StdEncoding.DecodeString(m.DataB64)
+				got[current] = append(got[current], piece...)
+			}
+		}
+		wantSkipped := map[string]string{
+			"a.log": "", "big.log": "too_large", "crc.log.gz": "unreadable",
+			"cut.log.gz": "unreadable", "header.log.gz": "unreadable", "c.log": "",
+		}
+		for name, reason := range wantSkipped {
+			if r, ok := skipped[name]; !ok || r != reason {
+				t.Errorf("%s: %s skipped %q, want %q", archive, name, r, reason)
+			}
+		}
+		if !withdrawn["big.log"] || !withdrawn["crc.log.gz"] {
+			t.Errorf("%s: withdrawn = %v, want big.log and crc.log.gz", archive, withdrawn)
+		}
+		if len(got) != 2 || !bytes.Equal(got["a.log"], want) || !bytes.Equal(got["c.log"], want) {
+			t.Errorf("%s: contents %q", archive, got)
+		}
+		if end.SourceSize != int64(2*len(content)) || end.Counts["card"] != 4 {
+			t.Errorf("%s: end = %#v", archive, end)
+		}
+	}
+}
+
 func TestFetchArchiveWithoutRedaction(t *testing.T) {
 	base := t.TempDir()
 	writeFile(t, base, "logs.zip", zipArchive(t, map[string]string{"a.log": "one\n", "b.log": "two\n"}))
@@ -884,6 +974,36 @@ func TestRedactedFetchRefusesACompressedMemberNotAskedDecompressed(t *testing.T)
 		assertNoSecret(t, archive+" app.log.gz", data)
 		if _, ok := last.(RedactedFetchEnd); !ok || !bytes.Equal(data, want) {
 			t.Errorf("%s: data %q, end %#v", archive, data, last)
+		}
+	}
+}
+
+// As the server's decompress_gzip: a .gz cut short, asked for
+// decompressed (the file or an archive member), is refused, redacted or
+// not, instead of passing as content up to the cut.
+func TestFetchRefusesATruncatedGzAskedDecompressed(t *testing.T) {
+	cut := gzipped(t, secretLog)
+	cut = cut[:len(cut)-4]
+	base := t.TempDir()
+	writeFile(t, base, "app.log.gz", cut)
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{{name: "app.log.gz", content: string(cut)}}))
+	writeFile(t, base, "logs.tar.gz", tarGzOf(t, []tarMember{{name: "app.log.gz", content: string(cut)}}))
+	for _, redacting := range []bool{false, true} {
+		for _, target := range []struct{ path, member string }{
+			{"app.log.gz", ""}, {"logs.zip", "app.log.gz"}, {"logs.tar.gz", "app.log.gz"},
+		} {
+			cmd := Command{
+				Type: "fetch", ID: "g", Path: target.path, Member: target.member, ChunkSize: minChunkSize,
+				Decompress: "gzip", MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			result, ok := sent[len(sent)-1].(ErrorResult)
+			if !ok || result.Type != "fetch_error" || !strings.Contains(result.Error, "end-of-stream") {
+				t.Errorf("%s %s (redacting %v): ended with %#v", target.path, target.member, redacting, sent[len(sent)-1])
+			}
 		}
 	}
 }

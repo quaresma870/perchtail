@@ -222,6 +222,34 @@ def test_connect_records_the_version_the_agent_reports(session):
         assert _wait_until(lambda: not registry.is_connected(source.id))
 
 
+def test_connect_records_the_features_the_agent_announces(session):
+    """#382, #249: an agent that redacts on its host says so; the live
+    connection decides what it is sent, the source keeps it for the UI."""
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    headers = {
+        "authorization": "Bearer s3cret",
+        "x-perchtail-agent-features": "redaction/1, Bogus Feature, other/2",
+    }
+    with client.websocket_connect("/agent/connect", headers=headers):
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        assert registry.features(source.id) == frozenset({"redaction/1", "other/2"})
+        assert registry.redacts_on_host(source.id)
+        session.refresh(source)
+        assert source.agent_features == "other/2,redaction/1"
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+    assert not registry.redacts_on_host(source.id)
+
+    # An older agent announces nothing: it can't redact on the host.
+    with client.websocket_connect("/agent/connect", headers={"authorization": "Bearer s3cret"}):
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        assert not registry.redacts_on_host(source.id)
+        session.refresh(source)
+        assert source.agent_features is None
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+
+
 def test_a_connected_agent_does_not_hold_a_database_connection(session):
     # The socket lives as long as the agent runs. Once the handshake is
     # committed, messages from the agent must not start a new transaction on
@@ -357,13 +385,13 @@ def test_a_token_regenerated_during_the_handshake_still_closes_the_connection(se
     original_register = registry.register
     registered = []
 
-    def register_after_a_regeneration(sid, websocket):
+    def register_after_a_regeneration(sid, websocket, features=frozenset()):
         session.execute(
             update(Source).where(Source.id == sid).values(agent_token_hash=_hash_token("new"))
         )
         session.commit()
         registry.disconnect(sid, "agent token regenerated")  # finds nothing yet
-        replaced = original_register(sid, websocket)
+        replaced = original_register(sid, websocket, features)
         registered.append(sid)
         return replaced
 

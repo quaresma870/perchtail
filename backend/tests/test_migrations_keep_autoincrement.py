@@ -1196,3 +1196,147 @@ def test_an_interrupted_password_reset_downgrade_runs_again(tmp_path):
 
     _alembic(tmp_path, "upgrade", PASSWORD_RESET)
     assert PASSWORD_RESET_INDEXES <= _indexes(db, "password_reset_token")
+
+
+# --- f6a2d8c41b73: source.agent_features added -------------------------------------
+
+AGENT_FEATURES = "f6a2d8c41b73"
+BEFORE_AGENT_FEATURES = "b2e7c4a19f53"
+
+
+def test_agent_features_goes_down_and_up(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "head")
+    assert _version(db) == AGENT_FEATURES
+    assert "agent_features" in _columns(db, "source")
+    _add_source(db, "a")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE source SET agent_features = '[\"redaction/1\"]' WHERE name = 'a'")
+        conn.execute("UPDATE sqlite_sequence SET seq = 41 WHERE name = 'source'")
+
+    def sequence() -> int:
+        with sqlite3.connect(db) as conn:
+            return conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'source'").fetchone()[
+                0
+            ]
+
+    _alembic(tmp_path, "downgrade", BEFORE_AGENT_FEATURES)
+    assert _version(db) == BEFORE_AGENT_FEATURES
+    assert "agent_features" not in _columns(db, "source")
+    assert _autoincrement_tables(db)["source"] is True
+    assert sequence() == 41
+    assert _source_names(db) == ["a"]
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert "agent_features" in _columns(db, "source")
+    assert _autoincrement_tables(db)["source"] is True
+    assert sequence() == 41
+    assert _source_names(db) == ["a"]
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT agent_features FROM source").fetchall() == [(None,)]
+        conn.execute("DELETE FROM source")
+    _add_source(db, "b")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT id FROM source").fetchall() == [(42,)]
+
+
+def test_the_agent_features_upgrade_runs_again_after_an_interruption(tmp_path):
+    # A leftover copy from an interrupted rebuild of source is dropped.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_AGENT_FEATURES)
+    _add_source(db, "a")
+    _interrupt_rebuild(db, "source", after_drop=False)
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert _version(db) == AGENT_FEATURES
+    assert "agent_features" in _columns(db, "source")
+    assert _source_names(db) == ["a"]
+    assert "_alembic_tmp_source" not in _tables(db)
+
+
+def test_an_agent_features_upgrade_interrupted_after_the_drop_is_finished(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_AGENT_FEATURES)
+    _add_source(db, "a")
+    _add_source(db, "b")
+    _interrupt_rebuild(db, "source", after_drop=True)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    assert "interrupted rebuild of table source was finished" in result.stderr
+    assert _version(db) == AGENT_FEATURES
+    assert _source_names(db) == ["a", "b"]
+    assert "agent_features" in _columns(db, "source")
+    assert _autoincrement_tables(db)["source"] is True
+    assert "_alembic_tmp_source" not in _tables(db)
+
+
+def test_an_agent_features_upgrade_with_nothing_to_recover_stops(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", BEFORE_AGENT_FEATURES)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE source")
+    before = _tables(db)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode != 0
+    assert "Table source is missing" in result.stderr
+    assert "pre-upgrade backup" in result.stderr
+    assert _tables(db) == before
+    assert _version(db) == BEFORE_AGENT_FEATURES
+
+
+def test_an_agent_features_upgrade_that_finished_before_the_interruption_runs_again(tmp_path):
+    # Interrupted after the column was added, before the version was recorded.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = ?", (BEFORE_AGENT_FEATURES,))
+
+    _alembic(tmp_path, "upgrade", "head")
+    assert _version(db) == AGENT_FEATURES
+    assert "agent_features" in _columns(db, "source")
+
+
+def test_an_agent_features_downgrade_runs_again_after_an_interruption(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "head")
+    _add_source(db, "a")
+    _interrupt_rebuild(db, "source", after_drop=True)
+
+    result = _alembic_run(tmp_path, "downgrade", BEFORE_AGENT_FEATURES)
+    assert result.returncode == 0, result.stderr
+    assert "interrupted rebuild of table source was finished" in result.stderr
+    assert _version(db) == BEFORE_AGENT_FEATURES
+    assert _source_names(db) == ["a"]
+    assert "agent_features" not in _columns(db, "source")
+    assert _autoincrement_tables(db)["source"] is True
+    assert "_alembic_tmp_source" not in _tables(db)
+
+    # A leftover copy from a downgrade stopped before the DROP is dropped.
+    _alembic(tmp_path, "upgrade", "head")
+    _interrupt_rebuild(db, "source", after_drop=False)
+    _alembic(tmp_path, "downgrade", BEFORE_AGENT_FEATURES)
+    assert _source_names(db) == ["a"]
+    assert "_alembic_tmp_source" not in _tables(db)
+
+    # Interrupted after the column went, before the version was recorded.
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = ?", (AGENT_FEATURES,))
+    _alembic(tmp_path, "downgrade", BEFORE_AGENT_FEATURES)
+    assert _version(db) == BEFORE_AGENT_FEATURES
+    assert "agent_features" not in _columns(db, "source")
+
+
+def test_an_agent_features_downgrade_with_nothing_to_recover_stops(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE source")
+    before = _tables(db)
+
+    result = _alembic_run(tmp_path, "downgrade", BEFORE_AGENT_FEATURES)
+    assert result.returncode != 0
+    assert "Table source is missing" in result.stderr
+    assert _tables(db) == before
+    assert _version(db) == AGENT_FEATURES

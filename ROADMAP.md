@@ -40,7 +40,7 @@ Done:
 
 Started:
 
-- Redaction of secrets, payment card numbers and personal data in viewed and downloaded content (#382), and masking by role (#249): the viewer, Tail and downloads get redacted content, and the push agent can redact on its host; alerts, asking agents to redact and a settings screen are still to do.
+- Redaction of secrets, payment card numbers and personal data in viewed and downloaded content (#382), and masking by role (#249): the viewer, Tail and downloads get redacted content, redacted on the push agent's host when the agent can; alerts and a settings screen are still to do.
 - An access report of who holds what, where, for access reviews (#384): the report, as JSON or CSV, and its capability exist; a page to view it is still to do.
 
 ## 1.0.0

@@ -140,6 +140,14 @@ class Source(SQLModel, table=True):
     # sends on connect (#215). Null until an agent that reports it (0.6 or
     # later) has connected.
     agent_version: str | None = None
+    # What the agent says it can do beyond the basic commands, from the
+    # X-PerchTail-Agent-Features header it sends on connect (#382, #249):
+    # comma-separated, "redaction/1" when it redacts on its host. Kept so the
+    # UI can say an agent doesn't redact on the host while it's offline too;
+    # whether a request is redacted on the agent goes by the live
+    # connection's features (app.agent_registry), never by this. Null until
+    # an agent has connected, and for an agent that announces nothing.
+    agent_features: str | None = None
     # Remote upgrades (#319, app/agent_upgrades.py): this source's own
     # policy -- "inherit" (follow Settings -> Agents), "off", "manual" or
     # "automatic" -- and its consecutive failed upgrades. At the failure
