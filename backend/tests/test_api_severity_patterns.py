@@ -29,7 +29,7 @@ def _make_role_and_user(
 
 
 def _make_source(session) -> Source:
-    customer = Customer(name=f"Vodacom Tanzania {uuid.uuid4().hex}")
+    customer = Customer(name=f"Northwind Telecom {uuid.uuid4().hex}")
     session.add(customer)
     session.commit()
     session.refresh(customer)

@@ -418,7 +418,7 @@ def test_a_page_of_entries_is_named_in_a_few_queries(session, client_for):
     from sqlalchemy import event
 
     viewer = _make_user(session, global_capabilities=[GlobalCapability.view_audit_log])
-    customer = Customer(name="Vodacom")
+    customer = Customer(name="Northwind")
     session.add(customer)
     session.commit()
     parent = None
@@ -458,7 +458,7 @@ def test_a_page_of_entries_is_named_in_a_few_queries(session, client_for):
     finally:
         event.remove(engine, "before_cursor_execute", listener)
 
-    assert {item["target_context"] for item in items} == {"Vodacom / level0 / level1 / level2"}
+    assert {item["target_context"] for item in items} == {"Northwind / level0 / level1 / level2"}
     assert len(statements) < 15, statements
 
 

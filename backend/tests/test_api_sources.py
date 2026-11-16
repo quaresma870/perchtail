@@ -30,7 +30,7 @@ def _make_user(session, *, is_super_admin=False, global_capabilities=None) -> Us
     return user
 
 
-def _make_customer(session, name="Vodacom Tanzania") -> Customer:
+def _make_customer(session, name="Northwind Telecom") -> Customer:
     customer = Customer(name=name)
     session.add(customer)
     session.commit()

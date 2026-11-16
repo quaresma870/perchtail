@@ -62,8 +62,8 @@ describe('nextSort', () => {
 
 describe('matchesText', () => {
   it('needs every word somewhere in the fields, ignoring case', () => {
-    expect(matchesText(['app01', 'Vodacom', null], 'vodacom APP')).toBe(true)
-    expect(matchesText(['app01', 'Vodacom'], 'app fidelidade')).toBe(false)
+    expect(matchesText(['app01', 'Northwind', null], 'northwind APP')).toBe(true)
+    expect(matchesText(['app01', 'Northwind'], 'app globex insurance')).toBe(false)
     expect(matchesText(['anything'], '   ')).toBe(true)
   })
 })
