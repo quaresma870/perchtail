@@ -77,12 +77,16 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 | `source.pins_removed` | Right after a `source.delete`, or a `source.update` that changed the host, port or CA certificate: the source's old SSH host key (`host_key`) or WinRM CA certificate file (`ca_certificate`) was removed, because no other source used it. |
 | `source.credential_update`, `source.agent_token_regenerate`, `source.pick_folder` | A source's saved credential replaced, its agent token regenerated, or its folders browsed with the saved credential. |
 | `rule.create`, `rule.update`, `rule.delete`, `rule.reorder`, `rule.replace_raw` | Visibility rules changed. |
-| `customer.*`, `folder.*` | Customers and folders created, changed or deleted. |
-| `role.*`, `role_grant.*` | Roles and their grants created, changed or deleted. A `role_grant.delete` with no user and reason `duplicate_scope` is a duplicate grant removed by the 0.7.0 migration, with the grant kept and the capabilities deleted. |
+| `customer.create`, `customer.update`, `customer.delete` | Customers created, renamed or deleted. |
+| `folder.create`, `folder.update`, `folder.delete` | Folders created, renamed or moved, or deleted. |
+| `role.create`, `role.update`, `role.delete` | Roles created, changed or deleted. |
+| `role_grant.create`, `role_grant.update`, `role_grant.delete` | A role's grants created, changed or deleted. A `role_grant.delete` with no user and reason `duplicate_scope` is a duplicate grant removed by the 0.7.0 migration, with the grant kept and the capabilities deleted. |
 | `user.create`, `user.update`, `user.deactivate`, `user.reset_password` | User accounts managed by an admin. Resetting the password of an SSO account is refused and recorded as `access.denied` with reason `sso_account`. |
 | `user.password_cleared` | With no user and reason `sso_account`: a password an admin had set on an SSO account before 0.7.0, removed by the 0.7.0 migration. |
-| `sso_provider.*`, `sso_group_mapping.*` | SSO configuration and group-to-role mappings. `sso_provider.issuer_mismatch` is a **Test** whose discovery document names an issuer other than the configured one. |
-| `severity_pattern.*` | Severity highlighting patterns. |
+| `sso_provider.create`, `sso_provider.update`, `sso_provider.delete` | The SSO provider configured, changed or removed. Never its client secret. |
+| `sso_provider.issuer_mismatch` | A **Test** of the SSO provider whose discovery document names an issuer other than the configured one. |
+| `sso_group_mapping.create`, `sso_group_mapping.update`, `sso_group_mapping.delete` | Group-to-role mappings created, changed or deleted. |
+| `severity_pattern.create`, `severity_pattern.update`, `severity_pattern.delete` | Severity highlighting patterns, global or a source's own. |
 | `redaction_rule.create`, `redaction_rule.update`, `redaction_rule.delete` | Redaction rules added, changed (with the values before and after) or deleted, system-wide (`"scope": "system"`) or on a source (`"scope": "source"`). |
 | `redaction_override.set` | A source turning a system redaction rule off (`"disabled": true`) or back on. |
 | `alert.create`, `alert.update`, `alert.delete` | Live alerts. |

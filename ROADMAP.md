@@ -36,7 +36,7 @@ Done:
 - Forgotten password, reset by email for local accounts (#244), off by default.
 - An access report of who holds what, where, for access reviews (#384), on its own Settings page and as JSON or CSV.
 - Secure defaults: the published port on the loopback address, container hardening, a warning for a weak credential encryption key, `Cache-Control: no-store` on file content, the API docs off by default, a daily backup on new installs, no test code in the image, private scratch and log folders, encrypted webhook URLs, SMB signing and encryption per source, and a warning for WinRM sources without JEA.
-- Security documentation: the response times and the support policy in [SECURITY.md](SECURITY.md), and the audited events in [docs/audit-events.md](docs/audit-events.md).
+- Security documentation: the response times and the support policy in [SECURITY.md](SECURITY.md), the audited events in [docs/audit-events.md](docs/audit-events.md), the security model in [docs/security-model.md](docs/security-model.md), a hardening guide in [docs/hardening.md](docs/hardening.md), and what is kept and what leaves the installation in [docs/data-and-retention.md](docs/data-and-retention.md).
 - Property-based API tests and accessibility checks in the end-to-end tests (#376, #377).
 
 Started:
