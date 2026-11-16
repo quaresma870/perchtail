@@ -18,6 +18,7 @@ const TARGET_TYPE_LABELS: Record<string, string> = {
   system_settings: 'System settings',
   monitoring_token: 'Monitoring token',
   audit_log: 'Audit log',
+  access_report: 'Access report',
 }
 
 export function targetTypeLabel(targetType: string): string {

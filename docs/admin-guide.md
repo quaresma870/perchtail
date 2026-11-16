@@ -227,6 +227,15 @@ Users manage their own MFA in **My profile**. There is no way to reset another u
 
 The access report answers who holds what, where, for periodic reviews of access rights. It is computed by the same grant resolution that decides every request (see [How a grant is chosen](#how-a-grant-is-chosen)), at the moment it is generated, so it shows what PerchTail actually enforces. Everything it reads comes from one read transaction, so a change saved while it is being generated is either wholly in the report or not at all. Generating it needs **View access report**; nothing is stored, and each report is generated anew.
 
+### The Access review page
+
+**Settings → Access review** shows the report; the tab appears only to roles with **View access report**. The top of the page says when the report on screen was generated and by whom, in your time zone, and a delegated reviewer also sees a note that the report is limited to their scope (see [Delegated reviewers](#delegated-reviewers)). Opening the page, switching views and changing the number of days each generate a new report.
+
+- **By user** lists each user with their role, sign-in method (with the identity-provider group that gave the role, for an SSO account), last sign-in, MFA, global capabilities and flags. The filter box matches usernames, display names and roles; the flag checkboxes keep the users with any of the flags picked. **Access** on a user's row opens their access, grouped by customer and folder, each group collapsed until opened, with a search box that matches customers, folders and sources and opens what matches. Each source shows the user's capabilities on it and the grant that gave them.
+- **By source** lists each source with its customer and folders, and for each capability the users holding it, their role and the grant that gave it. The search box matches sources, customers and folders.
+- **Days without sign-in** (90 by default, 1 to 3650) sets when an account counts as inactive; changing it generates the report again.
+- **Export CSV** and **Export JSON** download the report from the server for the view and number of days on screen, so every export is generated, stamped and audited like any other report; the filters and searches on the page don't apply to the exports.
+
 The report is available as `GET /access-report`, with these parameters:
 
 | Parameter | Values | Default |
