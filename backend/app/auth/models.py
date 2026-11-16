@@ -137,8 +137,8 @@ class User(SQLModel, table=True):
     # When the local password was last set (#245), for the optional expiry
     # under Settings -> System. Null for SSO accounts.
     password_changed_at: datetime | None = None
-    # Optional TOTP second factor for local accounts (ROADMAP.md's Security
-    # hardening section) -- SSO accounts delegate MFA to the IdP instead, so
+    # Optional TOTP second factor for local accounts (docs/design-decisions.md,
+    # "Authentication and SSO") -- SSO accounts delegate MFA to the IdP instead, so
     # this is only ever meaningful for auth_provider=local. mfa_enabled is
     # False both before enrollment starts and while a pending secret hasn't
     # been confirmed yet (see auth/mfa.py's start_enrollment/

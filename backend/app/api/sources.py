@@ -888,7 +888,7 @@ def check_connection(
     its connector. Replaces the pre-pivot "run-now"/"last run" concept from
     CLAUDE.md's original Web UI wording: there is no scheduled sync anymore,
     so there is nothing to run, only a live connection to test (see
-    ROADMAP.md's M7 notes).
+    docs/design-decisions.md, "Scope and principles").
 
     Anyone with `view` can run it, so the answer is the mapped, actionable
     message (SourceError.public_message) plus the effective base path; the

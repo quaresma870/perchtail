@@ -4,7 +4,7 @@ that's never checked doesn't actually catch anything on its own; this is
 what turns "detectable in principle" into "actually detected." Runs on its
 own configurable cadence (Settings.audit_integrity_check_interval_days),
 deliberately independent of both the purge job's cadence and the retention
-window itself (see ROADMAP.md's security-hardening notes) -- retention
+window itself (see docs/design-decisions.md, "Audit log") -- retention
 decides what's kept, this decides how often what's kept gets re-verified,
 and the two shouldn't be coupled just because they both touch AuditLog.
 

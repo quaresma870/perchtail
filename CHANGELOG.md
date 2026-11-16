@@ -40,7 +40,7 @@ release ships (0.x releases may include breaking changes between minors).
 - docs/audit-events.md lists every audited event, the fields of an entry, retention and how integrity is checked.
 - **Bulk credential update** (#248). In Settings → Sources, tick sources and **Update credentials** to set one new username and password (or SSH key) on all of them; each source keeps its own encrypted copy. By default the new credential is tried on each source first and applied only where it works, with a summary of what was updated, failed and skipped; every update is audited per source, without the secret. Sources show how old their credential is (sortable), with a warning and a filter past an age set in Settings → System (90 days by default, 0 turns it off).
 - **Live alerts** (#305): a pass every 60 seconds (Settings → System) reads only what was appended to the files each alert watches, the way Tail does, and keeps nothing of their content. An alert watches a source, a folder and its subfolders, a customer, or every source its owner can view, and picks files with a glob (`**/*.log` by default) among those the file-name index lists; compressed files and archives are never read. Queries are text or RE2 regular expressions. A rotated or rewritten file is read from the top. Each source gets at most 20 files and 15 seconds per alert per pass; files that don't fit are read in the next passes and counted in `/monitoring/health`.
-- **File-name index** (#304), on by default. PerchTail lists each source's rule-visible files in the background (a few sources at a time, each again once its index is older than 15 minutes) and keeps their names, sizes and modification times, never their content. `GET /files` searches them across every source the user can view, as text, glob or regex, with no cap on results (paged); the explorer's single search builds on it (#300). Settings → System turns it on or off and sets the interval (5 minutes to a day); each source can be left out, and its page shows how many files were found, when, why a pass stopped short, and an **Index now** button. Folders that can't be listed, or that are deeper than 32 levels, are skipped without dropping what was indexed below them. Search checks each source's current rules, and a rule change drops the names it now hides straight away.
+- **File-name index** (#304), on by default. PerchTail lists each source's rule-visible files in the background (a few sources at a time, each again once its index is older than 15 minutes) and keeps their names, sizes and modification times, never their content. `GET /files` searches them across every source the user can view, as text, glob or regex, with no cap on results (paged); the explorer's search box uses it to find files (#300). Settings → System turns it on or off and sets the interval (5 minutes to a day); each source can be left out, and its page shows how many files were found, when, why a pass stopped short, and an **Index now** button. Folders that can't be listed, or that are deeper than 32 levels, are skipped without dropping what was indexed below them. Search checks each source's current rules, and a rule change drops the names it now hides straight away.
 - Settings → Folders shows each customer's sources inside their folders, and folders and sources move by **drag and drop**: onto a folder, or onto the customer's top level. A folder can't be dropped into itself or below itself; the Move button still does the same from the keyboard (#355).
 - Settings → Users has an **Edit** popup per user (click the username or Edit): display name and email for local accounts, role and active, with the username read-only (#356).
 - Every background job has a stable id and name, and its last start, finish, result, duration and error are stored in the database and shown per job in `/monitoring/health` (#327). Stored errors never include URLs or credential-looking values.
@@ -74,7 +74,7 @@ release ships (0.x releases may include breaking changes between minors).
 
 ### Changed
 - Audit times are unambiguous: the audit API returns them in UTC with their zone (`Z`), and the Audit log page shows them in the browser's time zone, naming the zone in each time and in the Time header. Before, the page read UTC times as local ones.
-- `SECURITY.md` says which releases get security fixes (until 1.0, the latest release; from 1.0, the latest minor and, for 6 months after the next one, the previous minor), and fixes now ship within 3 days whatever their severity, instead of 7 days for medium and low. `TRADEMARKS.md` is stricter about the name and the logo, and says it doesn't limit what the AGPL-3.0 allows with the code.
+- `SECURITY.md` has a support and end-of-life policy: active support (bug and security fixes), end of support (security fixes only) and end of life (no fixes; the release, image, signatures and SBOM stay available). Until 1.0, only the latest release is supported. From 1.0, the latest minor has active support, and the previous minor keeps active support for 6 months after the next minor is released and security fixes until 12 months. Security fixes now ship within 3 days whatever their severity, instead of 7 days for medium and low. `TRADEMARKS.md` is stricter about the name and the logo, and says it doesn't limit what the AGPL-3.0 allows with the code. The ROADMAP is short again, with the plan to 1.0 and what comes after it, and its design notes moved to `docs/design-decisions.md` (#339).
 - **License:** PerchTail is now licensed under the GNU Affero General Public License v3.0 (AGPL-3.0-only) instead of MIT. You can still use, change and share it, including running it for others; whoever changes it and lets people use the changed version over a network has to offer them its source. Releases up to 0.6.1 stay under MIT. Contributions are accepted under a Contributor License Agreement (`CLA.md`), signed once.
 - **One search in the explorer** (#300). The box finds sources (by name, host, customer or folder) and file names in every source the user can view, from the file-name index, without picking a mode; results replace the tree while there is text in the box, each with its source and folder, and say when the index last listed the files. Text matches anywhere, `*` and `?` make a glob, and a regex goes between slashes (`/app\.log\.\d/`); the Regex and Match case options and the Advanced filter button are gone (always case-insensitive). **Filter sources**, next to List/Tree, shows the checkboxes: with sources or folders ticked, the search runs live in those, as before, including sources left out of the index.
 - Settings → System groups its settings into cards (Explorer, Sources, Audit log, Password policy, Monitoring, Updates) laid out in columns across the page width, one column on narrow screens (#357).
@@ -255,7 +255,15 @@ The release after 0.5.3. It carries everything from the pre-releases
 list every change; the code is the one retested in the lab as rc.3, on
 Linux, Windows (SMB, WinRM, JEA) and push agent sources.
 
-### Upgrading from 0.5.3
+Highlights:
+- **Viewer:** Tail fetches only the new lines (like `tail -f`), at an interval set under Settings → System. One find bar for Find and Find all, with Match case, Whole word, Regex and "3 of 120"; Find all lists every matching line, with no limit, even in logs of 100 MB. A quieter toolbar.
+- **Explorer:** each file shows its size (the time on hover); open folders refresh themselves; a status dot on each source says whether it answers; an advanced filter searches file names across ticked sources, folders of sources and whole customers, recursively, as text, glob or regex.
+- **WinRM without a remote shell:** a read-only JEA endpoint (`docs/examples/jea`) that lists and reads only the allowed folders, as an account with no administrator rights.
+- **Update check:** super admins see the running and the latest version, with the upgrade steps, under Settings → System → Updates.
+- **Accounts:** a password policy (NIST SP 800-63B defaults); My profile with name, email, password, two-factor authentication and sessions; a user menu in the top bar.
+- **Settings:** row actions are buttons; creating, editing and deleting open in popups, the source and role editors included.
+
+### Upgrading
 - **Back up `DATA_DIR` first**, with PerchTail stopped. Six migrations
   run on start; they only add columns and tables (update check state,
   agent version, password history, display name and email, user
@@ -277,28 +285,6 @@ Linux, Windows (SMB, WinRM, JEA) and push agent sources.
 - New under Settings → System: password policy (NIST defaults, stricter
   rules off), Tail interval (2 s), open-folder refresh (30 s), default
   file order, source check interval, update check.
-
-### Highlights
-- **Viewer:** Tail fetches only the new lines (like `tail -f`), at an
-  interval set under Settings → System. One find bar for Find and Find
-  all, with Match case, Whole word, Regex and "3 of 120"; Find all lists
-  every matching line, with no limit, even in logs of 100 MB. A quieter
-  toolbar.
-- **Explorer:** each file shows its size (the time on hover); open
-  folders refresh themselves; a status dot on each source says whether
-  it answers; an advanced filter searches file names across ticked
-  sources, folders of sources and whole customers, recursively, as
-  text, glob or regex.
-- **WinRM without a remote shell:** a read-only JEA endpoint
-  (`docs/examples/jea`) that lists and reads only the allowed folders,
-  as an account with no administrator rights.
-- **Update check:** super admins see the running and the latest version,
-  with the upgrade steps, under Settings → System → Updates.
-- **Accounts:** a password policy (NIST SP 800-63B defaults); My profile
-  with name, email, password, two-factor authentication and sessions; a
-  user menu in the top bar.
-- **Settings:** row actions are buttons; creating, editing and deleting
-  open in popups, the source and role editors included.
 
 ### Deprecated
 - **Content indexing, the Search page and the current Alerts go away in
@@ -558,33 +544,18 @@ buffer is now a fixed 1 MiB, so the chunk size PerchTail asks for can't
 make it allocate more. The rc was retested in the lab on Linux and
 Windows sources, including an audit log with old race breaks.
 
-### Upgrading from 0.5.2
-- **Back up `DATA_DIR` first**, with PerchTail stopped.
-- One migration runs on start (`audit known breaks`). It records the
-  newest audit row at the time of the upgrade, which is how 0.5.3 tells
-  the old race breaks apart (see below).
-- **Upgrade the push agents.** Agents older than 0.5.3 keep working with
-  this version, but send each file in one message, which fails above
-  about 12 MiB.
-- Optional new setting: `SEARCH_INDEX_SOURCE_BUDGET_SECONDS` (default
-  120).
-
-### Highlights
-- **Audit log:** if "Verify now" reported "Tampering detected" because of
-  the race fixed in 0.5.2, it now shows those breaks apart, and a super
-  admin can mark them as known (Settings → Audit log). Any other break is
-  still tampering. Entries now name the source, user or object they're
-  about, and keep that name after a rename or a delete.
-- **Push agent:** files come in 1 MiB chunks, written as they arrive, so
-  large logs open without the agent holding them in memory. A file over
-  `MAX_FETCH_MB` is refused before it's read. The agent answers commands
-  in parallel, so a long download doesn't hold up browsing, and stops
-  reading when PerchTail gives up on a file.
-- **Search indexing:** each source gets a time budget per sweep, so one
-  large source can't hold up the others; files that can't be indexed are
-  retried only when their size changes.
+Highlights:
+- **Audit log:** if "Verify now" reported "Tampering detected" because of the race fixed in 0.5.2, it now shows those breaks apart, and a super admin can mark them as known (Settings → Audit log). Any other break is still tampering. Entries now name the source, user or object they're about, and keep that name after a rename or a delete.
+- **Push agent:** files come in 1 MiB chunks, written as they arrive, so large logs open without the agent holding them in memory. A file over `MAX_FETCH_MB` is refused before it's read. The agent answers commands in parallel, so a long download doesn't hold up browsing, and stops reading when PerchTail gives up on a file.
+- **Search indexing:** each source gets a time budget per sweep, so one large source can't hold up the others; files that can't be indexed are retried only when their size changes.
 - **Settings:** the Sources and Users lists sort by any column and filter.
 - **Viewer:** "⌕ Find" is a button that opens the search panel.
+
+### Upgrading
+- **Back up `DATA_DIR` first**, with PerchTail stopped.
+- One migration runs on start (`audit known breaks`). It records the newest audit row at the time of the upgrade, which is how 0.5.3 tells the old race breaks apart (see above).
+- **Upgrade the push agents.** Agents older than 0.5.3 keep working with this version, but send each file in one message, which fails above about 12 MiB.
+- Optional new setting: `SEARCH_INDEX_SOURCE_BUDGET_SECONDS` (default 120).
 
 ## [0.5.3-rc.1] - 2026-11-05
 
@@ -611,16 +582,7 @@ First release candidate for 0.5.3. Upgrade notes:
   when the object still exists, and the details as key/value pairs.
   Entries from before this release can't be changed (the hash chain
   covers them), so they show the object's current name, marked as such.
-- Audit log: breaks in the hash chain left by the #213 race (concurrent
-  writes before 0.5.2) are no longer reported as tampering forever (#217).
-  "Verify now" reports them apart, as "N breaks match the #213 race", when
-  each row is valid under the chain's key, chains from an existing earlier
-  row, and was written before the upgrade to 0.5.3. A super admin can
-  "Mark as known": this writes a chained `audit.chain.known_breaks_recorded`
-  entry listing those rows and the fork's other rows, and verification
-  then reports the chain as intact, with N known breaks. Any other break is
-  still tampering, and so is a recorded row that later goes missing or
-  changes.
+- Audit log: breaks in the hash chain left by the race of concurrent writes before 0.5.2 (#213) are no longer reported as tampering forever (#217). "Verify now" reports them apart, as "N breaks match the #213 race", when each row is valid under the chain's key, chains from an existing earlier row, and was written before the upgrade to 0.5.3. A super admin can "Mark as known": this writes a chained `audit.chain.known_breaks_recorded` entry listing those rows and the fork's other rows, and verification then reports the chain as intact, with N known breaks. Any other break is still tampering, and so is a recorded row that later goes missing or changes.
 
 ### Fixed
 - Push agent: files are fetched in 1 MiB chunks, written to the scratch
@@ -678,48 +640,25 @@ release carries everything from the pre-releases 0.5.1-rc.1 and
 list every change. Both were retested in the lab on Linux and Windows
 sources.
 
-### Upgrading from 0.5.0
-- **Back up `DATA_DIR` first**, with PerchTail stopped: copy the whole
-  directory.
+Highlights:
+- **Security:** SMB and WinRM no longer follow junctions or symlinks out of the base path; SMB sessions are no longer shared between sources; changing a source's host or port requires its credential again; rules for Windows agents ignore case; `DATA_DIR` is readable by PerchTail's user only.
+- **Search indexing** no longer locks the database, and skips a file it can't read instead of failing the whole source.
+- **Audit log:** two requests writing at the same moment can no longer break the hash chain.
+- **Push agent:** stops at once on SIGTERM, and leaves out links that lead outside its folder.
+- **Releases** are built as a draft with the agent binaries, `SHA256SUMS` and an SBOM attached, then published.
+
+### Upgrading
+- **Back up `DATA_DIR` first**, with PerchTail stopped: copy the whole directory.
 - A migration adds `source.agent_os`; it runs on start.
-- The database switches to SQLite's WAL mode: `perchtail.db-wal` and
-  `perchtail.db-shm` appear next to it. Keep `DATA_DIR` on a local disk,
-  not a network share.
-- **Upgrade the push agents** too: Windows agents need this version for
-  their rules to ignore case, and all agents get the SIGTERM and link
-  fixes.
-- Installed from source? `/opt/perchtail` was owned by your build
-  account; run `sudo chown -R root:root /opt/perchtail` once (see
-  `docs/install-from-source.md`).
+- The database switches to SQLite's WAL mode: `perchtail.db-wal` and `perchtail.db-shm` appear next to it. Keep `DATA_DIR` on a local disk, not a network share.
+- **Upgrade the push agents** too: Windows agents need this version for their rules to ignore case, and all agents get the SIGTERM and link fixes.
+- Installed from source? `/opt/perchtail` was owned by your build account; run `sudo chown -R root:root /opt/perchtail` once (see `docs/install-from-source.md`).
 
-### Highlights
-- **Security:** SMB and WinRM no longer follow junctions or symlinks out
-  of the base path; SMB sessions are no longer shared between sources;
-  changing a source's host or port requires its credential again; rules
-  for Windows agents ignore case; `DATA_DIR` is readable by PerchTail's
-  user only.
-- **Search indexing** no longer locks the database, and skips a file it
-  can't read instead of failing the whole source.
-- **Audit log:** two requests writing at the same moment can no longer
-  break the hash chain.
-- **Push agent:** stops at once on SIGTERM, and leaves out links that
-  lead outside its folder.
-- **Releases** are built as a draft with the agent binaries,
-  `SHA256SUMS` and an SBOM attached, then published.
+### Known issues
+**Audit chain breaks from before this release.** Before 0.5.2, two requests writing audit entries at the same moment could both chain from the same previous entry (#213). An install where that happened keeps showing "Tampering detected" in Settings → Audit log → "Verify now", at the first such row. A break of this kind has a recognisable signature in the database (`auditlog` table): the reported row and the row before it have the **same `prev_hash`**, timestamps **within the same second**, and are dated **before your upgrade to 0.5.2**. Treat any other break, or one dated after the upgrade, as tampering. 0.5.3 will let a super admin record these breaks as known (#217).
 
-### Known issue: audit chain breaks from before this release
-Before 0.5.2, two requests writing audit entries at the same moment could
-both chain from the same previous entry (fixed by #213). An install where
-that happened keeps showing "Tampering detected" in Settings → Audit log
-→ "Verify now", at the first such row. A break of this kind has a
-recognisable signature in the database (`auditlog` table): the reported
-row and the row before it have the **same `prev_hash`**, timestamps
-**within the same second**, and are dated **before your upgrade to
-0.5.2**. Treat any other break, or one dated after the upgrade, as
-tampering. 0.5.3 will let a super admin record these breaks as known
-(#217).
-
-### Fixed (since 0.5.2-rc.2)
+### Fixed
+Since 0.5.2-rc.2:
 - Installing from source left `/opt/perchtail` owned by the account that
   built it, not root, so that account could change the code the service
   runs. Both `rsync` commands in `docs/install-from-source.md` now pass
@@ -788,18 +727,13 @@ upgrade push agents too (SIGTERM, link handling).
 - The source page writes agent OS names properly ("Linux", "Windows").
 - `DATA_DIR/winrm_ca` is `0700`, like the rest of `DATA_DIR`.
 
-### Documentation
-- `docs/install-from-source.md` installs the latest release tag rather
-  than a fixed one, builds as an ordinary user and installs with `sudo`,
-  lists `python3.12-venv`, gets Node.js 22 from nodejs.org with a checksum
-  check, and keeps settings in `/etc/perchtail/perchtail.env`.
-
 ### Changed
 - Dependencies: actions/checkout, setup-go, setup-node and setup-python 7,
   trivy-action 0.36.0, @codemirror/language 6.13.1, @codemirror/merge
   6.12.3, svelte 5.57.3, svelte-check 4.7.8, ruff 0.17.3 and pytest 9.2.0.
 - CI installs the e2e SSH/SMB test servers in their own step, before
   Playwright starts.
+- `docs/install-from-source.md` installs the latest release tag rather than a fixed one, builds as an ordinary user and installs with `sudo`, lists `python3.12-venv`, gets Node.js 22 from nodejs.org with a checksum check, and keeps settings in `/etc/perchtail/perchtail.env`.
 
 ## [0.5.1-rc.1] - 2026-11-04
 
@@ -904,7 +838,7 @@ by size, and the database moves to its own directory. Folder visibility
 now follows the rules (a security fix), and the WinRM docs match what
 the connector really needs.
 
-### Upgrading from 0.4.x
+### Upgrading
 
 Database migrations run automatically on startup. Back up the `/data`
 volume first.
@@ -1027,6 +961,9 @@ volume first.
   Download icons and actions are hidden from users without the
   `download` capability on that source, using the new
   `my_capabilities` field of each source (#174).
+- WinRM setup now states what the connector actually needs: an account with remote-shell rights (Administrators, or `GXGR` in the WinRM `RootSDDL`). The JEA instructions, which couldn't work, are gone; moving to PSRP so a JEA endpoint can constrain the account is tracked (#169). SMB or the push agent is recommended where possible.
+- New: base path per protocol, the folder picker and several folders per source (`docs/source-setup.md`), bulk import (`docs/bulk-import.md`), the data directories (README), and the `logs` health fields (`docs/monitoring.md`).
+- SSH/SFTP setup: `ForceCommand internal-sftp` is required with a `nologin` shell; chroot is optional hardening, with the sshd ownership rule and a bind-mount example for Debian/Ubuntu; with a chroot, Base path is relative to it (#173). Folder visibility and SSH rule case-sensitivity are documented with the rule principles.
 
 ### Fixed
 - WinRM sources whose base path is a drive root (`D:\`) listed the
@@ -1037,32 +974,6 @@ volume first.
   of browser spellcheck and grammar extensions such as Grammarly, which
   could otherwise send their contents to third-party servers. The
   private key field is monospace without soft wrapping (#158).
-
-### Security
-- Rules now decide which **folders** are visible, not only which files.
-  Before, every folder was always listed. An excluded folder, and through
-  direct API calls its whole tree of sub-folder names, stayed visible, and
-  a source with no rules showed its complete directory skeleton. A folder
-  is now shown and browsable only if some file below it could be visible
-  under the same ordered, last-match-wins rules. Hidden folders answer 404
-  on browse and folder ZIP, and the search indexer no longer walks them
-  (#164). **Upgrade note:** folders that only contain files your rules
-  don't show now disappear from the tree. Root-level patterns such as
-  `*.log` never cross `/`, so they show no folders at all: use `**/*.log`
-  to include matching files at any depth. Regex rules are analysed
-  conservatively; to hide a folder reliably, use a glob exclude such as
-  `folder/**`.
-- Failed logins, account lockouts and login attempts while locked out are
-  now recorded in the audit log and the app log (`user.login_failed`,
-  `user.locked_out`, `user.login_throttled`), with the attempted username,
-  client IP and reason, never the password. Repeated identical failures
-  within 60 s are folded into one row (#171).
-- Connection checks no longer show raw library errors (UNC paths, host
-  keys, internals) to users who can only view a source. They get an
-  actionable message instead, and users who can manage sources also see
-  the underlying error (#170).
-
-### Fixed
 - Push-agent sources can be browsed and opened again. Browse, open and
   download answered 501 "protocol agent not yet supported" while the
   connection check passed. All code paths now share one connector
@@ -1088,21 +999,10 @@ volume first.
   flat list of every member. Members with odd names (`../`, absolute) are
   shown normalized and still open (#175).
 
-### Documentation
-- WinRM setup now states what the connector actually needs: an account
-  with remote-shell rights (Administrators, or `GXGR` in the WinRM
-  `RootSDDL`). The JEA instructions, which couldn't work, are gone; moving
-  to PSRP so a JEA endpoint can constrain the account is tracked in #169.
-  SMB or the push agent is recommended where possible.
-- New: base path per protocol, the folder picker and several folders per
-  source (`docs/source-setup.md`), bulk import (`docs/bulk-import.md`),
-  the data directories (README), and the `logs` health fields
-  (`docs/monitoring.md`).
-- SSH/SFTP setup: `ForceCommand internal-sftp` is required with a
-  `nologin` shell; chroot is optional hardening, with the sshd ownership
-  rule and a bind-mount example for Debian/Ubuntu; with a chroot, Base path
-  is relative to it (#173). Folder visibility and SSH rule case-sensitivity
-  are documented with the rule principles.
+### Security
+- Rules now decide which **folders** are visible, not only which files. Before, every folder was always listed. An excluded folder, and through direct API calls its whole tree of sub-folder names, stayed visible, and a source with no rules showed its complete directory skeleton. A folder is now shown and browsable only if some file below it could be visible under the same ordered, last-match-wins rules. Hidden folders answer 404 on browse and folder ZIP, and the search indexer no longer walks them (#164). **Upgrade note:** folders that only contain files your rules don't show now disappear from the tree. Root-level patterns such as `*.log` never cross `/`, so they show no folders at all: use `**/*.log` to include matching files at any depth. Regex rules are analysed conservatively; to hide a folder reliably, use a glob exclude such as `folder/**`.
+- Failed logins, account lockouts and login attempts while locked out are now recorded in the audit log and the app log (`user.login_failed`, `user.locked_out`, `user.login_throttled`), with the attempted username, client IP and reason, never the password. Repeated identical failures within 60 s are folded into one row (#171).
+- Connection checks no longer show raw library errors (UNC paths, host keys, internals) to users who can only view a source. They get an actionable message instead, and users who can manage sources also see the underlying error (#170).
 
 ## [0.4.1] - 2026-11-03
 
@@ -1297,7 +1197,7 @@ Bugs fixed: concurrent opens of one file corrupting each other, invalid
 regex rules breaking a whole source, and alerts that missed new matches
 and repeated old ones.
 
-### Upgrading from 0.2.0
+### Upgrading
 
 Database migrations run automatically on startup. Back up the `/data`
 volume first. Before you restart, check the following:
@@ -1536,7 +1436,7 @@ scratch) after upgrading — see
   that specific already-validated IP, with the original hostname preserved
   as the `Host` header and TLS SNI/certificate-verification name — nothing
   re-resolves the hostname between validation and connection.
-- Fixed a login-CSRF gap in OIDC SSO (issue #61): the OAuth `state` param
+- Fixed a login-CSRF gap in OIDC SSO (#61): the OAuth `state` param
   was never bound to the browser that started the flow, so a code+state
   pair captured from an attacker's own successful login could be replayed
   by a victim's browser, silently logging the victim into the attacker's
@@ -2078,4 +1978,32 @@ admin/viewer UI (Vite + Svelte), packaged as a single Docker image.
   `/` and `\\`, and rejects a bare `:` to rule out Windows drive-letter
   absolute paths.
 
-See [ROADMAP.md](ROADMAP.md) for what's next (Phase 1b: SSO).
+What comes next is in [ROADMAP.md](ROADMAP.md).
+
+[Unreleased]: https://github.com/quaresma870/perchtail/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/quaresma870/perchtail/compare/v0.6.3...v0.6.4
+[0.6.4-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.6.3...v0.6.4-rc.1
+[0.6.3]: https://github.com/quaresma870/perchtail/compare/v0.6.2...v0.6.3
+[0.6.3-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.6.2...v0.6.3-rc.1
+[0.6.2]: https://github.com/quaresma870/perchtail/compare/v0.6.1...v0.6.2
+[0.6.2-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.6.1...v0.6.2-rc.1
+[0.6.1]: https://github.com/quaresma870/perchtail/compare/v0.6.0...v0.6.1
+[0.6.1-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.6.0...v0.6.1-rc.1
+[0.6.0]: https://github.com/quaresma870/perchtail/compare/v0.5.3...v0.6.0
+[0.6.0-rc.3]: https://github.com/quaresma870/perchtail/compare/v0.6.0-rc.2...v0.6.0-rc.3
+[0.6.0-rc.2]: https://github.com/quaresma870/perchtail/compare/v0.6.0-rc.1...v0.6.0-rc.2
+[0.6.0-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.5.3...v0.6.0-rc.1
+[0.5.3]: https://github.com/quaresma870/perchtail/compare/v0.5.2...v0.5.3
+[0.5.3-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.5.2...v0.5.3-rc.1
+[0.5.2]: https://github.com/quaresma870/perchtail/compare/v0.5.0...v0.5.2
+[0.5.2-rc.2]: https://github.com/quaresma870/perchtail/compare/v0.5.2-rc.1...v0.5.2-rc.2
+[0.5.2-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.5.1-rc.1...v0.5.2-rc.1
+[0.5.1-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.5.0...v0.5.1-rc.1
+[0.5.0]: https://github.com/quaresma870/perchtail/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/quaresma870/perchtail/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/quaresma870/perchtail/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/quaresma870/perchtail/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/quaresma870/perchtail/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/quaresma870/perchtail/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/quaresma870/perchtail/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/quaresma870/perchtail/releases/tag/v0.1.0

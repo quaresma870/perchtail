@@ -27,7 +27,7 @@
   // GET /audit/filters), not a hardcoded action/type list -- new action
   // namespaces show up here automatically as they're written, same
   // "never a guess that goes stale" reasoning as Search's source-name
-  // matching (ROADMAP.md).
+  // matching (docs/design-decisions.md, "Audit log").
   let filterOptions: AuditLogFilterOptions = { actions: [], target_types: [], targets: {} }
   let selectedTargetTypes = new Set<string>()
   let selectedActions = new Set<string>()

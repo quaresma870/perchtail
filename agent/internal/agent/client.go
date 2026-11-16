@@ -36,7 +36,7 @@ var (
 
 // Run holds the agent's persistent connection open, reconnecting with
 // exponential backoff and jitter whenever it drops, until ctx is
-// cancelled. Per ROADMAP.md's Phase 2 notes, the agent only ever dials out
+// cancelled. Per docs/design-decisions.md ("Push agent"), the agent only ever dials out
 // and waits -- the backend drives every list/fetch command live down this
 // connection, and nothing is proactively synced ahead of time. It returns
 // ErrRestart once an upgrade from the portal was installed and the agent

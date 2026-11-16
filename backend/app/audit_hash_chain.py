@@ -1,5 +1,5 @@
 """Tamper-evidence for AuditLog: an HMAC-SHA256 hash chain over its rows
-(see ROADMAP.md's "Security hardening (pre-1.0)" section). Each row's
+(see docs/design-decisions.md, "Audit log"). Each row's
 row_hash covers its own content plus the previous row's hash, so altering
 or deleting a row anywhere in the chain changes every hash after it --
 detectable by app.audit_integrity.verify_chain(). Keyed (via

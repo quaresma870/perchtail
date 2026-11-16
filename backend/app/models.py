@@ -211,7 +211,7 @@ class SeverityPattern(SQLModel, table=True):
     # when stepping through "next problem" navigation. A pattern can be
     # visually highlighted without cluttering that step-through, or vice
     # versa -- deliberately not reusing `enabled` for both meanings (see
-    # ROADMAP.md's open-decision note on this).
+    # docs/design-decisions.md, "Frontend and UI").
     include_in_navigation: bool = True
 
 

@@ -92,7 +92,7 @@ class AuditLogFilterOptions(BaseModel):
     not a hardcoded list -- new action namespaces slot in automatically as
     they're written, the same "always accurate, not a guess that goes
     stale" reasoning already used for Search's source-name matching (see
-    ROADMAP.md's full-text search notes)."""
+    docs/design-decisions.md, "Audit log")."""
 
     actions: list[str]
     target_types: list[str]
