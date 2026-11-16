@@ -212,8 +212,8 @@ def test_scratch_is_readable_by_the_app_user_only(tmp_path):
     import stat
 
     root = tmp_path / "scratch"
-    root.mkdir(mode=0o750)
-    os.chmod(root, 0o750)
+    root.mkdir(mode=0o711)
+    os.chmod(root, 0o711)
     store = ScratchStore(root, 10_000_000)
     path = store.acquire("k")
 
