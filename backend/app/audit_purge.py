@@ -39,8 +39,8 @@ def run_audit_purge_sweep() -> None:
         # if what's deleted is a clean prefix of it. A row's timestamp is
         # captured at construction, before it's actually inserted/
         # committed, so under concurrent writes (this app runs FastAPI sync
-        # endpoints in a thread pool -- see ROADMAP.md's agent-registry
-        # notes) two rows' timestamp order and id (commit) order can, very
+        # endpoints in a thread pool -- see docs/design-decisions.md,
+        # "Push agent") two rows' timestamp order and id (commit) order can, very
         # rarely, diverge. first_not_old_id -- the smallest id among rows
         # NOT old enough to purge -- is, by that same minimality, always a
         # safe boundary: every row below it is guaranteed to already be

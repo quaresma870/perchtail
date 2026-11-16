@@ -1,5 +1,5 @@
-"""Tracks live push-agent WebSocket connections (Phase 2 — see ROADMAP.md
-and Protocol.agent's docstring in app/models.py) and lets synchronous
+"""Tracks live push-agent WebSocket connections (see docs/design-decisions.md,
+"Push agent", and Protocol.agent's docstring in app/models.py) and lets synchronous
 connector code (collectors/agent.py, called from FastAPI's thread pool like
 every other connector) send a command to a connected agent and block for its
 response, even though the WebSocket itself is only ever touched from the

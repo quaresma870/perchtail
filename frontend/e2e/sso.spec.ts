@@ -3,7 +3,7 @@ import { confirmPopup } from './popups'
 
 // Only the admin settings CRUD is covered here, not a real SSO login round
 // trip -- that would need a real OIDC IdP stood up, which is out of scope
-// (see ROADMAP.md's "Frontend E2E testing" notes). The issuer URL below
+// (see docs/design-decisions.md, "Testing and CI"). The issuer URL below
 // uses the reserved, guaranteed-nonexistent ".invalid" TLD (RFC 2606) so
 // "Test connection" fails fast and predictably instead of timing out
 // against a real network address.

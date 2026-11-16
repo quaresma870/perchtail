@@ -80,6 +80,8 @@ def with_base_path(source: Source, base_path: str) -> Source:
         winrm_scheme=source.winrm_scheme,
         winrm_configuration=source.winrm_configuration,
         tls_ca_pem=source.tls_ca_pem,
+        smb_require_signing=source.smb_require_signing,
+        smb_encrypt=source.smb_encrypt,
     )
 
 

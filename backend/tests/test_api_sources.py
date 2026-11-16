@@ -1084,3 +1084,86 @@ def test_testing_a_new_credential_never_records_status_on_the_real_source(
         json={"source_ids": [source["id"]], "credential": {"username": "svc", "password": "x"}},
     )
     assert source["id"] not in recorded
+
+
+def test_a_new_smb_source_requires_signing_and_can_ask_for_encryption(session, admin_client):
+    customer = _make_customer(session)
+    base = {"customer_id": customer.id, "protocol": "smb", "host": "fs01", "base_path": "Logs"}
+
+    plain = admin_client.post("/sources", json={**base, "name": "fs01"}).json()
+    assert (plain["smb_require_signing"], plain["smb_encrypt"]) == (True, False)
+
+    encrypted = admin_client.post(
+        "/sources", json={**base, "name": "fs02", "smb_encrypt": True}
+    ).json()
+    assert encrypted["smb_encrypt"] is True
+
+
+def test_smb_options_are_refused_on_other_protocols(session, admin_client):
+    customer = _make_customer(session)
+    response = admin_client.post(
+        "/sources",
+        json={
+            "name": "web01",
+            "customer_id": customer.id,
+            "protocol": "ssh",
+            "host": "web01",
+            "base_path": "/var/log",
+            "smb_require_signing": False,
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_turning_smb_signing_off_is_audited(session, admin_client):
+    customer = _make_customer(session)
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "fs01",
+            "customer_id": customer.id,
+            "protocol": "smb",
+            "host": "fs01",
+            "base_path": "Logs",
+        },
+    ).json()
+
+    response = admin_client.patch(f"/sources/{created['id']}", json={"smb_require_signing": False})
+    assert response.status_code == 200
+    assert response.json()["smb_require_signing"] is False
+    entry = session.exec(
+        select(AuditLog).where(AuditLog.action == "source.update").order_by(AuditLog.id.desc())
+    ).first()
+    assert entry.event_metadata["changes"]["smb_require_signing"] == {"from": True, "to": False}
+
+
+def test_bulk_update_tests_an_smb_source_with_its_own_signing_options(
+    session, admin_client, monkeypatch
+):
+    customer = _make_customer(session)
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "fs01",
+            "customer_id": customer.id,
+            "protocol": "smb",
+            "host": "fs01",
+            "base_path": "Logs",
+            "smb_require_signing": False,
+            "smb_encrypt": True,
+            "credential": {"username": "svc", "password": "old-pass"},
+        },
+    ).json()
+    seen = []
+
+    def fake_check(source, connector):
+        seen.append((source.smb_require_signing, source.smb_encrypt))
+        return []
+
+    monkeypatch.setattr("app.api.sources.source_status.check", fake_check)
+    response = admin_client.post(
+        "/sources/credentials",
+        json={"source_ids": [created["id"]], "credential": {"username": "svc", "password": "x"}},
+    )
+    assert response.json()[0]["status"] == "updated"
+    assert seen == [(False, True)]

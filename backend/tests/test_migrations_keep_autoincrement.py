@@ -370,6 +370,8 @@ def test_the_redaction_migration_adds_its_tables_and_clears_alert_heads(tmp_path
             "INSERT INTO alert_file_state (alert_id, source_id, file_path, offset, head) "
             "VALUES (1, 1, 'app.log', 1234, 'abcd')"
         )
+    # f7a2c4e9b351 encrypts the webhook URL and refuses without the salt.
+    (tmp_path / "credential_salt").write_bytes(os.urandom(16))
 
     _alembic(tmp_path, "upgrade", "head")
     with sqlite3.connect(db) as conn:
@@ -391,6 +393,89 @@ def test_the_redaction_migration_adds_its_tables_and_clears_alert_heads(tmp_path
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
     assert not {"redaction_rule", "source_redaction_override"} & tables
     _alembic(tmp_path, "upgrade", "head")
+
+
+def test_the_secure_defaults_migration_keeps_an_existing_install_as_it_was(tmp_path):
+    # f7a2c4e9b351: an install with users keeps the scheduled backup off and
+    # SMB signing required (what smbprotocol always asked for), without SMB
+    # encryption; its webhook URLs are encrypted, and decrypted going down.
+    db = tmp_path / "perchtail.db"
+    secret_url = "https://example.com/hook?token=SECRET"
+    _alembic(tmp_path, "upgrade", "e5c2a8d71f43")
+    salt = os.urandom(16)
+    (tmp_path / "credential_salt").write_bytes(salt)
+    _insert_alert_with_a_plain_webhook(db, secret_url)
+
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(db) as conn:
+        backup = conn.execute(
+            "SELECT value FROM system_setting WHERE key = 'backup_interval_hours'"
+        ).fetchone()
+        smb = conn.execute("SELECT smb_require_signing, smb_encrypt FROM source").fetchone()
+        stored = conn.execute("SELECT webhook_url FROM alert").fetchone()[0]
+    assert backup == ("0",)
+    assert smb == (1, 0)
+    assert "SECRET" not in stored and "example.com" not in stored
+    assert (tmp_path / "credential_salt").read_bytes() == salt
+
+    _alembic(tmp_path, "downgrade", "e5c2a8d71f43")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT webhook_url FROM alert").fetchone()[0] == secret_url
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(source)")}
+    assert not {"smb_require_signing", "smb_encrypt"} & columns
+    assert _autoincrement_tables(db)["source"] is True
+
+
+def test_the_secure_defaults_migration_stops_without_the_credential_salt(tmp_path):
+    # A lost salt must not be replaced by a new one before the app's own
+    # check runs: the migration refuses, leaves the webhook as it was and
+    # creates no salt file.
+    db = tmp_path / "perchtail.db"
+    secret_url = "https://example.com/hook?token=SECRET"
+    _alembic(tmp_path, "upgrade", "e5c2a8d71f43")
+    _insert_alert_with_a_plain_webhook(db, secret_url)
+
+    result = _alembic_run(tmp_path, "upgrade", "head")
+    assert result.returncode != 0
+    assert "CREDENTIAL_SALT_PATH" in result.stderr
+    assert not (tmp_path / "credential_salt").exists()
+    assert _version(db) == "e5c2a8d71f43"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT webhook_url FROM alert").fetchone()[0] == secret_url
+
+
+def _insert_alert_with_a_plain_webhook(db: Path, url: str) -> None:
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source (id, name, protocol, host, base_path, enabled, is_system, "
+            "check_failures, name_index_enabled, agent_upgrade_policy, agent_upgrade_failures) "
+            "VALUES (1, 'a', 'smb', 'h', 'share', 1, 0, 0, 1, 'inherit', 0)"
+        )
+        conn.execute(
+            "INSERT INTO role (id, name, is_builtin, is_super_admin, global_capabilities) "
+            "VALUES (1, 'r', 0, 0, '[]')"
+        )
+        conn.execute(
+            "INSERT INTO user (id, username, role_id, auth_provider, active, "
+            "must_change_password) VALUES (1, 'u', 1, 'local', 1, 0)"
+        )
+        conn.execute(
+            "INSERT INTO alert (id, user_id, name, query, regex, file_glob, webhook_url, "
+            "enabled, failed_deliveries, created_at) "
+            "VALUES (1, 1, 'x', 'q', 0, '**/*.log', ?, 1, 0, '2026-11-14 00:00:00')",
+            (url,),
+        )
+
+
+def test_a_new_install_gets_the_daily_scheduled_backup(tmp_path):
+    # A new install runs every migration on an empty database: nothing is
+    # stored, so the code's default (every 24 hours) applies.
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(tmp_path / "perchtail.db") as conn:
+        stored = conn.execute(
+            "SELECT value FROM system_setting WHERE key = 'backup_interval_hours'"
+        ).fetchone()
+    assert stored is None
 
 
 def _alembic_run(data_dir: Path, *args: str) -> subprocess.CompletedProcess:
@@ -1016,12 +1101,12 @@ def test_an_sso_role_group_upgrade_with_nothing_to_recover_stops(tmp_path):
 def test_an_sso_role_group_upgrade_that_finished_before_the_interruption_runs_again(tmp_path):
     # Interrupted after the column was added, before the version was recorded.
     db = tmp_path / "perchtail.db"
-    _alembic(tmp_path, "upgrade", "head")
+    _alembic(tmp_path, "upgrade", "e5c2a8d71f43")
     with sqlite3.connect(db) as conn:
         conn.execute("UPDATE alembic_version SET version_num = ?", (BEFORE_SSO_ROLE_GROUP,))
 
-    _alembic(tmp_path, "upgrade", "head")
-    assert _version(db) == AGENT_FEATURES
+    _alembic(tmp_path, "upgrade", "e5c2a8d71f43")
+    assert _version(db) == "e5c2a8d71f43"
     assert "sso_role_group" in _columns(db, "user")
 
 
@@ -1046,10 +1131,77 @@ def test_an_sso_role_group_downgrade_runs_again_after_an_interruption(tmp_path):
     assert "sso_role_group" not in _columns(db, "user")
 
 
+# --- b2e7c4a19f53: password reset tokens ---------------------------------------------
+
+PASSWORD_RESET = "b2e7c4a19f53"
+PASSWORD_RESET_INDEXES = {"ix_password_reset_token_user_id", "ix_password_reset_token_token_hash"}
+
+
+def _before_password_reset() -> str:
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
+    return script.get_revision(PASSWORD_RESET).down_revision
+
+
+def _indexes(db: Path, table: str) -> set[str]:
+    with sqlite3.connect(db) as conn:
+        return {row[1] for row in conn.execute(f'PRAGMA index_list("{table}")')}
+
+
+def test_an_interrupted_password_reset_migration_runs_again(tmp_path):
+    # Stopped after CREATE TABLE password_reset_token, before its indexes and
+    # the version were written.
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", PASSWORD_RESET)
+    with sqlite3.connect(db) as conn:
+        for index in PASSWORD_RESET_INDEXES:
+            conn.execute(f"DROP INDEX {index}")
+        conn.execute(
+            "INSERT INTO password_reset_token (user_id, token_hash, password_fingerprint, "
+            "email_fingerprint, created_at, expires_at) "
+            "VALUES (1, 'h', 'p', 'e', '2026-11-16 00:00:00', '2026-11-16 00:30:00')"
+        )
+        conn.execute("UPDATE alembic_version SET version_num = ?", (_before_password_reset(),))
+
+    _alembic(tmp_path, "upgrade", PASSWORD_RESET)
+    assert _version(db) == PASSWORD_RESET
+    assert PASSWORD_RESET_INDEXES <= _indexes(db, "password_reset_token")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT token_hash FROM password_reset_token").fetchall() == [("h",)]
+        unique = {row[1]: row[2] for row in conn.execute("PRAGMA index_list(password_reset_token)")}
+    assert unique["ix_password_reset_token_token_hash"] == 1
+    assert unique["ix_password_reset_token_user_id"] == 0
+
+
+def test_an_interrupted_password_reset_downgrade_runs_again(tmp_path):
+    db = tmp_path / "perchtail.db"
+    before = _before_password_reset()
+    _alembic(tmp_path, "upgrade", PASSWORD_RESET)
+
+    # Stopped after dropping one index, before the table and the version.
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP INDEX ix_password_reset_token_token_hash")
+    _alembic(tmp_path, "downgrade", before)
+    assert "password_reset_token" not in _tables(db)
+    assert _version(db) == before
+
+    # Stopped after dropping the table, before the version: down again.
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = ?", (PASSWORD_RESET,))
+    _alembic(tmp_path, "downgrade", before)
+    assert "password_reset_token" not in _tables(db)
+    assert _version(db) == before
+
+    _alembic(tmp_path, "upgrade", PASSWORD_RESET)
+    assert PASSWORD_RESET_INDEXES <= _indexes(db, "password_reset_token")
+
+
 # --- f6a2d8c41b73: source.agent_features added -------------------------------------
 
 AGENT_FEATURES = "f6a2d8c41b73"
-BEFORE_AGENT_FEATURES = "e5c2a8d71f43"
+BEFORE_AGENT_FEATURES = "b2e7c4a19f53"
 
 
 def test_agent_features_goes_down_and_up(tmp_path):

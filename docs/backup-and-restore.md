@@ -45,7 +45,7 @@ PerchTail keeps the last `BACKUP_KEEP` (7) manual and scheduled backups and the 
 
 ### On a schedule
 
-**Settings → System**, card **Backups**, **Back up every** sets an interval from 1 hour to a week; 0 (the default) turns scheduled backups off. The same card lists the backups on the server, with their date, size and reason, for whoever manages the system settings. Backups are never downloadable from the web interface or the API: copy them off the host yourself (see below).
+**Settings → System**, card **Backups**, **Back up every** sets an interval from 1 hour to a week; 0 turns scheduled backups off. A new install backs up every 24 hours; an install upgraded from before 0.7.0 keeps what it had, which is off unless it was set. The same card lists the backups on the server, with their date, size and reason, for whoever manages the system settings. Backups are never downloadable from the web interface or the API: copy them off the host yourself (see below).
 
 A scheduled backup that fails logs `backup.create_failed` and fails the `backup` job in `/monitoring/health` ([monitoring.md](monitoring.md)). After a failed attempt, the next one waits an hour (or the interval, if that's shorter), so a full disk doesn't fill the audit log with an entry every few minutes. That wait is kept in memory: after a restart, the job tries again at its first run, within 5 minutes, and a backup that works brings back the normal interval.
 
@@ -143,6 +143,14 @@ sudo systemctl start perchtail
 The current `DATA_DIR` is moved, whole, to `<DATA_DIR>.before-restore-<UTC time>` (for example `/data/db.before-restore-20261112T101500Z`), and the backup's files are written to a fresh `DATA_DIR`, without the old `-wal` and `-shm` files. When `DATA_DIR` is its own volume, which can't be renamed, its contents are moved instead. A database, salt or `known_hosts` that `DATABASE_URL`, `CREDENTIAL_SALT_PATH` or `SSH_KNOWN_HOSTS_PATH` puts outside `DATA_DIR` is renamed to `<file>.before-restore-<UTC time>` next to itself. Delete the `before-restore` copies once the restored instance works.
 
 The restored database can't hold the record of its own restore, so the restore is logged (`backup.restore`, [monitoring.md](monitoring.md#log-events-worth-alerting-on)) and the first start on it writes the `backup.restore` audit entry. On start, the container's entrypoint (or the unit's `ExecStartPre` for an install from source) runs `alembic upgrade head`, which migrates the restored database to the running version, as after any upgrade.
+
+### The before-restore copy
+
+`<DATA_DIR>.before-restore-<UTC time>` is the instance as it was just before the restore: its database, its credential salt, its SSH `known_hosts`, its audit chain marker and anything else that was in `DATA_DIR`. It is kept so a restore can be undone, or so something changed after the backup was made can be looked up, and PerchTail never reads it, backs it up or deletes it. Files that lived outside `DATA_DIR` get the same suffix next to themselves.
+
+It holds the same secrets as `DATA_DIR`: the stored credentials, SSO settings and MFA secrets (encrypted, and readable with its salt and `CREDENTIAL_ENCRYPTION_KEY`), and the audit log. Keep it readable by PerchTail's user only (it is created `0700`, like `DATA_DIR`).
+
+Delete it once the restored instance works: you can sign in, the sources connect, and the audit log's integrity check passes (Settings → Audit log, **Verify now**). Until then it is the only way back to the state before the restore. A second restore makes a copy of its own, with its own time, and leaves the earlier ones in place.
 
 ## Restoring on a new machine
 

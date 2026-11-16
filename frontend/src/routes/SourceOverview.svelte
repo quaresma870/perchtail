@@ -219,6 +219,27 @@
               authenticated. Prefer HTTPS.
             </p>
           {/if}
+          {#if source.protocol === 'winrm' && !source.winrm_configuration}
+            <p class="http-warning" data-testid="winrm-no-jea-warning">
+              No JEA endpoint: the account needs remote-shell rights, in practice an
+              administrator on the server. The read-only JEA endpoint is recommended.
+            </p>
+          {/if}
+        </dd>
+      {/if}
+      {#if source.protocol === 'smb'}
+        <dt>SMB security</dt>
+        <dd>
+          {source.smb_require_signing ? 'Signing required' : 'Signing not required'}{source.smb_encrypt
+            ? ', encrypted'
+            : ''}
+          {#if !source.smb_require_signing}
+            <p class="http-warning" data-testid="smb-signing-off-warning">
+              Signing is off: someone on the network between PerchTail and this server could
+              change what it reads. Turn on <strong>Require signing</strong> in the source's
+              settings unless the server can't sign.
+            </p>
+          {/if}
         </dd>
       {/if}
       {#if source.roots.length > 0}

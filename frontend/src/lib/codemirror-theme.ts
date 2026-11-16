@@ -128,8 +128,8 @@ function buildLineDecorations(view: EditorView, patterns: SeverityPattern[]): De
   return builder.finish()
 }
 
-/** Admin-configurable severity highlighting (see ROADMAP.md's "Viewer:
- * toward an advanced editor" section and backend/app/api/severity_patterns.py)
+/** Admin-configurable severity highlighting (see docs/design-decisions.md,
+ * "Frontend and UI", and backend/app/api/severity_patterns.py)
  * — colors matched tokens and optionally tints the whole line, driven by
  * whatever pattern set is effective for the currently open source, rather
  * than a fixed set of regexes. Two separate ViewPlugins/builders (line
@@ -353,8 +353,8 @@ function buildBookmarkDecorations(view: EditorView, bookmarks: number[]): Decora
   return builder.finish()
 }
 
-/** Pure client-side/session bookmarks (ROADMAP.md: "never written to the
- * file, doesn't need to be persisted server-side") -- `bookmarks` is a
+/** Pure client-side/session bookmarks (docs/design-decisions.md, "Scope
+ * and principles": never written to the file or persisted server-side) -- `bookmarks` is a
  * plain list of 1-indexed line numbers, owned and toggled by Viewer.svelte
  * per open tab, rendered here the same way severity line-tints are. */
 export function bookmarkHighlighting(bookmarks: number[]) {
@@ -374,8 +374,8 @@ export function bookmarkHighlighting(bookmarks: number[]) {
   )
 }
 
-/** Per-file-type syntax highlighting (ROADMAP.md's "Viewer: toward an
- * advanced editor" section), picked from the open file's own extension
+/** Per-file-type syntax highlighting (docs/design-decisions.md, "Live
+ * browsing, scratch and the viewer"), picked from the open file's own extension
  * (see file-language.ts) -- `@codemirror/lang-json`/`lang-xml`/
  * `lang-javascript` were already-installed dependencies, unused anywhere
  * in the codebase until now. Returns `[]` for anything unrecognized (most

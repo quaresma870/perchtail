@@ -79,6 +79,8 @@ _SOURCE_KEYS = {
     "rules",
     "winrm_scheme",
     "tls_ca_pem",
+    "smb_require_signing",
+    "smb_encrypt",
     "agent_upgrade_policy",
     "redaction_rules",
     "redaction_disable",
@@ -144,6 +146,10 @@ class _SourceSpec:
     rules: list[_RuleSpec] | None
     winrm_scheme: str | None = None
     tls_ca_pem: str | None = None
+    # SMB only. None (key left out) keeps what the source has; a new source
+    # then gets signing required and no encryption.
+    smb_require_signing: bool | None = None
+    smb_encrypt: bool | None = None
     agent_upgrade_policy: str = "inherit"
     # Redaction (#382): the source's own rules, and the names of the system
     # rules it turns off. None (key left out) keeps what the source has.
@@ -373,6 +379,18 @@ def _parse_source(
         # As in the editor: a WinRM source always stores its scheme.
         scheme = "https" if not port or port == 5986 else "http"
 
+    smb_options: dict[str, bool] = {}
+    for key in ("smb_require_signing", "smb_encrypt"):
+        if key not in node:
+            continue
+        if not isinstance(node[key], bool):
+            problems.append(Problem(f"{where}.{key}", f"{key} must be true or false"))
+            return
+        if protocol != Protocol.smb:
+            problems.append(Problem(f"{where}.{key}", f"{key} is for SMB sources only"))
+            return
+        smb_options[key] = node[key]
+
     upgrade_policy = node.get("agent_upgrade_policy", "inherit")
     if upgrade_policy is False:
         upgrade_policy = "off"  # YAML reads an unquoted off as false
@@ -420,6 +438,7 @@ def _parse_source(
             rules=rules,
             winrm_scheme=scheme,
             tls_ca_pem=ca_pem,
+            **smb_options,
             agent_upgrade_policy=upgrade_policy,
             redaction_rules=redaction_rules,
             redaction_disable=redaction_disable,
@@ -782,6 +801,10 @@ def _create_source(session, spec, customer_id, folder_id, credential, apply, use
         credential_updated_at=utcnow() if credential else None,
         winrm_scheme=spec.winrm_scheme,
         tls_ca_pem=spec.tls_ca_pem,
+        smb_require_signing=(
+            spec.smb_require_signing if spec.smb_require_signing is not None else True
+        ),
+        smb_encrypt=spec.smb_encrypt if spec.smb_encrypt is not None else False,
         agent_upgrade_policy=spec.agent_upgrade_policy,
     )
     session.add(source)
@@ -794,6 +817,9 @@ def _create_source(session, spec, customer_id, folder_id, credential, apply, use
         "base_path": source.base_path,
         "via": "import",
     }
+    if source.protocol == Protocol.smb:
+        metadata["smb_require_signing"] = source.smb_require_signing
+        metadata["smb_encrypt"] = source.smb_encrypt
     if spec.redaction_rules:
         _replace_redaction_rules(session, source.id, spec.redaction_rules)
         metadata["redaction_rules"] = [
@@ -841,6 +867,9 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id,
         "tls_ca_pem": spec.tls_ca_pem,
         "agent_upgrade_policy": spec.agent_upgrade_policy,
     }
+    for key in ("smb_require_signing", "smb_encrypt"):
+        if getattr(spec, key) is not None:
+            wanted[key] = getattr(spec, key)
     changes = {
         k: {"from": getattr(source, k), "to": v}
         for k, v in wanted.items()
@@ -1096,6 +1125,10 @@ def _source_out(source: Source, session: Session) -> dict:
         out["winrm_scheme"] = source.winrm_scheme
     if source.tls_ca_pem:
         out["tls_ca_pem"] = source.tls_ca_pem
+    if source.protocol == Protocol.smb and not source.smb_require_signing:
+        out["smb_require_signing"] = False
+    if source.protocol == Protocol.smb and source.smb_encrypt:
+        out["smb_encrypt"] = True
     if not source.enabled:
         out["enabled"] = False
     if not source.name_index_enabled:

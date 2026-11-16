@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     data_dir: str = "./data/db"
     database_url: str = ""
     credential_encryption_key: str = "changeme"
+    # A key that fails the strength check (app/key_strength.py) is only
+    # warned about; true refuses to start with it instead. Meant to become
+    # the default in 1.0.
+    credential_key_refuse_weak: bool = False
+    # The interactive API documentation (/docs) and the OpenAPI schema
+    # (/openapi.json) answer 404 unless this is true: the API is internal to
+    # the web UI, and the schema maps every endpoint for whoever reaches it.
+    api_docs: bool = False
     # Per-install random salt for deriving the Fernet key from
     # credential_encryption_key (see app/crypto.py) — generated on first use
     # and persisted here, not stored in the DB, since crypto.py has no DB
@@ -157,7 +165,7 @@ class Settings(BaseSettings):
     # Full audit log viewer (app/audit_purge.py) -- how often the purge
     # sweep runs. *What* it purges (retention in days, 0 = keep forever) is
     # admin-configurable from Settings -> System (SystemSetting), not an env
-    # var, per ROADMAP.md's explicit direction; only the sweep cadence
+    # var, per docs/design-decisions.md ("Audit log"); only the sweep cadence
     # itself is an operational/deployment concern like the other interval
     # settings above.
     audit_purge_interval_seconds: int = 86400

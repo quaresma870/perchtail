@@ -51,8 +51,11 @@ class FakeSMBClient:
         auth_protocol=None,
         connection_cache=None,
         connection_timeout=None,
+        require_signing=True,
+        encrypt=None,
     ):
         self.connection_timeout = connection_timeout
+        self.signing = (require_signing, encrypt)
         self.sessions.append((host, username, password, port, auth_protocol))
         self.caches.append(connection_cache)
 
@@ -306,3 +309,20 @@ def test_connections_have_a_connect_and_receive_timeout(fake_smbclient):
     timeout = get_settings().remote_read_timeout_seconds
     assert fake_smbclient.connection_timeout == timeout
     assert os.environ["SMB_EXPERIMENTAL_TRANSPORT_RECEIVE_TIMEOUT"] == str(timeout)
+
+
+def test_signing_is_required_and_encryption_left_to_the_server_by_default(fake_smbclient):
+    smb_module.list_directory(_source(), [])
+    assert fake_smbclient.signing == (True, None)
+
+
+def test_the_source_can_turn_signing_off_and_ask_for_encryption(fake_smbclient):
+    smb_module.list_directory(_source(smb_require_signing=False, smb_encrypt=True), [])
+    assert fake_smbclient.signing == (False, True)
+
+
+def test_a_copy_for_another_folder_keeps_the_smb_options():
+    from app.source_roots import with_base_path
+
+    copy = with_base_path(_source(smb_require_signing=False, smb_encrypt=True), "Other")
+    assert (copy.smb_require_signing, copy.smb_encrypt) == (False, True)

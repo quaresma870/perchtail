@@ -125,9 +125,16 @@ def purge_expired_sessions(session: Session) -> int:
 
 
 def run_session_purge_sweep() -> None:
-    from app.db import engine  # deferred: same reason as the other sweeps
+    # Deferred: same reason as the other sweeps; password_reset imports this
+    # module.
+    from app.auth.password_reset import purge_expired_tokens
+    from app.db import engine
 
     with Session(engine) as session:
         purged = purge_expired_sessions(session)
+        # Password-reset links past their expiry (#244) go with the sessions.
+        purged_links = purge_expired_tokens(session)
     if purged:
         logger.info("sessions.expired_purged", count=purged)
+    if purged_links:
+        logger.info("password_reset.expired_purged", count=purged_links)

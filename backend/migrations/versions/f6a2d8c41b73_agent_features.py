@@ -1,7 +1,7 @@
 """agent features
 
 Revision ID: f6a2d8c41b73
-Revises: e5c2a8d71f43
+Revises: b2e7c4a19f53
 Create Date: 2026-11-15 18:00:00.000000
 
 What an agent says it can do on connect (#382, #249: "redaction/1" when it
@@ -23,7 +23,7 @@ import sqlmodel
 from alembic import op
 
 revision: str = "f6a2d8c41b73"
-down_revision: str | Sequence[str] | None = "e5c2a8d71f43"
+down_revision: str | Sequence[str] | None = "b2e7c4a19f53"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

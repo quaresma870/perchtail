@@ -6,3 +6,8 @@ data/
 .env
 tests/
 .claude
+# Test code and test doubles never go into the image: the backend's tests,
+# the fake WinRM connector loaded by the end-to-end run, and its admin seeder.
+backend/tests/
+backend/app/testing/
+backend/app/seed_e2e_admin.py

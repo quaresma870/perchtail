@@ -1,8 +1,8 @@
 import { expect, test } from '@playwright/test'
 import { confirmPopup, createFolder } from './popups'
 
-// Connections-home's "Tree" view (ROADMAP.md's folder-tree navigation
-// item) groups RBAC-visible sources by customer -> nested folder path,
+// Connections-home's "Tree" view (docs/design-decisions.md, "Frontend
+// and UI") groups RBAC-visible sources by customer -> nested folder path,
 // built entirely from GET /sources's own folder_path field. This spec
 // builds a small nested structure (customer -> EU -> Prod -> a source,
 // plus a second source directly under the customer) via the existing

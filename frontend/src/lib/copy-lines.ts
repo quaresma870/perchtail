@@ -5,8 +5,8 @@ export interface NumberedLine {
 
 /** Formats a run of lines as "N: text", one per line, joined by \n --
  * the actual clipboard payload for "copy selected lines with line
- * numbers" (ROADMAP.md's "Viewer: toward an advanced editor" toolbar
- * items). Pure so it's testable without a CodeMirror view; the caller
+ * numbers" (docs/design-decisions.md, "Live browsing, scratch and the
+ * viewer"). Pure so it's testable without a CodeMirror view; the caller
  * (CodeMirrorPane) is responsible for turning a selection into this
  * shape and writing the result to the clipboard. */
 export function formatLinesWithNumbers(lines: NumberedLine[]): string {

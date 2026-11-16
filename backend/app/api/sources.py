@@ -57,6 +57,7 @@ from app.models import (
 )
 from app.name_index import drop_source_names, index_in_background
 from app.redaction_rules import delete_source_redaction
+from app.source_pins import SourcePins, remove_unused_pins
 from app.timeutils import utcnow
 from app.version import APP_VERSION
 from app.versions import is_newer
@@ -104,6 +105,9 @@ class SourcePublic(BaseModel):
     # The JEA endpoint (#169), or null for the WinRS shell.
     winrm_configuration: str | None = None
     tls_ca_pem: str | None = None
+    # SMB: require signed messages, ask for SMB 3 encryption.
+    smb_require_signing: bool = True
+    smb_encrypt: bool = False
     enabled: bool
     is_system: bool
     rule_count: int
@@ -157,6 +161,9 @@ class SourceCreate(BaseModel):
     winrm_scheme: Literal["https", "http"] | None = None
     winrm_configuration: str | None = None
     tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
+    # SMB only: signing required by default, encryption off.
+    smb_require_signing: bool = True
+    smb_encrypt: bool = False
     enabled: bool = True
     # Per-protocol JSON blob (SSH: username + private_key|password; SMB/WinRM:
     # username + password); omitted entirely for `local`, which needs none.
@@ -178,6 +185,8 @@ class SourceUpdate(BaseModel):
     winrm_configuration: str | None = None
     # "" removes the CA certificate.
     tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
+    smb_require_signing: bool | None = None
+    smb_encrypt: bool | None = None
     enabled: bool | None = None
     credential: dict | None = None
     name_index_enabled: bool | None = None
@@ -257,6 +266,8 @@ def _to_public(
             winrm_collector.endpoint(source)[0] if source.protocol == Protocol.winrm else None
         ),
         tls_ca_pem=source.tls_ca_pem,
+        smb_require_signing=source.smb_require_signing,
+        smb_encrypt=source.smb_encrypt,
         enabled=source.enabled,
         is_system=source.is_system,
         rule_count=rule_count,
@@ -432,6 +443,14 @@ def _validate_winrm_configuration(protocol: Protocol, name: str | None) -> str |
     if not _CONFIGURATION_NAME.match(name):
         raise _bad_request("The JEA endpoint name can only have letters, digits, '.', '-' and '_'")
     return name
+
+
+def _smb_options(protocol: Protocol, require_signing: bool, encrypt: bool) -> dict:
+    """The SMB signing and encryption options, refused on another protocol
+    when they differ from the defaults (signing required, no encryption)."""
+    if protocol != Protocol.smb and (not require_signing or encrypt):
+        raise _bad_request("SMB signing and encryption only apply to SMB sources")
+    return {"smb_require_signing": require_signing, "smb_encrypt": encrypt}
 
 
 def _validate_winrm_scheme(protocol: Protocol, scheme: str | None) -> str | None:
@@ -658,6 +677,7 @@ def create_source(
             else None
         ),
         tls_ca_pem=_validate_ca_pem(payload.protocol, payload.tls_ca_pem),
+        **_smb_options(payload.protocol, payload.smb_require_signing, payload.smb_encrypt),
         enabled=payload.enabled,
         credential_ref=encrypt_credential(payload.credential) if payload.credential else None,
         credential_updated_at=utcnow() if payload.credential else None,
@@ -677,6 +697,14 @@ def create_source(
             "host": source.host,
             "base_path": source.base_path,
             **({"roots": roots} if roots else {}),
+            **(
+                {
+                    "smb_require_signing": source.smb_require_signing,
+                    "smb_encrypt": source.smb_encrypt,
+                }
+                if source.protocol == Protocol.smb
+                else {}
+            ),
         },
     )
     session.commit()
@@ -699,11 +727,14 @@ def update_source(
     _reject_encrypted_private_key(payload.credential)
 
     fields_set = payload.model_fields_set
+    old_pins = SourcePins.of(source)
     before = {
         "name": source.name,
         "enabled": source.enabled,
         "winrm_scheme": source.winrm_scheme,
         "winrm_configuration": source.winrm_configuration,
+        "smb_require_signing": source.smb_require_signing,
+        "smb_encrypt": source.smb_encrypt,
         **_location(source),
     }
     new_customer_id = payload.customer_id if "customer_id" in fields_set else source.customer_id
@@ -763,6 +794,23 @@ def update_source(
         new_ca = _validate_ca_pem(source.protocol, payload.tls_ca_pem)
         tls_ca_changed = new_ca != source.tls_ca_pem
         source.tls_ca_pem = new_ca
+    smb_changed = False
+    if payload.smb_require_signing is not None or payload.smb_encrypt is not None:
+        options = _smb_options(
+            source.protocol,
+            (
+                payload.smb_require_signing
+                if payload.smb_require_signing is not None
+                else source.smb_require_signing
+            ),
+            payload.smb_encrypt if payload.smb_encrypt is not None else source.smb_encrypt,
+        )
+        smb_changed = (options["smb_require_signing"], options["smb_encrypt"]) != (
+            source.smb_require_signing,
+            source.smb_encrypt,
+        )
+        source.smb_require_signing = options["smb_require_signing"]
+        source.smb_encrypt = options["smb_encrypt"]
     if payload.enabled is not None:
         source.enabled = payload.enabled
     if source.protocol == Protocol.agent and not source.enabled:
@@ -777,6 +825,8 @@ def update_source(
         "enabled": source.enabled,
         "winrm_scheme": source.winrm_scheme,
         "winrm_configuration": source.winrm_configuration,
+        "smb_require_signing": source.smb_require_signing,
+        "smb_encrypt": source.smb_encrypt,
         **_location(source),
     }
     location_changed = any(before[k] != after[k] for k in _location(source))
@@ -799,6 +849,7 @@ def update_source(
         or payload.credential is not None
         or tls_ca_changed
         or configuration_changed
+        or smb_changed
     ):
         # How the source is reached changed: the old status says nothing
         # about the new settings (#276).
@@ -816,6 +867,10 @@ def update_source(
         metadata={"changes": changes} if changes else None,
     )
     session.commit()
+    if (old_pins.host, old_pins.port) != (source.host, source.port) or tls_ca_changed:
+        # The old host's key and the old CA file are no longer this
+        # source's; they go unless another source uses them.
+        _remove_unused_pins(session, user, source_id, old_pins)
     session.refresh(source)
     return _to_public(session, source, build_folder_visibility_context(session, user), user)
 
@@ -846,6 +901,7 @@ def delete_source(
     delete_source_redaction(session, source_id)
     if source.protocol == Protocol.agent:
         disconnect_after_commit(session, source_id, "source deleted")
+    pins = SourcePins.of(source)
     session.delete(source)
     record_audit_event(
         session,
@@ -855,6 +911,26 @@ def delete_source(
         target_id=source_id,
     )
     session.commit()
+    # Its SSH host key and WinRM CA file go too, unless another source uses
+    # them (app/source_pins.py); only after the delete is committed.
+    _remove_unused_pins(session, user, source_id, pins)
+
+
+def _remove_unused_pins(session: Session, user: User, source_id: int, pins: SourcePins) -> None:
+    """Removes the host key and CA file a source no longer uses (deleted, or
+    pointed at another host, port or CA) when no source uses them, and
+    audits what was removed. Call it after the change is committed."""
+    removed = remove_unused_pins(session, pins)
+    if removed:
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="source.pins_removed",
+            target_type="source",
+            target_id=source_id,
+            metadata={"removed": removed},
+        )
+        session.commit()
 
 
 class NameIndexStart(BaseModel):
@@ -893,7 +969,7 @@ def check_connection(
     its connector. Replaces the pre-pivot "run-now"/"last run" concept from
     CLAUDE.md's original Web UI wording: there is no scheduled sync anymore,
     so there is nothing to run, only a live connection to test (see
-    ROADMAP.md's M7 notes).
+    docs/design-decisions.md, "Scope and principles").
 
     Anyone with `view` can run it, so the answer is the mapped, actionable
     message (SourceError.public_message) plus the effective base path; the
@@ -1006,6 +1082,8 @@ class FolderPickRequest(BaseModel):
     winrm_scheme: Literal["https", "http"] | None = None
     winrm_configuration: str | None = None
     tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
+    smb_require_signing: bool | None = None
+    smb_encrypt: bool | None = None
     path: str = ""
 
 
@@ -1079,6 +1157,16 @@ def _picker_source(session: Session, user: User, payload: FolderPickRequest) -> 
         winrm_scheme=scheme if protocol == Protocol.winrm else None,
         winrm_configuration=configuration if protocol == Protocol.winrm else None,
         tls_ca_pem=ca_pem if protocol == Protocol.winrm else None,
+        smb_require_signing=(
+            payload.smb_require_signing
+            if payload.smb_require_signing is not None
+            else (saved.smb_require_signing if saved else True)
+        ),
+        smb_encrypt=(
+            payload.smb_encrypt
+            if payload.smb_encrypt is not None
+            else (saved.smb_encrypt if saved else False)
+        ),
     )
 
 

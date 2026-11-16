@@ -5,11 +5,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
-from app import backup, password_policy, system_settings
+from app import backup, key_strength, password_policy, system_settings
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
+from app.auth import password_reset
 from app.auth.models import GlobalCapability, User
 from app.auth.rbac import forbidden, require_global_capability
+from app.config import get_settings
 from app.db import get_session
 from app.source_roots import HARD_MAX_ROOTS, max_roots
 
@@ -70,6 +72,13 @@ class SystemSettingsPublic(BaseModel):
     redaction_download_suffix: bool
     # MFA for every local account (app/auth/mfa_policy.py).
     require_mfa_local_accounts: bool
+    # Password recovery by email (#244, app/auth/password_reset.py):
+    # changed by super admins only.
+    password_reset_enabled: bool
+    password_reset_minutes: int
+    # Why it can't be turned on or doesn't work now (email not set up and
+    # on, PUBLIC_BASE_URL not https), or null when it can.
+    password_reset_unavailable: str | None
 
 
 class BackupPublic(BaseModel):
@@ -155,6 +164,14 @@ class SystemSettingsUpdate(BaseModel):
     redaction_download_suffix: bool | None = None
     # Super admins only, either way.
     require_mfa_local_accounts: bool | None = None
+    # Super admins only (_check_password_reset); turning it on needs email
+    # set up and on and PUBLIC_BASE_URL https.
+    password_reset_enabled: bool | None = None
+    password_reset_minutes: int | None = Field(
+        default=None,
+        ge=password_reset.MIN_MINUTES,
+        le=password_reset.MAX_MINUTES,
+    )
 
 
 _PASSWORD_INTS = (
@@ -186,6 +203,8 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         alerts_interval_seconds=system_settings.get_int(session, "alerts_interval_seconds"),
         credential_max_age_days=system_settings.get_int(session, "credential_max_age_days"),
         backup_interval_hours=system_settings.get_int(session, "backup_interval_hours"),
+        password_reset_minutes=system_settings.get_int(session, "password_reset_minutes"),
+        password_reset_unavailable=password_reset.unavailable_reason(session),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
         **{key: system_settings.get_int(session, key) for key in _CONCURRENCY_INTS},
     )
@@ -217,6 +236,31 @@ def list_system_backups(user: User = Depends(require_manage)):
     ]
 
 
+class SystemWarning(BaseModel):
+    code: str
+    message: str
+    advice: str
+
+
+@router.get("/warnings", response_model=list[SystemWarning])
+def list_system_warnings(user: User = Depends(require_manage)):
+    """Problems with how this instance is set up that only its operator can
+    fix, shown at the top of Settings -> System."""
+    warnings: list[SystemWarning] = []
+    # No length or estimated bits here: manage_system_settings can be
+    # delegated, and those numbers narrow the search for the root secret.
+    # They are in the startup log, which is the operator's.
+    if key_strength.is_weak(get_settings().credential_encryption_key):
+        warnings.append(
+            SystemWarning(
+                code="weak_credential_encryption_key",
+                message="CREDENTIAL_ENCRYPTION_KEY is weaker than recommended.",
+                advice=key_strength.WEAK_KEY_ADVICE,
+            )
+        )
+    return warnings
+
+
 @router.patch("", response_model=SystemSettingsPublic)
 def update_system_settings(
     payload: SystemSettingsUpdate,
@@ -233,6 +277,7 @@ def update_system_settings(
     _check_audit_retention(user, before["audit_retention_days"], changed)
     _check_audit_folder_listings(user, before["audit_folder_listings"], changed)
     _check_require_mfa(user, before["require_mfa_local_accounts"], changed)
+    _check_password_reset(user, before, changed)
     min_length = changed.get(
         "password_min_length", system_settings.get_int(session, "password_min_length")
     )
@@ -349,6 +394,21 @@ def _check_audit_folder_listings(user: User, current: bool, changed: dict) -> No
             reason="audit_folder_listings_disabled",
             user=user,
         )
+
+
+def _check_password_reset(user: User, before: dict, changed: dict) -> None:
+    """Password recovery by email changes how accounts are signed into, so
+    only a super admin changes it (#244). Turning it on needs email set up
+    and on and PUBLIC_BASE_URL https: refused with the reason otherwise."""
+    sent = system_settings.PASSWORD_RESET_SETTINGS & changed.keys()
+    if any(changed[key] != before[key] for key in sent) and not user.role.is_super_admin:
+        raise forbidden(
+            "Only a super admin can change password recovery by email",
+            reason="password_reset_settings_super_admin",
+            user=user,
+        )
+    if changed.get("password_reset_enabled") is True and before["password_reset_unavailable"]:
+        raise HTTPException(status_code=422, detail=before["password_reset_unavailable"])
 
 
 def _check_require_mfa(user: User, current: bool, changed: dict) -> None:

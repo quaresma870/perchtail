@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Optional
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, String
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
@@ -113,6 +113,12 @@ class Source(SQLModel, table=True):
     # over HTTPS) -- internal PKI or a self-signed certificate, without a
     # server-wide REQUESTS_CA_BUNDLE. Public data, not a secret.
     tls_ca_pem: str | None = None
+    # SMB only: refuse a session whose messages aren't signed, and ask for
+    # SMB 3 encryption (refused by a server that can't encrypt). Signing,
+    # which smbprotocol always asked for, is on by default; turning it off
+    # is for a server that can't sign, and the source's page warns about it.
+    smb_require_signing: bool = True
+    smb_encrypt: bool = False
     enabled: bool = True
     is_system: bool = False
     # Push-agent (protocol=agent) enrollment: only the SHA-256 hash of the
@@ -219,7 +225,7 @@ class SeverityPattern(SQLModel, table=True):
     # when stepping through "next problem" navigation. A pattern can be
     # visually highlighted without cluttering that step-through, or vice
     # versa -- deliberately not reusing `enabled` for both meanings (see
-    # ROADMAP.md's open-decision note on this).
+    # docs/design-decisions.md, "Frontend and UI").
     include_in_navigation: bool = True
 
 
@@ -315,7 +321,9 @@ class Alert(SQLModel, table=True):
     folder_id: int | None = Field(default=None, foreign_key="folder.id")
     customer_id: int | None = Field(default=None, foreign_key="customer.id")
     file_glob: str = "**/*.log"
-    webhook_url: str
+    # The webhook URL, Fernet-encrypted (app/crypto.py): its path or query
+    # often carries the receiver's secret. The API never returns it.
+    webhook_url_encrypted: str = Field(sa_column=Column("webhook_url", String, nullable=False))
     enabled: bool = True
     last_checked_at: datetime | None = None
     last_fired_at: datetime | None = None
