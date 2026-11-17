@@ -223,14 +223,43 @@ def test_invalid_regex_severity_pattern_is_a_400(session, client_for):
     assert client.get("/severity-patterns").json() == []
 
 
-def test_severity_patterns_keep_full_regex_syntax(session, client_for):
-    # Evaluated in the browser (JavaScript), not by the backend's rule
-    # engine, so lookaround stays allowed here.
+@pytest.mark.parametrize(
+    "pattern",
+    ["re:ERROR(?!: ignored)", "re:(?<=x)error", r"re:(a)\1", "x" * 1001, "re:" + "a" * 998],
+)
+def test_severity_patterns_need_re2_syntax_and_the_rule_length_limit(session, client_for, pattern):
+    # They run in every viewer's browser: like rules, a regex must be RE2
+    # (no lookaround or backreferences) and at most 1000 characters as typed.
+    _, admin = _make_role_and_user(
+        session, global_capabilities=[GlobalCapability.manage_system_settings]
+    )
+    role, user = _make_role_and_user(session)
+    source = _make_source(session)
+    _grant(session, role, source, [Capability.view, Capability.manage_rules])
+    admin_client, client = client_for(admin), client_for(user)
+
+    response = admin_client.post("/severity-patterns", json={"level": "error", "pattern": pattern})
+    assert response.status_code == 400
+    response = client.post(
+        f"/sources/{source.id}/severity-patterns", json={"level": "error", "pattern": pattern}
+    )
+    assert response.status_code == 400
+    assert admin_client.get("/severity-patterns").json() == []
+    assert client.get(f"/sources/{source.id}/severity-patterns").json() == []
+
+    created = admin_client.post("/severity-patterns", json={"level": "error", "pattern": "x"})
+    pattern_id = created.json()["id"]
+    response = admin_client.patch(f"/severity-patterns/{pattern_id}", json={"pattern": pattern})
+    assert response.status_code == 400
+    assert admin_client.get("/severity-patterns").json()[0]["pattern"] == "x"
+
+
+@pytest.mark.parametrize("pattern", ["re:" + "a" * 997, "x" * 1000, r"re:\b(error|fatal)\b"])
+def test_severity_patterns_within_the_limits_are_saved(session, client_for, pattern):
     _, user = _make_role_and_user(
         session, global_capabilities=[GlobalCapability.manage_system_settings]
     )
-    client = client_for(user)
-    response = client.post(
-        "/severity-patterns", json={"level": "error", "pattern": "re:ERROR(?!: ignored)"}
+    response = client_for(user).post(
+        "/severity-patterns", json={"level": "error", "pattern": pattern}
     )
     assert response.status_code == 201

@@ -1,11 +1,18 @@
-import { describe, expect, it } from 'vitest'
+import { get } from 'svelte/store'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  findMatchesInLine,
   findProblemLines,
-  lineHasHighlight,
   nextProblemLine,
+  PATTERN_BUDGET_MS,
   previousProblemLine,
+  SeverityMatcher,
+  slowSeverityPatterns,
+  WATCHDOG_GRACE_MS,
+  type SeverityWorkerLike,
+  type SeverityWorkerReply,
+  type SeverityWorkerRequest,
 } from './severity-highlighting'
+import { matchLines } from './severity-matching'
 import type { SeverityPattern } from './types'
 
 function pattern(overrides: Partial<SeverityPattern> = {}): SeverityPattern {
@@ -22,96 +29,170 @@ function pattern(overrides: Partial<SeverityPattern> = {}): SeverityPattern {
   }
 }
 
-describe('findMatchesInLine', () => {
-  it('matches a literal (glob-kind) pattern case-insensitively, every occurrence', () => {
-    const matches = findMatchesInLine('ERROR: retry after error', [pattern({ pattern: 'error' })])
-    expect(matches).toHaveLength(2)
-    expect(matches[0]).toMatchObject({ matchStart: 0, matchLength: 5 })
-    expect(matches[1]).toMatchObject({ matchStart: 19, matchLength: 5 })
+/** A worker that answers like severity-worker.ts, a moment later, except
+ * that it never comes back from a pattern whose id is in `hangOn`, as when
+ * one call to the browser's regex engine doesn't return. */
+class FakeWorker implements SeverityWorkerLike {
+  onmessage: ((event: MessageEvent<SeverityWorkerReply>) => void) | null = null
+  terminated = false
+  readonly requests: SeverityWorkerRequest[] = []
+  private readonly hangOn: Set<number>
+
+  constructor(hangOn: Set<number>) {
+    this.hangOn = hangOn
+  }
+
+  postMessage(request: SeverityWorkerRequest): void {
+    this.requests.push(request)
+    setTimeout(() => this.run(request), 0)
+  }
+
+  terminate(): void {
+    this.terminated = true
+  }
+
+  private reply(reply: SeverityWorkerReply): void {
+    if (!this.terminated) this.onmessage?.({ data: reply } as MessageEvent<SeverityWorkerReply>)
+  }
+
+  private run({ id, lines, patterns }: SeverityWorkerRequest): void {
+    const matches = lines.map(() => [] as ReturnType<typeof matchLines>['matches'][number])
+    const slow: number[] = []
+    for (const p of patterns) {
+      this.reply({ id, type: 'start', patternId: p.id })
+      if (this.hangOn.has(p.id)) return
+      const result = matchLines(lines, [p])
+      result.matches.forEach((m, i) => matches[i].push(...m))
+      slow.push(...result.slow)
+    }
+    this.reply({ id, type: 'done', matches, slow })
+  }
+}
+
+function fakeMatcher(hangOn: number[] = []) {
+  const workers: FakeWorker[] = []
+  const matcher = new SeverityMatcher(() => {
+    const worker = new FakeWorker(new Set(hangOn))
+    workers.push(worker)
+    return worker
+  })
+  return { matcher, workers }
+}
+
+describe('SeverityMatcher', () => {
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
-  it('treats glob-kind wildcards as literal text, not path globbing', () => {
-    const matches = findMatchesInLine('a*b literal', [pattern({ pattern: 'a*b' })])
-    expect(matches).toHaveLength(1)
-    expect(matches[0].matchStart).toBe(0)
+  it('matches lines in the worker', async () => {
+    const { matcher, workers } = fakeMatcher()
+    const matches = await matcher.match(['ok', 'an error'], [pattern({ id: 101 })])
+    expect(matches.map((m) => m.length)).toEqual([0, 1])
+    expect(workers).toHaveLength(1)
   })
 
-  it('matches a regex-kind pattern', () => {
-    const matches = findMatchesInLine('retry #42 failed', [
-      pattern({ pattern: '\\d+', pattern_kind: 'regex' }),
+  it('stops a worker stuck on a pattern, turns the pattern off, and keeps the others', async () => {
+    vi.useFakeTimers()
+    const { matcher, workers } = fakeMatcher([201])
+    const stuck = pattern({ id: 201, pattern: '(a+)+$', pattern_kind: 'regex' })
+    const fine = pattern({ id: 202, pattern: 'error', level: 'warning' })
+
+    const result = matcher.match(['aaaa error'], [stuck, fine])
+    // Within its budget and the grace, the worker is left alone.
+    await vi.advanceTimersByTimeAsync(PATTERN_BUDGET_MS + WATCHDOG_GRACE_MS - 1)
+    expect(workers[0].terminated).toBe(false)
+    await vi.advanceTimersByTimeAsync(2)
+    expect(workers[0].terminated).toBe(true)
+
+    const matches = await result
+    expect(matches[0]).toEqual([expect.objectContaining({ level: 'warning', matchStart: 5 })])
+    expect(get(slowSeverityPatterns).filter((p) => p.id === 201)).toHaveLength(1)
+    // A new worker took the request without the pattern, and never sees it again.
+    expect(workers).toHaveLength(2)
+    expect(workers[1].requests[0].patterns.map((p) => p.id)).toEqual([202])
+    vi.useRealTimers()
+    await matcher.match(['aaaa'], [stuck, fine])
+    expect(workers[1].requests[1].patterns.map((p) => p.id)).toEqual([202])
+  })
+
+  it('turns off a pattern the worker found over its budget', async () => {
+    const { matcher } = fakeMatcher()
+    let now = 0
+    const spy = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => (now += PATTERN_BUDGET_MS + 1))
+    const slow = pattern({ id: 301 })
+    const matches = await matcher.match(['error'], [slow])
+    spy.mockRestore()
+
+    expect(matches).toEqual([[]])
+    expect(get(slowSeverityPatterns).filter((p) => p.id === 301)).toHaveLength(1)
+    // Turned off: it matches nothing any more, and is listed once.
+    expect(await matcher.match(['error'], [slow])).toEqual([[]])
+    expect(get(slowSeverityPatterns).filter((p) => p.id === 301)).toHaveLength(1)
+  })
+
+  it('answers requests one at a time, in order', async () => {
+    const { matcher } = fakeMatcher()
+    const p = pattern({ id: 401 })
+    const [first, second] = await Promise.all([
+      matcher.match(['error'], [p]),
+      matcher.match(['ok', 'error error'], [p]),
     ])
-    expect(matches).toHaveLength(1)
-    expect(matches[0]).toMatchObject({ matchStart: 7, matchLength: 2 })
+    expect(first.map((m) => m.length)).toEqual([1])
+    expect(second.map((m) => m.length)).toEqual([0, 2])
   })
 
-  it('skips an invalid regex pattern instead of throwing', () => {
-    expect(() =>
-      findMatchesInLine('anything', [pattern({ pattern: '(unclosed', pattern_kind: 'regex' })]),
-    ).not.toThrow()
-    expect(findMatchesInLine('anything', [pattern({ pattern: '(unclosed', pattern_kind: 'regex' })])).toEqual(
-      [],
-    )
-  })
-
-  it('does not infinite-loop on a zero-length regex match', () => {
-    const matches = findMatchesInLine('abc', [pattern({ pattern: 'x*', pattern_kind: 'regex' })])
-    expect(matches).toEqual([])
-  })
-
-  it('skips disabled patterns', () => {
-    expect(findMatchesInLine('error here', [pattern({ enabled: false })])).toEqual([])
-  })
-
-  it('combines matches from multiple independent patterns', () => {
-    const matches = findMatchesInLine('warn: retry, then error', [
-      pattern({ pattern: 'warn', level: 'warning' }),
-      pattern({ pattern: 'error', level: 'error' }),
-    ])
-    expect(matches.map((m) => m.level)).toEqual(['warning', 'error'])
-  })
-})
-
-describe('lineHasHighlight', () => {
-  it('is true only when a matching pattern has highlight_line set', () => {
-    expect(lineHasHighlight('fatal crash', [pattern({ pattern: 'fatal', highlight_line: true })])).toBe(
-      true,
-    )
-    expect(lineHasHighlight('info: ok', [pattern({ pattern: 'info', highlight_line: false })])).toBe(
-      false,
-    )
-  })
-
-  it('is false when nothing matches', () => {
-    expect(lineHasHighlight('all clear', [pattern({ pattern: 'error', highlight_line: true })])).toBe(
-      false,
-    )
+  it('needs no worker when no pattern applies', async () => {
+    const { matcher, workers } = fakeMatcher()
+    expect(await matcher.match(['error'], [pattern({ enabled: false })])).toEqual([[]])
+    expect(workers).toHaveLength(0)
   })
 })
 
 describe('findProblemLines', () => {
   const content = 'line one\nERROR here\nline three\nwarn: retry\nline five'
 
-  it('returns 1-indexed lines with a navigation-eligible match', () => {
-    expect(findProblemLines(content, [pattern({ pattern: 'error' })])).toEqual([2])
+  it('returns 1-indexed lines with a navigation-eligible match', async () => {
+    const { matcher } = fakeMatcher()
+    expect(await findProblemLines(content, [pattern({ pattern: 'error' })], matcher)).toEqual([2])
   })
 
-  it('excludes patterns with include_in_navigation false', () => {
+  it('excludes patterns with include_in_navigation false', async () => {
+    const { matcher, workers } = fakeMatcher()
     expect(
-      findProblemLines(content, [pattern({ pattern: 'error', include_in_navigation: false })]),
+      await findProblemLines(
+        content,
+        [pattern({ pattern: 'error', include_in_navigation: false })],
+        matcher,
+      ),
     ).toEqual([])
+    expect(workers).toHaveLength(0)
   })
 
-  it('collects matches across multiple patterns, sorted ascending', () => {
+  it('collects matches across multiple patterns, sorted ascending', async () => {
+    const { matcher } = fakeMatcher()
     expect(
-      findProblemLines(content, [
-        pattern({ pattern: 'warn', level: 'warning' }),
-        pattern({ pattern: 'error', level: 'error' }),
-      ]),
+      await findProblemLines(
+        content,
+        [
+          pattern({ id: 501, pattern: 'warn', level: 'warning' }),
+          pattern({ id: 502, pattern: 'error', level: 'error' }),
+        ],
+        matcher,
+      ),
     ).toEqual([2, 4])
   })
 
-  it('returns empty for no patterns', () => {
-    expect(findProblemLines(content, [])).toEqual([])
+  it('matches only the first 2000 characters of each line', async () => {
+    const { matcher } = fakeMatcher()
+    const p = pattern({ id: 503 })
+    expect(await findProblemLines('x'.repeat(2500) + 'error\nerror', [p], matcher)).toEqual([2])
+  })
+
+  it('returns empty for no patterns', async () => {
+    const { matcher } = fakeMatcher()
+    expect(await findProblemLines(content, [], matcher)).toEqual([])
   })
 })
 

@@ -21,8 +21,9 @@ export function findRedactionMarkers(line: string): MarkerMatch[] {
 }
 
 // Markers the server doesn't count as a value: a line still being written,
-// or one too long to read whole.
-const UNCOUNTED = /^\[redacted: (incomplete line|line over [^\]]*)\]$/
+// one too long to read whole, or the rest of a file in an encoding
+// redaction doesn't support.
+const UNCOUNTED = /^\[redacted: (incomplete line|line over [^\]]*|unsupported encoding)\]$/
 
 /** How many redacted values `text` shows, the way the server counts them
  * in X-Redaction-Count: used to take the lines the Tail drops from the top

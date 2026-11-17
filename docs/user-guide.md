@@ -206,6 +206,8 @@ A folder ZIP is streamed while it is built, so the browser doesn't know its tota
 
 An archive inside an archive is listed as a file: it doesn't expand.
 
+A `.tar.gz` or `.tgz` with more than 50,000 entries, or more than 8 MiB of names, lists only its first entries, and says the list was cut short; the files past them can't be opened from it.
+
 An archive can be downloaded whole only when none of its files is hidden on purpose by the rules. Otherwise the download is refused with "This archive can't be downloaded whole: open or download its files one by one." The files you can see in it still open and download one by one.
 
 PerchTail also refuses the whole archive when it can't read it as an archive, or when it holds another archive, as soon as the source has any exclude rule.

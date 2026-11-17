@@ -35,7 +35,10 @@ class SeverityPatternPublic(BaseModel):
 
 class SeverityPatternCreate(BaseModel):
     level: SeverityLevel
-    # Same admin-facing syntax as Rule: default glob, `re:` prefix for regex.
+    # Same admin-facing syntax and limits as Rule: default glob, `re:` prefix
+    # for a regex in RE2 syntax, at most MAX_PATTERN_CHARS (parse_pattern_or_400).
+    # It runs in every viewer's browser, which also bounds its time there
+    # (frontend/src/lib/severity-highlighting.ts).
     pattern: str
     enabled: bool = True
     highlight_line: bool = False
@@ -54,9 +57,7 @@ def _apply_update(pattern: SeverityPattern, payload: SeverityPatternUpdate) -> N
     if payload.level is not None:
         pattern.level = payload.level
     if payload.pattern is not None:
-        pattern.pattern, pattern.pattern_kind = parse_pattern_or_400(
-            payload.pattern, linear_time=False
-        )
+        pattern.pattern, pattern.pattern_kind = parse_pattern_or_400(payload.pattern)
     if payload.enabled is not None:
         pattern.enabled = payload.enabled
     if payload.highlight_line is not None:
@@ -83,7 +84,7 @@ def create_global_pattern(
     user: User = Depends(require_manage_global),
     session: Session = Depends(get_session),
 ):
-    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern, linear_time=False)
+    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern)
     pattern = SeverityPattern(
         source_id=None,
         level=payload.level,
@@ -185,7 +186,7 @@ def create_source_pattern(
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
-    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern, linear_time=False)
+    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern)
     pattern = SeverityPattern(
         source_id=source.id,
         level=payload.level,

@@ -1,11 +1,30 @@
+import { writable } from 'svelte/store'
 import { nextLine, previousLine } from './line-cycle'
+import {
+  HIGHLIGHT_MAX_CHARS,
+  PATTERN_BUDGET_MS,
+  type LinesMatched,
+  type SeverityMatch,
+} from './severity-matching'
 import type { SeverityPattern } from './types'
 
-export interface SeverityMatch {
-  matchStart: number
-  matchLength: number
-  level: SeverityPattern['level']
-  highlightLine: boolean
+export { HIGHLIGHT_MAX_CHARS, PATTERN_BUDGET_MS, type SeverityMatch }
+
+/** How long past its budget a pattern may keep the worker busy before the
+ * worker is stopped: the worker checks the budget itself between calls to
+ * the regex engine, so this only catches one call that doesn't return. */
+export const WATCHDOG_GRACE_MS = 500
+
+/** A pattern over its budget (severity-matching.ts) is turned off until the
+ * page is reloaded, and listed in `slowSeverityPatterns` for the viewer to
+ * say so. */
+const slowPatternIds = new Set<number>()
+export const slowSeverityPatterns = writable<SeverityPattern[]>([])
+
+function turnOff(pattern: SeverityPattern): void {
+  if (slowPatternIds.has(pattern.id)) return
+  slowPatternIds.add(pattern.id)
+  slowSeverityPatterns.update((list) => [...list, pattern])
 }
 
 export const LEVEL_CLASS: Record<SeverityPattern['level'], string> = {
@@ -15,74 +34,143 @@ export const LEVEL_CLASS: Record<SeverityPattern['level'], string> = {
   debug: 'cm-level-debug',
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/** What the page asks the worker (severity-worker.ts), and what it answers:
+ * `start` before each pattern runs, then `done`. */
+export interface SeverityWorkerRequest {
+  id: number
+  lines: string[]
+  patterns: SeverityPattern[]
 }
 
-/** Compiles one pattern into a global, case-insensitive matcher. Unlike
- * Rule's path-oriented glob compiler (backend app/rules.py's `_compile_glob`,
- * anchored and `**`/`*` path-segment-aware), a "glob"-kind severity pattern
- * is matched as a literal substring anywhere in the line -- line-content
- * matching needs "does this text appear", not path globbing, so `*`/`**`
- * aren't given special meaning here. Returns null for an invalid
- * user-supplied regex rather than throwing, so one bad admin-entered
- * pattern doesn't break highlighting for every other pattern. */
-function compilePattern(pattern: SeverityPattern): RegExp | null {
-  try {
-    const source =
-      pattern.pattern_kind === 'regex' ? pattern.pattern : escapeRegex(pattern.pattern)
-    return new RegExp(source, 'gi')
-  } catch {
-    return null
+export type SeverityWorkerReply =
+  | { id: number; type: 'start'; patternId: number }
+  | ({ id: number; type: 'done' } & LinesMatched)
+
+/** The part of a Worker the matcher uses. */
+export interface SeverityWorkerLike {
+  onmessage: ((event: MessageEvent<SeverityWorkerReply>) => void) | null
+  postMessage(request: SeverityWorkerRequest): void
+  terminate(): void
+}
+
+interface Job {
+  lines: string[]
+  patterns: SeverityPattern[]
+  resolve: (matches: SeverityMatch[][]) => void
+}
+
+/** Runs severity patterns in a Web Worker, one request at a time. When a
+ * pattern keeps the worker busy past PATTERN_BUDGET_MS + WATCHDOG_GRACE_MS
+ * (one call to the regex engine that doesn't return), the worker is
+ * stopped, the pattern turned off, and the request sent again to a new
+ * worker without it, so the other patterns still apply. */
+export class SeverityMatcher {
+  private worker: SeverityWorkerLike | null = null
+  private readonly queue: Job[] = []
+  private current: Job | null = null
+  private currentId = 0
+  private watchdog: ReturnType<typeof setTimeout> | undefined
+  private readonly createWorker: () => SeverityWorkerLike
+
+  constructor(createWorker: () => SeverityWorkerLike) {
+    this.createWorker = createWorker
   }
-}
 
-/** Scans one line against every enabled pattern, collecting every match
- * (not just the first) so multiple markers on the same line each get
- * highlighted -- same "every occurrence" behavior the old hardcoded
- * MatchDecorator-based token highlighting had. */
-export function findMatchesInLine(lineText: string, patterns: SeverityPattern[]): SeverityMatch[] {
-  const matches: SeverityMatch[] = []
-  for (const pattern of patterns) {
-    if (!pattern.enabled) continue
-    const regex = compilePattern(pattern)
-    if (!regex) continue
+  /** The matches of each line, from the enabled patterns not turned off. */
+  match(lines: string[], patterns: SeverityPattern[]): Promise<SeverityMatch[][]> {
+    return new Promise((resolve) => {
+      this.queue.push({ lines, patterns: patterns.filter((p) => p.enabled), resolve })
+      this.next()
+    })
+  }
 
-    let match: RegExpExecArray | null
-    while ((match = regex.exec(lineText)) !== null) {
-      if (match[0].length === 0) {
-        regex.lastIndex += 1
-        continue
-      }
-      matches.push({
-        matchStart: match.index,
-        matchLength: match[0].length,
-        level: pattern.level,
-        highlightLine: pattern.highlight_line,
-      })
+  private next(): void {
+    while (!this.current && this.queue.length > 0) {
+      this.current = this.queue.shift() ?? null
+      this.send()
     }
   }
-  return matches
+
+  private send(): void {
+    const job = this.current
+    if (!job) return
+    job.patterns = job.patterns.filter((p) => !slowPatternIds.has(p.id))
+    if (job.patterns.length === 0 || job.lines.length === 0) {
+      this.finish(job.lines.map(() => []))
+      return
+    }
+    if (!this.worker) {
+      this.worker = this.createWorker()
+      this.worker.onmessage = (event) => this.receive(event.data)
+    }
+    this.currentId += 1
+    this.worker.postMessage({ id: this.currentId, lines: job.lines, patterns: job.patterns })
+  }
+
+  private receive(reply: SeverityWorkerReply): void {
+    const job = this.current
+    if (!job || reply.id !== this.currentId) return
+    clearTimeout(this.watchdog)
+    if (reply.type === 'start') {
+      const pattern = job.patterns.find((p) => p.id === reply.patternId)
+      if (pattern) {
+        this.watchdog = setTimeout(
+          () => this.stuck(pattern),
+          PATTERN_BUDGET_MS + WATCHDOG_GRACE_MS,
+        )
+      }
+      return
+    }
+    for (const id of reply.slow) {
+      const pattern = job.patterns.find((p) => p.id === id)
+      if (pattern) turnOff(pattern)
+    }
+    this.finish(reply.matches)
+  }
+
+  private stuck(pattern: SeverityPattern): void {
+    this.worker?.terminate()
+    this.worker = null
+    turnOff(pattern)
+    this.send()
+  }
+
+  private finish(matches: SeverityMatch[][]): void {
+    const job = this.current
+    this.current = null
+    job?.resolve(matches)
+    this.next()
+  }
 }
 
-export function lineHasHighlight(lineText: string, patterns: SeverityPattern[]): boolean {
-  return findMatchesInLine(lineText, patterns).some((m) => m.highlightLine)
-}
+/** The page's own matcher. The worker is a file of the bundle, served from
+ * the page's origin, which the CSP allows: it has no `worker-src` or
+ * `child-src`, so workers fall back to `script-src 'self'`
+ * (backend/app/main.py). */
+export const severityMatcher = new SeverityMatcher(
+  () =>
+    new Worker(new URL('./severity-worker.ts', import.meta.url), {
+      type: 'module',
+    }) as unknown as SeverityWorkerLike,
+)
 
 /** 1-indexed line numbers containing a match from a navigation-eligible
  * pattern (`include_in_navigation`), for the "next/previous problem" step
  * command -- deliberately a per-pattern flag rather than a fixed
  * warn-or-worse severity floor, so an admin decides what counts as a "step
  * to" problem instead of it being hardcoded. */
-export function findProblemLines(content: string, patterns: SeverityPattern[]): number[] {
+export async function findProblemLines(
+  content: string,
+  patterns: SeverityPattern[],
+  matcher: SeverityMatcher = severityMatcher,
+): Promise<number[]> {
   const navPatterns = patterns.filter((p) => p.include_in_navigation)
   if (navPatterns.length === 0) return []
 
+  const matches = await matcher.match(content.split('\n'), navPatterns)
   const result: number[] = []
-  content.split('\n').forEach((lineText, index) => {
-    if (findMatchesInLine(lineText, navPatterns).length > 0) {
-      result.push(index + 1)
-    }
+  matches.forEach((lineMatches, index) => {
+    if (lineMatches.length > 0) result.push(index + 1)
   })
   return result
 }
