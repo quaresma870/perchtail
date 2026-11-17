@@ -33,13 +33,19 @@ from app.agent_upgrades import (
 )
 from app.api.auth import get_current_active_user
 from app.api.sources import (
-    MANAGE_EXISTING_SOURCE_REFUSED,
+    BULK_NOT_FOUND,
     can_manage_existing_source,
     require_manage_existing_source,
 )
 from app.audit import record_audit_event
-from app.auth.models import GlobalCapability, User
-from app.auth.rbac import require_global_capability
+from app.auth.models import Capability, GlobalCapability, User
+from app.auth.rbac import (
+    SOURCE_NOT_FOUND,
+    concealed,
+    record_access_denied,
+    require_global_capability,
+    source_in_reach,
+)
 from app.db import get_session
 from app.logging_config import get_logger
 from app.models import AgentUpgradeRun, Protocol, Source
@@ -341,12 +347,22 @@ def _agent_source(
     """The push-agent source. With `manager`, changing it (its policy, its
     upgrades) also needs manage sources on it, as editing the source does.
     With `reader`, reading its upgrades needs the same, and a source without
-    it is not found, so it isn't revealed."""
+    it is not found, so it isn't revealed. A source outside the caller's
+    reach answers like one that doesn't exist; both refusals are audited."""
+    user = manager or reader
     source = session.get(Source, source_id)
     if source is None or source.is_system:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+        if source is not None and user is not None and not user.role.is_super_admin:
+            raise concealed(SOURCE_NOT_FOUND, reason="source_out_of_reach", user=user)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SOURCE_NOT_FOUND)
+    if user is not None and not source_in_reach(session, user, source):
+        raise concealed(SOURCE_NOT_FOUND, reason="source_out_of_reach", user=user)
     if reader is not None and not can_manage_existing_source(session, reader, source):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+        raise concealed(
+            SOURCE_NOT_FOUND,
+            reason=f"missing_capability:{Capability.manage_source}",
+            user=reader,
+        )
     if manager is not None:
         require_manage_existing_source(session, manager, source)
     if source.protocol != Protocol.agent:
@@ -545,19 +561,26 @@ def upgrade_agents(
     targets: list[tuple[int, str | None]] = []
     for source_id in wanted:
         source = found.get(source_id)
-        if source is None or source.is_system:
+        if (
+            source is None
+            or source.is_system
+            or not can_manage_existing_source(session, user, source)
+        ):
+            # Same rule as upgrading it on its own. A source the role can't
+            # change is answered like one that doesn't exist, without its
+            # name, since the role may not even see it; the refusal is
+            # audited.
+            if source is not None and not user.role.is_super_admin:
+                record_access_denied(
+                    session,
+                    user,
+                    attempted="POST /agent-upgrades",
+                    target_type="source",
+                    target_id=source_id,
+                    reason=f"missing_capability:{Capability.manage_source}",
+                )
             results[source_id] = BulkAgentUpgradeResult(
-                source_id=source_id, name=None, result="skipped", detail="Not found"
-            )
-            continue
-        if not can_manage_existing_source(session, user, source):
-            # Same rule as upgrading it on its own; its name isn't given
-            # back, since the role may not even see it.
-            results[source_id] = BulkAgentUpgradeResult(
-                source_id=source_id,
-                name=None,
-                result="skipped",
-                detail=MANAGE_EXISTING_SOURCE_REFUSED,
+                source_id=source_id, name=None, result="skipped", detail=BULK_NOT_FOUND
             )
             continue
         reason = not_upgradable(source)
@@ -581,4 +604,6 @@ def upgrade_agents(
             result=started.result,
             detail=started.detail,
         )
+    # The access.denied entries of refused items.
+    session.commit()
     return [results[source_id] for source_id in wanted]

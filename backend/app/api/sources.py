@@ -28,8 +28,10 @@ from app.auth.rbac import (
     delete_scope_grants,
     folder_in_reach,
     folder_path_boundary,
+    get_source_in_reach,
     holds_capability_at,
     move_keeps_access_within,
+    record_access_denied,
     require_capability,
     require_global_capability,
     resolve_capability,
@@ -40,7 +42,7 @@ from app.collectors import smb as smb_collector
 from app.collectors import smb_shares
 from app.collectors import ssh as ssh_collector
 from app.collectors import winrm as winrm_collector
-from app.collectors.base import SourceError, SourceNotFoundError
+from app.collectors.base import SourceError, SourceNotFoundError, SourceUnreachableError
 from app.collectors.errors import translate_smb, translate_winrm, translated
 from app.collectors.registry import CONNECTORS
 from app.crypto import encrypt_credential
@@ -81,6 +83,12 @@ _MAX_CA_PEM = 64 * 1024
 class SourceRootModel(BaseModel):
     label: str
     path: str
+
+
+class AgentConnectionReplaced(BaseModel):
+    previous_address: str | None
+    address: str | None
+    at: datetime
 
 
 class SourcePublic(BaseModel):
@@ -140,6 +148,10 @@ class SourcePublic(BaseModel):
     name_indexed_at: datetime | None
     name_index_files: int | None
     name_index_message: str | None
+    # Agent sources: set when the agent's connection was replaced by one
+    # from another address (two agents may share the token), until the next
+    # connection that replaces none. Only for users with manage_source.
+    agent_connection_replaced: AgentConnectionReplaced | None = None
     # What the requesting user may do on this source (view, download,
     # manage_rules, run_now, manage_source), so the UI can hide actions it would refuse --
     # e.g. Download buttons for a view-only role (#174). Informational only:
@@ -247,6 +259,20 @@ def _to_public(
 ) -> SourcePublic:
     rule_count = len(session.exec(select(Rule).where(Rule.source_id == source.id)).all())
     boundary = folder_path_boundary(folder_ctx, source)
+    capabilities = (
+        [c for c in Capability if resolve_capability(session, user, source, c)]
+        if user is not None
+        else []
+    )
+    replaced = None
+    if source.protocol == Protocol.agent and Capability.manage_source in capabilities:
+        warning = get_agent_registry().connection_replaced(source.id)
+        if warning is not None:
+            replaced = AgentConnectionReplaced(
+                previous_address=warning.previous_address,
+                address=warning.address,
+                at=warning.at,
+            )
     return SourcePublic(
         id=source.id,
         name=source.name,
@@ -287,11 +313,8 @@ def _to_public(
         name_indexed_at=source.name_indexed_at,
         name_index_files=source.name_index_files,
         name_index_message=source.name_index_message,
-        my_capabilities=(
-            [c for c in Capability if resolve_capability(session, user, source, c)]
-            if user is not None
-            else []
-        ),
+        agent_connection_replaced=replaced,
+        my_capabilities=capabilities,
     )
 
 
@@ -318,7 +341,7 @@ def _require_allowed_local_base_path(base_path: str) -> None:
         )
 
 
-_DRIVE_PATH = re.compile(r"^[A-Za-z]:([\\/]|$)")
+_DRIVE_PATH = winrm_collector.DRIVE_PATH
 _ADMIN_SHARE = re.compile(r"^([A-Za-z]\$|ADMIN\$|IPC\$)$", re.IGNORECASE)
 
 
@@ -361,9 +384,12 @@ def _validate_base_path(protocol: Protocol, base_path: str) -> str:
                 "(see docs/source-setup.md) so the account can't read the whole disk"
             )
     elif protocol == Protocol.winrm:
-        if not (_DRIVE_PATH.match(path) or path.startswith("\\\\")):
+        # A drive path only: a UNC path (\\server\share) or a device path
+        # (\\?\..., \\.\...) would have the WinRM host reach out to another
+        # machine with its own credentials.
+        if not _DRIVE_PATH.match(path):
             raise _bad_request(
-                "WinRM Base path must be an absolute Windows path, e.g. D:\\Logs\\App"
+                "WinRM Base path must be an absolute Windows path on a drive, e.g. D:\\Logs\\App"
             )
     elif protocol == Protocol.local:
         _require_allowed_local_base_path(path)
@@ -468,22 +494,27 @@ def _location(source: Source) -> dict:
     }
 
 
+FOLDER_CUSTOMER_MISMATCH = "folder_id must belong to customer_id"
+
+
 def _validate_scope(
     session: Session, user: User, *, customer_id: int | None, folder_id: int | None
 ) -> None:
     """The customer or folder must exist; one outside the caller's reach
     answers exactly like one that doesn't, so the answer can't tell which
-    ids exist."""
+    ids exist. A source in a folder belongs to the folder's customer: any
+    other customer_id, or none, is refused, so the source can't sit in a
+    folder while escaping its customer's grants."""
     if folder_id is not None:
         folder = session.get(Folder, folder_id)
         if folder is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
         if not folder_in_reach(session, user, folder_id):
             raise concealed("Folder not found", reason="folder_out_of_reach", user=user)
-        if customer_id is not None and folder.customer_id != customer_id:
+        if folder.customer_id != customer_id:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="folder_id must belong to customer_id",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=FOLDER_CUSTOMER_MISMATCH,
             )
     elif customer_id is not None:
         if session.get(Customer, customer_id) is None:
@@ -719,9 +750,7 @@ def update_source(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    source = session.get(Source, source_id)
-    if source is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    source = get_source_in_reach(session, user, source_id)
     _require_not_system(source)
     require_manage_existing_source(session, user, source)
     _reject_encrypted_private_key(payload.credential)
@@ -881,9 +910,7 @@ def delete_source(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    source = session.get(Source, source_id)
-    if source is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    source = get_source_in_reach(session, user, source_id)
     _require_not_system(source)
     require_manage_existing_source(session, user, source)
 
@@ -962,8 +989,7 @@ def index_names_now(
 
 @router.post("/{source_id}/check", response_model=ConnectionCheckResult)
 def check_connection(
-    source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
-    user: User = Depends(get_current_active_user),
+    source: Source = Depends(require_capability(Capability.manage_source, get_current_active_user)),
 ):
     """On-demand reachability check — lists the source's base path through
     its connector. Replaces the pre-pivot "run-now"/"last run" concept from
@@ -971,10 +997,11 @@ def check_connection(
     so there is nothing to run, only a live connection to test (see
     docs/design-decisions.md, "Scope and principles").
 
-    Anyone with `view` can run it, so the answer is the mapped, actionable
-    message (SourceError.public_message) plus the effective base path; the
-    raw library error, which can carry UNC paths, host keys or internals,
-    is added only for users who can manage sources (#170). A disabled
+    It needs manage_source on the source. The answer is the mapped,
+    actionable message (SourceError.public_message) plus the effective base
+    path; a closed port, a refused connection and a timeout all get the same
+    neutral message, and the raw library error, which can carry UNC paths,
+    host keys or internals, only goes to the server log (#170). A disabled
     source is off, so it isn't contacted (409)."""
     if not source.enabled:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=SOURCE_DISABLED)
@@ -989,14 +1016,22 @@ def check_connection(
     failed = source_status.check(source, connector)
     source_status.record_check(source.id, failed)
     if failed:
-        failures = [_check_failure_message(source, root, exc, user) for root, exc in failed]
+        # source_status.check logged each failure with its raw error.
+        failures = [_check_failure_message(source, root, exc) for root, exc in failed]
         return ConnectionCheckResult(ok=False, detail="; ".join(failures))
     if len(roots) > 1:
         return ConnectionCheckResult(ok=True, detail=f"Connected ({len(roots)} folders)")
     return ConnectionCheckResult(ok=True, detail="Connected")
 
 
-def _check_failure_message(source: Source, root: dict, exc: Exception, user: User) -> str:
+# What a caller is told when a connection couldn't be made, whatever the
+# reason (a closed port, a refused connection, a timeout, an error the
+# connector doesn't map): the same words, so the answer can't be used to
+# probe which ports answer. The reason goes to the server log.
+CONNECTION_FAILED = SourceUnreachableError.public_message
+
+
+def _check_failure_message(source: Source, root: dict, exc: Exception) -> str:
     where = f"base path: {root['path'] or '/'}"
     if root["label"]:
         where = f"folder {root['label']}: {root['path']}"
@@ -1008,15 +1043,15 @@ def _check_failure_message(source: Source, root: dict, exc: Exception, user: Use
                 "chroot (usually /)."
             )
     else:
-        message = f"The connection check failed ({where})"
-    if _can_manage_sources(user):
-        message += f" — {exc}"
+        message = f"{CONNECTION_FAILED} ({where})"
     return message
 
 
-def _can_manage_sources(user: User) -> bool:
-    role = user.role
-    return role.is_super_admin or GlobalCapability.create_source in role.global_capabilities
+def _connection_failed(exc: Exception) -> SourceUnreachableError:
+    """The neutral error for a connection the folder picker couldn't make
+    (see CONNECTION_FAILED); what really happened is kept as its detail,
+    which app/api/errors.py logs and never sends."""
+    return SourceUnreachableError(f"{type(exc).__name__}: {exc}")
 
 
 class AgentTokenResult(BaseModel):
@@ -1035,9 +1070,7 @@ def regenerate_agent_token(
     returned here once and never again; regenerating invalidates whatever
     token the agent config was using before, same UX as an admin resetting a
     user's password."""
-    source = session.get(Source, source_id)
-    if source is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    source = get_source_in_reach(session, user, source_id)
     require_manage_existing_source(session, user, source)
     if source.protocol != Protocol.agent:
         raise HTTPException(
@@ -1104,27 +1137,31 @@ class FolderPickResult(BaseModel):
 
 
 def _picker_source(session: Session, user: User, payload: FolderPickRequest) -> Source:
-    saved = session.get(Source, payload.source_id) if payload.source_id is not None else None
-    if payload.source_id is not None and saved is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
-    if saved is not None:
+    """The draft source to browse. With `source_id`, that source must be
+    within the caller's reach and they must hold manage_source on it,
+    whatever credential is used, and its host and port are always the
+    saved ones: the request's are ignored, so a saved source can't be used
+    to reach another host. Without it, the request says where to connect
+    (create_source, checked by the endpoint, is enough for that)."""
+    saved = None
+    if payload.source_id is not None:
+        saved = get_source_in_reach(session, user, payload.source_id)
         _require_not_system(saved)
+        require_manage_existing_source(session, user, saved)
     protocol = saved.protocol if saved is not None else payload.protocol
     if protocol not in _PICKER_PROTOCOLS:
         raise _bad_request("Browsing for a folder works with SSH, SMB and WinRM sources")
-    host = (payload.host or (saved.host if saved else "")).strip()
+    if saved is not None:
+        host, port = saved.host, saved.port
+    else:
+        host = (payload.host or "").strip()
+        port = payload.port
     if not host:
         raise _bad_request("Enter the host first")
-    port = payload.port if "port" in payload.model_fields_set else (saved.port if saved else None)
 
     if payload.credential is not None:
         credential_ref = encrypt_credential(payload.credential)
     elif saved is not None and saved.credential_ref is not None:
-        require_manage_existing_source(session, user, saved)
-        # The saved credential is only ever sent to the host it was saved
-        # for -- pointing the picker somewhere else needs it typed again.
-        if (host, port) != (saved.host, saved.port):
-            raise _bad_request(CREDENTIAL_REQUIRED_FOR_NEW_HOST)
         credential_ref = saved.credential_ref
     else:
         raise _bad_request("Enter the credential first")
@@ -1204,7 +1241,8 @@ def _pick(source: Source, path: str) -> tuple[str, str | None, str, list[FolderP
                 "drives",
                 [FolderPickEntry(name=d, path=d.rstrip("\\") + "\\") for d in drives],
             )
-        if not _DRIVE_PATH.match(path) and not path.startswith("\\\\"):
+        # A drive only, as for the Base path: never a UNC or device path.
+        if not _DRIVE_PATH.match(path):
             raise _bad_request("Pick a drive first, e.g. D:\\")
         listed = path + "\\" if re.fullmatch(r"[A-Za-z]:", path) else path
         names = _list_folders(connector, source, listed)
@@ -1218,7 +1256,10 @@ def _pick(source: Source, path: str) -> tuple[str, str | None, str, list[FolderP
             [FolderPickEntry(name=n, path=f"{path}\\{n}") for n in names],
         )
 
-    # SMB: the top level is the server's shares.
+    # SMB: the top level is the server's shares; a path is inside one of them,
+    # never a UNC or device path of its own.
+    if path.startswith("\\\\"):
+        raise _bad_request("Pick a share first")
     if not path:
         with translated(translate_smb), smb_collector._connection(source) as kwargs:
             shares = smb_shares.list_shares(source.host, kwargs)
@@ -1236,10 +1277,21 @@ def pick_folder(
 ):
     """Lists the folders at `path` on a source's host so the Base path can
     be picked instead of typed (#159). Folders only, never file names, and
-    only for users who can manage sources; each listing is audited, since
-    it reaches outside any configured base path."""
+    only for users who can create sources (and manage the saved source,
+    when there is one); each listing is audited, since it reaches outside
+    any configured base path. A connection that can't be made is answered
+    with the same neutral error whatever the reason (CONNECTION_FAILED)."""
     source = _picker_source(session, user, payload)
-    path, parent, kind, entries = _pick(source, payload.path)
+    try:
+        path, parent, kind, entries = _pick(source, payload.path)
+    except HTTPException:
+        raise
+    except SourceError as exc:
+        if not isinstance(exc, SourceUnreachableError):
+            raise
+        raise _connection_failed(exc) from None
+    except Exception as exc:  # noqa: BLE001 - whatever it was, the caller gets the neutral error
+        raise _connection_failed(exc) from None
     record_audit_event(
         session,
         user_id=user.id,
@@ -1263,6 +1315,9 @@ def pick_folder(
 
 _CREDENTIAL_PROTOCOLS = (Protocol.ssh, Protocol.smb, Protocol.winrm)
 _MAX_BULK_SOURCES = 200
+# A batch item the caller can't act on, whether it doesn't exist or isn't
+# theirs: the same words, so the answer doesn't say which ids exist.
+BULK_NOT_FOUND = "Not found"
 
 
 class BulkCredentialRequest(BaseModel):
@@ -1306,22 +1361,23 @@ def update_credentials(
     results: list[BulkCredentialResult] = []
     for source_id in dict.fromkeys(payload.source_ids):
         source = session.get(Source, source_id)
-        if source is None:
-            results.append(
-                BulkCredentialResult(
-                    source_id=source_id, name=None, status="skipped", detail="Not found"
+        if source is None or not can_manage_existing_source(session, user, source):
+            # Same rule as editing it one by one. A source the role can't
+            # change is answered like one that doesn't exist, without its
+            # name, since the role may not even see it; the refusal is
+            # audited.
+            if source is not None:
+                record_access_denied(
+                    session,
+                    user,
+                    attempted="POST /sources/credentials",
+                    target_type="source",
+                    target_id=source_id,
+                    reason=f"missing_capability:{Capability.manage_source}",
                 )
-            )
-            continue
-        if not can_manage_existing_source(session, user, source):
-            # Same rule as editing it one by one; its name isn't given back,
-            # since the role may not even see it.
             results.append(
                 BulkCredentialResult(
-                    source_id=source_id,
-                    name=None,
-                    status="skipped",
-                    detail=MANAGE_EXISTING_SOURCE_REFUSED,
+                    source_id=source_id, name=None, status="skipped", detail=BULK_NOT_FOUND
                 )
             )
             continue

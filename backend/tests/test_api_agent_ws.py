@@ -112,6 +112,69 @@ def test_reconnecting_agent_stays_connected_when_the_old_socket_closes(session):
     assert _wait_until(lambda: not registry.is_connected(source.id))
 
 
+def test_a_replaced_connection_is_audited_with_both_addresses(session):
+    """A second connection with the token of a connected agent replaces the
+    first (a legitimate reconnection, usually), and that is audited."""
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    headers = {"authorization": "Bearer s3cret"}
+
+    with client.websocket_connect("/agent/connect", headers=headers):
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        assert session.exec(select(AuditLog)).all() == []
+        with client.websocket_connect("/agent/connect", headers=headers):
+            session.expire_all()
+            assert _wait_until(
+                lambda: session.exec(
+                    select(AuditLog).where(AuditLog.action == "agent.connection_replaced")
+                ).first()
+                is not None
+            )
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+    [entry] = session.exec(
+        select(AuditLog).where(AuditLog.action == "agent.connection_replaced")
+    ).all()
+    assert (entry.user_id, entry.target_type, entry.target_id) == (None, "source", source.id)
+    # The test client connects from "testclient" both times.
+    assert entry.event_metadata["previous_address"] == "testclient"
+    assert entry.event_metadata["address"] == "testclient"
+
+
+def test_the_replaced_connection_is_closed_only_after_the_commit(session, monkeypatch):
+    """Closing the old socket may wait on its peer; the audit row's write
+    transaction (and SQLite's write lock) mustn't stay open meanwhile."""
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    original_register = registry.register
+    seen = []
+
+    def register_watching_the_close(sid, websocket, features=frozenset(), address=None):
+        replaced = original_register(sid, websocket, features, address)
+        if replaced is not None:
+            original_close = replaced.websocket.close
+
+            async def close(*args, **kwargs):
+                seen.append(session.in_transaction())
+                await original_close(*args, **kwargs)
+
+            replaced.websocket.close = close
+        return replaced
+
+    monkeypatch.setattr(registry, "register", register_watching_the_close)
+    client = _client(session)
+    headers = {"authorization": "Bearer s3cret"}
+    with client.websocket_connect("/agent/connect", headers=headers):
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        with client.websocket_connect("/agent/connect", headers=headers):
+            assert _wait_until(lambda: seen)
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+    assert seen == [False]
+
+
 def test_connect_records_the_os_the_agent_reports(session):
     """#189: rules for a Windows agent are matched case-insensitively, so
     the backend needs to know which OS the agent runs on."""
@@ -385,13 +448,13 @@ def test_a_token_regenerated_during_the_handshake_still_closes_the_connection(se
     original_register = registry.register
     registered = []
 
-    def register_after_a_regeneration(sid, websocket, features=frozenset()):
+    def register_after_a_regeneration(sid, websocket, features=frozenset(), address=None):
         session.execute(
             update(Source).where(Source.id == sid).values(agent_token_hash=_hash_token("new"))
         )
         session.commit()
         registry.disconnect(sid, "agent token regenerated")  # finds nothing yet
-        replaced = original_register(sid, websocket, features)
+        replaced = original_register(sid, websocket, features, address)
         registered.append(sid)
         return replaced
 

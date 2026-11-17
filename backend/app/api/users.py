@@ -11,6 +11,7 @@ from app.auth.models import AuthProviderType, GlobalCapability, Role, User
 from app.auth.providers.local import create_local_user, set_password
 from app.auth.rbac import (
     OWN_ROLE_REFUSED,
+    forbidden,
     require_global_capability,
     require_role_within_authority,
 )
@@ -71,6 +72,22 @@ def _get_manageable_user(session: Session, actor: User, user_id: int) -> User:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     require_role_within_authority(session, actor, target.role)
     return target
+
+
+_PEER_ADMIN_CAPABILITIES = (GlobalCapability.manage_users, GlobalCapability.manage_roles)
+
+
+def _require_not_peer_admin(actor: User, target: User) -> None:
+    """Only a super admin resets the password of, deactivates or changes the
+    role of an account whose role manages users or roles: otherwise one
+    delegated admin could take over another (a peer whose role is within
+    their authority) and act as them. Refused with a neutral 403, audited
+    as access.denied (app/api/errors.py)."""
+    if actor.role.is_super_admin:
+        return
+    held = set(target.role.global_capabilities)
+    if any(capability in held for capability in _PEER_ADMIN_CAPABILITIES):
+        raise forbidden("Not permitted", reason="peer_admin", user=actor)
 
 
 def _require_not_last_super_admin(session: Session, target: User) -> None:
@@ -158,6 +175,10 @@ def update_user(
     session: Session = Depends(get_session),
 ):
     target = _get_manageable_user(session, user, user_id)
+    # Changing one's own role is refused below with its own message.
+    changes_role = payload.role_id is not None and payload.role_id != target.role_id
+    if (changes_role and target.id != user.id) or (payload.active is False and target.active):
+        _require_not_peer_admin(user, target)
 
     if payload.role_id is not None:
         new_role = session.get(Role, payload.role_id)
@@ -220,6 +241,7 @@ def reset_password(
     same as account creation) and forces a change on next login — same
     Security-notes rule as admin-created accounts."""
     target = _get_manageable_user(session, user, user_id)
+    _require_not_peer_admin(user, target)
     if target.auth_provider != AuthProviderType.local:
         # A password would give an SSO account a way in that skips the
         # identity provider and its MFA. Audited like any other refusal.
@@ -280,6 +302,7 @@ def deactivate_user(
     deactivation is the default way to remove access, keeping audit
     history intact."""
     target = _get_manageable_user(session, user, user_id)
+    _require_not_peer_admin(user, target)
     _require_not_last_super_admin(session, target)
 
     target.active = False

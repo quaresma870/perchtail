@@ -1,3 +1,5 @@
+import threading
+import time
 from urllib.parse import urlparse
 
 import re2
@@ -17,10 +19,11 @@ from app.alerts import (
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, User
-from app.auth.rbac import require_global_capability, visible_source_ids
+from app.auth.rbac import concealed, require_global_capability, visible_source_ids
 from app.crypto import encrypt_secret
 from app.db import get_session
 from app.models import Alert, Customer, Folder, Source
+from app.password_reset_limits import SlidingWindow
 from app.timeutils import utcnow
 from app.webhook_safety import UnsafeWebhookURLError, assert_webhook_url_is_safe
 
@@ -150,21 +153,24 @@ def _require_scope_allowed(session: Session, user: User, alert: Alert) -> None:
     """An alert can only point at a source, folder or customer that exists
     and that the owner can reach -- checked again at every pass (see
     app.alerts), and up front here so nobody sets one up on something they
-    have no business watching."""
+    have no business watching. One the owner can't watch is answered
+    exactly like one that doesn't exist (and the refusal is audited), so
+    the answer can't tell which ids exist."""
     visible = visible_source_ids(session, user, Capability.view)
     if alert.source_id is not None:
         source = session.get(Source, alert.source_id)
         if source is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+        if visible is not None and alert.source_id not in visible:
+            raise concealed(
+                "Source not found", reason=f"missing_capability:{Capability.view}", user=user
+            )
         if source.is_system:
-            # Passes never read PerchTail's own logs (see app.alerts).
+            # Passes never read PerchTail's own logs (see app.alerts). Only
+            # a super admin gets here.
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Alerts can't watch PerchTail's own logs",
-            )
-        if visible is not None and alert.source_id not in visible:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted for this source"
             )
     for key, model, label in (
         ("folder_id", Folder, "Folder"),
@@ -186,9 +192,10 @@ def _require_scope_allowed(session: Session, user: User, alert: Alert) -> None:
                 select(Source.id).where(in_scope, Source.id.in_(visible))
             ).first()
             if reachable is None:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Not permitted for this {label.lower()}",
+                raise concealed(
+                    f"{label} not found",
+                    reason=f"missing_capability:{Capability.view}",
+                    user=user,
                 )
 
 
@@ -326,6 +333,31 @@ class AlertTestResult(BaseModel):
     error: str | None = None
 
 
+# Each test makes the server call out, so a user can send at most this many
+# in TEST_WINDOW_SECONDS; over it, 429 with Retry-After. In memory and per
+# process, like the other request limits.
+TEST_CALLS_PER_USER = 5
+TEST_WINDOW_SECONDS = 60.0
+_test_calls = SlidingWindow(TEST_CALLS_PER_USER, TEST_WINDOW_SECONDS)
+_test_calls_lock = threading.Lock()
+
+
+def reset_test_limit_for_tests() -> None:
+    with _test_calls_lock:
+        _test_calls.events.clear()
+
+
+def _require_test_allowed(user: User) -> None:
+    with _test_calls_lock:
+        wait = _test_calls.hit(str(user.id), time.monotonic())
+    if wait is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many webhook tests; try again shortly",
+            headers={"Retry-After": str(wait)},
+        )
+
+
 @router.post("/{alert_id}/test", response_model=AlertTestResult)
 def test_alert_webhook(
     alert_id: int,
@@ -334,8 +366,9 @@ def test_alert_webhook(
 ):
     """Sends one sample call to the alert's webhook, in the same shape as a
     real one, so the owner can check the receiver without waiting for a
-    matching line."""
+    matching line. Limited per user (TEST_CALLS_PER_USER)."""
     alert = _get_owned_alert(session, user, alert_id)
+    _require_test_allowed(user)
     error = post_webhook(
         webhook_url(alert),
         {

@@ -46,7 +46,7 @@ from app import system_settings
 from app.archives import is_archive, is_transparent_gzip
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, User
-from app.auth.rbac import visible_source_ids
+from app.auth.rbac import resolve_capability, visible_source_ids
 from app.crypto import decrypt_secret, encrypt_secret, follow_head_key
 from app.logging_config import get_logger
 from app.models import (
@@ -634,6 +634,13 @@ def masked_webhook_url(url: str) -> str:
     return f"{parsed.scheme}://{host}{port}/…"
 
 
+# What the alert's owner is told when the webhook's server couldn't be
+# reached, whatever the reason (refused, timed out, reset, TLS): the same
+# words, so the answer can't be used to probe what answers where. The
+# reason goes to the server log.
+CONNECTION_FAILED = "connection failed"
+
+
 def post_webhook(url: str, payload: dict) -> str | None:
     """Sends one webhook call; None when it worked, else why it didn't.
     The target is resolved and validated here, and pinned to the address
@@ -655,12 +662,35 @@ def post_webhook(url: str, payload: dict) -> str | None:
         # Never the URL: its path or query often carries the webhook's secret,
         # and this text is logged and shown on the alert.
         return f"HTTP {exc.response.status_code}"
-    except httpx.TimeoutException:
-        return "timed out"
     except httpx.HTTPError as exc:
         text = str(exc)
-        name = exc.__class__.__name__
-        return name if not text or "://" in text else f"{name}: {text}"
+        logger.info(
+            "alert.webhook_connection_failed",
+            error_type=exc.__class__.__name__,
+            # Never the URL (see above).
+            error=None if "://" in text else text,
+        )
+        return CONNECTION_FAILED
+
+
+def sources_out_of_view(session: Session, owner: User, payload: dict) -> list[int]:
+    """The sources of a queued delivery's lines that its owner can't view
+    any more (or that no longer exist), sorted; empty when every line may
+    still go out. Checked at each send, since a delivery waits and is
+    retried for up to RETRY_FOR after it was matched."""
+    hits = payload.get("hits") if isinstance(payload, dict) else None
+    source_ids = {hit.get("source_id") for hit in hits or [] if isinstance(hit, dict)}
+    lost = []
+    for source_id in source_ids:
+        # A source id that isn't one can't be checked, so it counts as lost.
+        source = session.get(Source, source_id) if isinstance(source_id, int) else None
+        if (
+            source is None
+            or source.is_system
+            or not resolve_capability(session, owner, source, Capability.view)
+        ):
+            lost.append(source_id if isinstance(source_id, int) else -1)
+    return sorted(lost)
 
 
 def _backoff(attempts: int) -> timedelta:
@@ -711,6 +741,28 @@ def deliver_due(session: Session) -> None:
         if alert is None or not alert.enabled or not owner_may_alert(owner):
             # Turned off, or its owner may no longer alert: what was matched
             # before doesn't go out any more either.
+            session.delete(delivery)
+            session.commit()
+            continue
+        out_of_view = sources_out_of_view(session, owner, delivery.payload)
+        if out_of_view:
+            # The lines were matched while the owner could view their
+            # source; they no longer can (or the source is gone), so the
+            # lines don't go out, and that is audited.
+            logger.warning("alert.delivery_dropped", alert_id=alert.id, source_ids=out_of_view)
+            record_audit_event(
+                session,
+                user_id=None,
+                action="alert.delivery_dropped",
+                target_type="alert",
+                target_id=alert.id,
+                metadata={
+                    "reason": "owner_cannot_view_source",
+                    "owner_id": owner.id,
+                    "source_ids": out_of_view,
+                    "attempts": delivery.attempts,
+                },
+            )
             session.delete(delivery)
             session.commit()
             continue

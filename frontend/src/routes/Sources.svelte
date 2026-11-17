@@ -399,20 +399,34 @@
                     >
                   {/if}
                 {:else if source.status === 'ok' || source.status === 'failing'}
-                  <!-- The shared, last known status (#276); click to check again. -->
-                  <button
-                    class="status link"
-                    class:status-ok={source.status === 'ok'}
-                    class:status-fail={source.status === 'failing'}
-                    title={sourceStatusView(source, null, true).tooltip + ' — click to check now'}
-                    on:click={() => checkConnection(source)}
-                  >
-                    {source.status === 'ok' ? '✓ reachable' : '✕ failing'}
-                  </button>
-                {:else}
+                  <!-- The shared, last known status (#276); click to check again
+                       (needs manage sources on the source). -->
+                  {#if source.my_capabilities.includes('manage_source')}
+                    <button
+                      class="status link"
+                      class:status-ok={source.status === 'ok'}
+                      class:status-fail={source.status === 'failing'}
+                      title={sourceStatusView(source, null, true).tooltip + ' — click to check now'}
+                      on:click={() => checkConnection(source)}
+                    >
+                      {source.status === 'ok' ? '✓ reachable' : '✕ failing'}
+                    </button>
+                  {:else}
+                    <span
+                      class="status"
+                      class:status-ok={source.status === 'ok'}
+                      class:status-fail={source.status === 'failing'}
+                      title={sourceStatusView(source, null, true).tooltip}
+                    >
+                      {source.status === 'ok' ? '✓ reachable' : '✕ failing'}
+                    </span>
+                  {/if}
+                {:else if source.my_capabilities.includes('manage_source')}
                   <button class="status status-pending link" on:click={() => checkConnection(source)}>
                     ⏱ check
                   </button>
+                {:else}
+                  <span class="status status-pending">not checked yet</span>
                 {/if}
               </td>
               <td class="credential-age">

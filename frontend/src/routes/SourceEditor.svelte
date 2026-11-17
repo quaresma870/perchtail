@@ -325,7 +325,9 @@
 
   $: multiRoot = roots.length > 1
   // A saved credential is only sent to the host and port it was saved for,
-  // so pointing the source elsewhere needs it typed again.
+  // so pointing the source elsewhere needs it typed again. The folder picker
+  // then browses the typed host as for a new source: given the saved
+  // source, the server always browses the saved host.
   $: hostPortChanged = !isNew && originalHostPort !== '' && `${host}:${port ?? ''}` !== originalHostPort
   $: needsCredentialAgain =
     hostPortChanged && !!source?.has_credential && protocol !== 'agent' && protocol !== 'local'
@@ -744,7 +746,7 @@
               {host}
               {port}
               credential={buildCredential()}
-              sourceId={isNew ? null : sourceId}
+              sourceId={isNew || hostPortChanged ? null : sourceId}
               connection={protocol === 'winrm'
                 ? winrmPayload()
                 : protocol === 'smb'

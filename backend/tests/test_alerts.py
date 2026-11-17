@@ -334,6 +334,25 @@ def _posts(monkeypatch, *, fail=False):
     return posted
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "RemoteProtocolError",
+    ],
+)
+def test_post_webhook_says_the_same_whatever_stopped_the_connection(monkeypatch, failure):
+    import httpx
+
+    def fake_post(url, json, headers, extensions):
+        raise getattr(httpx, failure)("[Errno 111] Connection refused to 10.1.2.3", request=None)
+
+    monkeypatch.setattr("app.alerts.httpx.Client", lambda **kw: _FakeHttpxClient(fake_post, **kw))
+    assert post_webhook("https://example.com/hook", {"x": 1}) == alerts.CONNECTION_FAILED
+
+
 def test_post_webhook_pins_the_validated_address(monkeypatch):
     posted = _posts(monkeypatch)
     assert post_webhook("https://example.com/hook", {"x": 1}) is None
@@ -356,7 +375,8 @@ def test_post_webhook_blocks_a_url_that_now_resolves_privately(monkeypatch):
 def test_a_failed_delivery_is_retried_then_given_up_after_an_hour(session, monkeypatch, tmp_path):
     user = _user(session)
     alert = _alert(session, user)
-    hit = alerts.Hit(1, "src", "app.log", 0, "refused")
+    source = _source(session, tmp_path)
+    hit = alerts.Hit(source.id, "src", "app.log", 0, "refused")
     _posts(monkeypatch, fail=True)
     queue_delivery(session, alert, [hit])
     session.commit()
@@ -364,7 +384,8 @@ def test_a_failed_delivery_is_retried_then_given_up_after_an_hour(session, monke
     deliver_due(session)
     delivery = session.exec(select(AlertDelivery)).one()
     assert delivery.attempts == 1 and delivery.next_attempt_at > utcnow()
-    assert alert.failed_deliveries == 0 and "refused" in alert.last_error
+    # The reason the receiver couldn't be reached isn't given: only the log has it.
+    assert alert.failed_deliveries == 0 and alert.last_error == alerts.CONNECTION_FAILED
 
     delivery.created_at = utcnow() - timedelta(hours=2)
     delivery.next_attempt_at = utcnow()
@@ -380,14 +401,73 @@ def test_a_failed_delivery_is_retried_then_given_up_after_an_hour(session, monke
     [entry] = session.exec(select(AuditLog).where(AuditLog.action == "alert.delivery_failed")).all()
     assert (entry.target_type, entry.target_id) == ("alert", alert.id)
     assert entry.event_metadata["attempts"] == 2
-    assert "refused" in entry.event_metadata["error"]
+    assert entry.event_metadata["error"] == alerts.CONNECTION_FAILED
 
 
-def test_a_retry_that_works_clears_the_error(session, monkeypatch):
+def test_a_queued_delivery_is_dropped_when_its_owner_can_no_longer_view_the_source(
+    session, monkeypatch, tmp_path
+):
+    from app.auth.models import AuditLog, RoleGrant
+
+    user = _user(session, is_super_admin=False)
+    source = _source(session, tmp_path)
+    grant = RoleGrant(
+        role_id=user.role_id,
+        scope_type=ScopeType.source,
+        scope_id=source.id,
+        capabilities=[Capability.view],
+    )
+    session.add(grant)
+    session.commit()
+    alert = _alert(session, user)
+    _posts(monkeypatch, fail=True)
+    queue_delivery(session, alert, [alerts.Hit(source.id, "src", "app.log", 0, "refused")])
+    session.commit()
+
+    # While the owner can view the source, the delivery is tried.
+    deliver_due(session)
+    delivery = session.exec(select(AlertDelivery)).one()
+    assert delivery.attempts == 1
+
+    # Their view is taken away before the retry: the lines don't go out.
+    session.delete(grant)
+    delivery.next_attempt_at = utcnow()
+    session.add(delivery)
+    session.commit()
+    posted = _posts(monkeypatch)
+    deliver_due(session)
+    assert posted == []
+    assert session.exec(select(AlertDelivery)).all() == []
+    dropped = select(AuditLog).where(AuditLog.action == "alert.delivery_dropped")
+    [entry] = session.exec(dropped).all()
+    assert (entry.target_type, entry.target_id) == ("alert", alert.id)
+    assert entry.event_metadata == {
+        "reason": "owner_cannot_view_source",
+        "owner_id": user.id,
+        "source_ids": [source.id],
+        "attempts": 1,
+        "target_name": "my alert",
+    }
+
+
+def test_a_queued_delivery_for_a_deleted_source_is_dropped(session, monkeypatch, tmp_path):
+    user = _user(session)
+    alert = _alert(session, user)
+    posted = _posts(monkeypatch)
+    queue_delivery(session, alert, [alerts.Hit(9999, "gone", "app.log", 0, "refused")])
+    session.commit()
+
+    deliver_due(session)
+    assert posted == []
+    assert session.exec(select(AlertDelivery)).all() == []
+
+
+def test_a_retry_that_works_clears_the_error(session, monkeypatch, tmp_path):
     user = _user(session)
     alert = _alert(session, user, last_error="earlier failure")
+    source = _source(session, tmp_path)
     posted = _posts(monkeypatch)
-    queue_delivery(session, alert, [alerts.Hit(1, "src", "app.log", 0, "refused")])
+    queue_delivery(session, alert, [alerts.Hit(source.id, "src", "app.log", 0, "refused")])
     session.commit()
     deliver_due(session)
     session.refresh(alert)

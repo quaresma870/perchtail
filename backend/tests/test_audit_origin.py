@@ -218,25 +218,30 @@ def _denials(session) -> list[AuditLog]:
 
 
 @pytest.mark.parametrize(
-    ("method", "path", "body", "target_type"),
+    ("method", "path", "body", "target_type", "status_code"),
     [
-        ("GET", "/sources/{sid}/open?path=sub/app.log", None, "source"),
-        ("GET", "/sources/{sid}/download?path=sub/app.log", None, "source"),
-        ("PATCH", "/sources/{sid}", {"name": "renamed"}, "source"),
-        ("DELETE", "/sources/{sid}", None, "source"),
-        ("POST", "/sources/{sid}/rules", {"type": "include", "pattern": "*.log"}, "source"),
-        ("POST", "/roles", {"name": "sneaky"}, None),
-        ("POST", "/users", {"username": "someone", "role_id": 1}, None),
+        # A source outside the user's reach answers like one that doesn't
+        # exist (404), and is audited all the same.
+        ("GET", "/sources/{sid}/open?path=sub/app.log", None, "source", 404),
+        ("GET", "/sources/{sid}/download?path=sub/app.log", None, "source", 404),
+        ("PATCH", "/sources/{sid}", {"name": "renamed"}, "source", 403),
+        ("DELETE", "/sources/{sid}", None, "source", 403),
+        ("POST", "/sources/{sid}/rules", {"type": "include", "pattern": "*.log"}, "source", 404),
+        ("POST", "/roles", {"name": "sneaky"}, None, 403),
+        ("POST", "/users", {"username": "someone", "role_id": 1}, None, 403),
     ],
 )
 def test_a_refused_request_is_audited_as_access_denied(
-    session, real_app, source, method, path, body, target_type
+    session, real_app, source, method, path, body, target_type, status_code
 ):
     user = _user(session)
     client, token = _client(session, user, address=("198.51.100.7", 1))
 
     response = client.request(method, path.format(sid=source.id), json=body)
-    assert response.status_code == 403
+    assert response.status_code == status_code
+    if status_code == 404:
+        missing = client.request(method, path.format(sid=source.id + 1000), json=body)
+        assert (missing.status_code, missing.json()) == (404, response.json())
     # The answer stays neutral: no capability names, nothing about the target.
     assert "missing" not in response.text
 

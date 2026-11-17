@@ -10,7 +10,7 @@ Start from the [template](examples/perchtail-import.example.yaml), which the imp
 2. Type credentials for any new sources the file has none for, or leave them blank and set them later in each source's settings.
 3. Click **Apply** (the button shows how many changes). The whole file is applied in one transaction: either every change lands or none does.
 
-An import is **idempotent**: importing the same file again changes nothing. It is also **additive**: customers, folders and sources the file doesn't mention are left as they are, and none is ever deleted.
+An import is **idempotent**: importing the same file again changes nothing, except that credentials given in it are set again (see [Credentials](#credentials)). It is also **additive**: customers, folders and sources the file doesn't mention are left as they are, and none is ever deleted.
 
 A file can be at most 1 MB and hold at most 5000 sources.
 
@@ -72,6 +72,8 @@ rules:
 
 Don't quote just the pattern. In `rules: [include **/*, exclude "*/secret/**"]` each item is a single string, so the quotes would become part of the pattern and the rule would never match; the import refuses such a pattern. Quote the whole rule if you need to (`- "exclude */secret/**"`), or use the list form above.
 
+A source has at most 500 rules, and a pattern (with its `re:` prefix) at most 1000 characters, as in the rule editor; the import refuses more.
+
 A new source with no rules shows nothing until rules are added.
 
 Redaction rules replace matching text in file content before it leaves the server. Each of a source's own rules has a `name` (at most 48 characters, used in the replacement `[redacted: <name>]`), an RE2 `pattern`, `max_length` (the longest match it can make, in bytes, from 1 to 4096), and optionally `secret_group` (the capture group to replace instead of the whole match), `enabled` (default `true`) and `notes`. They're checked as when they're saved one by one: a pattern that doesn't compile, matches empty text, or can match more than `max_length` bytes is a problem. `redaction_disable` names system rules, which must exist; the system rules themselves aren't in the file.
@@ -97,6 +99,8 @@ On import, a source's credential comes from, in this order:
 1. what you type for it in the import screen;
 2. its `credential` block in the file. A value can be inline, or a reference to an environment variable of the PerchTail server written `${env:PERCHTAIL_IMPORT_NAME}`. Only variables whose names start with `PERCHTAIL_IMPORT_` can be referenced, so an import can't read the server's other settings, such as the credential encryption key;
 3. the credential the source already has.
+
+A credential given for an existing source, typed or in the file, always replaces the saved one, and the preview says **credential replaced**. It is never compared with the saved credential, so the preview can't be used to check whether a credential is the right one. Importing a file with credentials again replaces them again.
 
 A file with inline passwords is as sensitive as the passwords themselves. Prefer environment references or typing them in, and don't commit such a file to version control.
 

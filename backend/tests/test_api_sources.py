@@ -94,18 +94,55 @@ def test_folder_must_belong_to_given_customer(session, admin_client):
     session.commit()
     session.refresh(folder)
 
-    response = admin_client.post(
+    def create(customer_id):
+        return admin_client.post(
+            "/sources",
+            json={
+                "name": "x",
+                "customer_id": customer_id,
+                "folder_id": folder.id,
+                "protocol": "local",
+                "host": "localhost",
+                "base_path": "/tmp",
+            },
+        )
+
+    assert create(customer_b.id).status_code == 422
+    # No customer with a folder would leave the source outside the folder's
+    # customer, and its grants.
+    assert create(None).status_code == 422
+    assert session.exec(select(Source)).all() == []
+
+
+def test_a_source_moved_into_a_folder_needs_the_folder_customer(session, admin_client):
+    customer_a = _make_customer(session, "A")
+    customer_b = _make_customer(session, "B")
+    folder = Folder(name="prod", customer_id=customer_a.id)
+    session.add(folder)
+    session.commit()
+    session.refresh(folder)
+    created = admin_client.post(
         "/sources",
         json={
             "name": "x",
             "customer_id": customer_b.id,
-            "folder_id": folder.id,
-            "protocol": "local",
-            "host": "localhost",
-            "base_path": "/tmp",
+            "protocol": "ssh",
+            "host": "h",
+            "base_path": "/var/log",
         },
+    ).json()
+
+    moved = admin_client.patch(f"/sources/{created['id']}", json={"folder_id": folder.id})
+    assert moved.status_code == 422
+    loose = admin_client.patch(
+        f"/sources/{created['id']}", json={"customer_id": None, "folder_id": folder.id}
     )
-    assert response.status_code == 400
+    assert loose.status_code == 422
+    ok = admin_client.patch(
+        f"/sources/{created['id']}", json={"customer_id": customer_a.id, "folder_id": folder.id}
+    )
+    assert ok.status_code == 200
+    assert (ok.json()["customer_id"], ok.json()["folder_id"]) == (customer_a.id, folder.id)
 
 
 def test_list_sources_filtered_by_rbac(session, client_for):
@@ -264,7 +301,10 @@ def test_get_single_source_denied_without_grant(session, client_for):
 
     user = _make_user(session)
     response = client_for(user).get(f"/sources/{source.id}")
-    assert response.status_code == 403
+    missing = client_for(user).get(f"/sources/{source.id + 1000}")
+    # Answered exactly like a source that doesn't exist.
+    assert response.status_code == missing.status_code == 404
+    assert response.json() == missing.json() == {"detail": "Source not found"}
 
 
 def test_delete_source(session, admin_client):

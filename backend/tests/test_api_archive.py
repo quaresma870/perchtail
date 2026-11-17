@@ -204,8 +204,33 @@ def test_browse_denied_without_view_capability(app_client, session, fake_sftp):
     source = _make_source(session, customer=customer)
     _make_user(session, app, is_super_admin=False)
 
+    # With no access at all the source answers like one that doesn't exist.
     response = client.get(f"/sources/{source.id}/browse")
-    assert response.status_code == 403
+    missing = client.get(f"/sources/{source.id + 1000}/browse")
+    assert response.status_code == missing.status_code == 404
+    assert response.json() == missing.json() == {"detail": "Source not found"}
+
+
+def test_browse_denied_with_access_but_without_view(app_client, session, fake_sftp):
+    app, client = app_client
+    customer = Customer(name="Acme")
+    session.add(customer)
+    session.commit()
+    session.refresh(customer)
+    source = _make_source(session, customer=customer)
+    user = _make_user(session, app, is_super_admin=False)
+    session.add(
+        RoleGrant(
+            role_id=user.role_id,
+            scope_type=ScopeType.source,
+            scope_id=source.id,
+            capabilities=[Capability.download],
+        )
+    )
+    session.commit()
+
+    # A source the user reaches without view is a plain refusal.
+    assert client.get(f"/sources/{source.id}/browse").status_code == 403
 
 
 def test_browse_expands_zip_archive_members(app_client, session, fake_sftp):

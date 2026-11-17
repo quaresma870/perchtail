@@ -16,6 +16,12 @@ _WINDOWS_PROTOCOLS = frozenset({Protocol.smb, Protocol.winrm})
 # these to the long name they abbreviate.
 _SHORT_NAME_ALIAS = re.compile(r"^[^~]{1,8}~\d+(\.[^.]*)?$")
 
+# The most visibility rules a source can have and the longest pattern, as
+# typed (with its `re:` prefix): for the row editor, the pasted text and the
+# import alike.
+MAX_RULES_PER_SOURCE = 500
+MAX_PATTERN_CHARS = 1000
+
 
 class InvalidPatternError(ValueError):
     pass

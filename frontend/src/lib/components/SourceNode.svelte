@@ -187,13 +187,16 @@
       <span class="badge badge-accent">system</span>
     {/if}
   </button>
-  <button
-    class="refresh check"
-    title="Check the connection now"
-    aria-label="Check {source.name} now"
-    disabled={checking}
-    on:click={checkNow}>{checking ? '…' : '✓?'}</button
-  >
+  {#if source.my_capabilities.includes('manage_source')}
+    <!-- The connection check needs manage sources on the source. -->
+    <button
+      class="refresh check"
+      title="Check the connection now"
+      aria-label="Check {source.name} now"
+      disabled={checking}
+      on:click={checkNow}>{checking ? '…' : '✓?'}</button
+    >
+  {/if}
   {#if expanded && loaded}
     <button class="refresh" title="Refresh this source" aria-label="Refresh {source.name}" on:click={refreshNow}>⟳</button>
   {/if}

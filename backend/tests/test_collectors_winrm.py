@@ -74,6 +74,25 @@ def test_remote_path_joins_base_and_relative():
     )
 
 
+@pytest.mark.parametrize(
+    "base_path",
+    ["\\\\fileserver\\share\\logs", "\\\\?\\C:\\Logs", "\\\\.\\C:\\Logs", "Logs", ""],
+)
+def test_a_saved_base_path_off_a_drive_is_never_read(fake_session, base_path):
+    """Refused when saved; one saved before that check never reaches the
+    host, which would otherwise reach another machine with its own
+    credentials."""
+    source = _source(base_path=base_path)
+    with pytest.raises(winrm_module.BasePathNotOnDriveError) as caught:
+        winrm_module.list_directory(source, [], "")
+    assert "edit the source" in caught.value.public_message
+    with pytest.raises(winrm_module.BasePathNotOnDriveError):
+        winrm_module.read_range(source, "app.log", 0, 10)
+    with pytest.raises(winrm_module.BasePathNotOnDriveError):
+        winrm_module.list_directory(_source(base_path=base_path, winrm_configuration="PT"), [], "")
+    assert fake_session.scripts_run == []
+
+
 def test_list_directory_always_shows_dirs_but_filters_files(fake_session):
     payload = json.dumps(
         [

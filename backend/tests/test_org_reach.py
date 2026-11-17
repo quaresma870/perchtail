@@ -165,9 +165,33 @@ def test_grants_in_several_customers_add_up(session, org):
     )
 
 
-def test_any_grant_counts_whatever_its_capabilities(session, org):
-    user = _user(session, grants=[(ScopeType.folder, org.b1.id, [])])
+def test_any_grant_with_a_capability_counts_whatever_it_is(session, org):
+    user = _user(session, grants=[(ScopeType.folder, org.b1.id, [Capability.run_now])])
     assert _reach(session, user) == ({org.b.id}, {org.b1.id, org.b1a.id})
+
+
+def test_a_grant_holding_nothing_reaches_nothing(session, org):
+    # None can be saved any more, but one saved before may remain: it
+    # mustn't reveal customer and folder names.
+    source = Source(
+        name="s-b1",
+        customer_id=org.b.id,
+        folder_id=org.b1.id,
+        protocol=Protocol.ssh,
+        host="h",
+        base_path="/",
+    )
+    session.add(source)
+    session.commit()
+    user = _user(
+        session,
+        grants=[
+            (ScopeType.folder, org.b1.id, []),
+            (ScopeType.customer, org.a.id, []),
+            (ScopeType.source, source.id, []),
+        ],
+    )
+    assert _reach(session, user) == (set(), set())
 
 
 def test_grants_on_scopes_that_are_gone_or_system_reach_nothing(session, org):

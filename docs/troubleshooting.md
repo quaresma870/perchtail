@@ -18,7 +18,7 @@ PerchTail logs one JSON object per line, to standard output and to `perchtail.lo
 
 Each line has `event` (the event's name, such as `source.status_changed`), `level`, `timestamp` and, for a request, `request_id`. Every response carries the same ID in its `X-Request-ID` header: find it in the browser's developer tools (Network tab) and search the log for it. A request that already has an `X-Request-ID` header keeps that value.
 
-What PerchTail shows in the browser is deliberately short. The library's own error (paths, host keys, internals) goes to the log, next to the request ID. **Test connection** adds it to its answer for users with **Create new sources**.
+What PerchTail shows in the browser is deliberately short. The library's own error (paths, host keys, internals) goes only to the log, next to the request ID, also for **Test connection** and the folder picker, which give the same message for a closed port, a refused connection and a timeout.
 
 `LOG_LEVEL` sets how much is logged (`INFO` by default; `DEBUG` for more). At `DEBUG`, the protocol libraries (SMB, SSH, WinRM, HTTP) log a lot; set `LOG_QUIET_THIRD_PARTY=true` to keep them at `INFO` while PerchTail itself logs at `DEBUG`. The file rotates at `LOG_MAX_FILE_MB` or at midnight, and old files are deleted after `LOG_RETENTION_DAYS` or past `LOG_MAX_TOTAL_MB` in all.
 
@@ -45,7 +45,7 @@ PerchTail also checks sources in the background: **Settings → System → Sourc
 
 - A check that takes longer than twice `REMOTE_READ_TIMEOUT_SECONDS` plus 10 seconds is given up, and the source shows "The source didn't answer in time".
 - After 3 failed background checks in a row, the source backs off. Its background checks and file-name index passes are skipped for twice the check interval, then twice as long after each further failure, at most 30 minutes, minus a random part of up to a quarter. The log has `source.check.backing_off` with the number of failures.
-- The source stays failing until an operation on it works. Browsing it is never blocked by the backoff. **Test connection** on the source page, or the check button next to the source in the Viewer ("Check the connection now"), tries it at once.
+- The source stays failing until an operation on it works. Browsing it is never blocked by the backoff. **Test connection** on the source page, or the check button next to the source in the Viewer ("Check the connection now"), tries it at once; both are shown to users with **Manage sources** on the source.
 - The failure count is kept in the database, so a restart doesn't reset it.
 
 A disabled source isn't contacted at all. Opening it answers "This source is disabled. An admin can turn it back on in its settings."
@@ -73,7 +73,7 @@ A disabled source isn't contacted at all. Opening it answers "This source is dis
 - **"The server's SSH host key doesn't match the pinned one -- refusing to connect (possible man-in-the-middle). An administrator must verify and re-pin it."** The host presented a different key than the one in `SSH_KNOWN_HOSTS_PATH` (`/data/db/ssh_known_hosts` in Docker). First find out why: a rebuilt server, or something in the middle. Once you trust the new key, delete the host's line from the file (it starts with the host name, or with `[host]:port` for a port other than 22) and keep the file owned by the PerchTail user. PerchTail reads the file on every connection, so no restart is needed. With the default policy, the next connection pins the new key.
 - **"The server's SSH host key isn't pinned and the policy is strict"**. `SSH_HOST_KEY_POLICY=strict` refuses hosts that aren't in the file. Add the host's key first: see [source-setup.md](source-setup.md#6-host-key-pinning).
 - With the default policy, `tofu`, each new host's key is pinned on first connect and logged as `ssh.host_key_pinned` with its `SHA256:` fingerprint. Compare it with the server's key.
-- **"Authentication to the source failed"**: wrong username, password or key, or the key isn't in the account's `authorized_keys`. PerchTail takes Ed25519, ECDSA and RSA keys in OpenSSH or PEM format, without a passphrase. A key with a passphrase fails when PerchTail connects, not when you save the source: **Test connection** shows "The connection check failed", and users with **Create new sources** also see "SSH private key is protected by a passphrase; use a key without one (see docs/source-setup.md)".
+- **"Authentication to the source failed"**: wrong username, password or key, or the key isn't in the account's `authorized_keys`. PerchTail takes Ed25519, ECDSA and RSA keys in OpenSSH or PEM format, without a passphrase. A key with a passphrase fails when PerchTail connects, not when you save the source: **Test connection** shows "Authentication to the source failed", and the log has "SSH private key is protected by a passphrase; use a key without one (see docs/source-setup.md)".
 - **"Not found on the source" for the base path, on an account with a `ChrootDirectory`**: the base path is relative to the chroot, usually `/`. **Test connection** says so: "If this account has a ChrootDirectory, Base path is relative to the chroot (usually /)."
 - **Timeouts**: the TCP connection must open within 10 seconds. After that, the SSH banner, the login and every SFTP read must answer within `REMOTE_READ_TIMEOUT_SECONDS` (60 by default). A server that stalls fails with "Can't reach the source". Raise the value for a slow link; lower it to fail faster.
 - **Rules and letter case**: on SSH sources, rules are case-sensitive. `secret/**` doesn't hide `SECRET/`.
@@ -105,7 +105,8 @@ A disabled source isn't contacted at all. Opening it answers "This source is dis
   - "The WinRM account isn't allowed to use the JEA endpoint (see docs/examples/jea)": the account isn't in the group given to `-Group` when the endpoint was registered.
   - A base path outside the endpoint's allowed folders answers "not found". The base path must be one of the folders given to `-Roots`, or inside one. **Browse…** offers them.
 - **Without a JEA endpoint** (a WinRS shell): "The WinRM account isn't allowed to run commands on the server (see docs/source-setup.md, WinRM)". The account needs remote-shell rights: see [source-setup.md](source-setup.md#2-create-a-dedicated-account). Use the JEA endpoint instead where you can.
-- **"WinRM Base path must be an absolute Windows path, e.g. D:\Logs\App"** when saving: WinRM takes a drive path or a UNC path.
+- **"WinRM Base path must be an absolute Windows path on a drive, e.g. D:\Logs\App"** when saving: WinRM takes a drive path only. UNC paths (`\\server\share`) and device paths (`\\?\`, `\\.\`) are refused, since the WinRM host would reach out to another machine with its own credentials.
+- **"This source's Base path isn't a path on a drive"** when browsing a WinRM source: it was saved, before 0.7.0, with a UNC or device path, which PerchTail no longer reads (the log has `winrm.base_path_not_on_drive`). Edit the source and change its Base path or folders to a path on a drive of the WinRM host, or read the share through an SMB source.
 - Use **Test connection** after each change.
 
 ### Local disk

@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -126,7 +127,25 @@ def _containment_guard(source: Source, relative_path: str) -> str:
     )
 
 
+# An absolute path on a drive (D:\Logs). Anything else -- a UNC path
+# (\\server\share) or a device path (\\?\..., \\.\...) -- would have the WinRM
+# host reach out to another machine with its own credentials.
+DRIVE_PATH = re.compile(r"^[A-Za-z]:([\\/]|$)")
+
+
+class BasePathNotOnDriveError(collector_base.SourceError):
+    public_message = (
+        "This source's Base path isn't a path on a drive (e.g. D:\\Logs): "
+        "edit the source to correct it"
+    )
+
+
 def _remote_path(source: Source, relative_path: str = "") -> str:
+    if not DRIVE_PATH.match(source.base_path or ""):
+        # Refused when saved since 0.7.0; a source saved before may still
+        # have one, and is never read until it is corrected.
+        logger.warning("winrm.base_path_not_on_drive", source_id=source.id)
+        raise BasePathNotOnDriveError("the Base path is not a path on a drive")
     base = source.base_path.rstrip("\\")
     if not relative_path:
         # A bare "D:" is the current directory on D: in PowerShell, not the

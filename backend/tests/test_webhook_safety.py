@@ -30,11 +30,25 @@ def test_allows_a_url_resolving_to_a_public_address():
         "http://192.0.2.10/hook",  # documentation range (TEST-NET-1)
         "http://198.18.0.1/hook",  # benchmarking range
         "http://[::ffff:127.0.0.1]/hook",  # IPv4-mapped loopback
+        # Translation and tunnel prefixes: the embedded IPv4 address is what
+        # is really reached, here 10.0.0.5 or 127.0.0.1.
+        "http://[64:ff9b::a00:5]/hook",  # NAT64, well-known prefix
+        "http://[64:ff9b:1::a00:5]/hook",  # NAT64, local use
+        "http://[2002:a00:5::1]/hook",  # 6to4
+        "http://[2001:0:4136:e378:8000:63bf:f5ff:fffa]/hook",  # Teredo
+        "http://[::ffff:0:a00:5]/hook",  # IPv4-translated
+        "http://[::a00:5]/hook",  # IPv4-compatible
+        # ...whatever the embedded address, even a public one.
+        "http://[64:ff9b::5db8:d822]/hook",  # NAT64 of 93.184.216.34
     ],
 )
 def test_rejects_urls_resolving_to_non_public_addresses(url):
     with pytest.raises(UnsafeWebhookURLError):
         assert_webhook_url_is_safe(url)
+
+
+def test_a_public_ipv6_address_is_still_allowed():
+    assert_webhook_url_is_safe("http://[2606:2800:220:1:248:1893:25c8:1946]/hook")
 
 
 def test_rejects_a_url_with_no_hostname():

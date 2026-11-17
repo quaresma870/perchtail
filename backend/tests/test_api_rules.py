@@ -230,3 +230,77 @@ def test_raw_paste_with_an_invalid_regex_names_the_line_and_changes_nothing(admi
     assert response.status_code == 400
     assert "line 3" in response.json()["detail"]
     assert [r["pattern"] for r in client.get(f"/sources/{source.id}/rules").json()] == ["**/*.log"]
+
+
+def test_raw_paste_has_the_editor_limits_and_changes_nothing_over_them(admin_client):
+    from app.api.rules import MAX_PATTERN_CHARS, MAX_RULES_PER_SOURCE
+
+    client, source = admin_client
+    client.post(f"/sources/{source.id}/rules", json={"type": "include", "pattern": "**/*.log"})
+
+    too_many = "\n".join(f"dir{i}/**" for i in range(MAX_RULES_PER_SOURCE + 1))
+    response = client.put(f"/sources/{source.id}/rules/raw", json={"text": too_many})
+    assert response.status_code == 400
+    assert str(MAX_RULES_PER_SOURCE) in response.json()["detail"]
+
+    too_long = "# keep\n**/*.txt\n!" + "a" * (MAX_PATTERN_CHARS + 1) + "\n"
+    response = client.put(f"/sources/{source.id}/rules/raw", json={"text": too_long})
+    assert response.status_code == 400
+    assert "line 3" in response.json()["detail"]
+    assert [r["pattern"] for r in client.get(f"/sources/{source.id}/rules").json()] == ["**/*.log"]
+
+    # Exactly at the limits is fine; comments and blank lines don't count.
+    at_limit = "# header\n\n" + "\n".join(f"dir{i}/**" for i in range(MAX_RULES_PER_SOURCE))
+    response = client.put(f"/sources/{source.id}/rules/raw", json={"text": at_limit})
+    assert response.status_code == 200
+    assert len(response.json()) == MAX_RULES_PER_SOURCE
+
+
+def test_the_row_editor_has_the_same_limits(admin_client):
+    from app.api.rules import MAX_PATTERN_CHARS, MAX_RULES_PER_SOURCE
+
+    client, source = admin_client
+    long = client.post(
+        f"/sources/{source.id}/rules",
+        json={"type": "include", "pattern": "a" * (MAX_PATTERN_CHARS + 1)},
+    )
+    assert long.status_code == 400
+    full = "\n".join(f"dir{i}/**" for i in range(MAX_RULES_PER_SOURCE))
+    assert client.put(f"/sources/{source.id}/rules/raw", json={"text": full}).status_code == 200
+    one_more = client.post(f"/sources/{source.id}/rules", json={"type": "include", "pattern": "x"})
+    assert one_more.status_code == 400
+    first = client.get(f"/sources/{source.id}/rules").json()[0]
+    updated = client.patch(
+        f"/sources/{source.id}/rules/{first['id']}",
+        json={"pattern": "a" * (MAX_PATTERN_CHARS + 1)},
+    )
+    assert updated.status_code == 400
+
+
+def test_raw_paste_audits_the_patterns_before_and_after(session, admin_client):
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    client, source = admin_client
+    client.post(f"/sources/{source.id}/rules", json={"type": "include", "pattern": "**/*.log"})
+    client.post(f"/sources/{source.id}/rules", json={"type": "exclude", "pattern": "secret/**"})
+
+    response = client.put(
+        f"/sources/{source.id}/rules/raw", json={"text": "**/*\n!re:^private-.*$\n"}
+    )
+    assert response.status_code == 200
+    [entry] = session.exec(select(AuditLog).where(AuditLog.action == "rule.replace_raw")).all()
+    metadata = {
+        k: v for k, v in entry.event_metadata.items() if k not in ("target_name", "target_context")
+    }
+    assert metadata == {
+        "rule_count": 2,
+        "before": [
+            {"type": "include", "pattern": "**/*.log", "pattern_kind": "glob"},
+            {"type": "exclude", "pattern": "secret/**", "pattern_kind": "glob"},
+        ],
+        "after": [
+            {"type": "include", "pattern": "**/*", "pattern_kind": "glob"},
+            {"type": "exclude", "pattern": "^private-.*$", "pattern_kind": "regex"},
+        ],
+    }
