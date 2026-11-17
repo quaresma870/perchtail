@@ -35,7 +35,11 @@ For the `production` profile, `generate` also writes each source's own
 tree (shared/prod/<source>/, or the agent's folder; seed/production.py),
 and `write` keeps every source's current.log growing at its rate. With
 --only-windows-agents and --agents-dir DIR, both work only on the agents
-meant for a Windows test server, under DIR: run them there.
+meant for a Windows test server, under DIR: run them there. With
+--protocols ssh,smb (a comma-separated list of the profile's protocols),
+both work only on the trees of those protocols' sources, and `generate`
+checks the disk only for them: a test server that serves only SSH and SMB,
+or only WinRM, gets only what it serves.
 """
 
 from __future__ import annotations
@@ -240,12 +244,39 @@ def production_trees(profile: dict) -> dict[str, dict]:
     }
 
 
-def _generate_production(args: argparse.Namespace, profile: dict, shared_root: Path) -> int:
+def selected_protocols(args: argparse.Namespace, profile: dict) -> set[str] | None:
+    """The protocols of --protocols (None without it), each one of the
+    profile's production sources."""
+    if args.protocols is None:
+        return None
+    asked = {p.strip().lower() for p in args.protocols.split(",") if p.strip()}
+    known = sorted({s["protocol"] for s in production_sources(profile)})
+    if not known:
+        raise KitError(
+            f"--protocols chooses among the production trees, and profile {profile['name']} "
+            "has none"
+        )
+    if not asked:
+        raise KitError(f"--protocols is empty; the profile's protocols are {', '.join(known)}")
+    unknown = sorted(asked - set(known))
+    if unknown:
+        raise KitError(
+            f"profile {profile['name']} has no {', '.join(unknown)} sources; "
+            f"its protocols are {', '.join(known)}"
+        )
+    return asked
+
+
+def _generate_production(
+    args: argparse.Namespace, profile: dict, shared_root: Path, protocols: set[str] | None
+) -> int:
     sources = production_sources(profile, args.only_windows_agents)
     trees = production_trees(profile)
     agents_dir = Path(args.agents_dir) if args.agents_dir else logs_dir() / "agents"
     written = 0
     for source in sources:
+        if protocols is not None and source["protocol"] not in protocols:
+            continue
         if args.only_windows_agents and source["protocol"] != "agent":
             continue
         if args.out and not args.only_windows_agents and source["protocol"] == "agent":
@@ -255,10 +286,30 @@ def _generate_production(args: argparse.Namespace, profile: dict, shared_root: P
     return written
 
 
-def _check_disk(profile: dict) -> None:
+def writer_sources(args: argparse.Namespace, profile: dict) -> list[dict]:
+    """The production sources whose current.log `write` keeps growing here,
+    with these options (their rates are shared out among them)."""
+    sources = production_sources(profile, args.only_windows_agents)
+    if args.only_windows_agents:
+        return [s for s in sources if s["protocol"] == "agent"]
+    if args.out:
+        return [s for s in sources if s["protocol"] != "agent"]
+    if os.environ.get("LOADTEST_WINDOWS_AGENT_HOSTS"):
+        # Written on the Windows test server (write --only-windows-agents).
+        return [s for s in sources if not s.get("windows")]
+    return sources
+
+
+def _check_disk(
+    profile: dict, protocols: set[str] | None = None, sources: list[dict] | None = None
+) -> None:
+    """With `protocols`, counts only those protocols' trees among `sources`
+    (the writer's here), as the writer gives them their rates."""
+    if sources is None:
+        sources = production_sources(profile)
     needed = (
         growing_files.disk_needed(profile)
-        + production.disk_needed(profile, production_sources(profile))
+        + production.disk_needed(profile, sources, protocols)
         if "production" in profile
         else growing_files.disk_needed(profile)
     )
@@ -307,6 +358,7 @@ def _generate_tree(root: Path, spec: dict, profile: dict, blocks: list[bytes]) -
 
 def cmd_generate(args: argparse.Namespace) -> None:
     profile = load_profile(args.profile)
+    protocols = selected_protocols(args, profile)
     blocks = _blocks(seed=277)
     shared_root = Path(args.out) if args.out else logs_dir() / "shared"
     started = time.time()
@@ -318,9 +370,9 @@ def cmd_generate(args: argparse.Namespace) -> None:
                 "shared/ and agents/ here.\n",
                 encoding="utf-8",
             )
-    _check_disk(profile)
+    _check_disk(profile, protocols, writer_sources(args, profile) if protocols else None)
     if args.only_windows_agents:
-        count = _generate_production(args, profile, shared_root)
+        count = _generate_production(args, profile, shared_root, protocols)
         print(f"generated {count} files for the Windows agents under {args.agents_dir}")
         return
     shared_spec = layout(profile, "shared")
@@ -331,7 +383,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
         for i, root in enumerate(agent_roots(profile)):
             count += _generate_tree(root, agent_spec, profile, blocks)
             count += _start_growing(root, agent_spec, profile, i < growing_agent_count(profile))
-    count += _generate_production(args, profile, shared_root)
+    count += _generate_production(args, profile, shared_root, protocols)
     if "matrix" in profile:
         count += growing_files.write_matrix(shared_root, profile)
         if not args.out:
@@ -387,6 +439,7 @@ def cmd_write(args: argparse.Namespace) -> None:
     phase = next((p for p in profile["phases"] if p["name"] == args.phase), None)
     if phase is None:
         raise KitError(f"phase {args.phase} isn't in profile {profile['name']}")
+    protocols = selected_protocols(args, profile)
     shared_root = Path(args.out) if args.out else logs_dir() / "shared"
     roots = {"shared": shared_root}
     if not args.out:
@@ -400,15 +453,8 @@ def cmd_write(args: argparse.Namespace) -> None:
     )
     if "production" in phase["scenarios"]:
         agents_dir = Path(args.agents_dir) if args.agents_dir else logs_dir() / "agents"
-        sources = production_sources(profile, args.only_windows_agents)
-        if args.only_windows_agents:
-            sources = [s for s in sources if s["protocol"] == "agent"]
-        elif args.out:
-            sources = [s for s in sources if s["protocol"] != "agent"]
-        elif os.environ.get("LOADTEST_WINDOWS_AGENT_HOSTS"):
-            # Written on the Windows test server (write --only-windows-agents).
-            sources = [s for s in sources if not s.get("windows")]
-        entries += production.writer_entries(profile, sources, shared_root, agents_dir)
+        sources = writer_sources(args, profile)
+        entries += production.writer_entries(profile, sources, shared_root, agents_dir, protocols)
     if not entries:
         print(f"phase {args.phase} has no growing files")
         return
@@ -497,6 +543,11 @@ def main() -> None:
             )
             p.add_argument(
                 "--agents-dir", help="where the agents' folders are (default: logs/agents)"
+            )
+            p.add_argument(
+                "--protocols",
+                help="production: only the trees of these protocols' sources, comma-separated "
+                "(e.g. ssh,smb on a test server that serves only those)",
             )
         if name == "write":
             p.add_argument("--phase", required=True)
