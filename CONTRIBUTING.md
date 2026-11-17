@@ -138,6 +138,7 @@ The version must be `X.Y.Z`, `X.Y.Z-rc.N` or `X.Y.Z-beta.N` (`internal/agent/ver
 - Two backend tests cover every endpoint at once. `tests/test_every_endpoint_needs_auth.py` calls each operation without signing in and expects 401 or 403, except those in its `PUBLIC_OPERATIONS` list: a new endpoint that must be public goes in that list, with a one-line comment saying why. `tests/test_api_properties.py` runs Schemathesis against the OpenAPI schema as a super admin and fails on any 5xx; operations that would reach a source, agent, webhook, SSO provider or GitHub are excluded, and any other outbound connection fails the test. It runs 25 examples per operation with a fixed seed; set `SCHEMATHESIS_MAX_EXAMPLES` for a longer run by hand.
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`), with a scope where it helps (`feat(rbac): ...`).
 - Markdown: one paragraph or list item per line, no hard wraps.
+- Frontend dependency advisories: CI fails on any high or critical `npm audit` advisory, and the daily security scan on any at all, through `.github/scripts/npm_audit.py`. An advisory can be accepted in `.github/npm-audit-exceptions.json` only when it has no fixed version and doesn't reach what PerchTail ships, with the reason and an expiry date at most about a month away. CI fails again once the date passes, and once the advisory is gone, so the exception is removed when Dependabot brings the fix.
 
 ## Pull requests
 

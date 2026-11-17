@@ -1,0 +1,8 @@
+[
+  {
+    "id": "GHSA-fc5q-39xc-vjpf",
+    "package": "picomatch",
+    "reason": "No fixed version yet. picomatch only comes in through build and test tools (vite, vitest, svelte-check); the built frontend doesn't include it and every glob it matches is written in this repository.",
+    "expires": "2026-12-15"
+  }
+]

@@ -69,14 +69,15 @@ jobs:
           package-manager-cache: false
 
       # Every severity, dev dependencies included: the lockfile is all
-      # npm audit needs, nothing is installed.
+      # npm audit needs, nothing is installed. Both branches are checked
+      # with dev's script and dev's exceptions (.github/npm-audit-exceptions.json).
       - name: npm audit (main and dev)
         run: |
           status=0
-          for ref in main dev; do
-            echo "== $ref"
-            (cd "$ref/frontend" && npm audit --audit-level=low) || status=1
-          done
+          echo "== main"
+          python3 dev/.github/scripts/npm_audit.py --level low --other-branch main/frontend || status=1
+          echo "== dev"
+          python3 dev/.github/scripts/npm_audit.py --level low dev/frontend || status=1
           exit "$status"
 
   agent-source:
