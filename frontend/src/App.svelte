@@ -33,6 +33,7 @@
   import EmailSettings from './routes/EmailSettings.svelte'
   import SystemSettings from './routes/SystemSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
+  import RedactionSettings from './routes/RedactionSettings.svelte'
   import Profile from './routes/Profile.svelte'
   import UserMenu from './lib/components/UserMenu.svelte'
   import ConfirmHost from './lib/components/ConfirmHost.svelte'
@@ -66,6 +67,7 @@
     '/settings/email': EmailSettings,
     '/settings/system': SystemSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
+    '/settings/redaction': RedactionSettings,
     '/settings/audit-log': AuditLogSettings,
     '/settings/access-review': AccessReport,
     '/settings/import-export': ImportExportSettings,
@@ -130,6 +132,17 @@
     $currentUser &&
     (!$systemSettings.audit_view_enabled || !hasCapability($currentUser, 'view_audit_log')) &&
     $currentHash.startsWith('/settings/audit-log')
+  ) {
+    push('/settings')
+  }
+
+  // Redaction (#382, #249) is configured by super admins only; the API
+  // refuses anyone else too.
+  $: if (
+    $authChecked &&
+    $currentUser &&
+    !$currentUser.is_super_admin &&
+    $currentHash.startsWith('/settings/redaction')
   ) {
     push('/settings')
   }

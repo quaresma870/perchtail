@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { countRedactionMarkers, findRedactionMarkers, redactionCountLabel } from './redaction-markers'
+import {
+  countRedactionMarkers,
+  findRedactionMarkers,
+  redactionCountAfterCap,
+  redactionCountLabel,
+} from './redaction-markers'
+import { capTailBuffer } from './viewer-limits'
 
 describe('countRedactionMarkers', () => {
   it('counts the redacted values across lines', () => {
@@ -25,6 +31,32 @@ describe('findRedactionMarkers', () => {
   it('finds nothing in a line without one', () => {
     expect(findRedactionMarkers('plain [redacted] line')).toEqual([])
     expect(findRedactionMarkers('[redacted: unclosed')).toEqual([])
+  })
+})
+
+describe('redactionCountAfterCap', () => {
+  it('counts only the values left in the Tail buffer once lines leave its top', () => {
+    const held =
+      'a [redacted: email] [redacted: ip]\n' +
+      'b [redacted: jwt]\n' +
+      'c plain\n' +
+      'd [redacted: card ****1111]\n' +
+      '[redacted: incomplete line]'
+    // Five lines, four newlines; at most two kept: the first two go.
+    const capped = capTailBuffer(held, 4, 2)
+    expect(capped.dropped).toBe(2)
+    const count = redactionCountAfterCap(held, capped.content, 4)
+    expect(count).toBe(1)
+    expect(count).toBe(countRedactionMarkers(capped.content))
+  })
+
+  it('keeps the count when nothing left the top', () => {
+    const held = 'a [redacted: email]\n'
+    expect(redactionCountAfterCap(held, held, 1)).toBe(1)
+  })
+
+  it('never goes below zero', () => {
+    expect(redactionCountAfterCap('[redacted: ip] [redacted: ip]\nx\n', 'x\n', 1)).toBe(0)
   })
 })
 

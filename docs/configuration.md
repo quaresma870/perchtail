@@ -228,7 +228,7 @@ Shown to super admins only. See [upgrade.md](upgrade.md#the-updates-card) for wh
 
 ### Redaction
 
-No screen yet: in this version a super admin changes these through the API (`PATCH /system-settings`); anyone else, `manage_system_settings` included, is refused. In this version redaction applies to what the viewer and Tail show, to downloads and to alerts: an alert's query runs on the redacted lines, so a value that was replaced can't be matched, and only redacted lines are sent to its webhook, including calls queued before redaction was turned on, which are redacted as they are sent.
+Shown on **Settings → Redaction**, to super admins only; anyone else, `manage_system_settings` included, is refused. The rules themselves, and what each source turns off or adds, are set there and in each source's editor: [redaction.md](redaction.md) describes the rules, where content is redacted and what redaction doesn't cover. Redaction applies to what the viewer and Tail show, to downloads and to alerts: an alert's query runs on the redacted lines, so a value that was replaced can't be matched, and only redacted lines are sent to its webhook, including calls queued before redaction was turned on, which are redacted as they are sent.
 
 On a push-agent source, an agent of this version or later redacts on its own host, with the same rules and the same results, so the original content never reaches PerchTail: the file, the archive member or the decompressed `.gz` file is read and redacted there, an archive is listed and its members read there, and the server only rebuilds the archive or the ZIP from what arrived redacted. The server only uses an answer that says it was redacted with the rules it sent. If the agent can't run a custom rule, the request fails with the rule's name instead of falling back to the server. An archive inside an archive can't be downloaded from an agent while downloads are redacted (each of its files still opens one by one in the viewer). An older agent can't redact on its host: it gets the requests it understands, the server redacts what it sends, and `agent.redaction_fallback` is logged once per connection; upgrade it (Settings → Agents) to keep the original on the host.
 
@@ -238,9 +238,9 @@ While redaction applies, content compressed in a format PerchTail doesn't decomp
 
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
-| `redaction_enabled` | none yet | off | on, off | Redaction of file content with the enabled redaction rules, for everyone, super admins included. On with no enabled rule changes nothing. |
-| `redaction_downloads` | none yet | on | on, off | While redaction is on, whether downloads (single files, folder ZIPs, archives and their members) are redacted too. Off, they carry the original content; the viewer, Tail and alerts stay redacted. |
-| `redaction_download_suffix` | none yet | on | on, off | Whether a redacted download's file name says so (`app.redacted.log`). Only counts while downloads are redacted. |
+| `redaction_enabled` | **Redact file content** | off | on, off | Redaction of file content with the enabled redaction rules, for everyone, super admins included. On with no enabled rule changes nothing. |
+| `redaction_downloads` | **Redact downloads too** | on | on, off | While redaction is on, whether downloads (single files, folder ZIPs, archives and their members) are redacted too. Off, they carry the original content; the viewer, Tail and alerts stay redacted. |
+| `redaction_download_suffix` | **Say so in the file name** | on | on, off | Whether a redacted download's file name says so (`app.redacted.log`). Only counts while downloads are redacted. |
 
 ### Two-factor authentication card
 
