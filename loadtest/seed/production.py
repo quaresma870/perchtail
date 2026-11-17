@@ -362,17 +362,24 @@ def write_tree(root: Path, spec: dict, name: str) -> int:
 
 
 def writer_entries(
-    profile: dict, sources: list[dict], shared: Path, agents_dir: Path
+    profile: dict,
+    sources: list[dict],
+    shared: Path,
+    agents_dir: Path,
+    protocols: set[str] | None = None,
 ) -> list[dict]:
     """The writer's files for a production phase: each source's current.log
     at its class's rate. Calm and moving logs rotate by size; an intense
     log follows the daily_log pattern over `day_seconds` and rotates at the
-    end of each day."""
+    end of each day. With `protocols`, only the sources of those protocols
+    (their rates still come from all of `sources`)."""
     names = [s["name"] for s in sources]
     rates = rate_classes(profile, names)
     day = day_seconds(profile)
     out = []
     for source in sources:
+        if protocols is not None and source["protocol"] not in protocols:
+            continue
         if source["protocol"] == "agent" and not source.get("running", True):
             continue
         entry = rates[source["name"]]
@@ -400,13 +407,17 @@ def writer_entries(
     return out
 
 
-def disk_needed(profile: dict, sources: list[dict]) -> int:
+def disk_needed(profile: dict, sources: list[dict], protocols: set[str] | None = None) -> int:
     """Bytes the production trees can take: the static files, and each
-    current.log at its largest (twice: the rotated copy)."""
+    current.log at its largest (twice: the rotated copy). With `protocols`,
+    only the trees of the sources of those protocols (their rates and big
+    files still placed as among all of `sources`)."""
     names = [s["name"] for s in sources]
     rates = rate_classes(profile, names)
     total = 0
     for i, source in enumerate(sources):
+        if protocols is not None and source["protocol"] not in protocols:
+            continue
         spec = tree(profile, source["name"], rates[source["name"]], i)
         total += sum(f["size"] for f in spec["static"] + spec["large"])
         total += sum(f["size"] * 3 for f in spec["zip"]) + sum(f["size"] for f in spec["gz"])

@@ -175,6 +175,24 @@ class PeopleTests(unittest.TestCase):
         self.assertIn("create_source", admin_body["global_capabilities"])  # to edit sources
 
 
+class DiskTests(unittest.TestCase):
+    def test_disk_per_protocol_matches_the_readme(self) -> None:
+        # loadtest/README.md, "Setting up 100 or more sources with a few test servers".
+        # On a test server (`--out`), the writer shares the rates out among the
+        # sources that aren't agents, and `generate --protocols` counts the same way.
+        profile = load("production")
+        sources = [s for s in seed.planned_sources(profile) if s["protocol"] != "agent"]
+
+        def gib(*protocols: str) -> float:
+            return round(production.disk_needed(profile, sources, set(protocols)) / 1024**3, 1)
+
+        self.assertEqual(
+            {"ssh": gib("ssh"), "smb": gib("smb"), "ssh,smb": gib("ssh", "smb")},
+            {"ssh": 26.9, "smb": 17.9, "ssh,smb": 44.8},
+        )
+        self.assertEqual(gib("winrm"), 16.4)
+
+
 class ScheduleTests(unittest.TestCase):
     def test_the_day_rises_holds_at_least_30_minutes_and_falls(self) -> None:
         stages = production.concurrency_stages(load("production"))

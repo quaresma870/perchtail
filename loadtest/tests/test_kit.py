@@ -27,6 +27,7 @@ import agents  # noqa: E402
 import collect  # noqa: E402
 import common  # noqa: E402
 import gen_logs  # noqa: E402
+import production  # noqa: E402
 import report  # noqa: E402
 import run  # noqa: E402
 import seed  # noqa: E402
@@ -596,6 +597,175 @@ class LogFilesTests(StateTestCase):
             ):
                 gen_logs.main()
             self.assertIn("LOADTEST_BASE_URL is required", failed.call_args.args[0])
+
+
+class ProtocolFilterTests(StateTestCase):
+    """--protocols on generate and write: a test server gets only the trees
+    of the protocols it serves."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.profile_path = Path(self.tmp.name) / "prod-test.json"
+        self.profile_path.write_text(
+            json.dumps(
+                {
+                    "name": "prod-test",
+                    "sources": {"ssh": 2, "smb": 1, "local": 0, "winrm": 2},
+                    "agents": {"running": 1, "stopped": 0, "windows": 0},
+                    "files": {"sizes_kb": [1], "growing": 0},
+                    "production": {
+                        "tree": {
+                            "app_folders": 1,
+                            "rotated": 1,
+                            "rotated_kb": [1],
+                            "large_every": 2,
+                            "large_mb": 0.01,
+                        },
+                        "rate_classes": {
+                            "calm": {"share": 0.7, "kb_s": [2, 8], "rotate_mb": 1},
+                            "moving": {"share": 0.25, "kb_s": [100, 300], "rotate_mb": 1},
+                            "intense": {"share": 0.05, "daily_size_gb": 0.001},
+                        },
+                    },
+                    "phases": [
+                        {"name": "production", "duration": "1m", "scenarios": ["production"]}
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.profile = common.load_profile(str(self.profile_path))
+        self.sources = gen_logs.production_sources(self.profile)
+        self.out = Path(self.tmp.name) / "served"
+
+    def names(self, *protocols: str) -> set[str]:
+        return {s["name"] for s in self.sources if s["protocol"] in protocols}
+
+    def run_main(self, *extra: str) -> mock.MagicMock:
+        argv = ["gen_logs.py", *extra, "--profile", str(self.profile_path), "--out", str(self.out)]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch("sys.stdout"),
+            mock.patch.object(gen_logs, "_check_disk") as check_disk,
+        ):
+            gen_logs.main()
+        return check_disk
+
+    def written_trees(self) -> set[str]:
+        return {p.name for p in (self.out / "prod").iterdir()}
+
+    def writer_trees(self, *extra: str) -> set[str]:
+        argv = [
+            "gen_logs.py",
+            "write",
+            "--profile",
+            str(self.profile_path),
+            "--phase",
+            "production",
+            "--out",
+            str(self.out),
+            *extra,
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch("sys.stdout"),
+            mock.patch.object(gen_logs.growing_files, "run_writer") as run_writer,
+        ):
+            gen_logs.main()
+        return {e["tree"] for e in run_writer.call_args.args[0]}
+
+    def test_generate_writes_only_the_chosen_protocols_trees(self) -> None:
+        check_disk = self.run_main("generate", "--protocols", "winrm")
+        self.assertEqual(self.written_trees(), self.names("winrm"))
+        self.assertEqual(check_disk.call_args.args[1], {"winrm"})
+        # Among the sources the writer grows on a test server, as it rates them.
+        self.assertEqual(
+            check_disk.call_args.args[2], [s for s in self.sources if s["protocol"] != "agent"]
+        )
+
+    def test_generate_without_protocols_writes_every_server_tree(self) -> None:
+        check_disk = self.run_main("generate")
+        self.assertEqual(self.written_trees(), self.names("ssh", "smb", "winrm"))
+        self.assertIsNone(check_disk.call_args.args[1])
+        self.assertIsNone(check_disk.call_args.args[2])
+
+    def test_check_disk_counts_only_the_chosen_protocols(self) -> None:
+        winrm = production.disk_needed(self.profile, self.sources, {"winrm"})
+        everything = production.disk_needed(self.profile, self.sources)
+        self.assertGreater(winrm, 0)
+        self.assertLess(winrm, everything)
+        # Each source's share is the same as among all of them: the parts add up.
+        parts = sum(
+            production.disk_needed(self.profile, self.sources, {p})
+            for p in ("ssh", "smb", "winrm", "agent")
+        )
+        self.assertEqual(parts, everything)
+        for protocols, needed in ((None, everything), ({"winrm"}, winrm)):
+            with (
+                self.subTest(protocols=protocols),
+                mock.patch.object(gen_logs.growing_files, "disk_needed", return_value=0),
+                mock.patch.object(gen_logs.shutil, "disk_usage") as usage,
+                mock.patch("sys.stdout"),
+                self.assertRaises(common.KitError) as raised,
+            ):
+                usage.return_value.free = 0
+                gen_logs._check_disk(self.profile, protocols)
+            self.assertIn(f"{needed / 1024**3:.1f} GiB", str(raised.exception))
+
+    def test_write_grows_only_the_chosen_protocols_logs(self) -> None:
+        self.assertEqual(self.writer_trees("--protocols", "ssh,smb"), self.names("ssh", "smb"))
+        self.assertEqual(self.writer_trees(), self.names("ssh", "smb", "winrm"))
+
+    def test_write_keeps_each_sources_rate_when_filtered(self) -> None:
+        shared, agents_dir = self.out, Path(self.tmp.name) / "agents"
+        servers = [s for s in self.sources if s["protocol"] != "agent"]
+        kinds = {
+            e["tree"]: e["kind"]
+            for e in production.writer_entries(self.profile, servers, shared, agents_dir)
+        }
+        filtered = production.writer_entries(self.profile, servers, shared, agents_dir, {"smb"})
+        self.assertEqual({e["tree"] for e in filtered}, self.names("smb"))
+        for entry in filtered:
+            self.assertEqual(entry["kind"], kinds[entry["tree"]])
+
+    def test_a_protocol_the_profile_lacks_is_a_clear_error(self) -> None:
+        for command in (["generate"], ["write", "--phase", "production"]):
+            argv = [
+                "gen_logs.py",
+                *command,
+                "--profile",
+                str(self.profile_path),
+                "--out",
+                str(self.out),
+                "--protocols",
+                "ssh,ftp",
+            ]
+            with (
+                self.subTest(command=command[0]),
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(gen_logs, "fail", side_effect=SystemExit(1)) as failed,
+                self.assertRaises(SystemExit),
+            ):
+                gen_logs.main()
+            message = failed.call_args.args[0]
+            self.assertIn("no ftp sources", message)
+            self.assertIn("agent, smb, ssh, winrm", message)
+            self.assertFalse(self.out.exists())
+
+    def test_protocols_needs_a_profile_with_production_trees(self) -> None:
+        path = Path(self.tmp.name) / "plain.json"
+        path.write_text(
+            json.dumps({"name": "plain", "sources": {"ssh": 1}, "files": {"sizes_kb": [1]}}),
+            encoding="utf-8",
+        )
+        argv = ["gen_logs.py", "generate", "--profile", str(path), "--out", str(self.out)]
+        with (
+            mock.patch.object(sys, "argv", [*argv, "--protocols", "ssh"]),
+            mock.patch.object(gen_logs, "fail", side_effect=SystemExit(1)) as failed,
+            self.assertRaises(SystemExit),
+        ):
+            gen_logs.main()
+        self.assertIn("has none", failed.call_args.args[0])
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
