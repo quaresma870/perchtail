@@ -40,10 +40,9 @@ from app.archives import (
     extract_member,
     is_archive,
     is_transparent_gzip,
-    list_members,
     normalize_member_name,
     rebuild_archive,
-    resolve_member_name,
+    scan_members,
     tree_children,
     write_archive,
 )
@@ -454,7 +453,8 @@ def _archive_has_hidden_members(
     virtual path (`<archive>/<member>`, the same path the explorer and
     /open check) is an exclude. Members no rule matches don't count -- a
     rule that shows only the archive still lets it be downloaded whole. An
-    archive that can't be read as one, or that holds another archive (whose
+    archive that can't be read as one, whose listing was cut short
+    (app.archives.scan_members), or that holds another archive (whose
     own members the rules are never checked against), counts as hiding
     something whenever the source has an exclude rule. Every entry counts,
     a tar's links, devices and FIFOs included: they are never listed or
@@ -462,7 +462,7 @@ def _archive_has_hidden_members(
     has_exclude = any(rule.type == RuleType.exclude for rule in rules)
     filename = path.rsplit("/", 1)[-1]
     try:
-        members = list_members(local_archive, filename, include_special=True)
+        members, cut = scan_members(local_archive, filename, include_special=True)
     except (zipfile.BadZipFile, tarfile.TarError, EOFError, OSError, zlib.error, ValueError):
         return has_exclude
     case_insensitive = rules_case_insensitive(source)
@@ -474,7 +474,9 @@ def _archive_has_hidden_members(
             return True
         if is_explicitly_excluded(f"{path}/{name}", rules, case_insensitive=case_insensitive):
             return True
-    return False
+    # Entries past a cut listing were never checked: as with an archive that
+    # can't be read.
+    return cut and has_exclude
 
 
 def _require_whole_archive_allowed(
@@ -528,9 +530,8 @@ def _materialize(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         try:
             with connector.local_copy(source, path, rules=rules) as archive_local:
-                raw_name = resolve_member_name(archive_local, filename, member)
                 extract_member(
-                    archive_local, filename, raw_name, destination, _max_decompressed_bytes()
+                    archive_local, filename, member, destination, _max_decompressed_bytes()
                 )
             if check_whole_archive and is_archive(member.rsplit("/", 1)[-1]):
                 # A member that is itself an archive is served whole, so it
@@ -733,7 +734,7 @@ def _browse(
             members, listing_cut = connector.call("list_archive", source, archive_path, rules=rules)
         else:
             with connector.local_copy(source, archive_path, rules=rules) as archive_local:
-                members = list_members(archive_local, archive_name)
+                members, listing_cut = scan_members(archive_local, archive_name)
         if all_members:
             if member_dir:
                 raise HTTPException(

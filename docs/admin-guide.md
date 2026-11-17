@@ -490,6 +490,8 @@ Severity indicators colour matching text in the viewer, by level (error, warning
 
 A pattern is plain text matched anywhere in a line, ignoring case, or a regular expression with the `re:` prefix. Each pattern has a level and switches: **line** tints the whole line instead of only the matched text, **nav** includes it in the viewer's previous and next problem buttons, and **on** turns it on or off.
 
+Patterns run in every viewer's browser, so they have the same limits as rule patterns: at most 1000 characters, and regular expressions in the rules' syntax (RE2: no backreferences or lookaround). The viewer matches them in a background worker, apart from the page, and only on the first 2000 characters of each line. A pattern that takes more than a second in all over the lines in view, or over the whole file for the previous and next problem buttons, or that gets stuck on a line, is turned off until the page is reloaded, with a warning that names it, and the other patterns keep working: make such a pattern simpler, for example without a repeated group inside another (`(a+)+`).
+
 ## Redaction
 
 Redaction replaces secrets, payment card numbers and personal data in file content with `[redacted: ...]` for every user, super admins included: in the viewer, Tail, downloads and alerts. Only super admins configure it: **Settings → Redaction** holds the switches, the eleven built-in rules and the custom rules for every source, and the **Redaction** section of each source's editor turns system rules off for that source and adds rules of its own. Nobody else sees either. Redaction is best effort: see [Redaction](redaction.md) for the rules, their false positives, where content is redacted and what it doesn't cover.

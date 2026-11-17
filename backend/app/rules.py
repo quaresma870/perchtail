@@ -42,7 +42,7 @@ def compile_linear(pattern: str, ignore_case: bool = False):
     return re2.compile(pattern, _re2_options(ignore_case))
 
 
-def parse_pattern(raw: str, *, linear_time: bool = True) -> tuple[str, PatternKind]:
+def parse_pattern(raw: str) -> tuple[str, PatternKind]:
     """Splits the admin-facing `re:` prefix convention (CLAUDE.md's rule
     matching semantics) from the pattern itself. Raises InvalidPatternError
     for a regex that doesn't compile, so a typo is rejected when it's saved
@@ -51,23 +51,18 @@ def parse_pattern(raw: str, *, linear_time: bool = True) -> tuple[str, PatternKi
     Rule regexes run on the backend for every path of every browse, so they
     are compiled with RE2, which always matches in linear time: a
     catastrophic pattern like `(a+)+$` can't stall the server (ReDoS). RE2
-    has no backreferences or lookaround, so those are rejected here.
-    linear_time=False keeps Python's full syntax for patterns that never run
-    on the backend (severity patterns, evaluated in the browser)."""
+    has no backreferences or lookaround, so those are rejected here. Severity
+    patterns, which run in every viewer's browser, are held to the same
+    syntax."""
     if raw.startswith("re:"):
         pattern = raw[len("re:") :]
         try:
-            if linear_time:
-                re2.compile(pattern, _re2_options())
-            else:
-                re.compile(pattern)
+            re2.compile(pattern, _re2_options())
         except re2.error as exc:
             raise InvalidPatternError(
                 f"invalid regex {pattern!r} (rules use RE2: no backreferences or "
                 f"lookaround): {exc}"
             ) from exc
-        except re.error as exc:
-            raise InvalidPatternError(f"invalid regex {pattern!r}: {exc}") from exc
         return pattern, PatternKind.regex
     return raw, PatternKind.glob
 

@@ -3,12 +3,13 @@
 import gzip
 import io
 import os
+import tarfile
 import time
 import zipfile
 from collections import namedtuple
 
 import pytest
-from app import system_settings
+from app import archives, system_settings
 from app.api import archive as archive_api
 from app.api.archive import router as archive_router
 from app.api.auth import get_current_active_user
@@ -421,6 +422,49 @@ def test_an_archive_listing_is_capped(session, client, tmp_path):
     response = client.get(f"/sources/{source.id}/browse", params={"path": "big.zip"})
     assert len(response.json()) == 100
     assert response.headers["X-Listing-Truncated"] == "1"
+
+
+def _tar_gz_file(path, names):
+    with tarfile.open(path, "w:gz") as tf:
+        for name in names:
+            info = tarfile.TarInfo(name)
+            info.size = len(name)
+            tf.addfile(info, io.BytesIO(name.encode()))
+
+
+def test_a_tar_gz_past_its_entry_limit_lists_as_cut_short(session, client, tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "MAX_TAR_ENTRIES", 10)
+    (tmp_path / "logs").mkdir()
+    _tar_gz_file(tmp_path / "logs" / "big.tar.gz", [f"m-{i:03}.log" for i in range(25)])
+    source = _local_source(session, tmp_path / "logs")
+
+    response = client.get(f"/sources/{source.id}/browse", params={"path": "big.tar.gz"})
+    assert response.status_code == 200
+    assert len(response.json()) == 10
+    assert response.headers["X-Listing-Truncated"] == "1"
+    every = client.get(f"/sources/{source.id}/browse", params={"path": "big.tar.gz", "all": "true"})
+    assert len(every.json()) == 10
+    assert every.headers["X-Listing-Truncated"] == "1"
+
+
+def test_a_whole_tar_gz_past_its_entry_limit_is_refused_when_rules_exclude(
+    session, client, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(archives, "MAX_TAR_ENTRIES", 10)
+    (tmp_path / "logs").mkdir()
+    # The excluded member is past the limit, so it is never read.
+    names = [f"m-{i:03}.log" for i in range(25)] + ["secret.tmp"]
+    _tar_gz_file(tmp_path / "logs" / "big.tar.gz", names)
+    source = _local_source(
+        session, tmp_path / "logs", (RuleType.include, "**"), (RuleType.exclude, "**/*.tmp")
+    )
+
+    response = client.get(f"/sources/{source.id}/download", params={"path": "big.tar.gz"})
+    assert response.status_code == 403
+    # Without an exclude rule nothing can be hidden, so it is served.
+    plain = _local_source(session, tmp_path / "logs")
+    response = client.get(f"/sources/{plain.id}/download", params={"path": "big.tar.gz"})
+    assert response.status_code == 200
 
 
 def test_an_archive_lists_every_member_at_once_through_the_rules(session, client, tmp_path):

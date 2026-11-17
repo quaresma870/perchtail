@@ -16,6 +16,11 @@ describe('countRedactionMarkers', () => {
   it("leaves out the markers the server doesn't count", () => {
     expect(countRedactionMarkers('[redacted: incomplete line]')).toBe(0)
     expect(countRedactionMarkers('x[redacted: line over 1008 KiB]\n[redacted: jwt]\n')).toBe(1)
+    // The rest of a file that turned UTF-32 part way (X-Redaction-Count
+    // doesn't count it either).
+    expect(countRedactionMarkers('ok [redacted: email]\n[redacted: unsupported encoding]')).toBe(1)
+    // Still highlighted as a marker.
+    expect(findRedactionMarkers('[redacted: unsupported encoding]')).toEqual([{ start: 0, end: 32 }])
   })
 })
 

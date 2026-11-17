@@ -314,20 +314,23 @@
   // "Frontend and UI", severity patterns): steps through lines matching a navigation-eligible
   // severity pattern, wrapping around at either end. Uses the cursor's
   // current line as the starting point, same as an IDE's "next diagnostic".
-  function jumpToProblem(step: typeof nextProblemLine | typeof previousProblemLine) {
+  // The lines are found in the severity worker, so the step lands a moment
+  // later, from wherever the cursor is by then.
+  async function jumpToProblem(step: typeof nextProblemLine | typeof previousProblemLine) {
     if (!view) return
-    const problemLines = findProblemLines(view.state.doc.toString(), severityPatterns)
+    const problemLines = await findProblemLines(view.state.doc.toString(), severityPatterns)
+    if (!view) return
     const currentLine = view.state.doc.lineAt(view.state.selection.main.head).number
     const target = step(problemLines, currentLine)
     if (target !== null) scrollToLine(target)
   }
 
   export function jumpToNextProblem() {
-    jumpToProblem(nextProblemLine)
+    void jumpToProblem(nextProblemLine)
   }
 
   export function jumpToPreviousProblem() {
-    jumpToProblem(previousProblemLine)
+    void jumpToProblem(previousProblemLine)
   }
 
   // Exposed so Viewer.svelte can toggle a bookmark on whatever line the

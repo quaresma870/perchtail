@@ -48,6 +48,7 @@
   import { languageForFilename } from '../lib/file-language'
   import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
   import { redactionCountAfterCap, redactionCountLabel } from '../lib/redaction-markers'
+  import { slowSeverityPatterns } from '../lib/severity-highlighting'
   import { parsePatternInput } from '../lib/rule-format'
   import { systemSettings } from '../lib/settings'
   import { tabKey } from '../lib/tab-key'
@@ -86,6 +87,10 @@
   let loadError = ''
   // Per-source severity patterns, fetched on first use for that source.
   let severityBySource: Record<number, SeverityPattern[]> = {}
+  // Severity patterns turned off for taking too long (severity-highlighting.ts);
+  // the warning shows those not dismissed yet.
+  let dismissedSlowPatterns = 0
+  $: newSlowPatterns = $slowSeverityPatterns.slice(dismissedSlowPatterns)
 
   // A failed open/reload/compare shows here, above the editor, with the
   // server's reason -- it never replaces the explorer (#160).
@@ -1239,6 +1244,22 @@
             <button class="link" on:click={() => notice?.retry?.()}>Try again</button>
           {/if}
           <button class="link" aria-label="Dismiss" on:click={() => (notice = null)}>✕</button>
+        </span>
+      </div>
+    {/if}
+    {#if newSlowPatterns.length > 0}
+      <div class="notice" role="alert">
+        <span>
+          {newSlowPatterns.length === 1 ? 'A severity indicator' : 'Some severity indicators'} took too
+          long to match and {newSlowPatterns.length === 1 ? 'is' : 'are'} turned off until you reload the
+          page: {newSlowPatterns.map((p) => p.pattern).join(', ')}
+        </span>
+        <span class="notice-actions">
+          <button
+            class="link"
+            aria-label="Dismiss"
+            on:click={() => (dismissedSlowPatterns = $slowSeverityPatterns.length)}>✕</button
+          >
         </span>
       </div>
     {/if}

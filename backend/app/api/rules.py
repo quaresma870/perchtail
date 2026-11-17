@@ -89,9 +89,13 @@ def _require_editable_rules(source: Source) -> None:
         )
 
 
-def parse_pattern_or_400(raw: str, *, linear_time: bool = True) -> tuple[str, PatternKind]:
+def parse_pattern_or_400(raw: str) -> tuple[str, PatternKind]:
+    """parse_pattern for a pattern typed in the editor (a rule or a severity
+    pattern): at most MAX_PATTERN_CHARS long, a regex in RE2 syntax; 400
+    otherwise."""
+    _require_pattern_length(raw)
     try:
-        return parse_pattern(raw, linear_time=linear_time)
+        return parse_pattern(raw)
     except InvalidPatternError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -115,7 +119,6 @@ def create_rule(
     session: Session = Depends(get_session),
 ):
     _require_editable_rules(source)
-    _require_pattern_length(payload.pattern)
     pattern, pattern_kind = parse_pattern_or_400(payload.pattern)
 
     existing = _ordered_rules(session, source.id)
@@ -162,7 +165,6 @@ def update_rule(
     if payload.type is not None:
         rule.type = payload.type
     if payload.pattern is not None:
-        _require_pattern_length(payload.pattern)
         rule.pattern, rule.pattern_kind = parse_pattern_or_400(payload.pattern)
     if "notes" in payload.model_fields_set:
         rule.notes = payload.notes

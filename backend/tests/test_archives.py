@@ -4,6 +4,7 @@ import tarfile
 import zipfile
 
 import pytest
+from app import archives
 from app.archives import (
     SKIP_LINK,
     SKIP_NESTED_ARCHIVE,
@@ -15,6 +16,7 @@ from app.archives import (
     is_transparent_gzip,
     list_members,
     rebuild_archive,
+    scan_members,
 )
 
 
@@ -356,3 +358,333 @@ def test_rebuild_leaves_nothing_behind_when_it_fails(tmp_path):
     assert not (tmp_path / "rebuilt-logs.zip").exists()
     with pytest.raises(ValueError):
         _rebuild(source, "logs.rar", tmp_path)
+
+
+# -- a tar.gz is read once, within limits -------------------------------------------
+
+
+def _tar_gz(path, members):
+    """A tar.gz of `members`, each (name, bytes) for a file or (name, None)
+    for a folder, in order."""
+    with tarfile.open(path, "w:gz") as tf:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tf.addfile(info)
+            else:
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+
+
+@pytest.fixture()
+def decompressed_bytes(monkeypatch):
+    """How many bytes gzip decompressed, in every read and forward seek."""
+    counted = [0]
+    original = gzip._GzipReader.read
+
+    def counting_read(self, size=-1):
+        data = original(self, size)
+        counted[0] += len(data)
+        return data
+
+    monkeypatch.setattr(gzip._GzipReader, "read", counting_read)
+    return counted
+
+
+def test_opening_a_tar_member_decompresses_the_archive_once(tmp_path, decompressed_bytes):
+    archive = tmp_path / "logs.tar.gz"
+    block = bytes(range(256)) * 400
+    _tar_gz(archive, [(f"m{i}.log", block) for i in range(5)] + [("./last.log", b"the end")])
+    with gzip.open(archive) as raw:
+        tar_size = len(raw.read())
+    decompressed_bytes[0] = 0
+
+    destination = tmp_path / "out"
+    extract_member(archive, "logs.tar.gz", "last.log", destination)
+
+    assert destination.read_bytes() == b"the end"
+    assert decompressed_bytes[0] <= tar_size
+
+
+def test_listing_a_tar_gz_decompresses_it_once(tmp_path, decompressed_bytes):
+    archive = tmp_path / "logs.tar.gz"
+    _tar_gz(archive, [(f"m{i}.log", bytes(range(256)) * 100) for i in range(5)])
+    with gzip.open(archive) as raw:
+        tar_size = len(raw.read())
+    decompressed_bytes[0] = 0
+
+    assert len(list_members(archive, "logs.tar.gz")) == 5
+    assert decompressed_bytes[0] <= tar_size
+
+
+def test_a_tar_gz_listing_stops_at_the_entry_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "MAX_TAR_ENTRIES", 10)
+    archive = tmp_path / "logs.tar.gz"
+    _tar_gz(archive, [(f"m{i:02}.log", b"x") for i in range(25)])
+
+    members, cut = scan_members(archive, "logs.tar.gz")
+    assert [m.name for m in members] == [f"m{i:02}.log" for i in range(10)]
+    assert cut is True
+    # Within the limit, nothing is cut.
+    monkeypatch.setattr(archives, "MAX_TAR_ENTRIES", 25)
+    members, cut = scan_members(archive, "logs.tar.gz")
+    assert len(members) == 25
+    assert cut is False
+
+
+def test_the_entry_limit_counts_links_and_devices_too(tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "MAX_TAR_ENTRIES", 10)
+    archive = tmp_path / "logs.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        for i in range(30):
+            tf.addfile(_special(f"link{i}", tarfile.SYMTYPE, "x"))
+        info = tarfile.TarInfo("app.log")
+        info.size = 1
+        tf.addfile(info, io.BytesIO(b"x"))
+
+    members, cut = scan_members(archive, "logs.tar.gz")
+    assert members == []
+    assert cut is True
+
+
+def test_a_tar_gz_listing_stops_at_the_name_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "MAX_TAR_NAME_BYTES", 100)
+    archive = tmp_path / "logs.tar.gz"
+    _tar_gz(archive, [(f"{'n' * 40}{i}.log", b"x") for i in range(5)])
+
+    members, cut = scan_members(archive, "logs.tar.gz")
+    assert len(members) == 2
+    assert cut is True
+
+
+def test_a_tar_gz_header_over_the_limit_is_unreadable(tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "MAX_TAR_HEADER_BYTES", 4096)
+    archive = tmp_path / "logs.tar.gz"
+    with tarfile.open(archive, "w:gz", format=tarfile.GNU_FORMAT) as tf:
+        info = tarfile.TarInfo("d/" * 5000 + "app.log")
+        info.size = 1
+        tf.addfile(info, io.BytesIO(b"x"))
+
+    with pytest.raises(tarfile.ReadError):
+        list_members(archive, "logs.tar.gz")
+    with pytest.raises(tarfile.ReadError):
+        extract_member(archive, "logs.tar.gz", "app.log", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+_TAR_END = b"\0" * 2 * tarfile.BLOCKSIZE
+
+
+def _file_header(name: str) -> bytes:
+    """The header of an empty regular file `name`."""
+    return tarfile.TarInfo(name).tobuf(tarfile.USTAR_FORMAT)
+
+
+def _with_checksum(block: bytearray) -> bytes:
+    block[148:156] = b" " * 8
+    block[148:155] = b"%06o\0" % tarfile.calc_chksums(bytes(block))[0]
+    return bytes(block)
+
+
+def _write_tar_gz(path, raw: bytes) -> None:
+    path.write_bytes(gzip.compress(raw + _TAR_END))
+
+
+@pytest.fixture()
+def pax_header_bytes(monkeypatch):
+    """The largest size the global pax headers tarfile keeps reached, in
+    bytes of keys and values, seen after each entry is read."""
+    seen = [0]
+    original = tarfile.TarFile.next
+
+    def watching_next(self):
+        try:
+            return original(self)
+        finally:
+            size = sum(len(k) + len(v) for k, v in self.pax_headers.items())
+            seen[0] = max(seen[0], size)
+
+    monkeypatch.setattr(tarfile.TarFile, "next", watching_next)
+    return seen
+
+
+def test_global_pax_headers_past_their_limit_make_a_tar_gz_unreadable(
+    tmp_path, monkeypatch, pax_header_bytes
+):
+    monkeypatch.setattr(archives, "MAX_TAR_GLOBAL_HEADER_BYTES", 64 * 1024)
+    archive = tmp_path / "logs.tar.gz"
+    # Each entry comes after a global header with a key of its own, each
+    # well within the limit on one entry's headers.
+    raw = b"".join(
+        tarfile.TarInfo._create_pax_generic_header(
+            {f"k{i:04}": "a" * 4096}, tarfile.XGLTYPE, "utf-8"
+        )
+        + _file_header(f"m{i}.log")
+        for i in range(100)
+    )
+    _write_tar_gz(archive, raw)
+
+    with pytest.raises(tarfile.ReadError):
+        list_members(archive, "logs.tar.gz")
+    with pytest.raises(tarfile.ReadError):
+        extract_member(archive, "logs.tar.gz", "m99.log", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+    assert pax_header_bytes[0] <= 64 * 1024
+    # A global header within the limit is read as before.
+    small = tmp_path / "small.tar.gz"
+    with tarfile.open(small, "w:gz", format=tarfile.PAX_FORMAT, pax_headers={"c": "x"}) as tf:
+        tf.addfile(tarfile.TarInfo("app.log"))
+    assert [m.name for m in list_members(small, "small.tar.gz")] == ["app.log"]
+
+
+def test_sparse_blocks_past_the_header_limit_make_a_tar_gz_unreadable(tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "MAX_TAR_HEADER_BYTES", 64 * 1024)
+    archive = tmp_path / "logs.tar.gz"
+    header = bytearray(_file_header("sparse.log"))
+    header[156:157] = tarfile.GNUTYPE_SPARSE
+    header[482] = 1  # isextended
+    header[483:495] = b"%011o\0" % 1
+    # Each extension block holds 21 sparse entries and says another follows;
+    # each is one 512-byte read, under any limit on one read.
+    blocks = []
+    for n in range(500):
+        block = bytearray(tarfile.BLOCKSIZE)
+        for i in range(21):
+            block[i * 24 : i * 24 + 24] = b"%011o\0%011o\0" % (n * 21 + i + 1, 1)
+        block[504] = 1 if n < 499 else 0
+        blocks.append(bytes(block))
+    _write_tar_gz(archive, _with_checksum(header) + b"".join(blocks) + _file_header("app.log"))
+
+    with pytest.raises(tarfile.ReadError):
+        list_members(archive, "logs.tar.gz")
+    with pytest.raises(tarfile.ReadError):
+        extract_member(archive, "logs.tar.gz", "app.log", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def _long_name_chain(levels: int) -> bytes:
+    """`levels` GNU long-name headers in a row, then an empty file: tarfile
+    reads each one by calling itself again for the header after it."""
+    long_name = tarfile.TarInfo._create_gnu_long_header(
+        "n" * 400, tarfile.GNUTYPE_LONGNAME, "utf-8", "surrogateescape"
+    )
+    return long_name * levels + _file_header("app.log")
+
+
+def test_chained_long_names_past_the_header_limit_make_a_tar_gz_unreadable(tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "MAX_TAR_HEADER_BYTES", 64 * 1024)
+    archive = tmp_path / "logs.tar.gz"
+    # 200 headers of 1 KiB each, each read well under the limit.
+    _write_tar_gz(archive, _long_name_chain(200))
+
+    with pytest.raises(tarfile.ReadError):
+        list_members(archive, "logs.tar.gz")
+    with pytest.raises(tarfile.ReadError):
+        extract_member(archive, "logs.tar.gz", "app.log", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_long_names_chained_past_the_recursion_limit_make_a_tar_gz_unreadable(tmp_path):
+    archive = tmp_path / "logs.tar.gz"
+    # Within the default limit on one entry's headers, but deeper than
+    # tarfile can recurse.
+    _write_tar_gz(archive, _long_name_chain(900))
+
+    with pytest.raises(tarfile.ReadError):
+        list_members(archive, "logs.tar.gz")
+    with pytest.raises(tarfile.ReadError):
+        extract_member(archive, "logs.tar.gz", "app.log", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_tar_gz_keeps_no_entry_it_has_read(tmp_path, monkeypatch):
+    seen = []
+    original = tarfile.TarFile.next
+
+    def watching_next(self):
+        member = original(self)
+        seen.append(len(self.members))
+        return member
+
+    monkeypatch.setattr(tarfile.TarFile, "next", watching_next)
+    archive = tmp_path / "logs.tar.gz"
+    _tar_gz(archive, [(f"m{i}.log", b"x") for i in range(50)])
+
+    assert len(list_members(archive, "logs.tar.gz")) == 50
+    assert max(seen) <= 2
+
+
+def test_a_member_past_the_entry_limit_is_not_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "MAX_TAR_ENTRIES", 10)
+    archive = tmp_path / "logs.tar.gz"
+    _tar_gz(archive, [(f"m{i:02}.log", b"x") for i in range(25)])
+
+    extract_member(archive, "logs.tar.gz", "m09.log", tmp_path / "ok")
+    with pytest.raises(KeyError):
+        extract_member(archive, "logs.tar.gz", "m20.log", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    "members,requested,expected",
+    [
+        # The last entry under a name counts, as tarfile.getmember.
+        ([("app.log", b"first"), ("app.log", b"second")], "app.log", b"second"),
+        # A raw name equal to the request wins over a normalized match,
+        # wherever it is.
+        ([("./app.log", b"dotted"), ("app.log", b"plain")], "app.log", b"plain"),
+        ([("app.log", b"plain"), ("./app.log", b"dotted")], "app.log", b"plain"),
+        # Else the first file whose normalized name matches.
+        ([("./a/app.log", b"one"), ("a//app.log", b"two")], "a/app.log", b"one"),
+        # A name that is a folder is not a file.
+        ([("a/app.log", None), ("./a/app.log", b"file")], "a/app.log", None),
+    ],
+)
+def test_a_tar_member_is_found_as_before(tmp_path, members, requested, expected):
+    archive = tmp_path / "logs.tar.gz"
+    _tar_gz(archive, members)
+    destination = tmp_path / "out"
+
+    if expected is None:
+        with pytest.raises(KeyError):
+            extract_member(archive, "logs.tar.gz", requested, destination)
+        assert not destination.exists()
+    else:
+        extract_member(archive, "logs.tar.gz", requested, destination)
+        assert destination.read_bytes() == expected
+
+
+def test_a_file_replaced_by_a_link_under_the_same_name_is_not_found(tmp_path):
+    archive = tmp_path / "logs.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        info = tarfile.TarInfo("app.log")
+        info.size = 4
+        tf.addfile(info, io.BytesIO(b"real"))
+        tf.addfile(_special("app.log", tarfile.SYMTYPE, "secret.txt"))
+    destination = tmp_path / "out"
+
+    with pytest.raises(KeyError):
+        extract_member(archive, "logs.tar.gz", "app.log", destination)
+    assert not destination.exists()
+
+
+def test_a_corrupt_tar_gz_is_a_read_error(tmp_path):
+    archive = tmp_path / "logs.tar.gz"
+    archive.write_bytes(b"not gzip at all")
+
+    with pytest.raises(tarfile.ReadError):
+        list_members(archive, "logs.tar.gz")
+    with pytest.raises(tarfile.ReadError):
+        extract_member(archive, "logs.tar.gz", "app.log", tmp_path / "out")
+
+
+def test_a_tar_gz_over_the_entry_limit_is_not_rebuilt(tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "MAX_TAR_ENTRIES", 10)
+    source = tmp_path / "logs.tar.gz"
+    _tar_gz(source, [(f"m{i:02}.log", b"x") for i in range(25)])
+
+    with pytest.raises(tarfile.ReadError):
+        _rebuild(source, "logs.tar.gz", tmp_path, keep=lambda name: True)
+    assert not (tmp_path / "rebuilt-logs.tar.gz").exists()
+    assert list((tmp_path / "work").iterdir()) == []
