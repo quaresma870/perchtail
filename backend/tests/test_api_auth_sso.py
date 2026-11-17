@@ -79,6 +79,7 @@ def _key_set_and_token(**claim_overrides) -> tuple[KeySet, str]:
         "iat": now,
         "nonce": "placeholder",
         "email": "jdoe@example.com",
+        "email_verified": True,
     }
     claims.update(claim_overrides)
     token = jwt.encode({"alg": "RS256", "kid": key.kid}, claims, key)
@@ -330,6 +331,65 @@ def test_callback_redirects_to_login_error_on_idp_error_param(client, session):
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
     assert "perchtail_session" not in response.cookies
+
+
+def test_callback_cuts_the_idp_error_short_in_the_log(client, session):
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        response = client.get(
+            "/auth/sso/callback",
+            params={"error": "e" * 5000, "error_description": "d" * 5000, "state": "x"},
+        )
+
+    assert response.status_code == 302
+    [entry] = [e for e in logs if e["event"] == "sso.callback.idp_error"]
+    assert entry["error"] == "e" * 200
+    assert entry["error_description"] == "d" * 200
+
+
+def test_sso_login_is_limited_per_address(client, session, monkeypatch):
+    from app import login_throttle
+
+    _make_enabled_provider(session)
+    fetched = []
+
+    def fetch(issuer):
+        fetched.append(issuer)
+        return DISCOVERY
+
+    monkeypatch.setattr(oidc, "fetch_discovery_document", fetch)
+
+    for _ in range(login_throttle.SSO_LOGINS_PER_ADDRESS):
+        assert client.get("/auth/sso/login").status_code == 302
+    response = client.get("/auth/sso/login")
+
+    assert response.status_code == 429
+    assert int(response.headers["retry-after"]) >= 1
+    # One discovery for all of them (the cache).
+    assert fetched == [ISSUER]
+    [entry] = _sso_login_failures(session)
+    assert entry.event_metadata["reason"] == "rate_limited"
+
+
+def test_the_sso_login_limit_is_per_address(session, monkeypatch):
+    from app import login_throttle
+
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")
+    get_settings.cache_clear()
+    app = FastAPI()
+    app.include_router(auth_router)
+    app.dependency_overrides[get_session] = lambda: session
+    _make_enabled_provider(session)
+    monkeypatch.setattr(oidc, "fetch_discovery_document", lambda issuer: DISCOVERY)
+    first = TestClient(app, follow_redirects=False, client=("198.51.100.1", 1000))
+    second = TestClient(app, follow_redirects=False, client=("198.51.100.2", 1000))
+
+    for _ in range(login_throttle.SSO_LOGINS_PER_ADDRESS):
+        first.get("/auth/sso/login")
+    assert first.get("/auth/sso/login").status_code == 429
+    assert second.get("/auth/sso/login").status_code == 302
+    get_settings.cache_clear()
 
 
 def test_callback_redirects_to_login_error_on_missing_code(client, session):

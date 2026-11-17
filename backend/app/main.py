@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -117,9 +118,21 @@ if _test_patch_module:
 _INSECURE_DEFAULT_CREDENTIAL_KEY = "changeme"
 
 
+_REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def request_id_for(header_value: str | None) -> str:
+    """The caller's x-request-id when it is at most 64 characters of
+    letters, digits, `.`, `_` and `-`; anything else is replaced with a new
+    one, so a caller can't write arbitrary text into every log line."""
+    if header_value is not None and _REQUEST_ID_PATTERN.fullmatch(header_value):
+        return header_value
+    return str(uuid.uuid4())
+
+
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+        request_id = request_id_for(request.headers.get("x-request-id"))
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id)
         response = await call_next(request)

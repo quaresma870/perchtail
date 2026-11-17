@@ -311,6 +311,26 @@ def test_a_failed_send_drops_the_link_and_is_audited(session, recovery_on, clien
 # --- using the link ------------------------------------------------------------
 
 
+def test_a_password_over_the_policy_maximum_is_refused_before_anything_else(
+    session, recovery_on, client, monkeypatch
+):
+    user = _user(session)
+    hash_before = user.password_hash
+    _ask(client)
+    token = _token_from(recovery_on)
+    monkeypatch.setattr(
+        "app.auth.password_reset.complete_reset", lambda *a, **k: pytest.fail("no hashing")
+    )
+
+    response = _complete(client, token, "x" * 129)
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["error_code"] == "password_too_long"
+    assert "x" * 129 not in response.text
+    session.expire_all()
+    assert session.get(User, user.id).password_hash == hash_before
+
+
 def test_the_link_sets_the_password_once_and_ends_every_session(session, recovery_on, client):
     user = _user(session, must_change_password=True)
     create_session(session, user)

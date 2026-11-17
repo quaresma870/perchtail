@@ -34,6 +34,33 @@ def test_healthz_sets_request_id_header():
     assert "x-request-id" in response.headers
 
 
+def test_a_well_formed_request_id_is_kept():
+    client = TestClient(app, client=LOCAL)
+    response = client.get("/healthz", headers={"x-request-id": "abc-123_X.y"})
+    assert response.headers["x-request-id"] == "abc-123_X.y"
+
+
+@pytest.mark.parametrize(
+    "sent",
+    ["a" * 65, "has space", 'quote"', "{json}", "a=b"],
+)
+def test_a_malformed_or_long_request_id_is_replaced(sent):
+    client = TestClient(app, client=LOCAL)
+    response = client.get("/healthz", headers={"x-request-id": sent})
+    assert response.headers["x-request-id"] != sent
+    assert len(response.headers["x-request-id"]) <= 64
+
+
+def test_request_id_for_accepts_up_to_64_safe_characters():
+    from app.main import request_id_for
+
+    assert request_id_for("a" * 64) == "a" * 64
+    assert request_id_for("a" * 65) != "a" * 65
+    assert request_id_for("") != ""
+    assert request_id_for("x\ny") != "x\ny"
+    assert len(request_id_for(None)) == 36
+
+
 def test_responses_carry_security_headers():
     client = TestClient(app, client=LOCAL)
     response = client.get("/healthz")

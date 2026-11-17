@@ -471,3 +471,118 @@ def test_the_forced_password_change_comes_before_mfa_setup(session, make_client,
     assert client.get("/protected").json()["detail"]["error_code"] == "mfa_setup_required"
     _enroll(client, NEW_PASSWORD)
     assert client.get("/protected").status_code == 200
+
+
+# --- the longest password a request may carry -----------------------------------
+
+
+@pytest.fixture()
+def no_password_checks(monkeypatch):
+    """Fails the test if a too-long password reaches argon2."""
+
+    def refuse(*args, **kwargs):
+        pytest.fail("a too-long password reached the password check")
+
+    monkeypatch.setattr("app.api.auth.verify_password", refuse)
+    monkeypatch.setattr("app.api.auth.LocalPasswordProvider.authenticate", refuse)
+    monkeypatch.setattr("app.api.auth.change_password", refuse)
+
+
+def _too_long(response) -> bool:
+    return (
+        response.status_code == 422
+        and response.json()["detail"]["error_code"] == "password_too_long"
+    )
+
+
+def test_a_huge_password_on_login_is_refused_before_argon2(
+    session, make_client, no_password_checks
+):
+    _local_user(session, "ana")
+    response = _login(make_client(), "ana", "x" * 1_000_000)
+    assert _too_long(response)
+    assert "x" * 200 not in response.text
+
+
+def test_huge_passwords_after_sign_in_are_refused_before_argon2(session, make_client, monkeypatch):
+    _local_user(session, "ana")
+    client = make_client()
+    assert _login(client, "ana").status_code == 200
+
+    def refuse(*args, **kwargs):
+        pytest.fail("a too-long password reached the password check")
+
+    monkeypatch.setattr("app.api.auth.verify_password", refuse)
+    monkeypatch.setattr("app.api.auth.change_password", refuse)
+    huge = "x" * 1_000_000
+    for path, body in [
+        ("/auth/change-password", {"current_password": huge, "new_password": NEW_PASSWORD}),
+        ("/auth/change-password", {"current_password": PASSWORD, "new_password": huge}),
+        ("/auth/mfa/enroll", {"password": huge}),
+        ("/auth/mfa/disable", {"password": huge}),
+        ("/auth/mfa/backup-codes/regenerate", {"password": huge}),
+    ]:
+        assert _too_long(client.post(path, json=body)), path
+    response = client.patch("/auth/me", json={"email": "ana@example.com", "current_password": huge})
+    assert _too_long(response)
+
+
+def test_the_limit_is_the_policy_maximum(session, make_client, no_password_checks):
+    system_settings.set_int(session, "password_max_length", 64)
+    session.commit()
+    _local_user(session, "ana")
+
+    response = _login(make_client(), "ana", "x" * 65)
+
+    assert _too_long(response)
+    assert response.json()["detail"]["message"] == "Use at most 64 characters."
+
+
+def test_a_password_at_the_limit_is_checked_as_usual(session, make_client):
+    _local_user(session, "ana")
+    assert _login(make_client(), "ana", "x" * 128).status_code == 401
+
+
+def test_without_a_policy_maximum_the_limit_is_1024(session, monkeypatch):
+    from app import password_policy
+    from app.api.auth import password_length_limit
+
+    monkeypatch.setattr(
+        password_policy, "get_policy", lambda s: password_policy.PasswordPolicy(max_length=0)
+    )
+    assert password_length_limit(session) == 1024
+
+
+# --- a password change gives the session a new token -----------------------------
+
+
+def test_changing_the_password_replaces_the_current_session_token(session, make_client):
+    from app.api.auth import SESSION_COOKIE_NAME
+
+    _local_user(session, "ana")
+    client = make_client()
+    assert _login(client, "ana").status_code == 200
+    old_token = client.cookies[SESSION_COOKIE_NAME]
+    other = make_client()
+    assert _login(other, "ana").status_code == 200
+
+    response = client.post(
+        "/auth/change-password",
+        json={"current_password": PASSWORD, "new_password": NEW_PASSWORD},
+    )
+
+    assert response.status_code == 200
+    new_token = client.cookies[SESSION_COOKIE_NAME]
+    assert new_token != old_token
+    # This browser goes on with the new token; the old one, and the other
+    # session, stop working.
+    assert client.get("/auth/me").status_code == 200
+    stale = make_client()
+    stale.cookies.set(SESSION_COOKIE_NAME, old_token)
+    assert stale.get("/auth/me").status_code == 401
+    assert other.get("/auth/me").status_code == 401
+    session.expire_all()
+    [revoked] = _audit(session, "session.revoke")
+    assert _details(revoked) == {"count": 1, "reason": "password_change"}
+    user = session.exec(select(User).where(User.username == "ana")).one()
+    assert len(session.exec(select(AuthSession).where(AuthSession.user_id == user.id)).all()) == 1

@@ -110,6 +110,17 @@ def _reset_login_throttle():
 
 
 @pytest.fixture(autouse=True)
+def _empty_sso_discovery_cache():
+    # app.auth.providers.oidc caches discovery documents per issuer in a
+    # module-level dict; tests serve different documents for one issuer.
+    from app.auth.providers import oidc
+
+    oidc.clear_discovery_cache()
+    yield
+    oidc.clear_discovery_cache()
+
+
+@pytest.fixture(autouse=True)
 def _own_audit_chain_marker(monkeypatch, tmp_path):
     # The audit chain marker lives in DATA_DIR (app.audit_hash_chain), which
     # tests share: each test gets its own, absent unless the test writes it.
