@@ -109,9 +109,19 @@ export interface Source {
   name_indexed_at: string | null
   name_index_files: number | null
   name_index_message: string | null
+  // Agent sources: the agent's connection was taken over by one from another
+  // address (two agents may share the token), until a connection takes over
+  // none. Only sent to users with manage_source; absent from older servers.
+  agent_connection_replaced?: AgentConnectionReplaced | null
   // What the current user may do on this source (#174); the backend still
   // enforces every action on its own.
   my_capabilities: Capability[]
+}
+
+export interface AgentConnectionReplaced {
+  previous_address: string | null
+  address: string | null
+  at: string
 }
 
 export interface SourceRoot {

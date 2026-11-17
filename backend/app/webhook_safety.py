@@ -55,12 +55,36 @@ def _unmapped(ip: Address) -> Address:
     return ip
 
 
+# IPv6 prefixes that carry an IPv4 address to be reached through a
+# translator or tunnel: the address that is really contacted is the embedded
+# IPv4 one, which may well be internal, so none of them counts as global.
+_TRANSLATION_PREFIXES = tuple(
+    ipaddress.IPv6Network(prefix)
+    for prefix in (
+        "64:ff9b::/96",  # NAT64, well-known prefix (RFC 6052)
+        "64:ff9b:1::/48",  # NAT64, local use (RFC 8215)
+        "2002::/16",  # 6to4 (RFC 3056)
+        "2001::/32",  # Teredo (RFC 4380)
+        "::ffff:0:0:0/96",  # IPv4-translated (RFC 2765)
+        "::/96",  # IPv4-compatible, deprecated (RFC 4291)
+    )
+)
+
+
+def _is_translated(ip: Address) -> bool:
+    return isinstance(ip, ipaddress.IPv6Address) and any(
+        ip in prefix for prefix in _TRANSLATION_PREFIXES
+    )
+
+
 def _is_disallowed(ip: Address) -> bool:
     """Anything not publicly routable is refused -- an allowlist (is_global),
     not a list of known-bad ranges, so carrier-grade NAT, documentation and
-    benchmarking ranges and the like are covered too."""
+    benchmarking ranges and the like are covered too. IPv6 addresses that
+    embed an IPv4 one for a translator or tunnel (NAT64, 6to4, Teredo...)
+    are refused too, whatever the embedded address."""
     ip = _unmapped(ip)
-    return not ip.is_global or ip.is_multicast
+    return not ip.is_global or ip.is_multicast or _is_translated(ip)
 
 
 def _is_disallowed_for_smtp(ip: Address) -> bool:

@@ -6,7 +6,7 @@ from app.api.auth import get_current_active_user
 from app.auth.models import Capability, Role, ScopeType, User
 from app.auth.rbac import create_role_grant
 from app.db import get_session
-from app.models import Alert, AlertFileState, Customer, Protocol, Source
+from app.models import Alert, AlertFileState, Customer, Folder, Protocol, Source
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -104,8 +104,69 @@ def test_create_alert_requires_visible_source(session, client_for):
             "webhook_url": "https://example.com/hook",
         },
     )
+    missing = client.post(
+        "/alerts",
+        json={
+            "name": "x",
+            "query": "q",
+            "source_id": source.id + 1000,
+            "webhook_url": "https://example.com/hook",
+        },
+    )
 
-    assert response.status_code == 403
+    # Answered exactly like a source that doesn't exist, so the answer
+    # doesn't say which ids exist (the refusal is a ConcealedDenial, audited
+    # by app/api/errors.py: see tests/test_audit_origin.py).
+    assert response.status_code == missing.status_code == 404
+    assert response.json() == missing.json() == {"detail": "Source not found"}
+
+
+def test_create_alert_requires_visible_folder_and_customer(session, client_for):
+    user = _make_user(session, is_super_admin=False)
+    customer = Customer(name="Hidden")
+    session.add(customer)
+    session.commit()
+    folder = Folder(name="f", customer_id=customer.id)
+    session.add(folder)
+    session.commit()
+    client = client_for(user)
+
+    def create(**scope):
+        return client.post(
+            "/alerts",
+            json={"name": "x", "query": "q", "webhook_url": "https://example.com/hook", **scope},
+        )
+
+    assert create(folder_id=folder.id).json() == create(folder_id=folder.id + 1000).json()
+    assert create(folder_id=folder.id).status_code == 404
+    assert create(customer_id=customer.id).json() == create(customer_id=customer.id + 1000).json()
+    assert create(customer_id=customer.id).status_code == 404
+
+
+def test_the_webhook_test_is_limited_per_user(session, client_for, monkeypatch):
+    from app.api import alerts as alerts_api
+
+    sent = []
+    monkeypatch.setattr(alerts_api, "post_webhook", lambda url, payload: sent.append(url))
+    user, other = _make_user(session), _make_user(session)
+
+    def alert_of(client):
+        return client.post(
+            "/alerts", json={"name": "a", "query": "q", "webhook_url": "https://example.com/hook"}
+        ).json()["id"]
+
+    client = client_for(user)
+    alert_id = alert_of(client)
+    for _ in range(alerts_api.TEST_CALLS_PER_USER):
+        assert client.post(f"/alerts/{alert_id}/test").json() == {"ok": True, "error": None}
+    refused = client.post(f"/alerts/{alert_id}/test")
+    assert refused.status_code == 429
+    assert 1 <= int(refused.headers["Retry-After"]) <= alerts_api.TEST_WINDOW_SECONDS
+    assert len(sent) == alerts_api.TEST_CALLS_PER_USER
+
+    # Another user has their own allowance.
+    other_client = client_for(other)
+    assert other_client.post(f"/alerts/{alert_of(other_client)}/test").status_code == 200
 
 
 def test_create_alert_succeeds_once_source_is_visible(session, client_for):
@@ -215,7 +276,8 @@ def test_update_alert_rejects_source_the_user_cannot_view(session, client_for):
 
     response = client.patch(f"/alerts/{created['id']}", json={"source_id": other_source.id})
 
-    assert response.status_code == 403
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Source not found"}
 
 
 def test_delete_alert_requires_ownership(session, client_for):

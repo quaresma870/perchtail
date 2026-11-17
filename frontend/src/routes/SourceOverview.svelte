@@ -97,6 +97,8 @@
   $: canIndexNow = source?.my_capabilities.includes('run_now') ?? false
   // Without manage_rules the rules are shown, not edited.
   $: canManageRules = source?.my_capabilities.includes('manage_rules') ?? false
+  // The connection test needs manage sources on the source.
+  $: canCheck = source?.my_capabilities.includes('manage_source') ?? false
 
   async function indexNow() {
     if (!source) return
@@ -180,14 +182,16 @@
               : undefined}
           on:click={() => push(`/viewer/${sourceId}`)}>Browse</button
         >
-        <button
-          class="btn btn-ghost"
-          disabled={checking || !source.enabled}
-          title={source.enabled ? undefined : 'This source is disabled: turn it on in its settings to test it'}
-          on:click={testConnection}
-        >
-          {checking ? 'Testing…' : 'Test connection'}
-        </button>
+        {#if canCheck}
+          <button
+            class="btn btn-ghost"
+            disabled={checking || !source.enabled}
+            title={source.enabled ? undefined : 'This source is disabled: turn it on in its settings to test it'}
+            on:click={testConnection}
+          >
+            {checking ? 'Testing…' : 'Test connection'}
+          </button>
+        {/if}
         {#if canManage}
           <button class="btn btn-ghost" on:click={() => push(`/settings/sources/${sourceId}/edit`)}>Edit</button>
         {/if}
@@ -257,7 +261,19 @@
       {/if}
       {#if source.protocol === 'agent'}
         <dt>Agent</dt>
-        <dd>{source.agent_connected ? 'connected' : 'not connected'}</dd>
+        <dd>
+          {source.agent_connected ? 'connected' : 'not connected'}
+          {#if source.agent_connection_replaced}
+            <p class="http-warning" role="status" data-testid="agent-connection-replaced-warning">
+              The agent's connection was taken over {ago(source.agent_connection_replaced.at, new Date())}
+              by a connection from {source.agent_connection_replaced.address ?? 'an unknown address'}
+              (it was connected from {source.agent_connection_replaced.previous_address ??
+                'an unknown address'}). Two agents may be using this source's token: if one of them
+              isn't yours, regenerate the token. This notice stays until an agent connects without
+              taking over another connection.
+            </p>
+          {/if}
+        </dd>
         <dt>Agent OS</dt>
         <dd>
           {#if source.agent_os === 'windows'}

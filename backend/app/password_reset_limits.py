@@ -37,7 +37,10 @@ TOKEN_WINDOW_SECONDS = 15 * 60.0
 _MAX_TRACKED_KEYS = 50_000
 
 
-class _SlidingWindow:
+class SlidingWindow:
+    """At most `limit` events per key within the last `window` seconds, in
+    memory. Also used for the alert webhook test (app/api/alerts.py)."""
+
     def __init__(self, limit: int, window: float):
         self.limit = limit
         self.window = window
@@ -77,9 +80,9 @@ class _SlidingWindow:
 
 
 _lock = threading.Lock()
-_requests_by_address = _SlidingWindow(REQUESTS_PER_ADDRESS, REQUEST_WINDOW_SECONDS)
-_requests_by_identifier = _SlidingWindow(REQUESTS_PER_IDENTIFIER, IDENTIFIER_WINDOW_SECONDS)
-_token_attempts_by_address = _SlidingWindow(TOKEN_ATTEMPTS_PER_ADDRESS, TOKEN_WINDOW_SECONDS)
+_requests_by_address = SlidingWindow(REQUESTS_PER_ADDRESS, REQUEST_WINDOW_SECONDS)
+_requests_by_identifier = SlidingWindow(REQUESTS_PER_IDENTIFIER, IDENTIFIER_WINDOW_SECONDS)
+_token_attempts_by_address = SlidingWindow(TOKEN_ATTEMPTS_PER_ADDRESS, TOKEN_WINDOW_SECONDS)
 
 
 def request_from_address(client_ip: str | None) -> int | None:

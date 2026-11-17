@@ -4,6 +4,7 @@ editing the role they hold, and not by handing out a role or grant reaching
 beyond what they hold themselves at that customer, folder or source."""
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from app.api.auth import get_current_active_user
@@ -490,11 +491,20 @@ def test_removing_a_narrower_grant_cannot_widen_the_role_beyond_theirs(session, 
     )
     client = _client(session, admin)
     role_id = client.post("/roles", json={"name": "Tier 2"}).json()["id"]
-    narrower = client.post(
+    # A grant holding nothing can't be saved any more; one saved before can
+    # remain, and still takes away what a broader grant gives.
+    refused = client.post(
         f"/roles/{role_id}/grants",
         json={"scope_type": "folder", "scope_id": folder_x.id, "capabilities": []},
     )
-    assert narrower.status_code == 201, narrower.text
+    assert refused.status_code == 422
+    legacy = RoleGrant(
+        role_id=role_id, scope_type=ScopeType.folder, scope_id=folder_x.id, capabilities=[]
+    )
+    session.add(legacy)
+    session.commit()
+    session.refresh(legacy)
+    narrower = SimpleNamespace(json=lambda: {"id": legacy.id})
     wider = client.post(
         f"/roles/{role_id}/grants",
         json={"scope_type": "customer", "scope_id": customer_a.id, "capabilities": ["view"]},
@@ -660,3 +670,59 @@ def test_the_last_active_super_admin_is_never_deactivated(session):
     assert client.patch(f"/users/{admin.id}", json={"active": False}).status_code == 409
     session.refresh(admin)
     assert admin.active
+
+
+# --- grants holding nothing -----------------------------------------------------
+
+
+def test_a_grant_holding_nothing_is_refused(session, customers):
+    """A grant with no capability would pass any authority check and widen
+    what the role reaches (customer and folder names) while giving nothing:
+    refused when it is added or edited, by anyone."""
+    customer_a, customer_b = customers
+    elsewhere = _source(session, customer_b)
+    admin = _admin(session, customer_a, GlobalCapability.manage_roles)
+    target = _role(session)
+    client = _client(session, admin)
+
+    for scope_type, scope_id in (
+        ("source", elsewhere.id),
+        ("customer", customer_b.id),
+        ("customer", customer_a.id),
+    ):
+        response = client.post(
+            f"/roles/{target.id}/grants",
+            json={"scope_type": scope_type, "scope_id": scope_id, "capabilities": []},
+        )
+        assert response.status_code == 422, response.text
+    granted = client.post(
+        f"/roles/{target.id}/grants",
+        json={"scope_type": "customer", "scope_id": customer_a.id, "capabilities": ["view"]},
+    )
+    assert granted.status_code == 201
+    emptied = client.patch(
+        f"/roles/{target.id}/grants/{granted.json()['id']}", json={"capabilities": []}
+    )
+    assert emptied.status_code == 422
+    assert [
+        list(g.capabilities)
+        for g in session.exec(select(RoleGrant).where(RoleGrant.role_id == target.id)).all()
+    ] == [VIEW]
+
+
+def test_a_grant_on_a_source_out_of_reach_answers_like_a_missing_one(session, customers):
+    customer_a, customer_b = customers
+    elsewhere = _source(session, customer_b)
+    admin = _admin(session, customer_a, GlobalCapability.manage_roles)
+    target = _role(session)
+    client = _client(session, admin)
+
+    def grant(source_id):
+        return client.post(
+            f"/roles/{target.id}/grants",
+            json={"scope_type": "source", "scope_id": source_id, "capabilities": ["view"]},
+        )
+
+    hidden, missing = grant(elsewhere.id), grant(elsewhere.id + 1000)
+    assert hidden.status_code == missing.status_code == 404
+    assert hidden.json() == missing.json() == {"detail": "source not found"}

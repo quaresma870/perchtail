@@ -397,16 +397,23 @@ def test_upgrade_all_leaves_out_agents_it_cannot_manage(session, registry):
     assert {s for s, _c, _f in registry.sent} == {mine.id}
 
     registry.sent.clear()
-    picked = manager.post("/agent-upgrades", json={"source_ids": [other.id]})
+    missing = other.id + 1000
+    picked = manager.post("/agent-upgrades", json={"source_ids": [other.id, missing]})
+    # A source it can't change is answered exactly like one that doesn't
+    # exist, and the refusal is audited.
     assert picked.json() == [
-        {
-            "source_id": other.id,
-            "name": None,
-            "result": "skipped",
-            "detail": MANAGE_EXISTING_SOURCE_REFUSED,
-        }
+        {"source_id": other.id, "name": None, "result": "skipped", "detail": "Not found"},
+        {"source_id": missing, "name": None, "result": "skipped", "detail": "Not found"},
     ]
     assert registry.sent == []
+    session.expire_all()
+    denied = session.exec(select(AuditLog).where(AuditLog.action == "access.denied")).all()
+    assert [(d.target_type, d.target_id) for d in denied] == [("source", other.id)]
+    assert denied[0].event_metadata == {
+        "attempted": "POST /agent-upgrades",
+        "reason": "missing_capability:manage_source",
+        "target_name": "other",
+    }
 
 
 def test_reading_upgrades_shows_only_agents_it_can_manage(session, admin, registry):

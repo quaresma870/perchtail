@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
 from typing import BinaryIO, Protocol
 
@@ -23,6 +24,7 @@ from fastapi import WebSocket
 
 from app.json_values import as_int
 from app.logging_config import get_logger
+from app.timeutils import utcnow
 
 logger = get_logger(__name__)
 
@@ -116,6 +118,8 @@ class _AgentConnection:
     websocket: WebSocket
     # What the agent announced on connect (X-PerchTail-Agent-Features).
     features: frozenset[str] = frozenset()
+    # The address it connected from (app/request_context.py), if known.
+    address: str | None = None
     # Whether falling back to redacting on the server was logged already:
     # once per connection (#382, #249).
     fallback_logged: bool = False
@@ -153,9 +157,21 @@ def disconnect_after_commit(session, source_id: int, reason: str) -> None:
     event.listen(session, "after_commit", _after_commit, once=True)
 
 
+@dataclass(frozen=True)
+class ConnectionReplaced:
+    """A source's agent connection was replaced by one from another
+    address (see AgentRegistry.register): two agents may be using the same
+    token. Kept until the source's next connection that replaces none."""
+
+    previous_address: str | None
+    address: str | None
+    at: datetime
+
+
 class AgentRegistry:
     def __init__(self):
         self._connections: dict[int, _AgentConnection] = {}
+        self._replaced: dict[int, ConnectionReplaced] = {}
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -200,24 +216,49 @@ class AgentRegistry:
             return True
 
     def register(
-        self, source_id: int, websocket: WebSocket, features: frozenset[str] = frozenset()
+        self,
+        source_id: int,
+        websocket: WebSocket,
+        features: frozenset[str] = frozenset(),
+        address: str | None = None,
     ) -> "_AgentConnection | None":
         """Makes `websocket` the source's connection, with the `features` its
-        agent announced. If one was already
+        agent announced and the `address` it came from. If one was already
         registered (the agent reconnected before the old socket was noticed
         as dead, or a second agent is using the same token), it's replaced:
         its pending commands fail now instead of waiting out their timeout,
-        and it is returned so the caller can close it."""
+        and it is returned so the caller can close it (and audit it).
+
+        A replacement from another address is kept as the source's
+        `connection_replaced` warning until a connection that replaces
+        nothing; a connection that replaces nothing clears it."""
         with self._lock:
             replaced = self._connections.get(source_id)
             self._connections[source_id] = _AgentConnection(
-                websocket=websocket, features=frozenset(features)
+                websocket=websocket, features=frozenset(features), address=address
             )
+            if replaced is None:
+                self._replaced.pop(source_id, None)
+            elif replaced.address != address:
+                self._replaced[source_id] = ConnectionReplaced(
+                    previous_address=replaced.address, address=address, at=utcnow()
+                )
         if replaced is not None:
             _fail_pending(replaced, "agent connection replaced by a newer one")
-            logger.warning("agent.connection_replaced", source_id=source_id)
+            logger.warning(
+                "agent.connection_replaced",
+                source_id=source_id,
+                previous_address=replaced.address,
+                address=address,
+            )
         logger.info("agent.connected", source_id=source_id)
         return replaced
+
+    def connection_replaced(self, source_id: int) -> ConnectionReplaced | None:
+        """The source's warning that its connection was replaced by one from
+        another address, until its next connection that replaces none."""
+        with self._lock:
+            return self._replaced.get(source_id)
 
     def unregister(self, source_id: int, websocket: WebSocket | None = None) -> None:
         """Removes the source's connection -- but, when `websocket` is given,

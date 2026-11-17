@@ -1206,7 +1206,7 @@ BEFORE_AGENT_FEATURES = "b2e7c4a19f53"
 
 def test_agent_features_goes_down_and_up(tmp_path):
     db = tmp_path / "perchtail.db"
-    _alembic(tmp_path, "upgrade", "head")
+    _alembic(tmp_path, "upgrade", AGENT_FEATURES)
     assert _version(db) == AGENT_FEATURES
     assert "agent_features" in _columns(db, "source")
     _add_source(db, "a")
@@ -1247,7 +1247,7 @@ def test_the_agent_features_upgrade_runs_again_after_an_interruption(tmp_path):
     _add_source(db, "a")
     _interrupt_rebuild(db, "source", after_drop=False)
 
-    _alembic(tmp_path, "upgrade", "head")
+    _alembic(tmp_path, "upgrade", AGENT_FEATURES)
     assert _version(db) == AGENT_FEATURES
     assert "agent_features" in _columns(db, "source")
     assert _source_names(db) == ["a"]
@@ -1261,7 +1261,7 @@ def test_an_agent_features_upgrade_interrupted_after_the_drop_is_finished(tmp_pa
     _add_source(db, "b")
     _interrupt_rebuild(db, "source", after_drop=True)
 
-    result = _alembic_run(tmp_path, "upgrade", "head")
+    result = _alembic_run(tmp_path, "upgrade", AGENT_FEATURES)
     assert result.returncode == 0, result.stderr
     assert "interrupted rebuild of table source was finished" in result.stderr
     assert _version(db) == AGENT_FEATURES
@@ -1289,11 +1289,11 @@ def test_an_agent_features_upgrade_with_nothing_to_recover_stops(tmp_path):
 def test_an_agent_features_upgrade_that_finished_before_the_interruption_runs_again(tmp_path):
     # Interrupted after the column was added, before the version was recorded.
     db = tmp_path / "perchtail.db"
-    _alembic(tmp_path, "upgrade", "head")
+    _alembic(tmp_path, "upgrade", AGENT_FEATURES)
     with sqlite3.connect(db) as conn:
         conn.execute("UPDATE alembic_version SET version_num = ?", (BEFORE_AGENT_FEATURES,))
 
-    _alembic(tmp_path, "upgrade", "head")
+    _alembic(tmp_path, "upgrade", AGENT_FEATURES)
     assert _version(db) == AGENT_FEATURES
     assert "agent_features" in _columns(db, "source")
 
@@ -1330,7 +1330,7 @@ def test_an_agent_features_downgrade_runs_again_after_an_interruption(tmp_path):
 
 def test_an_agent_features_downgrade_with_nothing_to_recover_stops(tmp_path):
     db = tmp_path / "perchtail.db"
-    _alembic(tmp_path, "upgrade", "head")
+    _alembic(tmp_path, "upgrade", AGENT_FEATURES)
     with sqlite3.connect(db) as conn:
         conn.execute("DROP TABLE source")
     before = _tables(db)
@@ -1340,3 +1340,103 @@ def test_an_agent_features_downgrade_with_nothing_to_recover_stops(tmp_path):
     assert "Table source is missing" in result.stderr
     assert _tables(db) == before
     assert _version(db) == AGENT_FEATURES
+
+
+# --- a7c3e9d2f514: a source in a folder gets the folder's customer -----------------
+
+SOURCE_CUSTOMER = "a7c3e9d2f514"
+
+
+def _customers_by_source(db: Path) -> dict[str, int | None]:
+    with sqlite3.connect(db) as conn:
+        return dict(conn.execute("SELECT name, customer_id FROM source ORDER BY id"))
+
+
+def _add_placed_source(db: Path, name: str, customer_id, folder_id) -> None:
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source (name, protocol, host, base_path, enabled, is_system, "
+            "check_failures, name_index_enabled, customer_id, folder_id) "
+            "VALUES (?, 'ssh', 'h', '/', 1, 0, 0, 1, ?, ?)",
+            (name, customer_id, folder_id),
+        )
+
+
+def test_source_customer_from_folder_corrects_only_mismatched_sources(tmp_path):
+    db = tmp_path / "perchtail.db"
+    _alembic(tmp_path, "upgrade", AGENT_FEATURES)
+    with sqlite3.connect(db) as conn:
+        a = conn.execute("INSERT INTO customer (name) VALUES ('A')").lastrowid
+        b = conn.execute("INSERT INTO customer (name) VALUES ('B')").lastrowid
+        folder = conn.execute(
+            "INSERT INTO folder (name, customer_id) VALUES ('prod', ?)", (a,)
+        ).lastrowid
+    _add_placed_source(db, "no-customer", None, folder)
+    _add_placed_source(db, "other-customer", b, folder)
+    _add_placed_source(db, "right", a, folder)
+    _add_placed_source(db, "no-folder", b, None)
+    _add_placed_source(db, "loose", None, None)
+    with sqlite3.connect(db) as conn:
+        ids = dict(conn.execute("SELECT name, id FROM source").fetchall())
+
+    result = _alembic_run(tmp_path, "upgrade", SOURCE_CUSTOMER)
+    assert result.returncode == 0, result.stderr
+    assert "Set the customer of 2 source(s)" in result.stderr
+    expected = {
+        "no-customer": a,
+        "other-customer": a,
+        "right": a,
+        "no-folder": b,
+        "loose": None,
+    }
+    assert _customers_by_source(db) == expected
+    # Who reaches the two sources changed: each change waits in the outbox
+    # for the next start to record it in the audit log.
+    recorded = [
+        (
+            "source.update",
+            {
+                "reason": "folder_customer",
+                "source_id": ids["no-customer"],
+                "folder_id": folder,
+                "changes": {"customer_id": {"from": None, "to": a}},
+            },
+        ),
+        (
+            "source.update",
+            {
+                "reason": "folder_customer",
+                "source_id": ids["other-customer"],
+                "folder_id": folder,
+                "changes": {"customer_id": {"from": b, "to": a}},
+            },
+        ),
+    ]
+    assert _outbox(db) == recorded
+
+    # Run again, as after an interruption before the version was recorded:
+    # nothing left to correct, and nothing recorded twice.
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = ?", (AGENT_FEATURES,))
+    again = _alembic_run(tmp_path, "upgrade", SOURCE_CUSTOMER)
+    assert again.returncode == 0, again.stderr
+    assert "Set the customer" not in again.stderr
+    assert _customers_by_source(db) == expected
+    assert _outbox(db) == recorded
+
+    # Down changes nothing, and up again is a no-op.
+    _alembic(tmp_path, "downgrade", AGENT_FEATURES)
+    assert _version(db) == AGENT_FEATURES
+    assert _customers_by_source(db) == expected
+    _alembic(tmp_path, "upgrade", "head")
+    assert _customers_by_source(db) == expected
+    assert _outbox(db) == recorded
+    assert _autoincrement_tables(db)["source"] is True
+
+    # The next start accepts both and signs them at the end of the chain.
+    from app.audit_outbox import drain_audit_outbox
+    from sqlmodel import Session
+
+    with Session(_audit_engine(db)) as session:
+        assert drain_audit_outbox(session) == (2, 0)
+    assert _audit_actions(db)[-2:] == ["source.update", "source.update"]

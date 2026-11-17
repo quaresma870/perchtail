@@ -13,7 +13,10 @@ redaction rules) and `redaction_disable` (the system redaction rules it
 turns off, by name). Credentials are never exported. On import a source
 gets a credential from the file (inline, or `${env:PERCHTAIL_IMPORT_...}`
 read from the server's environment), from the values typed in the import
-screen, or keeps the one it already has.
+screen, or keeps the one it already has. A credential given for an
+existing source always replaces the saved one: it is never compared with
+it, so the plan can't tell whether a credential is the one saved (and the
+second run of a file with credentials replaces them again).
 
 The whole file is checked before anything is written, and applying it is
 one transaction: either every change lands or none does."""
@@ -32,7 +35,7 @@ from app.agent_registry import disconnect_after_commit
 from app.alerts import forget_source
 from app.audit import record_audit_event
 from app.collectors import ssh
-from app.crypto import decrypt_credential, encrypt_credential
+from app.crypto import encrypt_credential
 from app.logging_config import get_logger
 from app.models import (
     Customer,
@@ -55,7 +58,12 @@ from app.redaction_rules import (
     source_rules,
     system_rules,
 )
-from app.rules import InvalidPatternError, parse_pattern
+from app.rules import (
+    MAX_PATTERN_CHARS,
+    MAX_RULES_PER_SOURCE,
+    InvalidPatternError,
+    parse_pattern,
+)
 from app.timeutils import utcnow
 
 logger = get_logger(__name__)
@@ -502,6 +510,11 @@ def _parse_rules(value: Any, where: str, problems: list[Problem]) -> list[_RuleS
     if not isinstance(value, list):
         problems.append(Problem(where, "rules must be a list"))
         return None
+    if len(value) > MAX_RULES_PER_SOURCE:
+        # The same limits as the rule editor, so an import can't leave a
+        # source with rules the editor would refuse.
+        problems.append(Problem(where, f"A source can have at most {MAX_RULES_PER_SOURCE} rules"))
+        return None
     out = []
     for i, item in enumerate(value):
         rule_where = f"{where}[{i}]"
@@ -530,6 +543,11 @@ def _parse_rules(value: Any, where: str, problems: list[Problem]) -> list[_RuleS
         raw = raw.strip()
         if not raw:
             problems.append(Problem(rule_where, "The rule has no pattern"))
+            continue
+        if len(raw) > MAX_PATTERN_CHARS:
+            problems.append(
+                Problem(rule_where, f"The pattern is longer than {MAX_PATTERN_CHARS} characters")
+            )
             continue
         if isinstance(item, str) and _quoted(raw):
             # `[include **/*, exclude "*/secret/**"]` is valid YAML, but each
@@ -885,9 +903,9 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id,
     ) != _redaction_tuple(spec.redaction_rules)
     current_disabled = sorted(disabled_rule_ids(session, source.id))
     disable_change = disable_ids is not None and current_disabled != disable_ids
-    credential_change = credential is not None and (
-        source.credential_ref is None or decrypt_credential(source.credential_ref) != credential
-    )
+    # A credential in the file always replaces the saved one: comparing them
+    # would let the plan say whether a guessed credential is the saved one.
+    credential_change = credential is not None
     labels = [
         f"{k}: {v['from']!r} → {v['to']!r}"
         for k, v in changes.items()

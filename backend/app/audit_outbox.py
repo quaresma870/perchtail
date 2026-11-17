@@ -93,12 +93,33 @@ def _sso_password_cleared(metadata: object) -> bool:
     )
 
 
+def _source_customer_from_folder(metadata: object) -> bool:
+    """a7c3e9d2f514: a source in a folder given the folder's customer."""
+    if not isinstance(metadata, dict):
+        return False
+    if set(metadata) != {"reason", "source_id", "folder_id", "changes"}:
+        return False
+    if metadata["reason"] != "folder_customer":
+        return False
+    if not (_is_int(metadata["source_id"]) and _is_int(metadata["folder_id"])):
+        return False
+    changes = metadata["changes"]
+    if not isinstance(changes, dict) or set(changes) != {"customer_id"}:
+        return False
+    change = changes["customer_id"]
+    if not isinstance(change, dict) or set(change) != {"from", "to"}:
+        return False
+    old, new = change["from"], change["to"]
+    return (old is None or _is_int(old)) and _is_int(new) and old != new
+
+
 # action -> (target_type, check of the metadata, metadata key of the target
 # id or None).
 ACCEPTED: dict[str, tuple[str, Callable[[object], bool], str | None]] = {
     "system_settings.update": ("system_settings", _retention_raised, None),
     "role_grant.delete": ("role_grant", _duplicate_grant_deleted, "grant_id"),
     "user.password_cleared": ("user", _sso_password_cleared, "user_id"),
+    "source.update": ("source", _source_customer_from_folder, "source_id"),
 }
 
 

@@ -9,12 +9,42 @@ from app.auth.rbac import require_capability
 from app.db import get_session
 from app.models import PatternKind, Rule, RuleType, Source
 from app.name_index import prune_hidden_names
-from app.rules import InvalidPatternError, parse_pattern
+from app.rules import (
+    MAX_PATTERN_CHARS,
+    MAX_RULES_PER_SOURCE,
+    InvalidPatternError,
+    parse_pattern,
+)
 
 router = APIRouter(prefix="/sources/{source_id}/rules", tags=["rules"])
 
 require_view = require_capability(Capability.view, get_current_active_user)
 require_manage_rules = require_capability(Capability.manage_rules, get_current_active_user)
+
+
+def _require_pattern_length(raw: str, where: str = "") -> None:
+    if len(raw) > MAX_PATTERN_CHARS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{where}The pattern is longer than {MAX_PATTERN_CHARS} characters",
+        )
+
+
+def _require_room_for(count: int) -> None:
+    if count > MAX_RULES_PER_SOURCE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"A source can have at most {MAX_RULES_PER_SOURCE} rules",
+        )
+
+
+def _audit_rules(rules: list[Rule]) -> list[dict]:
+    """A rule chain as the audit log keeps it: each rule's type, pattern and
+    pattern kind (glob or regex), in order."""
+    return [
+        {"type": str(rule.type), "pattern": rule.pattern, "pattern_kind": str(rule.pattern_kind)}
+        for rule in rules
+    ]
 
 
 class RulePublic(BaseModel):
@@ -85,9 +115,11 @@ def create_rule(
     session: Session = Depends(get_session),
 ):
     _require_editable_rules(source)
+    _require_pattern_length(payload.pattern)
     pattern, pattern_kind = parse_pattern_or_400(payload.pattern)
 
     existing = _ordered_rules(session, source.id)
+    _require_room_for(len(existing) + 1)
     next_order = (existing[-1].order + 1) if existing else 0
 
     rule = Rule(
@@ -130,6 +162,7 @@ def update_rule(
     if payload.type is not None:
         rule.type = payload.type
     if payload.pattern is not None:
+        _require_pattern_length(payload.pattern)
         rule.pattern, rule.pattern_kind = parse_pattern_or_400(payload.pattern)
     if "notes" in payload.model_fields_set:
         rule.notes = payload.notes
@@ -231,7 +264,9 @@ def replace_rules_raw(
     session: Session = Depends(get_session),
 ):
     """Bulk-replaces the source's entire rule chain from pasted text — the
-    power-user alternative to the row-based editor, not a merge."""
+    power-user alternative to the row-based editor, not a merge. The same
+    limits as the editor apply (MAX_RULES_PER_SOURCE, MAX_PATTERN_CHARS),
+    and the audit log keeps the chain before and after."""
     _require_editable_rules(source)
     # Every line is parsed and validated before anything is deleted, so a
     # bad line rejects the whole paste and leaves the existing chain intact.
@@ -240,7 +275,9 @@ def replace_rules_raw(
         parsed_line = _parse_raw_line(line)
         if parsed_line is None:
             continue
+        _require_room_for(len(parsed) + 1)
         rule_type, raw_pattern = parsed_line
+        _require_pattern_length(raw_pattern, f"line {line_number}: ")
         try:
             pattern, pattern_kind = parse_pattern(raw_pattern)
         except InvalidPatternError as exc:
@@ -249,7 +286,9 @@ def replace_rules_raw(
             ) from exc
         parsed.append((rule_type, pattern, pattern_kind))
 
-    for rule in _ordered_rules(session, source.id):
+    previous = _ordered_rules(session, source.id)
+    before = _audit_rules(previous)
+    for rule in previous:
         session.delete(rule)
     session.flush()
 
@@ -271,7 +310,11 @@ def replace_rules_raw(
         action="rule.replace_raw",
         target_type="source",
         target_id=source.id,
-        metadata={"rule_count": len(created)},
+        metadata={
+            "rule_count": len(created),
+            "before": before,
+            "after": _audit_rules(created),
+        },
     )
     prune_hidden_names(session, source)
     session.commit()

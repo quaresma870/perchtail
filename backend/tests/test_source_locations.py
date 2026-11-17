@@ -102,6 +102,30 @@ def test_winrm_base_path_must_be_absolute(client, path):
     assert "absolute Windows path" in response.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "\\\\fileserver\\share\\Logs",  # UNC
+        "//fileserver/share/Logs",
+        "\\\\?\\C:\\Logs",  # device paths
+        "\\\\.\\C:\\Logs",
+        "\\\\?\\UNC\\fileserver\\share",
+        "\\??\\C:\\Logs",
+    ],
+)
+def test_winrm_base_path_refuses_unc_and_device_paths(session, client, path):
+    response = _create(client, protocol="winrm", base_path=path)
+    assert response.status_code == 400
+    assert "on a drive" in response.json()["detail"]
+    roots = _create(
+        client,
+        protocol="winrm",
+        roots=[{"label": "a", "path": "D:\\Logs"}, {"label": "b", "path": path}],
+    )
+    assert roots.status_code == 400
+    assert session.exec(select(Source)).all() == []
+
+
 def test_winrm_base_path_on_another_drive_is_accepted(client):
     response = _create(client, protocol="winrm", base_path="E:\\Apps\\Logs\\")
     assert response.status_code == 201
@@ -224,19 +248,28 @@ def test_picker_lists_only_folders_and_audits(session, client, fake_ssh):
     assert [e.event_metadata["path"] for e in events] == ["/var", "/"]
 
 
-def test_picker_reuses_the_saved_credential_only_for_the_same_host(session, client, fake_ssh):
+def test_picker_with_a_saved_source_always_uses_its_host(session, client, fake_ssh):
     created = _create(client).json()
 
     ok = client.post("/sources/pick-folder", json={"source_id": created["id"], "path": "/"})
     assert ok.status_code == 200
 
-    moved = client.post(
-        "/sources/pick-folder",
-        json={"source_id": created["id"], "host": "attacker.example.com", "path": "/"},
-    )
-    assert moved.status_code == 400
-    assert "credential again" in moved.json()["detail"]
-    assert ("/", "attacker.example.com", "") not in fake_ssh.calls
+    # Neither the saved credential nor a typed one is ever sent elsewhere
+    # through a saved source: its own host is browsed.
+    for credential in (None, {"username": "u", "password": "p"}):
+        fake_ssh.calls.clear()
+        moved = client.post(
+            "/sources/pick-folder",
+            json={
+                "source_id": created["id"],
+                "host": "attacker.example.com",
+                "port": 2222,
+                "path": "/",
+                **({"credential": credential} if credential else {}),
+            },
+        )
+        assert moved.status_code == 200
+        assert {host for _path, host, _rel in fake_ssh.calls} == {created["host"]}
 
 
 def test_picker_requires_manage_sources(session, fake_ssh):
@@ -297,6 +330,33 @@ def test_picker_winrm_lists_drives_then_folders(client, monkeypatch):
     assert folders["kind"] == "folders"
     assert folders["parent"] == ""
     assert folders["entries"] == [{"name": "Logs", "path": "D:\\Logs"}]
+
+
+@pytest.mark.parametrize(
+    "protocol, path",
+    [
+        ("winrm", "\\\\fileserver\\share"),
+        ("winrm", "//fileserver/share"),
+        ("winrm", "\\\\?\\C:\\Logs"),
+        ("winrm", "\\\\.\\PhysicalDrive0"),
+        ("smb", "\\\\otherserver\\share"),
+        ("smb", "\\\\?\\C:\\Logs"),
+    ],
+)
+def test_picker_refuses_unc_and_device_paths(client, monkeypatch, protocol, path):
+    """Listing one would have the source's host reach out to another
+    machine (with its own credentials, over WinRM)."""
+    import app.collectors.winrm as winrm_module
+
+    def never(*args, **kwargs):
+        raise AssertionError("nothing may be listed")
+
+    monkeypatch.setattr(winrm_module, "_run_ps", never)
+    monkeypatch.setattr(registry.CONNECTORS[Protocol.smb], "_module", None)
+    creds = {"protocol": protocol, "host": "w", "credential": {"username": "u", "password": "p"}}
+
+    response = client.post("/sources/pick-folder", json={**creds, "path": path})
+    assert response.status_code == 400, response.text
 
 
 def test_picker_smb_top_level_lists_shares(client, monkeypatch):

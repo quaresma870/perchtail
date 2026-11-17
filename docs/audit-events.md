@@ -67,21 +67,21 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 
 | Action | When |
 |---|---|
-| `access.denied` | Any request refused for lack of permission by a signed-in user, anywhere in the API (HTTP 403, or 404 where the answer mustn't reveal that the target exists: a customer or folder outside the role's grants, a role beyond the reader's authority, the audit log while its page is off): what was `attempted` (method and route), the target when the route names one, and the `reason` (for example `missing_capability:download`, `missing_global_capability:manage_roles`, `role_beyond_authority`). The person refused only gets a neutral message; the reason is only in the audit log. Refusals that already have their own event (`file.*_denied`) aren't recorded twice. |
+| `access.denied` | Any request refused for lack of permission by a signed-in user, anywhere in the API (HTTP 403, or 404 where the answer mustn't reveal that the target exists: a customer, folder or source outside the role's grants, a role beyond the reader's authority, the audit log while its page is off): what was `attempted` (method and route), the target when the route names one, and the `reason` (for example `missing_capability:download`, `missing_global_capability:manage_roles`, `role_beyond_authority`, `source_out_of_reach`, `peer_admin`). In a batch (bulk credential updates, bulk agent upgrades), each refused item gets its own entry. The person refused only gets a neutral message; the reason is only in the audit log. Refusals that already have their own event (`file.*_denied`) aren't recorded twice. |
 
 ### Administration
 
 | Action | When |
 |---|---|
-| `source.create`, `source.update`, `source.delete` | Sources added, changed (with the values before and after) or deleted. When an import sets a source's redaction rules, `source.create` lists each rule with its values, and `source.update` lists each rule added, changed or removed with its values before (`from`) and after (`to`). |
+| `source.create`, `source.update`, `source.delete` | Sources added, changed (with the values before and after) or deleted. When an import sets a source's redaction rules, `source.create` lists each rule with its values, and `source.update` lists each rule added, changed or removed with its values before (`from`) and after (`to`). A `source.update` with no user and reason `folder_customer` is a source in a folder given the folder's customer by the 0.7.0 migration (`source_id`, `folder_id`, and `customer_id` before and after), which changes the grants that reach it. |
 | `source.pins_removed` | Right after a `source.delete`, or a `source.update` that changed the host, port or CA certificate: the source's old SSH host key (`host_key`) or WinRM CA certificate file (`ca_certificate`) was removed, because no other source used it. |
 | `source.credential_update`, `source.agent_token_regenerate`, `source.pick_folder` | A source's saved credential replaced, its agent token regenerated, or its folders browsed with the saved credential. |
-| `rule.create`, `rule.update`, `rule.delete`, `rule.reorder`, `rule.replace_raw` | Visibility rules changed. |
+| `rule.create`, `rule.update`, `rule.delete`, `rule.reorder`, `rule.replace_raw` | Visibility rules changed. `rule.replace_raw` (rules pasted as text) lists the rules `before` and `after`, each with its type, pattern and pattern kind. |
 | `customer.create`, `customer.update`, `customer.delete` | Customers created, renamed or deleted. |
 | `folder.create`, `folder.update`, `folder.delete` | Folders created, renamed or moved, or deleted. |
 | `role.create`, `role.update`, `role.delete` | Roles created, changed or deleted. |
 | `role_grant.create`, `role_grant.update`, `role_grant.delete` | A role's grants created, changed or deleted. A `role_grant.delete` with no user and reason `duplicate_scope` is a duplicate grant removed by the 0.7.0 migration, with the grant kept and the capabilities deleted. |
-| `user.create`, `user.update`, `user.deactivate`, `user.reset_password` | User accounts managed by an admin. Resetting the password of an SSO account is refused and recorded as `access.denied` with reason `sso_account`. |
+| `user.create`, `user.update`, `user.deactivate`, `user.reset_password` | User accounts managed by an admin. Resetting the password of an SSO account is refused and recorded as `access.denied` with reason `sso_account`; resetting the password of, deactivating or changing the role of an account whose role has `manage_users` or `manage_roles`, by anyone but a super admin, with reason `peer_admin`. |
 | `user.password_cleared` | With no user and reason `sso_account`: a password an admin had set on an SSO account before 0.7.0, removed by the 0.7.0 migration. |
 | `sso_provider.create`, `sso_provider.update`, `sso_provider.delete` | The SSO provider configured, changed or removed. Never its client secret. |
 | `sso_provider.issuer_mismatch` | A **Test** of the SSO provider whose discovery document names an issuer other than the configured one. |
@@ -91,6 +91,7 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 | `redaction_override.set` | A source turning a system redaction rule off (`"disabled": true`) or back on. |
 | `alert.create`, `alert.update`, `alert.delete` | Live alerts. |
 | `alert.delivery_failed` | An alert notification the webhook never accepted, given up after retrying for an hour (`attempts`, `error`). Each retry before it is only in the application log. |
+| `alert.delivery_dropped` | With no user: an alert notification waiting to be sent or retried, dropped because the alert's owner (`owner_id`) can no longer view the source of its lines, or the source is gone (`source_ids`, `attempts`). |
 | `smtp_settings.create`, `smtp_settings.update`, `smtp_settings.delete` | The SMTP server under **Settings → Email** set up, changed or removed: the values before and after (`{"from": ..., "to": ...}`) of the server, port, security, username, sender and **Enabled**. The password is never recorded: a new one is recorded as `"password": "changed"`, a removed one as `"removed"`; a CA certificate as `"replaced"` or `"removed"`. |
 | `smtp_settings.test` | A test message: the `recipient` and the `result` (`sent`, `failed` with the `error`, `not_configured`, or `rate_limited`). Never the message. |
 | `system_settings.update` | System settings changed: for each setting, its value before and after (`{"old": ..., "new": ...}`); a secret value is recorded only as `"changed"`. |
@@ -100,6 +101,7 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 | `credential_key.rotate` | The credential encryption key rotated. |
 | `backup.create`, `backup.verify`, `backup.restore` | Backups made, checked and restored. |
 | `agent.upgrade`, `agent.upgrade_resume` | Push agents upgraded from the portal. |
+| `agent.connection_replaced` | With no user: a push agent connected with the token of an agent already connected, and replaced that connection (`previous_address`, `address`). Usually the same agent reconnecting before its old connection was noticed as dead; from another address, two agents may be sharing the token, and the source's page says so to those who manage it. |
 
 ### The audit log itself
 
@@ -126,7 +128,7 @@ When the purge deletes the oldest entries, the newest deleted one becomes the ch
 
 Every entry is signed when it is written. An entry without a signature is never signed afterwards, except entries from before the chain existed, once, on the first start that builds it. Any other unsigned entry was written outside PerchTail: it is reported as tampering (`unsigned_row`), and when one is found at startup PerchTail logs it at `ERROR` and checks the chain straight away.
 
-A database migration can't sign entries, so an event it has to record (today the retention raised to 90 days, the duplicate grants removed and the passwords removed from SSO accounts on upgrading to 0.7.0) waits in an outbox table. On the next start, after the chain is checked, PerchTail records each one as an ordinary signed entry at the end of the chain, with no user, and removes it from the outbox. Only the events PerchTail's own migrations write are accepted, in the exact form they write them; anything else is refused and recorded as `audit.outbox_rejected`. Writing to the outbox can only add entries at the end of the chain, never change the ones already there.
+A database migration can't sign entries, so an event it has to record (today the retention raised to 90 days, the duplicate grants removed, the passwords removed from SSO accounts and the sources given their folder's customer on upgrading to 0.7.0) waits in an outbox table. On the next start, after the chain is checked, PerchTail records each one as an ordinary signed entry at the end of the chain, with no user, and removes it from the outbox. Only the events PerchTail's own migrations write are accepted, in the exact form they write them; anything else is refused and recorded as `audit.outbox_rejected`. Writing to the outbox can only add entries at the end of the chain, never change the ones already there.
 
 Whether the chain has started is also kept outside the database, in `DATA_DIR/.audit-chain-started` (readable by PerchTail's user only, with the time it was written and the first signed entry's id). PerchTail writes it on the first start of a version that has it, once any older entries are signed, and never removes it; a restore puts it back when the backup has a chain ([backup-and-restore.md](backup-and-restore.md#restoring)). With the marker present, an audit log with no signed entry and no anchor, or whose first signed entry comes after the one the marker names, had its signatures taken away or its entries deleted: nothing is signed again, the check reports it as tampering (`chain_reset`), and at startup PerchTail logs `audit_hash_chain.chain_reset` at `ERROR`.
 

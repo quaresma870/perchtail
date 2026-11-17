@@ -17,6 +17,7 @@ from sqlmodel import Session, select
 from app import agent_registry as registry_module
 from app.agent_registry import AgentRegistry, get_agent_registry
 from app.agent_upgrades import agent_connected, binary_path, on_agent_message
+from app.audit import record_audit_event
 from app.db import get_session
 from app.logging_config import get_logger
 from app.models import Protocol, Source
@@ -84,6 +85,18 @@ def _reported_features(websocket: WebSocket) -> frozenset[str]:
     return frozenset(item for item in features if _AGENT_FEATURE_RE.match(item))
 
 
+async def _close_replaced(websocket: WebSocket, source_id: int) -> None:
+    """Closes a connection a newer one for the same source replaced. Called
+    with no write transaction open, since it may wait on the old peer."""
+    try:
+        await websocket.close(
+            code=status.WS_1000_NORMAL_CLOSURE,
+            reason="replaced by a newer connection for this source",
+        )
+    except Exception as exc:  # noqa: BLE001 - it may already be gone
+        logger.debug("agent.replaced_close_failed", source_id=source_id, error=str(exc))
+
+
 @router.websocket("/agent/connect")
 async def agent_connect(websocket: WebSocket, session: Session = Depends(get_session)):
     """The push-agent's persistent connection (Protocol.agent — see
@@ -101,18 +114,22 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
     await websocket.accept()
     registry = get_agent_registry()
     features = _reported_features(websocket)
-    replaced = registry.register(source.id, websocket, features)
+    # The client's address as resolved behind trusted proxies
+    # (app/request_context.py).
+    address = websocket.client.host if websocket.client else None
+    replaced = registry.register(source.id, websocket, features, address)
     if replaced is not None:
-        # Close the superseded socket so a half-dead connection doesn't
-        # linger; its own receive loop then ends, and its unregister below
-        # is a no-op because it is no longer the registered connection.
-        try:
-            await replaced.websocket.close(
-                code=status.WS_1000_NORMAL_CLOSURE,
-                reason="replaced by a newer connection for this source",
-            )
-        except Exception as exc:  # noqa: BLE001 - it may already be gone
-            logger.debug("agent.replaced_close_failed", source_id=source.id, error=str(exc))
+        # Usually the same agent reconnecting before its old socket was
+        # noticed as dead; possibly a second agent with the same token.
+        # Committed with the source update below.
+        record_audit_event(
+            session,
+            user_id=None,
+            action="agent.connection_replaced",
+            target_type="source",
+            target_id=source.id,
+            metadata={"previous_address": replaced.address, "address": address},
+        )
     source.agent_last_seen_at = utcnow()
     agent_os = _reported_os(websocket)
     if agent_os is not None and agent_os != source.agent_os:
@@ -152,6 +169,13 @@ async def agent_connect(websocket: WebSocket, session: Session = Depends(get_ses
     except Exception as exc:  # noqa: BLE001 - never refuse the agent over it
         logger.error("agent.upgrade_update_failed", source_id=source_id, error=str(exc))
     session.commit()
+    if replaced is not None:
+        # Close the superseded socket so a half-dead connection doesn't
+        # linger; its own receive loop then ends, and its unregister below
+        # is a no-op because it is no longer the registered connection.
+        # Only after the commit: the audit row above holds SQLite's write
+        # lock until then, and closing may wait for the old peer.
+        await _close_replaced(replaced.websocket, source_id)
     # The socket stays open for as long as the agent runs, and so does this
     # request's session. The commit handed its database connection back to
     # the pool; reading `source` again would expire-reload it and keep a

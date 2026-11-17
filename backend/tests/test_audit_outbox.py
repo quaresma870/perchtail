@@ -30,6 +30,13 @@ SSO_CLEARED = {
     "username": "sso@example.com",
     "auth_provider": "oidc",
 }
+# a7c3e9d2f514: a source in a folder given the folder's customer.
+FOLDER_CUSTOMER = {
+    "reason": "folder_customer",
+    "source_id": 4,
+    "folder_id": 2,
+    "changes": {"customer_id": {"from": None, "to": 3}},
+}
 
 
 def _last(session) -> AuditLog:
@@ -85,6 +92,15 @@ def test_an_accepted_entry_is_signed_at_the_end_of_the_chain_and_removed(session
         ("user.password_cleared", {**SSO_CLEARED, "username": None}),
         ("user.password_cleared", {**SSO_CLEARED, "extra": 1}),
         ("user.password_cleared", None),
+        ("source.update", {**FOLDER_CUSTOMER, "reason": "other"}),
+        ("source.update", {**FOLDER_CUSTOMER, "source_id": "4"}),
+        ("source.update", {**FOLDER_CUSTOMER, "folder_id": None}),
+        ("source.update", {**FOLDER_CUSTOMER, "extra": 1}),
+        ("source.update", {**FOLDER_CUSTOMER, "changes": {"customer_id": {"from": 3, "to": 3}}}),
+        ("source.update", {**FOLDER_CUSTOMER, "changes": {"customer_id": {"from": 1, "to": None}}}),
+        ("source.update", {**FOLDER_CUSTOMER, "changes": {"host": {"from": "a", "to": "b"}}}),
+        ("source.update", {**FOLDER_CUSTOMER, "changes": {"customer_id": 3}}),
+        ("source.update", None),
     ],
 )
 def test_anything_else_is_refused_audited_and_removed(session, action, metadata):
@@ -138,6 +154,23 @@ def test_a_cleared_sso_password_is_recorded_against_the_user(session):
         None,
     )
     assert {key: entry.event_metadata[key] for key in SSO_CLEARED} == SSO_CLEARED
+    assert verify_chain(KEY, session).ok
+
+
+def test_a_source_given_its_folder_customer_is_recorded_against_the_source(session):
+    session.add(AuditOutbox(action="source.update", event_metadata=FOLDER_CUSTOMER))
+    session.commit()
+
+    assert drain_audit_outbox(session) == (1, 0)
+
+    entry = _last(session)
+    assert (entry.action, entry.target_type, entry.target_id, entry.user_id) == (
+        "source.update",
+        "source",
+        4,
+        None,
+    )
+    assert {key: entry.event_metadata[key] for key in FOLDER_CUSTOMER} == FOLDER_CUSTOMER
     assert verify_chain(KEY, session).ok
 
 

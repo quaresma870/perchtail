@@ -191,9 +191,29 @@ def test_apply_creates_everything_and_is_idempotent(session, client):
 
     again = _import(client)
     assert again["problems"] == []
-    assert {i["action"] for i in again["items"]} == {"unchanged"}
+    # Only the credential in the file is set again: it is never compared
+    # with the saved one.
+    changed = [i for i in again["items"] if i["action"] != "unchanged"]
+    assert [(i["action"], i["changes"]) for i in changed] == [("update", ["credential replaced"])]
     assert len(session.exec(select(Source)).all()) == 4
     assert session.exec(select(AuditLog).where(AuditLog.action == "config.import")).all()
+
+
+def test_the_dry_run_never_says_whether_a_credential_is_the_saved_one(session, client):
+    _import(client)
+    web01 = session.exec(select(Source).where(Source.name == "web01")).one()
+    saved = decrypt_credential(web01.credential_ref)
+
+    def plan_for(credential):
+        result = _import(
+            client, dry_run=True, credentials={"Acme / prod / web / web01": credential}
+        )
+        [item] = [i for i in result["items"] if i["key"].endswith("web01")]
+        return item["action"], item["changes"]
+
+    right = plan_for(saved)
+    wrong = plan_for({"username": "svc", "password": "guess"})
+    assert right == wrong == ("update", ["credential replaced"])
 
 
 def test_export_round_trips_without_secrets(session, client):
@@ -384,6 +404,39 @@ def test_quoting_the_whole_rule_is_fine(session, client):
     )
     assert result["problems"] == []
     assert "**/debug/**" in {r.pattern for r in session.exec(select(Rule)).all()}
+
+
+def test_imported_rules_have_the_editor_limits(session, client):
+    """An import can't leave a source with more rules, or longer patterns,
+    than the rule editor accepts."""
+    from app.rules import MAX_PATTERN_CHARS, MAX_RULES_PER_SOURCE
+
+    def with_iis_rules(count: int) -> str:
+        rules = ", ".join(f"include dir{i}/**" for i in range(count))
+        return TEMPLATE.replace("rules: [include **/*.log]", f"rules: [{rules}]")
+
+    result = _import(client, text=with_iis_rules(MAX_RULES_PER_SOURCE + 1))
+    assert result["applied"] is False
+    assert any(
+        p["where"].endswith("sources[0].rules") and str(MAX_RULES_PER_SOURCE) in p["message"]
+        for p in result["problems"]
+    ), result["problems"]
+
+    too_long = "include " + "a" * (MAX_PATTERN_CHARS + 1)
+    result = _import(client, text=TEMPLATE.replace("- include **/*.log", f"- {too_long}"))
+    assert result["applied"] is False
+    assert any(
+        p["where"].endswith("rules[0]") and str(MAX_PATTERN_CHARS) in p["message"]
+        for p in result["problems"]
+    ), result["problems"]
+    assert session.exec(select(Source)).all() == []
+
+    result = _import(client, text=with_iis_rules(MAX_RULES_PER_SOURCE))
+    assert result["problems"] == []
+    iis = session.exec(select(Source).where(Source.name == "iis01")).one()
+    assert len(session.exec(select(Rule).where(Rule.source_id == iis.id)).all()) == (
+        MAX_RULES_PER_SOURCE
+    )
 
 
 def test_an_imported_source_without_a_credential_still_asks_for_one(session, client):

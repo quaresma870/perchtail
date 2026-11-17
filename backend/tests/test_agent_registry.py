@@ -193,6 +193,34 @@ def test_a_replaced_connection_closing_does_not_unregister_its_successor(loop_in
     assert not registry.is_connected(1)
 
 
+def test_a_replacement_from_another_address_is_kept_as_a_warning(loop_in_thread):
+    """Two agents may be using one token: a connection replaced by one from
+    another address leaves a warning, kept until a connection that replaces
+    none."""
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    registry.register(1, FakeWebSocket(), address="198.51.100.1")
+    assert registry.connection_replaced(1) is None
+
+    # The same agent reconnecting from where it was: no warning.
+    registry.register(1, FakeWebSocket(), address="198.51.100.1")
+    assert registry.connection_replaced(1) is None
+
+    registry.register(1, FakeWebSocket(), address="203.0.113.9")
+    warning = registry.connection_replaced(1)
+    assert (warning.previous_address, warning.address) == ("198.51.100.1", "203.0.113.9")
+    assert registry.connection_replaced(2) is None
+
+    # A replacement from the same address doesn't clear it...
+    registry.register(1, FakeWebSocket(), address="203.0.113.9")
+    assert registry.connection_replaced(1) == warning
+    # ...a connection that replaces none does.
+    registry.unregister(1)
+    registry.register(1, FakeWebSocket(), address="203.0.113.9")
+    assert registry.connection_replaced(1) is None
+    registry.unregister(1)
+
+
 def test_replacing_a_connection_fails_its_pending_commands_immediately(loop_in_thread):
     registry = AgentRegistry()
     registry.bind_loop(loop_in_thread)

@@ -111,13 +111,18 @@ def _reset_login_throttle():
     # docstring), so one test's failed-login attempts would otherwise bleed
     # into the next test that reuses the same username.
     # The same for app.request_context's untrusted-forwarded-header flag.
+    # The same for the per-user limit on webhook tests (app/api/alerts.py).
+    from app.api.alerts import reset_test_limit_for_tests
+
     login_throttle.reset_for_tests()
     auth_events.reset_for_tests()
     request_context.reset_for_tests()
+    reset_test_limit_for_tests()
     yield
     login_throttle.reset_for_tests()
     auth_events.reset_for_tests()
     request_context.reset_for_tests()
+    reset_test_limit_for_tests()
 
 
 @pytest.fixture(autouse=True)

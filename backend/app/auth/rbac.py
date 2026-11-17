@@ -350,13 +350,18 @@ def org_reach(session: Session, user: User) -> OrgReach | None:
     - the folder holding a source with a grant, and the folders above that
       one, for the path to it.
 
-    Any grant counts, whatever its capabilities: this only decides what the
-    lists show and what answers 404. What may be done there is still checked
-    by grant resolution."""
+    Any grant holding at least one capability counts: this only decides what
+    the lists show and what answers 404. What may be done there is still
+    checked by grant resolution. A grant holding nothing reaches nothing
+    (none can be saved any more, but one saved before may remain)."""
     if user.role.is_super_admin:
         return None
 
-    grants = session.exec(select(RoleGrant).where(RoleGrant.role_id == user.role_id)).all()
+    grants = [
+        grant
+        for grant in session.exec(select(RoleGrant).where(RoleGrant.role_id == user.role_id)).all()
+        if grant.capabilities
+    ]
     if not grants:
         return OrgReach(customer_ids=frozenset(), folder_ids=frozenset())
 
@@ -411,6 +416,50 @@ def org_reach(session: Session, user: User) -> OrgReach | None:
             add_with_ancestors(source.folder_id)
 
     return OrgReach(customer_ids=frozenset(customer_ids), folder_ids=frozenset(folder_ids))
+
+
+def source_in_reach(session: Session, user: User, source: Source) -> bool:
+    """Whether `source` is within `user`'s reach: they hold at least one
+    capability on it by grant resolution (super admins reach every source,
+    the system one included). A source outside it answers like one that
+    doesn't exist (`concealed`), as customers and folders do."""
+    return bool(resolve_source_access(session, user, source).capabilities)
+
+
+SOURCE_NOT_FOUND = "Source not found"
+
+
+def get_source_in_reach(session: Session, user: User, source_id: int) -> Source:
+    """The source, or 404: plain when there is none, audited (`concealed`)
+    when it exists outside `user`'s reach, so the answer is the same."""
+    source = session.get(Source, source_id)
+    if source is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SOURCE_NOT_FOUND)
+    if not source_in_reach(session, user, source):
+        raise concealed(SOURCE_NOT_FOUND, reason="source_out_of_reach", user=user)
+    return source
+
+
+def record_access_denied(
+    session: Session,
+    user: User,
+    *,
+    attempted: str,
+    target_type: str | None,
+    target_id: int | None,
+    reason: str,
+) -> None:
+    """The `access.denied` entry for a refusal an endpoint answers itself
+    rather than with a 403 (one item of a batch, for example), in the same
+    shape app/api/errors.py records. Doesn't commit."""
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="access.denied",
+        target_type=target_type,
+        target_id=target_id,
+        metadata={"attempted": attempted, "reason": reason},
+    )
 
 
 def customer_in_reach(session: Session, user: User, customer_id: int) -> bool:
@@ -515,9 +564,9 @@ def require_capability(capability: Capability, get_current_user: Callable[..., U
         user: User = Depends(get_current_user),
         session: Session = Depends(get_session),
     ) -> Source:
-        source = session.get(Source, source_id)
-        if source is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+        # A source outside the user's reach answers like a missing one; one
+        # they reach without `capability` is a plain refusal.
+        source = get_source_in_reach(session, user, source_id)
         if not resolve_capability(session, user, source, capability):
             raise forbidden("Not permitted", reason=f"missing_capability:{capability}", user=user)
         return source
