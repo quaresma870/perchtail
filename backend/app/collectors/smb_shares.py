@@ -126,16 +126,38 @@ def parse_share_enum_stub(stub: bytes) -> list[tuple[str, int, str]]:
     return shares
 
 
+# A response fragment's headers: the common one (16 bytes) and the
+# response's own (alloc_hint, context id, cancel count: 8 bytes).
+_RESPONSE_HEADER_LEN = 24
+# The most a NetrShareEnum response may take, all fragments together. A few
+# hundred shares fit in a fraction of it; a server that sends more, or never
+# says it's done, is cut off rather than read without end.
+MAX_RESPONSE_BYTES = 1024 * 1024
+_READ_BYTES = 65536
+
+
+def _fragment_length(data: bytes, pos: int) -> int:
+    """The length of the fragment at `pos`, refused (ShareEnumError) when it
+    is shorter than its own headers: a zero length would never move on to
+    the next fragment."""
+    (frag_len,) = struct.unpack_from("<H", data, pos + 8)
+    if frag_len < _RESPONSE_HEADER_LEN:
+        raise ShareEnumError(f"malformed DCE/RPC fragment length {frag_len}")
+    return frag_len
+
+
 def split_response_pdus(data: bytes) -> bytes:
     """Concatenates the stub data of one or more response fragments."""
     stub = b""
     pos = 0
     while pos < len(data):
-        if len(data) - pos < 24:
+        if len(data) - pos < _RESPONSE_HEADER_LEN:
             raise ShareEnumError("truncated DCE/RPC response")
         ptype, flags = data[pos + 2], data[pos + 3]
-        (frag_len,) = struct.unpack_from("<H", data, pos + 8)
+        frag_len = _fragment_length(data, pos)
         if ptype == _PTYPE_FAULT:
+            if len(data) - pos < _RESPONSE_HEADER_LEN + 4:
+                raise ShareEnumError("truncated DCE/RPC fault")
             (status,) = struct.unpack_from("<I", data, pos + 24)
             raise ShareEnumError(f"server refused share enumeration (fault 0x{status:08x})")
         if ptype != _PTYPE_RESPONSE:
@@ -173,23 +195,33 @@ def list_shares(host: str, connect_kwargs: dict) -> list[Share]:
         if len(ack) < 3 or ack[2] != _PTYPE_BIND_ACK:
             raise ShareEnumError("the server didn't accept the SRVSVC bind")
         pipe.write(share_enum_request_pdu(host))
-        response = b""
-        while True:
-            chunk = pipe.read(65536)
-            if not chunk:
-                break
-            response += chunk
-            # Stop once the last fragment is complete.
-            pos = 0
-            done = False
-            while pos + 10 <= len(response):
-                (frag_len,) = struct.unpack_from("<H", response, pos + 8)
-                if pos + frag_len > len(response):
-                    break
-                if response[pos + 3] & _PFC_LAST:
-                    done = True
-                    break
-                pos += frag_len
-            if done:
-                break
+        response = read_response(pipe)
     return disk_shares(parse_share_enum_stub(split_response_pdus(response)))
+
+
+def _last_fragment_complete(response: bytes) -> bool:
+    pos = 0
+    while pos + _RESPONSE_HEADER_LEN <= len(response):
+        frag_len = _fragment_length(response, pos)
+        if pos + frag_len > len(response):
+            return False
+        if response[pos + 3] & _PFC_LAST:
+            return True
+        pos += frag_len
+    return False
+
+
+def read_response(pipe) -> bytes:
+    """Reads the response fragments from `pipe` until the last one is
+    complete or the server stops sending. A fragment length shorter than its
+    headers, or more than MAX_RESPONSE_BYTES in all, raises ShareEnumError."""
+    response = b""
+    while True:
+        chunk = pipe.read(_READ_BYTES)
+        if not chunk:
+            return response
+        response += chunk
+        if len(response) > MAX_RESPONSE_BYTES:
+            raise ShareEnumError("NetrShareEnum response is too large")
+        if _last_fragment_complete(response):
+            return response

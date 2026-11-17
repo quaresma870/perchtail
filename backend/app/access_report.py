@@ -732,16 +732,26 @@ SOURCES_CSV_COLUMNS = (
     "via",
 )
 
-# A cell starting with one of these is read as a formula by spreadsheet
-# programs; usernames and display names can come from an identity provider.
-_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+# A cell starting with one of these, after any leading whitespace, is read as
+# a formula by spreadsheet programs, which also take the full-width forms
+# (U+FF1D, U+FF0B, U+FF0D, U+FF20) for the ASCII ones; usernames and display
+# names can come from an identity provider.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "＝", "＋", "－", "＠")
+# A cell starting with one of these is refused as is: a spreadsheet may drop
+# it and read what follows as a formula.
+_CONTROL_PREFIXES = ("\t", "\r", "\n")
+# What a spreadsheet skips before it looks for a formula character.
+_LEADING_SPACE = " \t\r\n 　"
 
 
 def safe_cell(value) -> str:
-    """A CSV cell that a spreadsheet won't run: one starting with a formula
-    character gets a leading `'`."""
+    """A CSV cell that a spreadsheet won't run: one starting with a tab, a
+    carriage return or a line feed, or with a formula character (ASCII or
+    full-width) after any leading whitespace, gets a leading `'`."""
     text = "" if value is None else str(value)
-    if text.startswith(_FORMULA_PREFIXES):
+    if text.startswith(_CONTROL_PREFIXES) or text.lstrip(_LEADING_SPACE).startswith(
+        _FORMULA_PREFIXES
+    ):
         return "'" + text
     return text
 

@@ -199,7 +199,7 @@ The limits are saved together with **Save limits**. A request over a limit is an
 
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
-| `concurrency_global` | **Listings and downloads at once** | `16` | 1 to 256 | Folder listings, file opens, downloads, folder ZIPs and archive listings running at the same time across the server. |
+| `concurrency_global` | **Listings and downloads at once** | `16` | 1 to 256 | Folder listings, file opens, Tail polls, downloads, folder ZIPs and archive listings running at the same time across the server. |
 | `concurrency_per_source` | **At once on one source** | `4` | 1 to 64, and not above `concurrency_global` | The same, on any one source, so one busy server can't take every slot. |
 | `concurrency_user_transfers` | **Downloads per user** | `2` | 1 to 32 | Downloads and folder ZIPs one person may have in progress. |
 | `listing_max_entries` | **Entries per listing** | `5000` | 100 to 20000 | The most entries a folder or archive listing shows. A bigger folder shows the first ones and says so; the search finds the rest. |

@@ -5,8 +5,11 @@ import mimetypes
 import os
 import shutil
 import tarfile
+import threading
+import time
 import zipfile
 import zlib
+from collections import OrderedDict
 from collections.abc import Callable, Coroutine, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -32,6 +35,7 @@ from app.archives import (
     SKIP_UNSUPPORTED_COMPRESSION,
     ArchiveMember,
     DecompressionLimitError,
+    MemberUnreadableError,
     decompress_gzip,
     extract_member,
     is_archive,
@@ -183,8 +187,18 @@ def _rules_for(session: Session, source_id: int) -> list[Rule]:
     return list(session.exec(select(Rule).where(Rule.source_id == source_id)).all())
 
 
-def _scratch_key(source_id: int, path: str, member: str | None) -> str:
-    raw = f"{source_id}:{path}:{member or ''}"
+def _scratch_owner(user: User) -> str:
+    """Whose scratch entries a request reaches: the user's, in the session
+    the request came with (app/request_context.py), so a viewer only ever
+    closes what its own session opened. A request without a session (none
+    reaches these endpoints through the app) is scoped to the user."""
+    context = request_context.current()
+    session_ref = context.session_id if context is not None else None
+    return f"{user.id}/{session_ref or ''}"
+
+
+def _scratch_key(owner: str, source_id: int, path: str, member: str | None) -> str:
+    raw = f"{owner}\0{source_id}\0{path}\0{member or ''}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -344,6 +358,34 @@ class RedactionFormatRefused(AuditedRefusal):
         self.reason = _AUDIT_REDACTION_FORMAT_REASON
 
 
+MEMBER_UNREADABLE_MESSAGE = (
+    "This archive member is encrypted or compressed with a method PerchTail can't read, "
+    "so it can't be opened."
+)
+MEMBER_UNREADABLE_ERROR_CODE = "archive_member_unreadable"
+# Why an archive member couldn't be extracted, in the audit log.
+_AUDIT_MEMBER_REASONS = {
+    SKIP_ENCRYPTED: "member_encrypted",
+    SKIP_UNSUPPORTED_COMPRESSION: "member_unsupported_compression",
+}
+
+
+class MemberUnreadableRefused(AuditedRefusal):
+    """409 for an archive member that can't be extracted (encrypted, or
+    compressed with a method zipfile can't read), with or without
+    redaction."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": MEMBER_UNREADABLE_MESSAGE,
+                "error_code": MEMBER_UNREADABLE_ERROR_CODE,
+            },
+        )
+        self.reason = _AUDIT_MEMBER_REASONS.get(reason, "member_unreadable")
+
+
 # The first bytes of the compressed formats PerchTail doesn't decompress.
 # bzip2 is "BZh", the block size ('1' to '9'), then the magic of its first
 # block or of the end of an empty stream. gzip and zip are decompressed only
@@ -488,6 +530,11 @@ def _materialize(
                 _require_whole_archive_allowed(source, f"{path}/{member}", destination, rules)
         except DecompressionLimitError as exc:
             raise _too_large(exc) from exc
+        except MemberUnreadableError as exc:
+            logger.warning(
+                "archive.member_unreadable", source_id=source.id, path=path, reason=exc.reason
+            )
+            raise MemberUnreadableRefused(exc.reason) from exc
         except KeyError as exc:
             # Not in the archive, or not a regular file (a link, a device):
             # either way there's nothing to open under that name.
@@ -883,6 +930,7 @@ def _resolve_redacted(
     rules: list[Rule],
     limits: Limits,
     redaction: CompiledRules,
+    owner: str,
     agent_rules: list[dict] | None = None,
 ) -> _Resolved:
     """_resolve_content when redaction applies: with `agent_rules`, the
@@ -910,13 +958,13 @@ def _resolve_redacted(
         logger.warning("archive.redaction_whole_archive_refused", source_id=source.id, path=path)
         raise WholeArchiveRefused(_AUDIT_REDACTION_ARCHIVE_REASON)
     if agent_rules is not None:
-        return _resolve_on_agent(source, path, member, limits, agent_rules)
+        return _resolve_on_agent(source, path, member, limits, owner, agent_rules)
 
     complete = member is not None or is_transparent_gzip(filename)
     store = get_scratch_store()
     with get_limiter().connector(limits, source.id):
         store.ensure_room()
-        key = _scratch_key(source.id, path, member)
+        key = _scratch_key(owner, source.id, path, member)
         destination = store.acquire(key)
         fetched = destination.with_name(f"{destination.name}.source")
         plain = destination.with_name(f"{destination.name}.plain")
@@ -952,6 +1000,7 @@ def _resolve_on_agent(
     path: str,
     member: str | None,
     limits: Limits,
+    owner: str,
     agent_rules: list[dict],
 ) -> _Resolved:
     """_resolve_redacted when the agent redacts on its host (#382, #249):
@@ -972,7 +1021,7 @@ def _resolve_on_agent(
     store = get_scratch_store()
     with get_limiter().connector(limits, source.id):
         store.ensure_room()
-        key = _scratch_key(source.id, path, member)
+        key = _scratch_key(owner, source.id, path, member)
         destination = store.acquire(key)
         try:
             with _agent_refusals(agent_rules):
@@ -1033,6 +1082,7 @@ def _resolve_content(
     member: str | None,
     rules: list[Rule],
     limits: Limits,
+    owner: str,
     redaction: CompiledRules | None = None,
     agent_rules: list[dict] | None = None,
 ) -> _Resolved:
@@ -1056,7 +1106,7 @@ def _resolve_content(
     if not _visible(source, path, rules):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
     if redaction is not None:
-        return _resolve_redacted(source, path, member, rules, limits, redaction, agent_rules)
+        return _resolve_redacted(source, path, member, rules, limits, redaction, owner, agent_rules)
 
     filename = path.rsplit("/", 1)[-1]
     needs_scratch = (
@@ -1072,7 +1122,7 @@ def _resolve_content(
     store = get_scratch_store()
     with get_limiter().connector(limits, source.id):
         store.ensure_room()
-        key = _scratch_key(source.id, path, member)
+        key = _scratch_key(owner, source.id, path, member)
         destination = store.acquire(key)
         try:
             served_filename = _materialize(source, path, member, rules, destination)
@@ -1126,9 +1176,12 @@ def _resolve_content_audited(
     redaction can't read) in the audit log (`denied_action`) before the
     refusal goes out, so every attempt leaves a trace. For an archive
     inside an archive (`member=`), the path recorded is the refused
-    archive's virtual path, `<archive>/<member>`."""
+    archive's virtual path, `<archive>/<member>`. Its scratch entry, if
+    any, belongs to `user`'s session (_scratch_owner)."""
     try:
-        return _resolve_content(source, path, member, rules, limits, redaction, agent_rules)
+        return _resolve_content(
+            source, path, member, rules, limits, _scratch_owner(user), redaction, agent_rules
+        )
     except AuditedRefusal as exc:
         refused_path = path if member is None else f"{path}/{normalize_member_name(member)}"
         _audit_refusal(session, user, source, denied_action, refused_path, exc.reason)
@@ -1355,9 +1408,12 @@ def follow_file(
 
     409 follow_unsupported for .gz files and archive members, and for an
     agent older than 0.6: the viewer reloads the whole file instead.
-    Audited when following starts (`start`) and whenever a read begins at
-    the start of the file, so a whole file can't be read through here
-    without a record; not on every poll.
+    Audited once per Tail of a file in a session (_FollowAudits), whatever
+    offset it starts from, with that offset, and again when a poll reads
+    from before the offset audited; not on every poll.
+
+    Takes a connector slot while it reads (#344): 503 with Retry-After when
+    none is free, as /open.
 
     When redaction applies to the source (#382, #249), see _follow_redacted:
     only redacted whole lines come back, offsets stay in bytes of the
@@ -1376,29 +1432,25 @@ def follow_file(
     redaction = redaction_rules_for(session, source)
     connector = _connector(source)
     agent_rules = agent_redaction_rules(session, source) if redaction is not None else None
+    limits = current_limits(session)
     if agent_rules is not None:
-        answer = _follow_on_agent(connector, source, path, offset, head, agent_rules, user, session)
+        with get_limiter().connector(limits, source.id):
+            answer = _follow_on_agent(
+                connector, source, path, offset, head, agent_rules, user, session
+            )
         if isinstance(answer, Response):
             return answer
         body, headers = answer
-        if start or offset == 0:
-            record_audit_event(
-                session,
-                user_id=user.id,
-                action="file.follow",
-                target_type="source",
-                target_id=source.id,
-                metadata={"path": path, **_redaction_applied(REDACTED_ON_AGENT)},
-            )
-            session.commit()
+        _audit_follow(session, user, source, path, offset, start, REDACTED_ON_AGENT)
         return Response(content=body, media_type="application/octet-stream", headers=headers)
     # Redacted, the read starts a little before the offset (context only).
     read_from = max(0, offset - FOLLOW_CONTEXT_BYTES) if redaction is not None else offset
     try:
         # One round trip: the size, the start of the file and the new bytes.
-        size, first, data = connector.read_range(
-            source, path, read_from, RANGE_MAX_BYTES, FOLLOW_HEAD_BYTES
-        )
+        with get_limiter().connector(limits, source.id):
+            size, first, data = connector.read_range(
+                source, path, read_from, RANGE_MAX_BYTES, FOLLOW_HEAD_BYTES
+            )
     except RangeNotSupportedError as exc:
         raise _follow_unsupported(
             "This source's agent is older than 0.6 and can't send only the new lines"
@@ -1455,20 +1507,85 @@ def follow_file(
         if next_offset < size:
             headers["X-Follow-More"] = "1"
 
-    if start or offset == 0:
-        record_audit_event(
-            session,
-            user_id=user.id,
-            action="file.follow",
-            target_type="source",
-            target_id=source.id,
-            metadata={
-                "path": path,
-                **(_redaction_applied(REDACTED_ON_SERVER) if redaction else {}),
-            },
-        )
-        session.commit()
+    _audit_follow(
+        session, user, source, path, offset, start, REDACTED_ON_SERVER if redaction else None
+    )
     return Response(content=body, media_type="application/octet-stream", headers=headers)
+
+
+# How long a Tail may go without a poll before the next one counts as a new
+# Tail, audited again; and how many Tails are remembered at once (the
+# least recently polled are forgotten first, and audited again if they come
+# back).
+FOLLOW_AUDIT_IDLE_SECONDS = 600
+FOLLOW_AUDIT_MAX_TAILS = 10_000
+
+
+class _FollowAudits:
+    """Which Tails have been audited: one entry per session, source and
+    file, with the time of its last poll and the lowest offset audited for
+    it. In memory only, like the scratch bookkeeping; after a restart every
+    Tail is audited again."""
+
+    def __init__(self) -> None:
+        self._polled: OrderedDict[tuple[str, int, str], tuple[float, int]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def starts(self, key: tuple[str, int, str], offset: int, *, start: bool) -> bool:
+        """Records a poll of the Tail `key` from `offset`. True when it
+        starts a Tail: the viewer says so (`start`), no poll of it was seen
+        recently, or it reads from before the lowest offset audited for it
+        (the viewer never goes back within a Tail, so a read from earlier
+        is on record as a Tail of its own)."""
+        now = time.monotonic()
+        with self._lock:
+            last = self._polled.pop(key, None)
+            starts = (
+                start
+                or last is None
+                or now - last[0] > FOLLOW_AUDIT_IDLE_SECONDS
+                or offset < last[1]
+            )
+            lowest = offset if starts else last[1]
+            self._polled[key] = (now, lowest)
+            while len(self._polled) > FOLLOW_AUDIT_MAX_TAILS:
+                self._polled.popitem(last=False)
+        return starts
+
+    def clear(self) -> None:
+        with self._lock:
+            self._polled.clear()
+
+
+_follow_audits = _FollowAudits()
+
+
+def _audit_follow(
+    session: Session,
+    user: User,
+    source: Source,
+    path: str,
+    offset: int,
+    start: bool,
+    redacted_at: str | None,
+) -> None:
+    """Writes file.follow, with the offset the Tail starts from, when this
+    poll starts a Tail (_FollowAudits): whatever offset a client asks from,
+    what it reads through here is on record, from the lowest offset read."""
+    if not _follow_audits.starts((_scratch_owner(user), source.id, path), offset, start=start):
+        return
+    metadata: dict = {"path": path, "offset": offset}
+    if redacted_at is not None:
+        metadata.update(_redaction_applied(redacted_at))
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="file.follow",
+        target_type="source",
+        target_id=source.id,
+        metadata=metadata,
+    )
+    session.commit()
 
 
 def _follow_on_agent(
@@ -1586,13 +1703,17 @@ class CloseRequest(BaseModel):
 def close_file(
     payload: CloseRequest,
     source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
+    user: User = Depends(get_current_active_user),
 ) -> None:
+    """Releases what this session opened at `path` (and `member`); the
+    scratch key names the session (_scratch_owner), so another viewer's
+    copy of the same file is never touched."""
     # The scratch key is a hash, not a filesystem path, so an unsafe path
     # here can't actually escape anywhere — checked anyway for consistency
     # with every other endpoint that takes a client-supplied path.
     _require_safe_path(source, payload.path)
     store = get_scratch_store()
-    key = _scratch_key(source.id, payload.path, payload.member)
+    key = _scratch_key(_scratch_owner(user), source.id, payload.path, payload.member)
     store.release(key)
 
 
@@ -2294,6 +2415,17 @@ class _ZipListingIncomplete(Exception):
         self.detail = detail
 
 
+def _audit_incomplete_listing(
+    session: Session, user: User, source: Source, path: str, exc: _ZipListingIncomplete
+) -> None:
+    """Records a folder ZIP refused because its walk can't list every file
+    (file.download_denied, with the folder that couldn't be listed)."""
+    folder_key = "truncated_folder" if exc.reason == "listing_truncated" else "folder"
+    _audit_refusal(
+        session, user, source, "file.download_denied", path, exc.reason, **{folder_key: exc.path}
+    )
+
+
 def _zip_entries(
     connector,
     source: Source,
@@ -2807,7 +2939,11 @@ def _download_folder_zip_redacted(
     try:
         slots.append(get_limiter().connector(limits, source.id))
         limit = max_fetch_bytes()
-        entries = _zip_entries(connector, source, rules, path)
+        try:
+            entries = _zip_entries(connector, source, rules, path)
+        except _ZipListingIncomplete as exc:
+            _audit_incomplete_listing(session, user, source, path, exc)
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.detail) from exc
         listed = sum(entry.size for entry in entries)
         if listed > limit:
             raise _fetch_too_large(
@@ -2962,16 +3098,7 @@ def download_folder_zip(
         try:
             entries = _zip_entries(connector, source, rules, path)
         except _ZipListingIncomplete as exc:
-            folder_key = "truncated_folder" if exc.reason == "listing_truncated" else "folder"
-            record_audit_event(
-                session,
-                user_id=user.id,
-                action="file.download_denied",
-                target_type="source",
-                target_id=source.id,
-                metadata={"path": path, "reason": exc.reason, folder_key: exc.path},
-            )
-            session.commit()
+            _audit_incomplete_listing(session, user, source, path, exc)
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
         listed = sum(entry.size for entry in entries)
         if listed > limit:

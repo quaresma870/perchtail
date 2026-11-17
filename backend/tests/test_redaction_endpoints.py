@@ -681,8 +681,10 @@ class _FakeSFTP:
     def normalize(self, path):
         return path
 
-    def get(self, remote_path, local_path):
-        Path(local_path).write_bytes(self.files[remote_path])
+    def open(self, remote_path, mode="r"):
+        remote = io.BytesIO(self.files[remote_path])
+        remote.prefetch = lambda file_size=None: None
+        return remote
 
     def stat(self, remote_path):
         attr = type("Attr", (), {})()

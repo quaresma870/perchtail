@@ -320,7 +320,9 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
 
 def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     """Fetch-on-open into `destination` — always a fresh transfer, the
-    caller (scratch.py) never reuses a prior fetch's bytes."""
+    caller (scratch.py) never reuses a prior fetch's bytes. A file over
+    MAX_FETCH_MB is refused before the transfer starts, from its size, and
+    one that grows past it while it is copied stops the copy there."""
     limit = collector_base.max_fetch_bytes()
     client = _connect(source)
     try:
@@ -330,11 +332,11 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
             size = sftp.stat(remote_path).st_size or 0
             if size > limit:
                 raise collector_base.too_large(size, limit)
-            sftp.get(remote_path, str(destination))
-            # The file may have grown between stat() and the transfer.
-            if destination.stat().st_size > limit:
-                destination.unlink(missing_ok=True)
-                raise collector_base.too_large(size, limit)
+            with sftp.open(remote_path, "rb") as remote:
+                # Asks for the listed size ahead, as SFTPClient.get does;
+                # anything past it is read on demand and still counted.
+                remote.prefetch(size)
+                collector_base.copy_with_limit(remote, destination, limit)
         finally:
             sftp.close()
     finally:

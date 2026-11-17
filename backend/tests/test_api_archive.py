@@ -37,13 +37,18 @@ class FakeSFTPClient:
     def listdir_attr(self, path):
         return self.listing
 
-    def get(self, remote_path, local_path):
-        Path(local_path).write_bytes(self.files[remote_path])
+    def open(self, remote_path, mode="r"):
+        return _RemoteFile(self.files[remote_path])
 
     def stat(self, remote_path):
         return FakeAttr(remote_path.rsplit("/", 1)[-1], False, len(self.files[remote_path]))
 
     def close(self):
+        pass
+
+
+class _RemoteFile(io.BytesIO):
+    def prefetch(self, file_size=None):
         pass
 
 
@@ -338,6 +343,61 @@ def test_close_releases_the_scratch_entry(app_client, session, fake_sftp, scratc
     close_response = client.post(f"/sources/{source.id}/close", json={"path": "app.log"})
     assert close_response.status_code == 204
     assert key not in scratch_store._entries
+
+
+def _as_session(session_ref: str):
+    """Runs a request as if it came with the session `session_ref`
+    (app/request_context.py, set by get_current_user in the app)."""
+    from contextlib import contextmanager
+
+    from app import request_context
+
+    @contextmanager
+    def scope():
+        original = request_context.current
+        context = request_context.RequestContext(session_id=session_ref)
+        request_context.current = lambda: context
+        try:
+            yield
+        finally:
+            request_context.current = original
+
+    return scope()
+
+
+def test_a_viewer_only_closes_its_own_scratch(app_client, session, fake_sftp, scratch_store):
+    """Two sessions with the same file open: closing it in one leaves the
+    other's copy alone, and only the owner's close releases it."""
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    other = User(username="other@example.com", role_id=user.role_id)
+    session.add(other)
+    session.commit()
+    session.refresh(other)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+    fake_sftp.files["/var/log/appname/app.log"] = b"hello world"
+    url = f"/sources/{source.id}"
+
+    with _as_session("session-a"):
+        key_a = client.get(f"{url}/open", params={"path": "app.log"}).headers["x-scratch-key"]
+    with _as_session("session-b"):
+        key_b = client.get(f"{url}/open", params={"path": "app.log"}).headers["x-scratch-key"]
+    assert key_a != key_b
+
+    with _as_session("session-b"):
+        assert client.post(f"{url}/close", json={"path": "app.log"}).status_code == 204
+    assert key_a in scratch_store._entries
+    assert key_b not in scratch_store._entries
+    # Another user in a session with the same reference can't close it either.
+    app.dependency_overrides[get_current_active_user] = lambda: other
+    with _as_session("session-a"):
+        client.post(f"{url}/close", json={"path": "app.log"})
+    assert key_a in scratch_store._entries
+    app.dependency_overrides[get_current_active_user] = lambda: user
+    with _as_session("session-a"):
+        client.post(f"{url}/close", json={"path": "app.log"})
+    assert key_a not in scratch_store._entries
 
 
 def test_download_releases_automatically_without_explicit_close(
@@ -1038,8 +1098,8 @@ def test_whole_archive_is_read_from_the_source_once(app_client, session, fake_sf
     original = _zip_bytes({"app.log": "hello"})
     fake_sftp.files["/var/log/appname/logs.zip"] = original
     reads = []
-    real_get = fake_sftp.get
-    fake_sftp.get = lambda remote, local: (reads.append(remote), real_get(remote, local))[1]
+    real_open = fake_sftp.open
+    fake_sftp.open = lambda remote, mode="r": (reads.append(remote), real_open(remote, mode))[1]
 
     response = client.get(f"/sources/{source.id}/download", params={"path": "logs.zip"})
 
@@ -1539,3 +1599,50 @@ def test_zip_links_are_read_as_stored(app_client, session, fake_sftp, scratch_st
     assert [e["name"] for e in listed.json()] == ["app.log", "link.log"]
     opened = client.get(f"{url}/open", params={"path": archive, "member": "link.log"})
     assert opened.status_code == 200 and opened.content == b"secret.txt"
+
+
+def _unreadable_member_zip(tmp_path, kind: str) -> bytes:
+    from tests.test_archives import zip_with_unsupported_method
+    from tests.test_redaction_downloads import _mark_encrypted
+
+    path = tmp_path / "unreadable.zip"
+    if kind == "encrypted":
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("big.log", "secret")
+            zf.writestr("app.log", "fine")
+        return _mark_encrypted(path.read_bytes(), "big.log")
+    zip_with_unsupported_method(path, "big.log", b"secret", others=[("app.log", b"fine")])
+    return path.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "kind, reason",
+    [("encrypted", "member_encrypted"), ("method", "member_unsupported_compression")],
+)
+@pytest.mark.parametrize(
+    "endpoint, action", [("open", "file.open_denied"), ("download", "file.download_denied")]
+)
+def test_an_unreadable_zip_member_is_an_audited_refusal(
+    app_client, session, fake_sftp, scratch_store, tmp_path, kind, reason, endpoint, action
+):
+    """An encrypted member, or one compressed with a method zipfile can't
+    read, is a clean, audited 409 rather than a 500."""
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/logs.zip"] = _unreadable_member_zip(tmp_path, kind)
+
+    response = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "logs.zip", "member": "big.log"}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "archive_member_unreadable"
+    [denied] = session.exec(select(AuditLog).where(AuditLog.action == action)).all()
+    assert denied.event_metadata["path"] == "logs.zip/big.log"
+    assert denied.event_metadata["reason"] == reason
+    readable = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "logs.zip", "member": "app.log"}
+    )
+    assert readable.status_code == 200 and readable.content == b"fine"
