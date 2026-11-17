@@ -124,14 +124,23 @@ func resolveSame(f *os.File, name, base string) (string, error) {
 	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
 		prefix += string(filepath.Separator)
 	}
-	if resolved != base && !strings.HasPrefix(resolved, prefix) {
-		return resolved, nil
+	rel := "."
+	if resolved != base {
+		if !strings.HasPrefix(resolved, prefix) {
+			return resolved, nil
+		}
+		rel = resolved[len(prefix):]
 	}
 	opened, err := f.Stat()
 	if err != nil {
 		return "", err
 	}
-	found, err := os.Stat(resolved)
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	found, err := root.Stat(rel)
 	if err != nil {
 		return "", err
 	}
