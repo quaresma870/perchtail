@@ -113,3 +113,44 @@ func TestAnUnsafeExpectedTargetIsRefused(t *testing.T) {
 		t.Fatalf("answer = %+v", sent)
 	}
 }
+
+// resolveSame, where finalPath isn't available: a name out of the base is
+// only reported as such, never looked at; one inside must be the opened file.
+func TestResolveSameLooksOnlyAtNamesInsideTheBase(t *testing.T) {
+	root := t.TempDir()
+	base := filepath.Join(root, "base")
+	outside := filepath.Join(root, "outside.log")
+	inside := filepath.Join(base, "inside.log")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{outside, inside, filepath.Join(base, "other.log")} {
+		if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(base, "out.log")); err != nil {
+		t.Skip("symlinks not available:", err)
+	}
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(inside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	got, err := resolveSame(f, inside, resolvedBase)
+	if err != nil || got != filepath.Join(resolvedBase, "inside.log") {
+		t.Fatalf("inside: got %q, %v", got, err)
+	}
+	got, err = resolveSame(f, filepath.Join(base, "out.log"), resolvedBase)
+	if err != nil || strings.HasPrefix(got, resolvedBase+string(filepath.Separator)) {
+		t.Fatalf("out of the base: got %q, %v", got, err)
+	}
+	if _, err := resolveSame(f, filepath.Join(base, "other.log"), resolvedBase); err == nil {
+		t.Fatal("another file inside the base was taken for the opened one")
+	}
+}

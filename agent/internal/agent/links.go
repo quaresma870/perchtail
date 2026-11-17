@@ -87,7 +87,7 @@ func newRealPaths(basePath string) (*realPaths, error) {
 func (r *realPaths) of(f *os.File, relPath string) (real string, ok bool, err error) {
 	full, err := finalPath(f)
 	if errors.Is(err, errNoFinalPath) {
-		full, err = resolveSame(f, filepath.Join(r.basePath, filepath.FromSlash(rootName(relPath))))
+		full, err = resolveSame(f, filepath.Join(r.basePath, filepath.FromSlash(rootName(relPath))), r.base)
 	}
 	if err != nil {
 		return "", false, err
@@ -107,8 +107,10 @@ func (r *realPaths) of(f *os.File, relPath string) (real string, ok bool, err er
 
 // resolveSame resolves name (every symlink followed) and checks it is the
 // file f is: where finalPath isn't available, this keeps the answer about
-// the file that was opened, not one swapped in since.
-func resolveSame(f *os.File, name string) (string, error) {
+// the file that was opened, not one swapped in since. A name that resolves
+// out of base is returned as it is, without looking at what it leads to:
+// the caller only learns from it that the file is out of the base path.
+func resolveSame(f *os.File, name, base string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(name)
 	if err != nil {
 		return "", err
@@ -116,6 +118,14 @@ func resolveSame(f *os.File, name string) (string, error) {
 	resolved, err = filepath.Abs(resolved)
 	if err != nil {
 		return "", err
+	}
+	resolved = filepath.Clean(resolved)
+	prefix := base
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	if resolved != base && !strings.HasPrefix(resolved, prefix) {
+		return resolved, nil
 	}
 	opened, err := f.Stat()
 	if err != nil {
