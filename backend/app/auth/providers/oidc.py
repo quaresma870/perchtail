@@ -17,6 +17,8 @@ import base64
 import hashlib
 import json
 import secrets
+import threading
+import time
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit
 
@@ -28,10 +30,15 @@ from sqlmodel import Session, select
 
 from app import profile
 from app.audit import record_audit_event
-from app.auth.models import AuthProviderType, SSOGroupRoleMapping, User
+from app.auth.models import AuthProviderType, Role, SSOGroupRoleMapping, User
+from app.auth.rbac import is_last_active_super_admin
 from app.config import get_settings
 from app.crypto import decrypt_secret, encrypt_secret
+from app.logging_config import get_logger
 from app.timeutils import utcnow
+from app.webhook_safety import resolve_pinned_webhook_target
+
+logger = get_logger(__name__)
 
 STATE_TTL_SECONDS = 600
 HTTP_TIMEOUT_SECONDS = 10
@@ -153,17 +160,48 @@ def resolve_group_mapped_role_id(session: Session, claim_groups: list[str]) -> i
     return mapping.role_id if mapping is not None else None
 
 
-def fetch_discovery_document(issuer: str) -> dict:
-    """GET <issuer>/.well-known/openid-configuration. Raises on any HTTP or
-    network failure — callers turn that into a user-facing detail —,
-    InsecureIdPURLError when the issuer or any endpoint the document names
-    (DISCOVERY_ENDPOINTS) isn't https://, and IssuerMismatchError when the
-    document's `issuer` isn't the configured one: its endpoints and keys
-    then speak for another identity provider."""
-    require_https(issuer, "issuer URL")
-    url = issuer.rstrip("/") + "/.well-known/openid-configuration"
-    response = httpx.get(url, timeout=HTTP_TIMEOUT_SECONDS)
+def _idp_request(method: str, url: str, what: str, **kwargs) -> httpx.Response:
+    """One request to the identity provider (discovery, JWKS, token), under
+    the same address policy as alert webhooks (app/webhook_safety.py): the
+    host must resolve only to global addresses, the connection goes to the
+    address that was checked (no second lookup, so no DNS rebinding), with
+    the real host name kept for the Host header and certificate checks, and
+    redirects aren't followed. SSO_ALLOW_HTTP_LOCALHOST=true lets through a
+    loopback host as well, for local development, and nothing else.
+
+    Raises InsecureIdPURLError for a URL that isn't https://,
+    UnsafeWebhookURLError for a refused address, and httpx's errors (a 3xx
+    included) for the rest. The messages can name the host: they go to the
+    log, never to the caller."""
+    require_https(url, what)
+    host = (urlsplit(url.strip()).hostname or "").lower()
+    if host in _LOOPBACK_HOSTS and get_settings().sso_allow_http_localhost:
+        with httpx.Client(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=False) as client:
+            response = client.request(method, url, **kwargs)
+    else:
+        target = resolve_pinned_webhook_target(url)
+        with httpx.Client(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=False) as client:
+            response = client.request(
+                method,
+                target.url,
+                headers={"Host": target.host_header},
+                extensions={"sni_hostname": target.sni_hostname},
+                **kwargs,
+            )
     response.raise_for_status()
+    return response
+
+
+def fetch_discovery_document(issuer: str) -> dict:
+    """GET <issuer>/.well-known/openid-configuration (see _idp_request for
+    the address policy). Raises on any HTTP or network failure — callers
+    log it and answer neutrally —, InsecureIdPURLError when the issuer or
+    any endpoint the document names (DISCOVERY_ENDPOINTS) isn't https://,
+    and IssuerMismatchError when the document's `issuer` isn't the
+    configured one: its endpoints and keys then speak for another identity
+    provider."""
+    url = issuer.rstrip("/") + "/.well-known/openid-configuration"
+    response = _idp_request("GET", url, "issuer URL")
     document = response.json()
     if not isinstance(document, dict):
         raise ValueError("The discovery document isn't a JSON object")
@@ -177,11 +215,36 @@ def fetch_discovery_document(issuer: str) -> dict:
     return document
 
 
+# Discovery documents of the sign-ins started lately, by issuer, so an
+# anonymous caller hitting /auth/sso/login can't make each request wait on
+# the identity provider. Cleared whenever an SSO provider is saved.
+DISCOVERY_CACHE_SECONDS = 600.0
+_discovery_cache: dict[str, tuple[float, dict]] = {}
+_discovery_cache_lock = threading.Lock()
+
+
+def cached_discovery_document(issuer: str) -> dict:
+    """fetch_discovery_document, reusing a document fetched for the same
+    issuer in the last DISCOVERY_CACHE_SECONDS. Only a document that passed
+    every check is kept; a failure is never cached."""
+    now = time.monotonic()
+    with _discovery_cache_lock:
+        cached = _discovery_cache.get(issuer)
+        if cached is not None and now - cached[0] < DISCOVERY_CACHE_SECONDS:
+            return cached[1]
+    document = fetch_discovery_document(issuer)
+    with _discovery_cache_lock:
+        _discovery_cache[issuer] = (time.monotonic(), document)
+    return document
+
+
+def clear_discovery_cache() -> None:
+    with _discovery_cache_lock:
+        _discovery_cache.clear()
+
+
 def fetch_jwks(jwks_uri: str) -> dict:
-    require_https(jwks_uri, "identity provider's jwks_uri")
-    response = httpx.get(jwks_uri, timeout=HTTP_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    return response.json()
+    return _idp_request("GET", jwks_uri, "identity provider's jwks_uri").json()
 
 
 def generate_code_verifier() -> str:
@@ -204,9 +267,10 @@ def exchange_code_for_tokens(
     client_secret: str,
     code_verifier: str,
 ) -> dict:
-    require_https(token_endpoint, "identity provider's token_endpoint")
-    response = httpx.post(
+    response = _idp_request(
+        "POST",
         token_endpoint,
+        "identity provider's token_endpoint",
         data={
             "grant_type": "authorization_code",
             "code": code,
@@ -215,19 +279,62 @@ def exchange_code_for_tokens(
             "client_secret": client_secret,
             "code_verifier": code_verifier,
         },
-        timeout=HTTP_TIMEOUT_SECONDS,
     )
-    response.raise_for_status()
     return response.json()
 
 
-def verify_id_token(id_token: str, *, jwks: dict, issuer: str, client_id: str, nonce: str) -> dict:
-    """Validates the ID token's signature against the IdP's published JWKS
-    and its iss/exp/iat/aud/nonce claims; exp and iat must be present.
-    Raises `ValueError` on any failure — an ID token's claims are never
-    trusted without this."""
+# Signature algorithms an ID token may use: asymmetric only, so neither
+# `none` nor an HMAC keyed with something the client knows (HS*) is ever
+# accepted, whatever the token's header says.
+ASYMMETRIC_ID_TOKEN_ALGORITHMS = frozenset(
+    {
+        "RS256",
+        "RS384",
+        "RS512",
+        "PS256",
+        "PS384",
+        "PS512",
+        "ES256",
+        "ES384",
+        "ES512",
+        "EdDSA",
+        "Ed25519",
+    }
+)
+# OpenID Connect Discovery's default when the provider announces nothing.
+DEFAULT_ID_TOKEN_ALGORITHMS = ("RS256",)
+
+
+def id_token_algorithms(discovery: dict) -> list[str]:
+    """The algorithms accepted for this provider's ID tokens: the asymmetric
+    ones its discovery document announces (id_token_signing_alg_values_
+    supported), or RS256 when it announces none. A provider announcing only
+    `none` or HS* gets an empty list, so its tokens are all refused."""
+    announced = discovery.get("id_token_signing_alg_values_supported")
+    if not isinstance(announced, list) or not announced:
+        return list(DEFAULT_ID_TOKEN_ALGORITHMS)
+    return [alg for alg in announced if alg in ASYMMETRIC_ID_TOKEN_ALGORITHMS]
+
+
+def verify_id_token(
+    id_token: str,
+    *,
+    jwks: dict,
+    issuer: str,
+    client_id: str,
+    nonce: str,
+    algorithms: list[str] | tuple[str, ...] = DEFAULT_ID_TOKEN_ALGORITHMS,
+) -> dict:
+    """Validates the ID token's signature against the IdP's published JWKS,
+    with one of `algorithms` (never `none` or HS*), and its iss/exp/iat/aud/
+    azp/nonce claims; exp and iat must be present. Raises `ValueError` on
+    any failure of the claims (joserfc's own errors for the signature) — an
+    ID token's claims are never trusted without this."""
+    allowed = [alg for alg in algorithms if alg in ASYMMETRIC_ID_TOKEN_ALGORITHMS]
+    if not allowed:
+        raise ValueError("the identity provider announces no accepted signing algorithm")
     key_set = KeySet.import_key_set(jwks)
-    token = jwt.decode(id_token, key_set)
+    token = jwt.decode(id_token, key_set, algorithms=allowed)
 
     claims_registry = jwt.JWTClaimsRegistry(
         iss={"essential": True, "value": issuer},
@@ -243,6 +350,10 @@ def verify_id_token(id_token: str, *, jwks: dict, issuer: str, client_id: str, n
     allowed_aud = aud if isinstance(aud, list) else [aud]
     if client_id not in allowed_aud:
         raise ValueError("unexpected audience in ID token")
+    # With several audiences, the party the token was issued to must be
+    # this client (OpenID Connect Core 1.0, 3.1.3.7).
+    if len(allowed_aud) > 1 and token.claims.get("azp") != client_id:
+        raise ValueError("unexpected authorized party in ID token")
 
     if token.claims.get("nonce") != nonce:
         raise ValueError("nonce mismatch")
@@ -289,6 +400,15 @@ def decode_state(state: str) -> tuple[str, str]:
     if not isinstance(nonce, str) or not isinstance(code_verifier, str):
         raise ValueError("malformed state")
     return nonce, code_verifier
+
+
+def email_is_verified(claims: dict) -> bool:
+    """Whether the ID token says its `email` is verified: `email_verified`
+    true (some IdPs send it as the string "true"). Missing means no."""
+    verified = claims.get("email_verified")
+    if isinstance(verified, str):
+        return verified.strip().lower() == "true"
+    return verified is True
 
 
 def find_or_provision_user(
@@ -353,7 +473,8 @@ class OIDCProvider:
     def authorization_redirect_url(
         self, *, redirect_uri: str, state: str, nonce: str, code_verifier: str
     ) -> str:
-        discovery = fetch_discovery_document(self.settings.issuer)
+        # Cached: this is the step an anonymous caller can start at will.
+        discovery = cached_discovery_document(self.settings.issuer)
         authorization_endpoint = discovery["authorization_endpoint"]
         require_https(authorization_endpoint, "identity provider's authorization_endpoint")
         return build_authorization_url(
@@ -403,12 +524,14 @@ class OIDCProvider:
             issuer=self.settings.issuer,
             client_id=self.settings.client_id,
             nonce=nonce,
+            algorithms=id_token_algorithms(discovery),
         )
 
         external_id = claims.get("sub")
         if not external_id:
             raise ValueError("ID token is missing a sub claim")
-        email = claims.get("email") or claims.get("preferred_username") or external_id
+        email = claims.get("email") if email_is_verified(claims) else None
+        email = email or claims.get("preferred_username") or external_id
 
         claim_groups = extract_claim_groups(claims, self.settings.group_claim)
         mapping = resolve_group_mapping(session, claim_groups)
@@ -432,21 +555,20 @@ class OIDCProvider:
 
         # Re-synced on every login, not just first provisioning -- see
         # SSOGroupRoleMapping's docstring for why this can override a
-        # manual role change made directly in PerchTail.
-        if mapped_role_id is not None and user.role_id != mapped_role_id:
-            user.role_id = mapped_role_id
-            record_audit_event(
-                session,
-                user_id=user.id,
-                action="user.sso_role_synced",
-                target_type="user",
-                target_id=user.id,
-                metadata={"role_id": mapped_role_id, "groups": claim_groups},
-            )
+        # manual role change made directly in PerchTail. With no matching
+        # mapping the account drops to the no-access role: leaving the IdP
+        # group takes away what the group gave.
+        target_role_id = mapped_role_id if mapped_role_id is not None else no_access_role_id
+        if user.role_id != target_role_id:
+            self._sync_role(session, user, target_role_id, claim_groups, matched=mapping)
         # The group that gave the role, for the access report: only that
         # one name, never the token's other groups. With no match the role
-        # wasn't set by a mapping at this sign-in, so nothing is recorded.
-        user.sso_role_group = mapping.group_name if mapping is not None else None
+        # wasn't set by a mapping at this sign-in, so nothing is recorded;
+        # nor when the role was kept against the mapping (the last active
+        # super admin), since that group didn't give it.
+        user.sso_role_group = (
+            mapping.group_name if mapping is not None and user.role_id == mapping.role_id else None
+        )
 
         user.last_login_at = utcnow()
         session.add(user)
@@ -461,3 +583,43 @@ class OIDCProvider:
         session.commit()
         session.refresh(user)
         return user
+
+    @staticmethod
+    def _sync_role(
+        session: Session,
+        user: User,
+        role_id: int,
+        claim_groups: list[str],
+        *,
+        matched: SSOGroupRoleMapping | None,
+    ) -> None:
+        """Gives the user the role this sign-in's groups call for, audited
+        as user.sso_role_synced. The last active super admin is never
+        demoted this way: the role is kept and a warning is logged, so a
+        change at the IdP can't leave the installation without one."""
+        new_role = session.get(Role, role_id)
+        if (
+            user.role.is_super_admin
+            and (new_role is None or not new_role.is_super_admin)
+            and is_last_active_super_admin(session, user)
+        ):
+            logger.warning(
+                "sso.role_sync_kept_last_super_admin",
+                user_id=user.id,
+                role_id=role_id,
+                matched_mapping=matched is not None,
+            )
+            return
+        user.role_id = role_id
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="user.sso_role_synced",
+            target_type="user",
+            target_id=user.id,
+            metadata={
+                "role_id": role_id,
+                "groups": claim_groups,
+                "reason": "mapping" if matched is not None else "no_matching_mapping",
+            },
+        )

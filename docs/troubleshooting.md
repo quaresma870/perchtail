@@ -199,7 +199,7 @@ The sign-in page shows "SSO sign-in failed — please try again or use your loca
 
 The redirect URI is always `PUBLIC_BASE_URL` followed by `/auth/sso/callback`. Register exactly that value at the identity provider, and set `PUBLIC_BASE_URL` to the external `https://` address users type, without a trailing slash. After the callback, PerchTail sends the browser to `PUBLIC_BASE_URL` as well.
 
-A new SSO user whom no group mapping matches gets the **No Access** role, and sees no sources until an administrator gives them a role.
+An SSO user whom no group mapping matches gets the **No Access** role at every sign-in, and sees no sources until a mapping matches their groups. A role given in **Settings → Users** lasts only until their next sign-in.
 
 ## Server limits and disk space
 

@@ -41,6 +41,32 @@ def create_session(
     return auth_session, token
 
 
+def replace_session(session: Session, user: User, old_token: str | None) -> str:
+    """Swaps the caller's session for a new one with a new token, the same
+    lifetime and user agent, and returns the raw token -- after a password
+    change, so a token seen before it stops working. Doesn't commit: the
+    caller commits it with the change that called for it."""
+    user_agent = None
+    if old_token is not None:
+        old = session.exec(
+            select(AuthSession).where(AuthSession.token_hash == hash_token(old_token))
+        ).first()
+        if old is not None:
+            user_agent = old.user_agent
+            session.delete(old)
+    token = secrets.token_urlsafe(32)
+    ttl = timedelta(hours=get_settings().session_ttl_hours)
+    session.add(
+        AuthSession(
+            token_hash=hash_token(token),
+            user_id=user.id,
+            expires_at=utcnow() + ttl,
+            user_agent=user_agent,
+        )
+    )
+    return token
+
+
 def get_user_by_token(session: Session, token: str) -> User | None:
     auth_session = session.exec(
         select(AuthSession).where(AuthSession.token_hash == hash_token(token))

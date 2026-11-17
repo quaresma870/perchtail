@@ -692,6 +692,18 @@ def role_within_authority(session: Session, actor: User, role: Role) -> bool:
     )
 
 
+def is_last_active_super_admin(session: Session, user: User) -> bool:
+    """Whether `user` is a super admin and no other active user is one."""
+    if not user.role.is_super_admin:
+        return False
+    other = session.exec(
+        select(User.id)
+        .join(Role, User.role_id == Role.id)
+        .where(Role.is_super_admin.is_(True), User.active.is_(True), User.id != user.id)
+    ).first()
+    return other is None
+
+
 def require_role_within_authority(session: Session, actor: User, role: Role) -> None:
     if not role_within_authority(session, actor, role):
         raise forbidden(ROLE_BEYOND_AUTHORITY, reason="role_beyond_authority", user=actor)

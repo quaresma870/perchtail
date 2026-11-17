@@ -305,7 +305,7 @@ PerchTail supports one OIDC provider at a time. [SSO setup](sso-setup.md) covers
 
 ### Auto-provisioning
 
-The first SSO sign-in creates the account, with the email claim as username (or `preferred_username`, or the subject). The new account gets the **No Access** role unless a group mapping matches, so it signs in but sees no sources until someone gives it a role. An SSO account whose username is already taken by another account can't sign in until that clash is resolved.
+The first SSO sign-in creates the account, with the email claim as username when the identity provider says it is verified (otherwise `preferred_username`, or the subject). The account gets the **No Access** role unless a group mapping matches, so it signs in but sees no sources. An SSO account whose username is already taken by another account can't sign in until that clash is resolved.
 
 The display name and email of an SSO account are updated from the identity provider at every sign-in. SSO accounts have no PerchTail password or MFA: the identity provider handles both, and the local sign-in form refuses them.
 
@@ -316,10 +316,10 @@ The display name and email of an SSO account are updated from the identity provi
 - **+ Add mapping** takes an **IdP group name** and a **Role**. A new mapping is added after the existing ones. To change the order, remove mappings and add them again.
 - Mappings are evaluated in order and the last matching mapping wins, like rules.
 - At every SSO sign-in, if a mapping matches, the user gets that role, even if an administrator gave them another role in PerchTail. The audit log records the change as `user.sso_role_synced`.
-- If no mapping matches, the user keeps the role they have. Removing a user from a mapped group, or removing the mapping, stops the sync but does not take the role away. To remove access, change the user's role or deactivate the user in **Settings → Users**.
-- A role change from a mapping takes effect at the user's next SSO sign-in. Sessions already open keep the current role until then.
+- If no mapping matches, the user gets the **No Access** role, recorded as `user.sso_role_synced` with reason `no_matching_mapping`. Removing a user from a mapped group, or removing the mapping, takes the role away at their next sign-in. The last active super admin is the exception: they keep the role, and the log has `sso.role_sync_kept_last_super_admin`.
+- A role change from a mapping takes effect at the user's next SSO sign-in. Sessions already open keep the current role until then; to remove access at once, deactivate the user in **Settings → Users**.
 
-A delegated administrator can only map a group to a role within their own access. They also can't enable a provider or change its issuer, client ID or group claim while any mapping points at a role beyond their access.
+A delegated administrator can only create, change or delete a mapping whose role is within their own access, and only at a position before every mapping whose role is beyond it (the last matching mapping wins). They also can't enable a provider or change its issuer, client ID or group claim while any mapping points at a role beyond their access. Only a super admin deletes the provider or turns it off.
 
 ## Email
 

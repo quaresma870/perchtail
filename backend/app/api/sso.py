@@ -18,6 +18,7 @@ from app.auth.providers.oidc import (
     DISCOVERY_ENDPOINTS,
     InsecureIdPURLError,
     IssuerMismatchError,
+    clear_discovery_cache,
     fetch_discovery_document,
     fetch_jwks,
     parse_oidc_settings,
@@ -25,12 +26,16 @@ from app.auth.providers.oidc import (
     require_https,
 )
 from app.auth.rbac import (
+    forbidden,
     require_global_capability,
     require_role_within_authority,
     role_within_authority,
 )
 from app.crypto import encrypt_secret
 from app.db import get_session
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/sso", tags=["sso"])
 
@@ -39,6 +44,11 @@ require_manage = require_global_capability(GlobalCapability.manage_sso, get_curr
 # A message, not a secret.
 UNREADABLE_SECRET_DETAIL = (
     "The saved client secret can't be decrypted with the current key; enter it again"  # nosec B105
+)
+SUPER_ADMIN_ONLY_DETAIL = "Only a super admin can delete or turn off the SSO provider"
+IDP_CHECK_FAILED_DETAIL = (
+    "Could not reach the identity provider, or its answer was refused. "
+    "The application log says why."
 )
 
 
@@ -174,6 +184,14 @@ def _require_trust_change_within_authority(session: Session, user: User) -> None
             )
 
 
+def _require_super_admin_to_remove_trust(user: User) -> None:
+    """Deleting or turning off the provider changes every SSO account's
+    access at once (and signs no one in until another is set up), so only
+    a super admin does it."""
+    if not user.role.is_super_admin:
+        raise forbidden(SUPER_ADMIN_ONLY_DETAIL, reason="super_admin_required", user=user)
+
+
 def _require_https_issuer(issuer: str) -> None:
     """The issuer must be https:// (app/auth/providers/oidc.py,
     require_https); the endpoints its discovery document names are checked
@@ -224,6 +242,7 @@ def create_provider(
         metadata={"name": payload.name, "enabled": payload.enabled},
     )
     session.commit()
+    clear_discovery_cache()
     session.refresh(config)
     return SSOProviderPublic.from_config(config)
 
@@ -277,6 +296,42 @@ def _require_mappable_role(session: Session, user: User, role_id: int) -> Role:
     return role
 
 
+MAPPING_ORDER_BEYOND_AUTHORITY = (
+    "Not permitted: a mapping to a role beyond your own comes at or before this position"
+)
+
+
+def _require_order_within_authority(
+    session: Session, user: User, *, orders: list[int], mapping_id: int | None = None
+) -> None:
+    """The last matching mapping wins, so a mapping overrides every mapping
+    at or before its position for whoever is in both groups, and removing or
+    moving it uncovers them. Checking only the touched mapping's own role
+    would let a delegated admin take a super-admin role away (a catch-all
+    group mapped to a lesser role at the end) or hand one out (deleting the
+    lesser mapping that overrode it). So, short of super admin, a mapping
+    can only be created, changed or deleted when every other mapping at or
+    before the highest of its old and new positions is within the actor's
+    authority."""
+    if user.role.is_super_admin:
+        return
+    bound = max(orders)
+    query = select(SSOGroupRoleMapping).where(SSOGroupRoleMapping.order <= bound)
+    if mapping_id is not None:
+        query = query.where(SSOGroupRoleMapping.id != mapping_id)
+    checked: dict[int, bool] = {}
+    for other in session.exec(query).all():
+        if other.role_id not in checked:
+            role = session.get(Role, other.role_id)
+            checked[other.role_id] = role is None or role_within_authority(session, user, role)
+        if not checked[other.role_id]:
+            raise forbidden(
+                MAPPING_ORDER_BEYOND_AUTHORITY,
+                reason="mapping_order_beyond_authority",
+                user=user,
+            )
+
+
 # Registered before "/{provider_id}" below -- FastAPI/Starlette match routes
 # in registration order, and "/{provider_id}" would otherwise shadow
 # "/group-mappings" (a single path segment matches the dynamic param too),
@@ -300,6 +355,7 @@ def create_group_mapping(
     session: Session = Depends(get_session),
 ):
     role = _require_mappable_role(session, user, payload.role_id)
+    _require_order_within_authority(session, user, orders=[payload.order])
     mapping = SSOGroupRoleMapping(
         order=payload.order, group_name=payload.group_name, role_id=payload.role_id
     )
@@ -337,6 +393,12 @@ def update_group_mapping(
     current_role = session.get(Role, mapping.role_id)
     if current_role is not None:
         require_role_within_authority(session, user, current_role)
+    _require_order_within_authority(
+        session,
+        user,
+        orders=[mapping.order, payload.order if payload.order is not None else mapping.order],
+        mapping_id=mapping.id,
+    )
     if payload.order is not None:
         mapping.order = payload.order
     if payload.group_name is not None:
@@ -366,6 +428,14 @@ def delete_group_mapping(
     session: Session = Depends(get_session),
 ):
     mapping = _get_mapping_or_404(session, mapping_id)
+    # Deleting a mapping takes its role away from the group's members at
+    # their next sign-in (they drop to No Access without another match), so
+    # it's held to the same rule as creating it: within the actor's
+    # authority, which a super-admin role never is for a delegated admin.
+    role = session.get(Role, mapping.role_id)
+    if role is not None:
+        require_role_within_authority(session, user, role)
+    _require_order_within_authority(session, user, orders=[mapping.order], mapping_id=mapping.id)
     session.delete(mapping)
 
     record_audit_event(
@@ -424,6 +494,8 @@ def update_provider(
     )
     if changes_trust:
         _require_trust_change_within_authority(session, user)
+    if payload.enabled is False and config.enabled:
+        _require_super_admin_to_remove_trust(user)
 
     if payload.enabled is not None:
         _assert_single_enabled(session, enabled=payload.enabled, exclude_id=provider_id)
@@ -453,6 +525,7 @@ def update_provider(
         target_id=config.id,
     )
     session.commit()
+    clear_discovery_cache()
     session.refresh(config)
     return SSOProviderPublic.from_config(config)
 
@@ -464,6 +537,7 @@ def delete_provider(
     session: Session = Depends(get_session),
 ):
     config = _get_or_404(session, provider_id)
+    _require_super_admin_to_remove_trust(user)
     session.delete(config)
 
     record_audit_event(
@@ -474,6 +548,7 @@ def delete_provider(
         target_id=provider_id,
     )
     session.commit()
+    clear_discovery_cache()
 
 
 @router.post("/{provider_id}/test", response_model=ConnectionCheckResult)
@@ -490,15 +565,16 @@ def test_provider(
     if raw is None:
         return ConnectionCheckResult(ok=False, detail=UNREADABLE_SECRET_DETAIL)
     settings = parse_oidc_settings(raw)
+    # What went wrong goes to the log, for the admin; the answer is the same
+    # whatever it was, so the check can't be used to probe other hosts.
     try:
         discovery = fetch_discovery_document(settings.issuer)
-        for required in DISCOVERY_ENDPOINTS:
-            if required not in discovery:
-                return ConnectionCheckResult(
-                    ok=False, detail=f"discovery document is missing {required}"
-                )
+        missing = [name for name in DISCOVERY_ENDPOINTS if name not in discovery]
+        if missing:
+            logger.warning("sso.test.discovery_incomplete", provider_id=config.id, missing=missing)
+            return ConnectionCheckResult(ok=False, detail=IDP_CHECK_FAILED_DETAIL)
         fetch_jwks(discovery["jwks_uri"])
-    except IssuerMismatchError as exc:
+    except IssuerMismatchError:
         # Sign-ins through this provider are refused the same way
         # (api/auth.py); recorded here too, since it can mean the issuer URL
         # points at someone else's discovery document.
@@ -510,8 +586,12 @@ def test_provider(
             target_id=config.id,
         )
         session.commit()
-        return ConnectionCheckResult(ok=False, detail=str(exc))
-    except Exception as exc:  # noqa: BLE001 - surfaced to the caller, not swallowed
-        return ConnectionCheckResult(ok=False, detail=str(exc))
+        logger.warning("sso.test.issuer_mismatch", provider_id=config.id)
+        return ConnectionCheckResult(ok=False, detail=IDP_CHECK_FAILED_DETAIL)
+    except Exception as exc:  # noqa: BLE001 - logged, answered neutrally
+        logger.warning(
+            "sso.test.failed", provider_id=config.id, error=type(exc).__name__, detail=str(exc)
+        )
+        return ConnectionCheckResult(ok=False, detail=IDP_CHECK_FAILED_DETAIL)
 
     return ConnectionCheckResult(ok=True, detail="Connected")

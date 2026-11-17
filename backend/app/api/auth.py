@@ -1,5 +1,6 @@
 import math
 import secrets
+from typing import NoReturn
 
 from fastapi import (
     APIRouter,
@@ -60,6 +61,7 @@ from app.auth.sessions import (
     get_user_by_token,
     hash_token,
     list_sessions_for_user,
+    replace_session,
     revoke_all_sessions,
     revoke_session,
 )
@@ -73,6 +75,7 @@ from app.login_throttle import (
     record_failure,
     record_success,
     seconds_until_allowed,
+    sso_login_from_address,
 )
 
 logger = get_logger(__name__)
@@ -116,6 +119,26 @@ def password_policy_error(exc: password_policy.PasswordPolicyError) -> HTTPExcep
         status_code=422,
         detail={"message": str(exc), "error_code": f"password_{exc.rule}"},
     )
+
+
+def password_length_limit(session: Session) -> int:
+    """The longest password a request may carry: the policy's maximum, or
+    the ceiling of that setting when it has none."""
+    limit = password_policy.get_policy(session).max_length
+    if not limit or limit > password_policy.MAX_LENGTH_CEILING:
+        return password_policy.MAX_LENGTH_CEILING
+    return limit
+
+
+def require_password_length(session: Session, *passwords: str | None) -> None:
+    """Refuses a password longer than password_length_limit before anything
+    hashes or checks it, so a huge body costs neither argon2 time nor the
+    policy's checks. The 422 never quotes the password."""
+    limit = password_length_limit(session)
+    if any(p is not None and len(p) > limit for p in passwords):
+        raise password_policy_error(
+            password_policy.PasswordPolicyError("too_long", f"Use at most {limit} characters.")
+        )
 
 
 class PreferencesUpdate(BaseModel):
@@ -359,6 +382,7 @@ def login(
     response: Response,
     session: Session = Depends(get_session),
 ):
+    require_password_length(session, payload.password)
     client_ip = request.client.host if request.client else None
     per_address = _per_address_account(session, payload.username)
     remaining = seconds_until_allowed(payload.username, client_ip, per_address_account=per_address)
@@ -457,10 +481,12 @@ def me(user: User = Depends(get_current_user), session: Session = Depends(get_se
 @router.post("/change-password", response_model=UserPublic)
 def change_password_endpoint(
     payload: ChangePasswordRequest,
+    response: Response,
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
     session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ):
+    require_password_length(session, payload.current_password, payload.new_password)
     # Throttled like /auth/login, so a stolen session can't be used to
     # brute-force the account password at argon2 speed.
     _require_password_reconfirmation(
@@ -473,8 +499,25 @@ def change_password_endpoint(
         session.rollback()
         raise password_policy_error(exc) from exc
     # Every other session was opened with the old password; it shouldn't
-    # outlive it. This session (the one that just proved the password) stays.
+    # outlive it. This one (which just proved the password) goes on under a
+    # new token, so a token copied before the change stops working too.
     # One commit, so the new password never lands without the revocation.
+    _end_other_sessions(session, user, session_token, reason="password_change")
+    new_token = replace_session(session, user, session_token)
+    session.commit()
+    _set_session_cookie(response, new_token)
+    session.refresh(user)
+    # The first-run password file (app/initial_admin_password.py) goes with
+    # the password it holds.
+    remove_initial_admin_password(user)
+    return UserPublic.from_user(user, session)
+
+
+def _end_other_sessions(
+    session: Session, user: User, session_token: str | None, *, reason: str
+) -> None:
+    """Ends every session of the user but the caller's, audited as
+    session.revoke with `reason`. Doesn't commit."""
     revoked = revoke_all_sessions(session, user.id, except_token=session_token)
     if revoked:
         record_audit_event(
@@ -483,15 +526,11 @@ def change_password_endpoint(
             action="session.revoke",
             target_type="user",
             target_id=user.id,
-            metadata={"count": revoked, "reason": "password_change"},
+            metadata={"count": revoked, "reason": reason},
         )
-    session.commit()
-    session.refresh(user)
-    # The first-run password file (app/initial_admin_password.py) goes with
-    # the password it holds.
-    remove_initial_admin_password(user)
-    return UserPublic.from_user(user, session)
 
+
+EMAIL_NOT_USABLE = "That email address can't be used. Enter another one."
 
 # An error code, not a password (Bandit B105).
 CURRENT_PASSWORD_REQUIRED = "current_password_required"  # nosec B105
@@ -540,6 +579,11 @@ def update_my_profile(
         _require_password_reconfirmation(session, user, current_password, action="email_change")
     try:
         profile.apply_profile(session, user, actor_id=user.id, changes=changes)
+    except profile.EmailTakenError:
+        # Not a 409 naming the conflict: whoever holds a session shouldn't
+        # learn which addresses other accounts have.
+        logger.info("user.email_change_refused", user_id=user.id, reason="taken")
+        raise HTTPException(status_code=422, detail=EMAIL_NOT_USABLE) from None
     except profile.ProfileError as exc:
         raise profile_error(exc) from exc
     session.commit()
@@ -631,34 +675,57 @@ def _require_password_reconfirmation(
 
     A wrong password or code is audited as user.reauth_failed, naming what
     it was meant to allow (`action`) and nothing about what was sent."""
-    context = request_context.current()
-    client_ip = context.client_ip if context is not None else None
-    per_address = mfa_policy.emergency_account(user)
-    remaining = seconds_until_allowed(user.username, client_ip, per_address_account=per_address)
-    if remaining is not None:
-        raise _too_many_attempts(remaining, "Too many failed attempts. Try again later.")
+    require_password_length(session, password)
+    attempt = _ReconfirmationAttempt(session, user, action=action)
+    if not verify_password(user, password):
+        attempt.refuse("Current password is incorrect")
+    # Whatever the check records (user.mfa_secret_unreadable, a spent backup
+    # code) is committed with the refusal or with the caller's change.
+    if mfa_code is not None and not mfa.verify_mfa_code(session, user, mfa_code):
+        attempt.refuse("Invalid authentication code")
+    attempt.succeeded()
 
-    def refuse(detail: str) -> None:
-        outcome = record_failure(user.username, client_ip, per_address_account=per_address)
+
+class _ReconfirmationAttempt:
+    """One attempt at re-proving account ownership, on the same budget as
+    /auth/login (app/login_throttle.py): refused with 429 while locked out;
+    each failure counts, is audited as user.reauth_failed naming `action`,
+    and audits any lockout it triggers; success clears the failures."""
+
+    def __init__(self, session: Session, user: User, *, action: str):
+        self.session = session
+        self.user = user
+        self.action = action
+        context = request_context.current()
+        self.client_ip = context.client_ip if context is not None else None
+        self.per_address = mfa_policy.emergency_account(user)
+        remaining = seconds_until_allowed(
+            user.username, self.client_ip, per_address_account=self.per_address
+        )
+        if remaining is not None:
+            raise _too_many_attempts(remaining, "Too many failed attempts. Try again later.")
+
+    def refuse(self, detail: str, *, status_code: int = status.HTTP_401_UNAUTHORIZED) -> NoReturn:
+        user, session = self.user, self.session
+        outcome = record_failure(
+            user.username, self.client_ip, per_address_account=self.per_address
+        )
         record_audit_event(
             session,
             user_id=user.id,
             action="user.reauth_failed",
             target_type="user",
             target_id=user.id,
-            metadata={"action": action},
+            metadata={"action": self.action},
         )
-        _audit_lockouts(session, user.username, client_ip, outcome, per_address_account=per_address)
+        _audit_lockouts(
+            session, user.username, self.client_ip, outcome, per_address_account=self.per_address
+        )
         session.commit()
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+        raise HTTPException(status_code=status_code, detail=detail)
 
-    if not verify_password(user, password):
-        refuse("Current password is incorrect")
-    # Whatever the check records (user.mfa_secret_unreadable, a spent backup
-    # code) is committed with the refusal or with the caller's change.
-    if mfa_code is not None and not mfa.verify_mfa_code(session, user, mfa_code):
-        refuse("Invalid authentication code")
-    record_success(user.username, client_ip, per_address_account=per_address)
+    def succeeded(self) -> None:
+        record_success(self.user.username, self.client_ip, per_address_account=self.per_address)
 
 
 @router.post("/mfa/enroll", response_model=MfaEnrollResponse)
@@ -690,13 +757,24 @@ def mfa_confirm(
     payload: MfaConfirmRequest,
     user: User = Depends(get_current_user_setting_up_mfa),
     session: Session = Depends(get_session),
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ):
+    """Confirms a pending enrollment (see /mfa/enroll) with a code from the
+    new secret. Only a pending one: with MFA already on it's refused, and
+    new backup codes come only from /mfa/backup-codes/regenerate, which
+    needs the password. A wrong code counts toward the same lockout as a
+    wrong password (_ReconfirmationAttempt), so this is no unlimited code
+    oracle. Turning MFA on ends the account's other sessions."""
+    if user.mfa_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="MFA is already enabled"
+        )
+    attempt = _ReconfirmationAttempt(session, user, action="mfa_confirm")
     try:
         codes = mfa.confirm_enrollment(session, user, payload.code)
     except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid authentication code"
-        ) from None
+        attempt.refuse("Invalid authentication code", status_code=status.HTTP_400_BAD_REQUEST)
+    attempt.succeeded()
 
     record_audit_event(
         session,
@@ -707,6 +785,8 @@ def mfa_confirm(
         # Whether the account had to set it up (app/auth/mfa_policy.py).
         metadata={"required": mfa_policy.mfa_required(session, user)},
     )
+    # A session opened without the second factor doesn't outlive it.
+    _end_other_sessions(session, user, session_token, reason="mfa_enable")
     session.commit()
     return MfaBackupCodesResponse(backup_codes=codes)
 
@@ -716,11 +796,14 @@ def mfa_disable(
     payload: MfaDisableRequest,
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ):
     """Turns the caller's own MFA off. Needs the current password and, while
     MFA is on, a TOTP or backup code (MfaDisableRequest). With MFA only
     pending (enrolled, not confirmed), there's no second factor to prove and
-    the password is enough."""
+    the password is enough. Turning it off ends the account's other
+    sessions."""
+    was_enabled = user.mfa_enabled
     _require_password_reconfirmation(
         session,
         user,
@@ -733,6 +816,8 @@ def mfa_disable(
     record_audit_event(
         session, user_id=user.id, action="user.mfa_disable", target_type="user", target_id=user.id
     )
+    if was_enabled:
+        _end_other_sessions(session, user, session_token, reason="mfa_disable")
     session.commit()
     session.refresh(user)
     return UserPublic.from_user(user, session)
@@ -861,6 +946,13 @@ def sso_login(request: Request, session: Session = Depends(get_session)):
     provider = _get_enabled_provider(session)
     if provider is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSO is not enabled")
+    # Anyone can call this, and it may wait on the identity provider: capped
+    # per address (app/login_throttle.py), on top of the discovery cache.
+    client_ip = _client_ip(request)
+    retry_after = sso_login_from_address(client_ip)
+    if retry_after is not None:
+        auth_events.sso_login_failed(session, client_ip=client_ip, reason="rate_limited")
+        raise _too_many_attempts(retry_after, "Too many sign-in attempts. Try again later.")
 
     app_settings = get_settings()
     raw_config = read_provider_config(provider.config)
@@ -933,12 +1025,21 @@ def sso_login(request: Request, session: Session = Depends(get_session)):
     return response
 
 
+SSO_ERROR_LOG_MAX = 200
+
+
+def _log_cut(value: str | None) -> str | None:
+    """At most SSO_ERROR_LOG_MAX characters of a value the caller sent."""
+    return value[:SSO_ERROR_LOG_MAX] if value is not None else None
+
+
 @router.get("/sso/callback")
 def sso_callback(
     request: Request,
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
+    error_description: str | None = None,
     sso_state_cookie: str | None = Cookie(default=None, alias=SSO_STATE_COOKIE_NAME),
     session: Session = Depends(get_session),
 ):
@@ -962,7 +1063,13 @@ def sso_callback(
         return login_error_redirect
 
     if error is not None or code is None or state is None:
-        logger.warning("sso.callback.idp_error", error=error)
+        # Sent by whoever followed the link, not only by the IdP: cut short
+        # before it reaches the log.
+        logger.warning(
+            "sso.callback.idp_error",
+            error=_log_cut(error),
+            error_description=_log_cut(error_description),
+        )
         return failed("idp_error", error)
 
     # Login-CSRF / state-fixation guard (issue #61): `state` must match the
@@ -1186,6 +1293,7 @@ def complete_password_reset(
     of the account and opens none: the user signs in again, second factor
     included. Every refusal of the link gets the same answer."""
     _require_password_reset(session)
+    require_password_length(session, payload.new_password)
     client_ip = _client_ip(request)
     _limit_token_attempts(session, client_ip)
     result = password_reset.check_token(session, payload.token)

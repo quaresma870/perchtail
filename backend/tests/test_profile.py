@@ -163,7 +163,12 @@ def test_an_email_is_unique_whatever_its_case(session, me_client):
     response = me_client.patch(
         "/auth/me", json={"email": "Taken@Example.com", "current_password": PASSWORD}
     )
-    assert response.status_code == 409
+    # Refused without saying another account has it.
+    assert response.status_code == 422
+    assert response.json()["detail"] == "That email address can't be used. Enter another one."
+    assert "already" not in response.text
+    session.expire_all()
+    assert me_client.holder["user"].email != "taken@example.com"
     response = me_client.patch("/auth/me", json={"email": "not-an-email"})
     assert response.status_code == 422
     assert response.json()["detail"] == "Enter a valid email address."

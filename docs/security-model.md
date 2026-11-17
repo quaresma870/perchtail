@@ -69,12 +69,12 @@ A delegated administrator (a role with `manage_users`, `manage_roles` or `manage
 - They can't change the role they hold or move themselves to another role. Only a super admin can.
 - A role's grants are checked as a whole after each change, so removing one grant can't make another reach further than the administrator's authority.
 - The last active super admin can't be deactivated or demoted, and the built-in roles ("Super Admin" and "No Access") can't be changed.
-- An SSO user whose groups match no mapping gets the "No Access" role on their first sign-in.
+- An SSO user whose groups match no mapping gets the "No Access" role at sign-in, also when they had another role before; the last active super admin keeps theirs. A delegated administrator only creates, changes or deletes a group mapping whose role is within their authority, placed before every mapping whose role isn't (the last matching mapping wins), and only a super admin deletes or turns off the SSO provider.
 
 ### Signing in
 
 - **Local accounts** sign in with a username and password. Passwords are hashed with argon2id and follow the password policy under Settings → System (12 to 128 characters by default, simple and personal passwords rejected, optional history, character classes and maximum age). Accounts an administrator creates must change their password at first sign-in.
-- **SSO** uses OpenID Connect with one provider at a time: the authorization code flow with PKCE, an `https://` issuer that must match its discovery document, and the ID token's signature, issuer, audience, expiry and nonce checked. SSO accounts can't sign in with a password, and an administrator can't give them one.
+- **SSO** uses OpenID Connect with one provider at a time: the authorization code flow with PKCE, an `https://` issuer that must match its discovery document, the identity provider reached only at public addresses, and the ID token's signature (only asymmetric algorithms the provider announces), issuer, audience (with `azp` when there are several), expiry and nonce checked. SSO accounts can't sign in with a password, and an administrator can't give them one.
 - **Two-factor authentication** (TOTP, with 10 single-use backup codes) is required of super admins and of every role with a global capability, and of every local account when **Require MFA for local accounts** is on. Until a covered account sets it up, it can do nothing else. SSO accounts rely on the identity provider's MFA.
 - **Failed sign-ins** lock the username for 5 minutes after 5 failures, and lock a client address that fails as often, whatever the usernames. An active local super admin with MFA is locked only from the address that failed, so an attacker can't lock the emergency account out from elsewhere.
 - **Password recovery by email** is off by default. When on, it never serves super admins, roles with a global capability, SSO accounts or accounts without an email.

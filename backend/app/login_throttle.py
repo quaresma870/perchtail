@@ -42,6 +42,7 @@ addresses failing inside one lockout window.
 import ipaddress
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 
 from app.config import get_settings
@@ -200,9 +201,52 @@ def record_success(
         _accounts.clear(_account_key(username, client_ip, per_address_account))
 
 
+# Starting an SSO sign-in (GET /auth/sso/login) needs no account and can
+# reach out to the identity provider, so every start counts, success or not:
+# at most SSO_LOGINS_PER_ADDRESS per client address (address_key) in
+# SSO_LOGIN_WINDOW_SECONDS. A full table refuses new addresses (fail closed).
+SSO_LOGINS_PER_ADDRESS = 20
+SSO_LOGIN_WINDOW_SECONDS = 60.0
+_sso_logins: dict[str, deque[float]] = {}
+
+
+def _trim_sso_logins(key: str, now: float) -> deque[float] | None:
+    starts = _sso_logins.get(key)
+    if starts is None:
+        return None
+    while starts and now - starts[0] >= SSO_LOGIN_WINDOW_SECONDS:
+        starts.popleft()
+    if not starts:
+        del _sso_logins[key]
+        return None
+    return starts
+
+
+def sso_login_from_address(client_ip: str | None) -> float | None:
+    """Counts one SSO sign-in start from this address. None when it's
+    allowed; otherwise the seconds to wait (and it isn't counted)."""
+    key = address_key(client_ip)
+    now = time.monotonic()
+    with _lock:
+        starts = _trim_sso_logins(key, now)
+        if starts is None:
+            if len(_sso_logins) >= _MAX_TRACKED_ADDRESSES:
+                for other in list(_sso_logins):
+                    _trim_sso_logins(other, now)
+            if len(_sso_logins) >= _MAX_TRACKED_ADDRESSES:
+                return SSO_LOGIN_WINDOW_SECONDS
+            starts = deque()
+            _sso_logins[key] = starts
+        if len(starts) >= SSO_LOGINS_PER_ADDRESS:
+            return max(1.0, SSO_LOGIN_WINDOW_SECONDS - (now - starts[0]))
+        starts.append(now)
+        return None
+
+
 def reset_for_tests() -> None:
     """Test-only: clears all tracked state between test cases so one test's
     lockout can't bleed into the next."""
     with _lock:
         _accounts.state.clear()
         _addresses.state.clear()
+        _sso_logins.clear()
