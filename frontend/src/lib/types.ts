@@ -95,6 +95,9 @@ export interface Source {
   // The version the agent reported (#215), and whether it's older than the server.
   agent_version: string | null
   agent_outdated: boolean
+  // What the agent last announced it can do (#382, #249): "redaction/1"
+  // when it redacts on its own host.
+  agent_features: string[]
   // Reachability (#276): last known, shared by every user; for an agent
   // source, its live connection.
   status: 'ok' | 'failing' | 'unknown'
@@ -148,6 +151,29 @@ export interface SeverityPattern {
   enabled: boolean
   highlight_line: boolean
   include_in_navigation: boolean
+}
+
+// A redaction rule (#382, #249), system-wide (source_id null) or a source's
+// own: a built-in detector (detector set, no pattern) or a custom RE2
+// pattern. Super admins only.
+export interface RedactionRule {
+  id: number
+  source_id: number | null
+  name: string
+  detector: string | null
+  pattern: string | null
+  secret_group: number | null
+  max_length: number | null
+  enabled: boolean
+  order: number
+  notes: string | null
+}
+
+// What a custom pattern replaces in text the admin typed
+// (POST /redaction-rules/test): character offsets in the sample.
+export interface RedactionTestResult {
+  redacted: string
+  matches: { start: number; end: number }[]
 }
 
 export interface Role {

@@ -36,6 +36,16 @@ export function countRedactionMarkers(text: string): number {
   return count
 }
 
+/** The redacted-value count of a Tail buffer once lines left its top
+ * (capTailBuffer): `held` is the buffer before the cut, `kept` what stays
+ * (its end), `count` the count of `held`. The count is of what the tab
+ * shows, so the values in the lines that went are taken off. */
+export function redactionCountAfterCap(held: string, kept: string, count: number): number {
+  if (count <= 0 || kept.length >= held.length) return count
+  const gone = held.slice(0, held.length - kept.length)
+  return Math.max(0, count - countRedactionMarkers(gone))
+}
+
 export function redactionCountLabel(count: number): string {
   return count === 1 ? '1 value redacted' : `${count.toLocaleString('en')} values redacted`
 }

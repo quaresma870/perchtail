@@ -150,7 +150,7 @@ The app's own logs are a system source, seeded at startup (`app/bootstrap.py`, `
 
 ## Web UI
 
-Main areas: the sources explorer with the file-name search, the viewer (tabs, find, follow, compare, download), alerts, My profile (display name, email, password, MFA, sessions), and Settings: sources, folders, users, roles, SSO, system, severity indicators, audit log, access review, agents, and import/export.
+Main areas: the sources explorer with the file-name search, the viewer (tabs, find, follow, compare, download), alerts, My profile (display name, email, password, MFA, sessions), and Settings: sources, folders, users, roles, SSO, system, severity indicators, redaction, audit log, access review, agents, and import/export.
 
 ## Data model
 

@@ -1,6 +1,6 @@
 # Administrator guide
 
-This guide is for the people who set PerchTail up and run it day to day: it covers customers, folders, sources and rules, roles and users, single sign-on, the audit log, alerts, the file-name index and source checks.
+This guide is for the people who set PerchTail up and run it day to day: it covers customers, folders, sources and rules, roles and users, single sign-on, the audit log, alerts, the file-name index, source checks and redaction.
 
 Related guides:
 
@@ -28,6 +28,7 @@ Related guides:
 - [Background source checks and statuses](#background-source-checks-and-statuses)
 - [Agents](#agents)
 - [Severity indicators](#severity-indicators)
+- [Redaction](#redaction)
 
 ## The Settings pages
 
@@ -41,7 +42,7 @@ Related guides:
 | **Users** | roles with **Manage users** |
 | **SSO** | roles with **Manage SSO settings** |
 | **System**, **Severity indicators** | roles with **Manage system settings (feature toggles)** |
-| **Email**, **Import / export** | super admins |
+| **Redaction**, **Email**, **Import / export** | super admins |
 | **Audit log** | roles with **View audit log**, while the **Audit log** switch under **Settings → System** is on |
 
 A super admin sees every page (the Audit log only while its switch in **Settings → System** is on). [Configuration](configuration.md) describes each setting under **Settings → System**.
@@ -488,3 +489,7 @@ Severity indicators colour matching text in the viewer, by level (error, warning
 - A source can have its own set, edited in its source editor. Its own set replaces the global set entirely; leave it empty to keep the global set. It needs `manage_rules` on the source.
 
 A pattern is plain text matched anywhere in a line, ignoring case, or a regular expression with the `re:` prefix. Each pattern has a level and switches: **line** tints the whole line instead of only the matched text, **nav** includes it in the viewer's previous and next problem buttons, and **on** turns it on or off.
+
+## Redaction
+
+Redaction replaces secrets, payment card numbers and personal data in file content with `[redacted: ...]` for every user, super admins included: in the viewer, Tail, downloads and alerts. Only super admins configure it: **Settings → Redaction** holds the switches, the eleven built-in rules and the custom rules for every source, and the **Redaction** section of each source's editor turns system rules off for that source and adds rules of its own. Nobody else sees either. Redaction is best effort: see [Redaction](redaction.md) for the rules, their false positives, where content is redacted and what it doesn't cover.

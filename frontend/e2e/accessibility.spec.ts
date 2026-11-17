@@ -162,6 +162,31 @@ test('accessibility: Settings -> System', async ({ page }) => {
   await expectNoSeriousViolations(page)
 })
 
+test('accessibility: Settings -> Redaction', async ({ page }) => {
+  await page.goto('/#/settings/redaction')
+  await settled(page, 'Redaction')
+  await expect(page.getByLabel('Redact file content')).toBeVisible()
+  // With a pattern tested, so its result is checked too. Nothing is saved.
+  await page.getByLabel('Pattern (RE2)').fill('ORD-\\d{8}')
+  await page.getByLabel('Try it on sample text').fill('order ORD-12345678 shipped')
+  await page.getByRole('button', { name: 'Test pattern' }).click()
+  await expect(page.getByTestId('redaction-test-output')).toBeVisible()
+  await expectNoSeriousViolations(page)
+})
+
+test("accessibility: a source's Redaction section", async ({ page }) => {
+  // The system source's editor, which a super admin sees with the section.
+  const sources: { id: number; is_system: boolean }[] = await (await page.request.get('/sources')).json()
+  const system = sources.find((source) => source.is_system)
+  expect(system).toBeDefined()
+  await page.goto(`/#/settings/sources/${system?.id}/edit`)
+  const section = page.getByTestId('source-redaction')
+  await expect(section).toBeVisible()
+  await expect(section.getByText('Loading…', { exact: true })).toHaveCount(0)
+  await expect(section.getByRole('button', { name: 'Add rule' })).toBeVisible()
+  await expectNoSeriousViolations(page)
+})
+
 test('accessibility: Settings -> Email', async ({ page }) => {
   await page.goto('/#/settings/email')
   await settled(page, 'Email settings')

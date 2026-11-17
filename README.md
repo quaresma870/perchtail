@@ -303,6 +303,7 @@ Connecting sources:
 Administration and use:
 
 - [docs/admin-guide.md](docs/admin-guide.md) — administering PerchTail
+- [docs/redaction.md](docs/redaction.md) — redaction of secrets, card numbers and personal data in file content: the built-in and custom rules, their false positives, where content is redacted and what redaction doesn't cover
 - [docs/sso-setup.md](docs/sso-setup.md) — registering PerchTail as an OIDC client and mapping groups to roles, with notes for Entra ID, Okta, Google Workspace and Keycloak/Authentik
 - [docs/user-guide.md](docs/user-guide.md) — using the explorer and the viewer
 

@@ -28,6 +28,7 @@
     >
   {/if}
   {#if $currentUser?.is_super_admin}
+    <a href="#/settings/redaction" class:active={isActive('/settings/redaction')}>Redaction</a>
     <a href="#/settings/email" class:active={isActive('/settings/email')}>Email</a>
     <a href="#/settings/import-export" class:active={isActive('/settings/import-export')}
       >Import / export</a

@@ -47,7 +47,7 @@
   import { canFormat, formatContent } from '../lib/format-content'
   import { languageForFilename } from '../lib/file-language'
   import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
-  import { countRedactionMarkers, redactionCountLabel } from '../lib/redaction-markers'
+  import { redactionCountAfterCap, redactionCountLabel } from '../lib/redaction-markers'
   import { parsePatternInput } from '../lib/rule-format'
   import { systemSettings } from '../lib/settings'
   import { tabKey } from '../lib/tab-key'
@@ -931,12 +931,9 @@
     const newlines = (current.newlineCount ?? countNewlines(current.content)) + countNewlines(appended)
     const held = kept + appended
     const capped = capTailBuffer(held, newlines)
-    if (capped.dropped > 0 && redactionCount > 0) {
-      // The count is of what the tab shows: the values in the lines that
-      // left the top go with them.
-      const gone = held.slice(0, held.length - capped.content.length)
-      redactionCount = Math.max(0, redactionCount - countRedactionMarkers(gone))
-    }
+    // The count is of what the tab shows: the values in the lines that
+    // left the top go with them.
+    if (capped.dropped > 0) redactionCount = redactionCountAfterCap(held, capped.content, redactionCount)
     updateTab(tab.key, {
       content: capped.content,
       newlineCount: capped.newlines,
