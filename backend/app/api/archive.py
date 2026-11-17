@@ -885,7 +885,9 @@ class RedactedRead:
     unfinished last line, and the original's first HEAD_BYTES (to identify
     the file for the Tail). Redacted on the agent, the server never has
     those bytes: `head_hash` is the agent's digest of them, and `at` says
-    where it was redacted."""
+    where it was redacted. `refused_at` is None, or the offset in the
+    original from which the content turned to an encoding redaction can't
+    read (UTF-32) and the rest was refused."""
 
     counts: dict[str, int]
     source_offset: int
@@ -893,6 +895,7 @@ class RedactedRead:
     head: bytes
     head_hash: str | None = None
     at: str = REDACTED_ON_SERVER
+    refused_at: int | None = None
 
     @property
     def count(self) -> int:
@@ -920,7 +923,13 @@ def _redact_file(original: Path, destination: Path, rules: CompiledRules, final:
         src.seek(0)
         with destination.open("wb") as dst:
             result = redact_stream(src, dst, rules, final=final, source_encoding=encoding)
-    return RedactedRead(result.counts, result.source_offset, result.trailing_partial, head)
+    return RedactedRead(
+        result.counts,
+        result.source_offset,
+        result.trailing_partial,
+        head,
+        refused_at=result.refused_at,
+    )
 
 
 def _resolve_redacted(
@@ -1052,6 +1061,7 @@ def _resolve_on_agent(
         b"",
         head_hash=fetched.head_digest,
         at=REDACTED_ON_AGENT,
+        refused_at=fetched.refused_encoding_at,
     )
     return _Resolved(destination, served_filename, key, redacted)
 
@@ -1193,13 +1203,26 @@ def _redaction_metadata(redacted: RedactedRead | None) -> dict:
     didn't apply."""
     if redacted is None:
         return {}
-    return _redaction_applied(redacted.at)
+    return {**_redaction_applied(redacted.at), **_redaction_refused(redacted.refused_at)}
 
 
 def _redaction_applied(at: str) -> dict:
     """What the audit entry of a read redacted on the server or the agent
     (`at`) says."""
     return {"redaction": "applied", "redaction_at": at}
+
+
+def _redaction_refused(refused_at: int | None) -> dict:
+    """What the audit entry of a read says when the content turned to an
+    encoding redaction can't read part way (UTF-32): the rest was refused,
+    from `redaction_refused_offset` in the original (apart from the
+    entry's own `offset`, where a Tail starts). Nothing otherwise."""
+    if refused_at is None:
+        return {}
+    return {
+        "redaction_refused": _AUDIT_REDACTION_ENCODING_REASON,
+        "redaction_refused_offset": refused_at,
+    }
 
 
 def _redaction_headers(redacted: RedactedRead) -> dict[str, str]:
@@ -1410,7 +1433,9 @@ def follow_file(
     agent older than 0.6: the viewer reloads the whole file instead.
     Audited once per Tail of a file in a session (_FollowAudits), whatever
     offset it starts from, with that offset, and again when a poll reads
-    from before the offset audited; not on every poll.
+    from before the offset audited; not on every poll. A redacted poll
+    whose content turned to an encoding redaction can't read (UTF-32) is
+    audited too, with where the refused rest started.
 
     Takes a connector slot while it reads (#344): 503 with Retry-After when
     none is free, as /open.
@@ -1440,8 +1465,8 @@ def follow_file(
             )
         if isinstance(answer, Response):
             return answer
-        body, headers = answer
-        _audit_follow(session, user, source, path, offset, start, REDACTED_ON_AGENT)
+        body, headers, refused_at = answer
+        _audit_follow(session, user, source, path, offset, start, REDACTED_ON_AGENT, refused_at)
         return Response(content=body, media_type="application/octet-stream", headers=headers)
     # Redacted, the read starts a little before the offset (context only).
     read_from = max(0, offset - FOLLOW_CONTEXT_BYTES) if redaction is not None else offset
@@ -1489,10 +1514,11 @@ def follow_file(
                 follow=True,
             )
             raise RedactionEncodingRefused() from exc
-        body, headers = _follow_redacted(
+        body, headers, refused_at = _follow_redacted(
             source, redaction, encoding, offset, read_from, size, first, data
         )
     else:
+        refused_at = None
         next_offset = offset + len(data)
         # What the viewer holds from the start once it appends `data`: the
         # head as read, extended by the new bytes while the file is still
@@ -1508,7 +1534,14 @@ def follow_file(
             headers["X-Follow-More"] = "1"
 
     _audit_follow(
-        session, user, source, path, offset, start, REDACTED_ON_SERVER if redaction else None
+        session,
+        user,
+        source,
+        path,
+        offset,
+        start,
+        REDACTED_ON_SERVER if redaction else None,
+        refused_at,
     )
     return Response(content=body, media_type="application/octet-stream", headers=headers)
 
@@ -1568,15 +1601,21 @@ def _audit_follow(
     offset: int,
     start: bool,
     redacted_at: str | None,
+    refused_at: int | None = None,
 ) -> None:
     """Writes file.follow, with the offset the Tail starts from, when this
     poll starts a Tail (_FollowAudits): whatever offset a client asks from,
-    what it reads through here is on record, from the lowest offset read."""
-    if not _follow_audits.starts((_scratch_owner(user), source.id, path), offset, start=start):
+    what it reads through here is on record, from the lowest offset read.
+    A poll whose redacted content turned to an encoding redaction can't
+    read (`refused_at`, in bytes of the original) is written too, with the
+    offset it asked from and where the refused rest started."""
+    starts = _follow_audits.starts((_scratch_owner(user), source.id, path), offset, start=start)
+    if not starts and refused_at is None:
         return
     metadata: dict = {"path": path, "offset": offset}
     if redacted_at is not None:
         metadata.update(_redaction_applied(redacted_at))
+    metadata.update(_redaction_refused(refused_at))
     record_audit_event(
         session,
         user_id=user.id,
@@ -1597,12 +1636,14 @@ def _follow_on_agent(
     agent_rules: list[dict],
     user: User,
     session: Session,
-) -> tuple[bytes, dict[str, str]] | Response:
+) -> tuple[bytes, dict[str, str], int | None] | Response:
     """The redacted Tail when the agent redacts on its host (#382, #249):
     the agent reads, from a little before `offset`, only whole lines and
     redacts them (the same answer as _follow_redacted), and never sends the
     start of the file, only its digests. A refusal (UTF-32, a compressed
-    format) is audited as when the server redacts."""
+    format) is audited as when the server redacts; the last item is where
+    the agent refused the rest of what it read (UTF-32 part way), or
+    None."""
     block = redaction_block(source.id, agent_rules, "utf-8")
     try:
         with _agent_refusals(agent_rules):
@@ -1631,7 +1672,7 @@ def _follow_on_agent(
         headers["X-Follow-Aligned"] = "1"
     if read.read_end < read.size:
         headers["X-Follow-More"] = "1"
-    return read.data, headers
+    return read.data, headers, read.refused_encoding_at
 
 
 def _follow_redacted(
@@ -1643,7 +1684,7 @@ def _follow_redacted(
     size: int,
     first: bytes,
     data: bytes,
-) -> tuple[bytes, dict[str, str]]:
+) -> tuple[bytes, dict[str, str], int | None]:
     """A redacted Tail answer. `data` was read from `read_from`, up to
     FOLLOW_CONTEXT_BYTES before `offset`; that context is never sent, only
     read to know whether `offset` falls inside a private-key block.
@@ -1657,6 +1698,10 @@ def _follow_redacted(
       start, so the next poll sends it again, whole once it is.
     - A line with no end within FOLLOW_WINDOW_BYTES can't be redacted whole:
       it becomes a marker and the Tail goes on after it.
+    - From a line that looks UTF-32, the rest of what was read is refused:
+      `[redacted: unsupported encoding]` ends the answer and the Tail goes
+      on after what was read. The last item returned is where that started
+      in the original, or None.
     - Offsets, X-File-Size and X-Follow-Head are about the original."""
     window = redact_window(
         data,
@@ -1691,7 +1736,8 @@ def _follow_redacted(
     # last line is read again on the next poll, not right away.
     if read_end < size:
         headers["X-Follow-More"] = "1"
-    return body, headers
+    refused_at = None if window.refused_at is None else read_from + window.refused_at
+    return body, headers, refused_at
 
 
 class CloseRequest(BaseModel):
@@ -1798,8 +1844,10 @@ def _redact_into(
 ) -> str | None:
     """Redacts the whole of `src` into `destination`, for a download: the
     last line is redacted as it is, and UTF-16 content goes back to UTF-16.
-    Returns None, or why it can't be redacted (nothing is then written).
-    Raises DecompressionLimitError past `max_bytes` of content."""
+    Returns None, or why it can't be redacted (nothing is then written):
+    content that turns UTF-32 part way is left out whole, as one that
+    starts so. Raises DecompressionLimitError past `max_bytes` of
+    content."""
     head = _read_head(src)
     if unsupported_compressed_format(head):
         return _SKIP_FORMAT
@@ -1819,11 +1867,16 @@ def _redact_into(
                         f"decompressed size exceeds the {max_bytes}-byte limit"
                     )
                 dst.write(redactor.feed(block))
+                if redactor.refused_at is not None:
+                    break
                 block = src.read(CHUNK_BYTES)
             dst.write(redactor.finish(final=True))
     except BaseException:
         destination.unlink(missing_ok=True)
         raise
+    if redactor.refused_at is not None:
+        destination.unlink(missing_ok=True)
+        return _SKIP_ENCODING
     return None
 
 
@@ -1948,6 +2001,9 @@ class _RedactedDownload(NamedTuple):
     skipped: list[tuple[str, str]] | None
     work_dir: Path
     at: str = REDACTED_ON_SERVER
+    # Redacted on the agent: where it refused the rest of the content (UTF-32
+    # part way), or None.
+    refused_at: int | None = None
 
 
 # Why the agent left a member of an archive out (fetch_archive), as the
@@ -2113,7 +2169,7 @@ def _prepare_on_agent(
                     )
                 decompress = is_transparent_gzip(target)
                 content = work_dir / "redacted"
-                connector.call(
+                fetched = connector.call(
                     "fetch_redacted",
                     source,
                     path,
@@ -2123,6 +2179,10 @@ def _prepare_on_agent(
                     decompress=decompress,
                 )
                 if member is not None and decompress:
+                    if fetched.refused_encoding_at is not None:
+                        # Compressed again whole, as the server refuses one
+                        # it can't redact whole (_redact_content).
+                        raise RedactionEncodingRefused()
                     # A .gz member is sent as it is in the archive: compressed.
                     rebuilt = work_dir / "rebuilt"
                     _gzip_file(content, rebuilt)
@@ -2132,7 +2192,14 @@ def _prepare_on_agent(
                     )
                 served = target[: -len(".gz")] if decompress else target
                 return _RedactedDownload(
-                    content, served, None, True, None, work_dir, REDACTED_ON_AGENT
+                    content,
+                    served,
+                    None,
+                    True,
+                    None,
+                    work_dir,
+                    REDACTED_ON_AGENT,
+                    fetched.refused_encoding_at,
                 )
         except FetchTooLargeError as exc:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -2241,18 +2308,31 @@ def _prepare_redacted_download(
             raise
 
 
-def _redacted_chunks(original: Path, rules: CompiledRules, encoding: str | None) -> Iterator[bytes]:
+def _redacted_chunks(
+    original: Path,
+    rules: CompiledRules,
+    encoding: str | None,
+    record_refusal: Callable[[int], None],
+) -> Iterator[bytes]:
     """`original` redacted a block at a time as it is sent: the last line
-    as it is, UTF-16 back to UTF-16."""
+    as it is, UTF-16 back to UTF-16. Content that turns UTF-32 part way
+    ends with `[redacted: unsupported encoding]`, and `record_refusal` gets
+    where the refused rest started, however the download ends."""
     redactor = Redactor(rules, source_encoding=encoding, output_encoding="source")
-    with original.open("rb") as src:
-        while block := src.read(CHUNK_BYTES):
-            out = redactor.feed(block)
-            if out:
-                yield out
-    out = redactor.finish(final=True)
-    if out:
-        yield out
+    try:
+        with original.open("rb") as src:
+            while block := src.read(CHUNK_BYTES):
+                out = redactor.feed(block)
+                if out:
+                    yield out
+                if redactor.refused_at is not None:
+                    break
+        out = redactor.finish(final=True)
+        if out:
+            yield out
+    finally:
+        if redactor.refused_at is not None:
+            record_refusal(redactor.refused_at)
 
 
 def _download_redacted(
@@ -2289,6 +2369,7 @@ def _download_redacted(
     try:
         metadata: dict = {"path": path, "member": member} if member else {"path": path}
         metadata.update(_redaction_applied(prepared.at))
+        metadata.update(_redaction_refused(prepared.refused_at))
         if prepared.skipped is not None:
             metadata["skipped_count"] = len(prepared.skipped)
         record_audit_event(
@@ -2309,7 +2390,12 @@ def _download_redacted(
         return _FinishingFileResponse(
             prepared.path, filename=name, headers=headers, on_finish=finish
         )
-    stream = _redacted_chunks(prepared.path, redaction, prepared.encoding)
+    stream = _redacted_chunks(
+        prepared.path,
+        redaction,
+        prepared.encoding,
+        _late_refusal_recorder(session, user, source, metadata),
+    )
 
     def finish_stream() -> None:
         # The generator's own cleanup (its open file) first, if the download
@@ -2727,7 +2813,7 @@ def _prepare_folder_entry_on_agent(
             )
         plain = tmp_dir / "agent-gz"
         try:
-            connector.call(
+            fetched = connector.call(
                 "fetch_redacted",
                 source,
                 entry.path,
@@ -2735,6 +2821,10 @@ def _prepare_folder_entry_on_agent(
                 redaction_block(source.id, agent_rules, "source"),
                 decompress=True,
             )
+            if fetched.refused_encoding_at is not None:
+                # UTF-32 part way: left out whole, as when the server
+                # redacts it (_redact_content).
+                return _SKIP_ENCODING
             _gzip_file(plain, prepared)
         finally:
             plain.unlink(missing_ok=True)
@@ -2774,7 +2864,7 @@ def _stream_redacted_zip(
     redaction: CompiledRules,
     skipped: list[tuple[str, str]],
     skipped_name: str,
-    record_late_skips: Callable[[list[str]], None],
+    record_late_skips: Callable[[list[tuple[str, str]]], None],
     agent_rules: list[dict] | None = None,
 ) -> Iterator[bytes]:
     """_stream_zip for a redacted folder ZIP. Each plain file is fetched
@@ -2787,10 +2877,11 @@ def _stream_redacted_zip(
     them again. `remaining` is what is left of the MAX_FETCH_MB budget,
     counted in bytes fetched from the source. Everything left out is listed
     last, in `skipped_name`. The files only found to be left out while the
-    ZIP is sent go to `record_late_skips` (their paths on the source) once
-    it ends, however it ends."""
+    ZIP is sent (UTF-32 from the start or part way, or compressed in a
+    format redaction doesn't support) go to `record_late_skips` (their
+    paths on the source, with why) once it ends, however it ends."""
     sink = _ZipSink()
-    late: list[str] = []
+    late: list[tuple[str, str]] = []
     try:
         with zipfile.ZipFile(sink, "w", zipfile.ZIP_DEFLATED) as zf:
             for index, (entry, prepared) in enumerate(planned):
@@ -2823,7 +2914,7 @@ def _stream_redacted_zip(
                                 reason=reason,
                             )
                             skipped.append((arcname, reason))
-                            late.append(entry.path)
+                            late.append((entry.path, reason))
                             continue
                     info = zipfile.ZipInfo.from_file(redacted, arcname=arcname)
                     info.compress_type = compress
@@ -2873,41 +2964,103 @@ def _fetch_redacted_file_on_agent(
         if exc.code in _AGENT_FILE_SKIPS:
             return 0, _AGENT_FILE_SKIPS[exc.code]
         raise _agent_refusal(exc, agent_rules) from exc
+    if fetched.refused_encoding_at is not None:
+        # UTF-32 part way: left out whole, as when the server redacts it.
+        destination.unlink(missing_ok=True)
+        return fetched.source_size, _SKIP_ENCODING
     return fetched.source_size, None
 
 
-def _late_skips_recorder(
-    session: Session, user: User, source: Source, path: str
-) -> Callable[[list[str]], None]:
-    """What records the files a redacted folder ZIP only found it had to
-    leave out while it was sent, after its folder.download entry was
-    written: a second audit entry, file.download_redaction_skipped, with the
-    folder, the count and their paths. Written in its own session, since
-    the request's may be gone by then; a failure is logged, never raised
-    into the response."""
-    bind = session.get_bind()
-    user_id = user.id
-    source_id = source.id
+# The audit reason of a file a redacted folder ZIP only found it had to leave
+# out while it was sent, by why it was left out.
+_LATE_SKIP_AUDIT_REASONS = {
+    _SKIP_ENCODING: _AUDIT_REDACTION_ENCODING_REASON,
+    _SKIP_FORMAT: _AUDIT_REDACTION_FORMAT_REASON,
+}
 
-    def record(paths: list[str]) -> None:
-        try:
-            with Session(bind) as late_session:
+
+def _record_late_entries(
+    bind, user_id: int, source_id: int, path: str, entries: list[dict]
+) -> None:
+    """Writes file.download_redaction_skipped entries after the response
+    started, in their own session, since the request's may be gone by then;
+    a failure is logged, never raised into the response."""
+    try:
+        with Session(bind) as late_session:
+            for metadata in entries:
                 record_audit_event(
                     late_session,
                     user_id=user_id,
                     action="file.download_redaction_skipped",
                     target_type="source",
                     target_id=source_id,
-                    metadata={"path": path, "skipped_count": len(paths), "skipped": paths},
+                    metadata=metadata,
                 )
-                late_session.commit()
-        except Exception as exc:
-            logger.error(
-                "archive.redaction_skipped_audit_failed",
-                source_id=source_id,
-                path=path,
-                error_type=type(exc).__name__,
-            )
+            late_session.commit()
+    except Exception as exc:
+        logger.error(
+            "archive.redaction_skipped_audit_failed",
+            source_id=source_id,
+            path=path,
+            error_type=type(exc).__name__,
+        )
+
+
+def _late_skips_recorder(
+    session: Session, user: User, source: Source, path: str
+) -> Callable[[list[tuple[str, str]]], None]:
+    """What records the files a redacted folder ZIP only found it had to
+    leave out while it was sent, after its folder.download entry was
+    written: a second audit entry, file.download_redaction_skipped, per
+    reason, with the folder, the reason, the count and their paths."""
+    bind = session.get_bind()
+    user_id = user.id
+    source_id = source.id
+
+    def record(late: list[tuple[str, str]]) -> None:
+        by_reason: dict[str, list[str]] = {}
+        for skipped_path, reason in late:
+            by_reason.setdefault(reason, []).append(skipped_path)
+        _record_late_entries(
+            bind,
+            user_id,
+            source_id,
+            path,
+            [
+                {
+                    "path": path,
+                    "reason": _LATE_SKIP_AUDIT_REASONS.get(reason, reason),
+                    "skipped_count": len(paths),
+                    "skipped": paths,
+                }
+                for reason, paths in by_reason.items()
+            ],
+        )
+
+    return record
+
+
+def _late_refusal_recorder(
+    session: Session, user: User, source: Source, download: dict
+) -> Callable[[int], None]:
+    """What records a redacted download sent while it is redacted whose
+    content turned UTF-32 part way, after its file.download entry was
+    written (`download` is that entry's path and member): a second audit
+    entry, file.download_redaction_skipped, with the reason and where the
+    refused rest started in the original (`offset`)."""
+    bind = session.get_bind()
+    user_id = user.id
+    source_id = source.id
+    target = {key: download[key] for key in ("path", "member") if key in download}
+
+    def record(offset: int) -> None:
+        _record_late_entries(
+            bind,
+            user_id,
+            source_id,
+            target["path"],
+            [{**target, "reason": _AUDIT_REDACTION_ENCODING_REASON, "offset": offset}],
+        )
 
     return record
 

@@ -168,6 +168,26 @@ func splits(data []byte) [][][]byte {
 	return out
 }
 
+// checkOffsets compares refused_at and union_at, when the vector has them
+// (null for -1).
+func checkOffsets(t testing.TB, v map[string]any, refusedAt, unionAt int64) {
+	t.Helper()
+	for key, got := range map[string]int64{"refused_at": refusedAt, "union_at": unionAt} {
+		raw, ok := v[key]
+		if !ok {
+			continue
+		}
+		want := int64(-1)
+		if raw != nil {
+			n, _ := number(v, key)
+			want = int64(n)
+		}
+		if got != want {
+			t.Fatalf("%s %d, want %d", key, got, want)
+		}
+	}
+}
+
 func final(v map[string]any) bool {
 	f, ok := v["final"].(bool)
 	return !ok || f
@@ -246,6 +266,7 @@ func TestVectors(t *testing.T) {
 				if n, ok := number(v, "trailing_partial"); ok && r.TrailingPartial != n {
 					t.Fatalf("blocks %v: trailing partial %d, want %d", sizes, r.TrailingPartial, n)
 				}
+				checkOffsets(t, v, r.RefusedAt, r.UnionAt)
 			}
 		})
 	}
@@ -285,6 +306,7 @@ func TestWindowVectors(t *testing.T) {
 				t.Fatalf("begin %d end %d aligned %v trailing %d; want %d %d %v %d",
 					got.Begin, got.End, got.Aligned, got.TrailingPartial, begin, end, aligned, trailing)
 			}
+			checkOffsets(t, v, int64(got.RefusedAt), int64(got.UnionAt))
 		})
 	}
 }

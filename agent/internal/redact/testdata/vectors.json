@@ -1,7 +1,7 @@
 {
   "engine": 1,
   "format": {
-    "vectors": "rules (the agent's redact block format: a custom rule has name, pattern, secret_group and max_length, the longest match it can make in bytes; the guard before the cut of a long line is the largest of cut_guard_bytes and the max_length of every custom rule), input or input_b64 (input_encoding encodes input: utf-8 by default, utf-16-le or utf-16-be), source_encoding (none: bytes; auto: detected from the first 64 bytes; utf-16-le; utf-16-be; utf-16-unsure: served as bytes, the detectors run on the bytes and on the UTF-16 LE and BE readings aligned on even file offsets, and the union is replaced), output_encoding (utf-8 by default, or source), final (true by default), max_line_bytes, pem_max_lines; expected or expected_b64 (expected_encoding like input_encoding), counts, source_offset, trailing_partial, or error. A vector with window redacts input[window.start:] of a read that began window.base_offset bytes into the file, and expects begin, end and aligned. Every vector without window must give the same result whatever block sizes the input is fed in.",
+    "vectors": "rules (the agent's redact block format: a custom rule has name, pattern, secret_group and max_length, the longest match it can make in bytes; the guard before the cut of a long line is the largest of cut_guard_bytes and the max_length of every custom rule), input or input_b64 (input_encoding encodes input: utf-8 by default, utf-16-le or utf-16-be), source_encoding (none: bytes; auto: detected from the first 64 bytes; utf-16-le; utf-16-be; utf-16-unsure: served as bytes, the detectors run on the bytes and on the UTF-16 LE and BE readings aligned on even file offsets, and the union is replaced), output_encoding (utf-8 by default, or source), final (true by default), max_line_bytes, pem_max_lines; expected or expected_b64 (expected_encoding like input_encoding), counts, source_offset, trailing_partial, or error. A vector with window redacts input[window.start:] of a read that began window.base_offset bytes into the file, and expects begin, end and aligned. Every vector without window must give the same result whatever block sizes the input is fed in. refused_at and union_at, when present, are where a line that looks UTF-32 made the rest refused and where the content started to be read as utf-16-unsure part way (offsets into input), or null for neither.",
     "long_line_cuts": "for every k from 0 to the length of value, the line kept + ' ' + '~' * n + ' ' + value + ' end\\n', with n such that max_line_bytes falls right after the first k bytes of value, is redacted with rules and max_line_bytes and must give expected_kept (followed by ' ' and the '~' filler when the blank just before value is at or before max_line_bytes - cut_guard_bytes), the long-line marker and '\\n', with counts, whatever block sizes it is fed in: the kept start of a long line ends at the last blank at or before max_line_bytes - cut_guard_bytes (detectors.json), or earlier at the start of a replacement that blank would cut, so nothing of a value cut by the limit is kept. With source_encoding utf-16-unsure, the line is encoded with input_encoding (utf-16-le or utf-16-be) and redacted as utf-16-unsure from file offset 0: k and n count characters, the guard is 2 * cut_guard_bytes source bytes (a character of the UTF-16 readings takes two), the blanks are found byte by byte (the 0x20 of '20 00' and of '00 20'), and the kept start ends at the blank's 0x20 byte; the expected output is expected_kept encoded with input_encoding except its markers, which stay ASCII, then the ' ' and '~' filler encoded likewise when kept, then for utf-16-be the 00 byte before the blank's 0x20, then the long-line marker and '\\n' in ASCII, then for utf-16-le the 00 byte that follows the line's 0x0A.",
     "head_digests": "HMAC-SHA256 with key_b64 of the first min(64, offset) bytes of data, hex, first 32 characters.",
     "detect": "the encoding decided from head_b64: utf-16-le, utf-16-be, utf-16-unsure, null (bytes) or error.",
@@ -1117,6 +1117,89 @@
       "final": true,
       "source_offset": 7,
       "trailing_partial": 0
+    },
+    {
+      "name": "reading change: a line of bytes content that looks UTF-16 is read as utf-16-unsure from its start",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input": "ok!\np\u0000a\u0000s\u0000s\u0000w\u0000o\u0000r\u0000d\u0000=\u0000h\u0000u\u0000n\u0000t\u0000e\u0000r\u00002\u0000\n\u0000",
+      "expected": "ok!\np\u0000a\u0000s\u0000s\u0000w\u0000o\u0000r\u0000d\u0000=\u0000[redacted: password]\n\u0000",
+      "counts": {"secret_kv": 1},
+      "source_offset": 38,
+      "trailing_partial": 0,
+      "refused_at": null,
+      "union_at": 4
+    },
+    {
+      "name": "reading change: a run of UTF-16 units off the even offsets is read as bytes",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input": "xa\u0000b\u0000c\u0000d\u0000\npassword=hunter22\n",
+      "expected": "xa\u0000b\u0000c\u0000d\u0000\npassword=[redacted: password]\n",
+      "counts": {"secret_kv": 1},
+      "source_offset": 28,
+      "refused_at": null,
+      "union_at": null
+    },
+    {
+      "name": "reading change: a line that looks UTF-32 refuses the rest, unfinished line included",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input": "ok\ns\u0000\u0000\u0000e\u0000\u0000\u0000c\u0000\u0000\u0000r\u0000\u0000\u0000e\u0000\u0000\u0000t\u0000\u0000\u0000\nmore=1\nabc",
+      "final": false,
+      "expected": "ok\n[redacted: unsupported encoding]",
+      "counts": {},
+      "source_offset": 38,
+      "trailing_partial": 0,
+      "refused_at": 3,
+      "union_at": null
+    },
+    {
+      "name": "reading change: ASCII text in clear UTF-16 is read as utf-16-unsure from its line",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input": "h\u0000e\u0000l\u0000l\u0000o\u0000\n\u0000password=hunter22\nb\u0000y\u0000e\u0000\n\u0000",
+      "source_encoding": "utf-16-le",
+      "expected": "hello\npassword=[redacted: password]\nb\u0000y\u0000e\u0000\n\u0000",
+      "counts": {"secret_kv": 1},
+      "source_offset": 38,
+      "refused_at": null,
+      "union_at": 12
+    },
+    {
+      "name": "reading change: UTF-32 right after a clear UTF-16 LE line refuses from its own start, the marker in UTF-16",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input": "o\u0000k\u0000 \u0000l\u0000i\u0000n\u0000e\u0000\n\u0000t\u0000\u0000\u0000o\u0000\u0000\u0000k\u0000\u0000\u0000e\u0000\u0000\u0000n\u0000\u0000\u0000=\u0000\u0000\u0000a\u0000\u0000\u0000b\u0000\u0000\u0000c\u0000\u0000\u0000\n\u0000\u0000\u0000",
+      "source_encoding": "utf-16-le",
+      "output_encoding": "source",
+      "expected": "ok line\n[redacted: unsupported encoding]",
+      "expected_encoding": "utf-16-le",
+      "counts": {},
+      "source_offset": 56,
+      "refused_at": 16,
+      "union_at": null
+    },
+    {
+      "name": "reading change: UTF-32 in the dropped part of a long line refuses from the next line",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input": "x x x x x x x x x x x x x x x x A\u0000\u0000\u0000B\u0000\u0000\u0000C\u0000\u0000\u0000D\u0000\u0000\u0000\nnext\n",
+      "max_line_bytes": 32,
+      "expected": "[redacted: line over 32 bytes]\n[redacted: unsupported encoding]",
+      "counts": {},
+      "source_offset": 54,
+      "refused_at": 49,
+      "union_at": null
+    },
+    {
+      "name": "window: a Tail read that meets UTF-32 refuses the rest",
+      "rules": [{"id": 4, "name": "secret_kv", "detector": "secret_kv"}],
+      "input": "ctx\nok\na\u0000\u0000\u0000b\u0000\u0000\u0000c\u0000\u0000\u0000d\u0000\u0000\u0000\nz",
+      "window": {"base_offset": 100, "start": 4},
+      "final": false,
+      "expected": "ok\n[redacted: unsupported encoding]",
+      "counts": {},
+      "begin": 4,
+      "end": 25,
+      "aligned": false,
+      "trailing_partial": 0,
+      "refused_at": 7,
+      "union_at": null
     }
   ],
   "long_line_cuts": [

@@ -696,6 +696,43 @@ def test_utf16_lines_are_redacted_with_their_original_offsets(session, tmp_path)
     assert hits[0].line.startswith("user ") and "alice@" not in hits[0].line
 
 
+def test_content_that_turns_utf32_part_way_waits_where_it_is(session, tmp_path):
+    from structlog.testing import capture_logs
+
+    _redacting(session)
+    _, alert = _started(session, tmp_path, query=".", regex=True)
+    _write_bytes(tmp_path, "app.log", b"plain line\n", mode="ab")
+    assert len(check_alert(session, alert)) == 1
+    session.commit()
+    start = _offset(session, alert)
+    _write_bytes(
+        tmp_path, "app.log", b"ok\n" + "token=Sup3rS3cret\n".encode("utf-32-le"), mode="ab"
+    )
+    with capture_logs() as logs:
+        for _ in range(2):
+            assert check_alert(session, alert) == []
+            session.commit()
+    assert _read_failures(logs) == 1 and _offset(session, alert) == start
+
+
+def test_utf16_lines_then_ascii_text_keep_their_original_offsets(session, tmp_path):
+    _redacting(session)
+    _, alert = _started(session, tmp_path, "﻿start\n".encode("utf-16-le"), query="user")
+    # ASCII text in clear UTF-16: read as bytes and both UTF-16 readings
+    # from its line on, whose lines then end at every newline byte.
+    added = (
+        "x\n".encode("utf-16-le")
+        # An even length, so the UTF-16 newline after it is on an even offset.
+        + b"user alice@example.com in\nuser two!\n"
+        + "end\n".encode("utf-16-le")
+    )
+    _write_bytes(tmp_path, "app.log", added, mode="ab")
+    hits = check_alert(session, alert)
+    first = len("﻿start\nx\n") * 2
+    assert [h.offset for h in hits] == [first, first + len(b"user alice@example.com in\n")]
+    assert "alice@" not in hits[0].line and hits[1].line == "user two!"
+
+
 def test_a_line_with_no_end_within_a_read_becomes_a_marker(session, tmp_path, monkeypatch):
     monkeypatch.setattr(alerts, "READ_BYTES", 20_000)
     _redacting(session)
@@ -1060,6 +1097,31 @@ def test_on_the_agent_a_file_it_cant_redact_is_logged_once_until_it_changes(
         check_alert(session, alert)
         check_alert(session, alert)
     assert _read_failures(logs) == 1
+
+
+def test_on_the_agent_content_that_turns_utf32_part_way_waits_where_it_is(session, redacting_agent):
+    _, agent, alert = redacting_agent
+    agent.files["app.log"] += b"ok\n" + "token=Sup3rS3cret\n".encode("utf-32-le")
+    assert check_alert(session, alert) == [] and _offset(session, alert) == 6
+
+
+def test_on_the_agent_utf16_lines_then_ascii_text(session, redacting_agent):
+    _, agent, alert = redacting_agent
+    content = "﻿start\n".encode("utf-16-le")
+    agent.files["app.log"] = content
+    state = session.exec(select(AlertFileState)).one()
+    state.offset, state.head = len(content), None
+    session.add(state)
+    session.commit()
+    agent.files["app.log"] += b"user alice@example.com in\nuser two!\n" + "end\n".encode(
+        "utf-16-le"
+    )
+    hits = check_alert(session, alert)
+    assert [h.offset for h in hits][:2] == [
+        len(content),
+        len(content) + len(b"user alice@example.com in\n"),
+    ]
+    assert "alice@" not in hits[0].line and hits[1].line == "user two!"
 
 
 def test_an_agent_that_cant_redact_falls_back_to_the_server(session, redacting_agent, monkeypatch):

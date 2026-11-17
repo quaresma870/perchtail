@@ -30,6 +30,9 @@ const (
 	// IncompleteLineLabel labels an unfinished last line of a read that
 	// the file may continue past.
 	IncompleteLineLabel = "incomplete line"
+	// UnsupportedEncodingLabel labels the refused rest of content that
+	// looks UTF-32 part way.
+	UnsupportedEncodingLabel = "unsupported encoding"
 	// pemCarryBytes is how much of the content before a dropped piece of a
 	// long line is read again with it, so a BEGIN or END split between two
 	// pieces is still found.
@@ -66,8 +69,9 @@ type Options struct {
 	MaxLineBytes int
 	// PemMaxLines is PemMaxLines when 0.
 	PemMaxLines int
-	// Origin is the file offset of the first byte fed (it only matters for
-	// UTF16Unsure, whose UTF-16 readings are aligned on even offsets).
+	// Origin is the file offset of the first byte fed (it matters for
+	// UTF16Unsure, whose UTF-16 readings are aligned on even offsets, and for
+	// RefusedAt and UnionAt).
 	Origin int64
 }
 
@@ -114,6 +118,7 @@ type Redactor struct {
 	unit        int
 	newline     []byte
 	reencode    bool
+	maxLineOpt  int
 	maxLine     int
 	longLine    []byte
 	pemMax      int
@@ -126,6 +131,18 @@ type Redactor struct {
 	pem         [3]pemState
 	pemCarry    []byte
 	pemFound    []pemFound
+	// While a long line is being dropped: its last bytes read, looked at
+	// again with the next piece, and how the windows in the dropped part
+	// change the reading from the next line.
+	restCarry  []byte
+	restChange string
+	// RefusedAt is the file offset from which the rest was refused (a line
+	// that looks UTF-32), or -1.
+	RefusedAt int64
+	// UnionAt is the file offset from which the content was read as
+	// UTF16Unsure although it didn't start so (lines end at every newline
+	// byte from there), or -1.
+	UnionAt int64
 	// Counts is the number of replacements by rule name.
 	Counts map[string]int
 	// SourceSize is the number of bytes fed.
@@ -175,6 +192,9 @@ func New(rules *Rules, opts Options) (*Redactor, error) {
 		lineCounts:  map[string]int{},
 		Counts:      map[string]int{},
 		pemMax:      pemMax,
+		maxLineOpt:  maxLine,
+		RefusedAt:   -1,
+		UnionAt:     -1,
 	}
 	encoding := opts.SourceEncoding
 	if r.union {
@@ -201,19 +221,22 @@ func (r *Redactor) Feed(data []byte) []byte {
 	if r.Passthrough {
 		return append([]byte(nil), data...)
 	}
+	if r.RefusedAt >= 0 {
+		return nil
+	}
 	r.buffer = append(r.buffer, data...)
 	var out bytes.Buffer
-	for {
+	for r.RefusedAt < 0 {
 		if r.overflow {
 			index := r.findNewline(r.buffer, 0, len(r.buffer))
 			at := r.origin + r.consumed
 			if index < 0 {
 				size := len(r.buffer) - len(r.buffer)%r.unit
-				r.pemTailFeed(clone(r.buffer[:size]), at)
+				r.droppedFeed(clone(r.buffer[:size]), at)
 				r.drop(size)
 				break
 			}
-			r.pemTailFeed(clone(r.buffer[:index]), at)
+			r.droppedFeed(clone(r.buffer[:index]), at)
 			r.pemTailEnd()
 			r.drop(index + len(r.newline))
 			out.Write(r.encodeMarker([]byte("\n")))
@@ -221,20 +244,36 @@ func (r *Redactor) Feed(data []byte) []byte {
 			r.lineStart = r.consumed
 			r.lineOutput = 0
 			r.lineCounts = map[string]int{}
+			if r.restChange != "" {
+				change := r.restChange
+				r.restChange = ""
+				out.Write(r.changeReading(change, r.origin+r.consumed))
+			}
 			continue
 		}
-		if index := r.rfindNewline(r.buffer); index >= 0 {
+		if index := r.rfindNewline(r.buffer, len(r.buffer)); index >= 0 {
 			end := index + len(r.newline)
-			block := clone(r.buffer[:end])
 			at := r.origin + r.consumed
-			r.drop(end)
-			out.Write(r.lines(block, at, true))
+			text, used := r.lines(clone(r.buffer[:end]), at, true)
+			out.Write(text)
+			if r.RefusedAt >= 0 {
+				break
+			}
+			r.drop(used)
 			r.lineStart = r.consumed
+			if used < end {
+				// The reading changed: the rest is split into lines again.
+				continue
+			}
 		}
 		if len(r.buffer) > r.maxLine {
-			r.lineCounts = map[string]int{}
 			at := r.origin + r.consumed
 			source := clone(r.buffer[:r.maxLine])
+			if index, change := r.readingChange(source, at); index >= 0 {
+				out.Write(r.changeReading(change, at))
+				continue
+			}
+			r.lineCounts = map[string]int{}
 			piece := r.segment(source, at, true, true)
 			piece = append(piece, r.encodeMarker(r.longLine)...)
 			out.Write(piece)
@@ -242,13 +281,74 @@ func (r *Redactor) Feed(data []byte) []byte {
 			r.overflow = true
 			size := len(r.buffer) - len(r.buffer)%r.unit
 			r.pemTailStart(source, at)
-			r.pemTailFeed(clone(r.buffer[r.maxLine:size]), at+int64(r.maxLine))
+			r.restCarry = clone(source[max(0, len(source)-changeCarryBytes):])
+			r.restChange = ""
+			r.droppedFeed(clone(r.buffer[r.maxLine:size]), at+int64(r.maxLine))
 			r.drop(size)
 			continue
 		}
 		break
 	}
+	if r.RefusedAt >= 0 {
+		r.buffer = nil
+	}
 	return out.Bytes()
+}
+
+// reading is how the content is read now.
+func (r *Redactor) reading() string {
+	if r.union {
+		return UTF16Unsure
+	}
+	return r.encoding
+}
+
+func (r *Redactor) readingChange(data []byte, at int64) (int, string) {
+	return FindReadingChange(data, at, r.reading())
+}
+
+// changeReading reads the content from file offset at, the start of a line,
+// as reading: UTF16Unsure, or UTF32, which refuses the rest. It returns what
+// to send in its place (the marker for a refusal).
+func (r *Redactor) changeReading(reading string, at int64) []byte {
+	if reading == UTF32 {
+		r.RefusedAt = at
+		r.buffer = nil
+		r.overflow = false
+		return r.encodeMarker(Marker(UnsupportedEncodingLabel))
+	}
+	if r.encoding != Bytes {
+		// Clear UTF-16: its private-key state goes on in the reading of the
+		// same byte order.
+		state := r.pem[0]
+		if r.encoding == UTF16BE {
+			r.pem = [3]pemState{{}, {}, state}
+		} else {
+			r.pem = [3]pemState{{}, state, {}}
+		}
+	}
+	r.UnionAt = at
+	r.union = true
+	r.encoding = Bytes
+	r.unit = 1
+	r.newline = []byte("\n")
+	r.reencode = false
+	r.maxLine = r.maxLineOpt
+	return nil
+}
+
+// droppedFeed reads the next piece of the dropped part of a long line for
+// private keys and for windows that change the reading.
+func (r *Redactor) droppedFeed(source []byte, at int64) {
+	r.pemTailFeed(source, at)
+	if r.restChange == UTF32 || len(source) == 0 {
+		return
+	}
+	text := append(clone(r.restCarry), source...)
+	if change := strongestReadingChange(text, at-int64(len(r.restCarry)), r.reading()); change != "" {
+		r.restChange = change
+	}
+	r.restCarry = clone(text[max(0, len(text)-changeCarryBytes):])
 }
 
 // Finish ends the content. final is true at the end of the file or of what
@@ -258,8 +358,10 @@ func (r *Redactor) Feed(data []byte) []byte {
 // and TrailingPartial how many bytes of the output it took.
 func (r *Redactor) Finish(final bool) []byte {
 	r.TrailingPartial = 0
-	if r.Passthrough {
+	if r.Passthrough || r.RefusedAt >= 0 {
+		// Refused: what was read is done with, sent or not.
 		r.SourceOffset = r.SourceSize
+		r.buffer = nil
 		return nil
 	}
 	var out []byte
@@ -279,7 +381,7 @@ func (r *Redactor) Finish(final bool) []byte {
 		}
 	case len(r.buffer) > 0:
 		if final {
-			out = r.lines(clone(r.buffer), r.origin+r.consumed, true)
+			out = r.allLines(clone(r.buffer), r.origin+r.consumed)
 			r.SourceOffset = r.SourceSize
 		} else {
 			out = r.encodeMarker(Marker(IncompleteLineLabel))
@@ -300,6 +402,18 @@ func (r *Redactor) SkipContext(data []byte, at int64) {
 	if !r.Passthrough && r.rules.pemBegin != nil && len(data) > 0 {
 		r.lines(data, at, false)
 	}
+}
+
+// allLines is lines on the whole block, through every change of reading.
+func (r *Redactor) allLines(block []byte, at int64) []byte {
+	var out bytes.Buffer
+	for len(block) > 0 && r.RefusedAt < 0 {
+		text, used := r.lines(block, at, true)
+		out.Write(text)
+		block = block[used:]
+		at += int64(used)
+	}
+	return out.Bytes()
 }
 
 func clone(b []byte) []byte { return append([]byte(nil), b...) }
@@ -329,8 +443,10 @@ func (r *Redactor) findNewline(data []byte, start, end int) int {
 	return -1
 }
 
-func (r *Redactor) rfindNewline(data []byte) int {
-	index := bytes.LastIndex(data, r.newline)
+// rfindNewline is the last newline in data[:end] at an offset that is a
+// multiple of the unit (relative to data).
+func (r *Redactor) rfindNewline(data []byte, end int) int {
+	index := bytes.LastIndex(data[:end], r.newline)
 	for index >= 0 && index%r.unit != 0 {
 		index = bytes.LastIndex(data[:index+1], r.newline)
 	}
@@ -349,11 +465,14 @@ func longestLine(block []byte) int {
 
 // lines redacts a block of whole lines (the last may lack its newline only
 // at the end of the content) that starts at file offset at, giving the
-// lines over maxLine the long-line marker.
-func (r *Redactor) lines(block []byte, at int64, emit bool) []byte {
+// lines over maxLine the long-line marker. It returns the output and how
+// much of the block it covers: less than all of it when the reading changed
+// at the start of a line (the rest is to be split into lines again), all of
+// it when the rest was refused.
+func (r *Redactor) lines(block []byte, at int64, emit bool) ([]byte, int) {
 	newline := r.newline
 	if len(block) <= r.maxLine+len(newline) || (r.unit == 1 && longestLine(block) <= r.maxLine) {
-		return r.redactSource(block, at, emit)
+		return r.shortLines(block, at, emit)
 	}
 	var out bytes.Buffer
 	start, pending := 0, 0
@@ -365,27 +484,67 @@ func (r *Redactor) lines(block []byte, at int64, emit bool) []byte {
 		}
 		if end-start > r.maxLine {
 			if pending < start {
-				out.Write(r.redactSource(block[pending:start], at+int64(pending), emit))
+				text, used := r.shortLines(block[pending:start], at+int64(pending), emit)
+				out.Write(text)
+				if used < start-pending || r.RefusedAt >= 0 {
+					return out.Bytes(), pending + used
+				}
 			}
 			piece := block[start : start+r.maxLine]
+			if emit {
+				if i, change := r.readingChange(piece, at+int64(start)); i >= 0 {
+					out.Write(r.changeReading(change, at+int64(start)))
+					return out.Bytes(), start
+				}
+			}
 			out.Write(r.segment(piece, at+int64(start), false, emit))
 			r.pemTailStart(piece, at+int64(start))
-			r.pemTailFeed(block[start+r.maxLine:end], at+int64(start+r.maxLine))
+			rest := block[start+r.maxLine : end]
+			r.pemTailFeed(rest, at+int64(start+r.maxLine))
 			r.pemTailEnd()
+			restChange := ""
 			if emit {
+				carry := piece[max(0, len(piece)-changeCarryBytes):]
+				text := append(clone(carry), rest...)
+				restChange = strongestReadingChange(text, at+int64(start+r.maxLine-len(carry)), r.reading())
 				out.Write(r.encodeMarker(r.longLine))
 				if index >= 0 {
 					out.Write(r.encodeMarker([]byte("\n")))
 				}
 			}
 			pending = after
+			if restChange != "" {
+				out.Write(r.changeReading(restChange, at+int64(after)))
+				return out.Bytes(), after
+			}
 		}
 		start = after
 	}
 	if pending < len(block) {
-		out.Write(r.redactSource(block[pending:], at+int64(pending), emit))
+		text, used := r.shortLines(block[pending:], at+int64(pending), emit)
+		out.Write(text)
+		return out.Bytes(), pending + used
 	}
-	return out.Bytes()
+	return out.Bytes(), len(block)
+}
+
+// shortLines is lines for a block with no line over maxLine: up to the start
+// of the first line whose windows change the reading.
+func (r *Redactor) shortLines(block []byte, at int64, emit bool) ([]byte, int) {
+	if emit {
+		if index, change := r.readingChange(block, at); index >= 0 {
+			line := 0
+			if newline := r.rfindNewline(block, index); newline >= 0 {
+				line = newline + len(r.newline)
+			}
+			var out []byte
+			if line > 0 {
+				out = r.redactSource(block[:line], at, emit)
+			}
+			return append(out, r.changeReading(change, at+int64(line))...), line
+		}
+	}
+	return r.redactSource(block, at, emit), len(block)
 }
 
 // segment redacts the first maxLine bytes of a long line: only the part
@@ -771,6 +930,9 @@ type Result struct {
 	SourceOffset    int64
 	TrailingPartial int
 	OutputSize      int
+	// RefusedAt and UnionAt are the Redactor's (file offsets, or -1).
+	RefusedAt int64
+	UnionAt   int64
 }
 
 // RedactBytes redacts content held in memory in one go.
@@ -780,19 +942,24 @@ func RedactBytes(data []byte, rules *Rules, final bool, opts Options) ([]byte, R
 		return nil, Result{}, err
 	}
 	out := append(r.Feed(data), r.Finish(final)...)
-	return out, Result{r.Counts, r.SourceSize, r.SourceOffset, r.TrailingPartial, len(out)}, nil
+	return out, Result{r.Counts, r.SourceSize, r.SourceOffset, r.TrailingPartial, len(out), r.RefusedAt, r.UnionAt}, nil
 }
 
 // WindowResult is a redacted read from the middle of a file. Offsets index
 // the data passed in: the output is the redaction of data[Begin:End] (plus
 // the incomplete-line marker when TrailingPartial > 0), and the next read
-// should start at End.
+// should start at End. RefusedAt is -1, or where the rest was refused (the
+// output then ends with the refusal marker and End is the end of data);
+// UnionAt is -1, or where the content started to be read as UTF16Unsure,
+// its lines ending at every newline byte from there.
 type WindowResult struct {
 	Data            []byte
 	Counts          map[string]int
 	Begin, End      int
 	Aligned         bool
 	TrailingPartial int
+	RefusedAt       int
+	UnionAt         int
 }
 
 // RedactWindow redacts data[start:] of a read that began baseOffset bytes
@@ -808,7 +975,7 @@ func RedactWindow(data []byte, start int, rules *Rules, baseOffset int64, final 
 	}
 	if r.Passthrough {
 		r.Feed(data[start:])
-		return WindowResult{clone(data[start:]), map[string]int{}, start, len(data), false, 0}, nil
+		return WindowResult{clone(data[start:]), map[string]int{}, start, len(data), false, 0, -1, -1}, nil
 	}
 	unit := int64(r.unit)
 	newline := r.newline
@@ -848,6 +1015,12 @@ func RedactWindow(data []byte, start int, rules *Rules, baseOffset int64, final 
 	r.origin = baseOffset + int64(begin)
 	r.SkipContext(clone(data[context:begin]), baseOffset+int64(context))
 	out := append(r.Feed(data[begin:]), r.Finish(final)...)
+	index := func(offset int64) int {
+		if offset < 0 {
+			return -1
+		}
+		return int(offset - baseOffset)
+	}
 	return WindowResult{
 		Data:            out,
 		Counts:          r.Counts,
@@ -855,5 +1028,7 @@ func RedactWindow(data []byte, start int, rules *Rules, baseOffset int64, final 
 		End:             begin + int(r.SourceOffset),
 		Aligned:         begin != start,
 		TrailingPartial: r.TrailingPartial,
+		RefusedAt:       index(r.RefusedAt),
+		UnionAt:         index(r.UnionAt),
 	}, nil
 }

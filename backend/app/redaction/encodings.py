@@ -8,7 +8,15 @@ NULs look like UTF-16's.
 
 The decision is taken from the first HEAD_BYTES of the file, the same bytes
 the viewer's Tail already identifies the file by, so /open, every Tail poll
-and the agent decide the same way however far into the file they read."""
+and the agent decide the same way however far into the file they read.
+
+Content can change encoding part way, so the engine also looks at every
+line it reads (find_reading_change): a line of content read as bytes that
+looks UTF-16, or a line of clear UTF-16 content with ASCII text in it, is
+read as UTF16_UNSURE from its start to the end of the read; a line that
+looks UTF-32 ends the read with a refusal."""
+
+import re
 
 UTF16_LE = "utf-16-le"
 UTF16_BE = "utf-16-be"
@@ -65,3 +73,93 @@ def detect_encoding(head: bytes) -> str | None:
     if little * 4 >= len(pairs) or big * 4 >= len(pairs):
         return UTF16_UNSURE
     return None
+
+
+# What find_reading_change gives for a line that looks UTF-32: the rest of
+# the read is refused.
+UTF32 = "utf-32"
+
+# The windows find_reading_change looks for. None holds a newline byte, so
+# each lies within one line of bytes, whatever the reading; in clear UTF-16
+# LE content, none starts on the NUL of a newline (`0A 00` on an even
+# offset), which ends the line before. UTF-32: 16 bytes
+# in which each group of 4 has one byte that isn't NUL, at the same place in
+# every group (in any phase). UTF-16: 4 units of 2 bytes, each with exactly
+# one NUL, on the same side (on even file offsets). ASCII: 4 printable ASCII
+# bytes in a row.
+_UTF32_WINDOW = re.compile(
+    rb"(?:[^\x00\n]\x00\x00\x00){4}|(?:\x00[^\x00\n]\x00\x00){4}"
+    rb"|(?:\x00\x00[^\x00\n]\x00){4}|(?:\x00\x00\x00[^\x00\n]){4}"
+)
+_UTF16_WINDOW = re.compile(rb"(?:[^\x00\n]\x00){4}|(?:\x00[^\x00\n]){4}")
+_ASCII_WINDOW = re.compile(rb"[\x20-\x7e]{4}")
+_UTF32_BYTES = 16
+_UTF16_BYTES = 8
+_ASCII_BYTES = 4
+# How much of what came before a piece of content is looked at again with
+# it, so a window across the two is still found.
+CHANGE_CARRY_BYTES = _UTF32_BYTES - 1
+
+
+def _first_utf32(data: bytes, at: int, reading: str | None) -> int | None:
+    # Every UTF-32 window holds three NULs in a row.
+    if b"\x00\x00\x00" not in data:
+        return None
+    position = 0
+    while (found := _UTF32_WINDOW.search(data, position)) is not None:
+        index = found.start()
+        if not (
+            reading == UTF16_LE
+            and index > 0
+            and data[index - 1] == 0x0A
+            and data[index] == 0
+            and (at + index) % 2
+        ):
+            return index
+        position = index + 1
+    return None
+
+
+def _first_aligned_utf16(data: bytes, at: int, endpos: int) -> int | None:
+    if b"\x00" not in data:
+        return None
+    position = 0
+    while (found := _UTF16_WINDOW.search(data, position, endpos)) is not None:
+        if (at + found.start()) % 2 == 0:
+            return found.start()
+        position = found.start() + 1
+    return None
+
+
+def find_reading_change(data: bytes, at: int, reading: str | None) -> tuple[int, str] | None:
+    """Where in `data` (content that starts at file offset `at`, read as
+    `reading`: None for bytes, UTF16_LE, UTF16_BE or UTF16_UNSURE) the first
+    window that changes how it is read starts, and what it changes to:
+    UTF32 for a UTF-32 window (in any reading), UTF16_UNSURE for a UTF-16
+    window in content read as bytes or an ASCII window in clear UTF-16
+    content. When two start at the same byte, UTF32 wins. None when there
+    is none."""
+    first = _first_utf32(data, at, reading)
+    best = None if first is None else (first, UTF32)
+    if reading is None:
+        # Only a window that starts before the UTF-32 one counts.
+        endpos = len(data) if best is None else min(len(data), best[0] + _UTF16_BYTES - 1)
+        index = _first_aligned_utf16(data, at, endpos)
+        if index is not None:
+            best = (index, UTF16_UNSURE)
+    elif reading in (UTF16_LE, UTF16_BE):
+        endpos = len(data) if best is None else min(len(data), best[0] + _ASCII_BYTES - 1)
+        found = _ASCII_WINDOW.search(data, 0, endpos)
+        if found is not None:
+            best = (found.start(), UTF16_UNSURE)
+    return best
+
+
+def strongest_reading_change(data: bytes, at: int, reading: str | None) -> str | None:
+    """What the windows anywhere in `data` change the reading to: UTF32 when
+    there is a UTF-32 window, otherwise UTF16_UNSURE when there is a window
+    that changes it to that (see find_reading_change), otherwise None."""
+    if _first_utf32(data, at, reading) is not None:
+        return UTF32
+    change = find_reading_change(data, at, reading)
+    return None if change is None else change[1]

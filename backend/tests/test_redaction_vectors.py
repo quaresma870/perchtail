@@ -86,6 +86,9 @@ def test_vector(vector):
             assert redactor.source_offset == vector["source_offset"]
         if "trailing_partial" in vector:
             assert redactor.trailing_partial == vector["trailing_partial"]
+        for key in ("refused_at", "union_at"):
+            if key in vector:
+                assert getattr(redactor, key) == vector[key], key
 
 
 @pytest.mark.parametrize("vector", WINDOW_VECTORS, ids=[v["name"] for v in WINDOW_VECTORS])
@@ -106,6 +109,9 @@ def test_window_vector(vector):
     assert result.end == vector["end"]
     assert result.aligned == vector["aligned"]
     assert result.trailing_partial == vector["trailing_partial"]
+    for key in ("refused_at", "union_at"):
+        if key in vector:
+            assert getattr(result, key) == vector[key], key
 
 
 @pytest.mark.parametrize(

@@ -346,6 +346,12 @@ def _read_redacted(
         final=False,
         source_encoding=encoding,
     )
+    if window.refused_at is not None:
+        # UTF-32 part way: as content that starts so, it waits where it is.
+        raise UnreadableContentError(
+            "content in an encoding redaction doesn't support",
+            head_hash(source.id, first, len(first)),
+        )
     read_end = read_from + len(data)
     next_offset = read_from + window.end
     if next_offset <= offset and read_end < size:
@@ -355,7 +361,12 @@ def _read_redacted(
         next_offset = read_end
     else:
         output = window.data[: len(window.data) - window.trailing_partial]
-        lengths = _line_lengths(data[window.begin : window.end], encoding, read_from + window.begin)
+        # Read as UTF16_UNSURE from union_at on, the lines there end at every
+        # newline byte.
+        union = window.end if window.union_at is None else window.union_at
+        lengths = _line_lengths(
+            data[window.begin : union], encoding, read_from + window.begin
+        ) + _line_lengths(data[union : window.end], None, read_from + union)
         lines = _redacted_lines(output, lengths, read_from + window.begin)
     state.offset = next_offset
     state.head = head_hash(source.id, first, next_offset) if next_offset else None
@@ -393,6 +404,9 @@ def _read_on_agent(
     ):
         # Rotated or rewritten: everything in it is new.
         read = read_from(0)
+    if read.refused_encoding_at is not None:
+        # UTF-32 part way: as content that starts so, it waits where it is.
+        raise UnreadableContentError("content in an encoding redaction doesn't support")
     state.offset = read.next_offset
     state.head = read.next_head_digest if read.next_offset else None
     return list(read.lines or ())

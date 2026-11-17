@@ -22,7 +22,7 @@ from app.auth.models import AuditLog, Capability, Role, RoleGrant, ScopeType, Us
 from app.config import get_settings
 from app.db import get_session
 from app.models import Customer, PatternKind, Protocol, Rule, RuleType, Source
-from app.redaction import redact_bytes
+from app.redaction import compile_rules, redact_bytes
 from app.scratch import get_scratch_store
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -30,12 +30,17 @@ from sqlmodel import select
 
 from tests.test_archives import zip_link_info, zip_with_unsupported_method
 from tests.test_redaction_endpoints import (
+    MIDSTREAM,
+    MIDSTREAM_REFUSED_AT,
+    MIDSTREAM_START,
+    MIDSTREAM_UTF16,
     MISNAMED_FORMATS,
     SAMPLE,
     UNSUPPORTED_FORMATS,
     _enable_redaction,
     _FakeSSH,
     all_rules,
+    assert_no_midstream_secret,
     assert_no_secret,
     compressed_sample,
 )
@@ -884,3 +889,122 @@ def test_a_folder_zip_without_suffix_keeps_its_name(session, downloads):
     assert response.headers["x-perchtail-redacted"] == "1"
     # Nothing left out while it was sent: no second entry.
     assert _audits(session, "file.download_redaction_skipped") == []
+
+
+def test_a_download_that_turns_utf32_part_way_ends_with_the_marker_and_says_so(
+    session, downloads, store
+):
+    _, client, source, folder = downloads
+    (folder / "app.log").write_bytes(MIDSTREAM)
+
+    response = _download(client, source, "app.log")
+    assert response.status_code == 200
+    assert response.content.startswith(MIDSTREAM_START)
+    assert response.content.endswith(b"[redacted: unsupported encoding]")
+    assert_no_midstream_secret(response.content)
+    download = _audit(session, "file.download")
+    assert download.event_metadata["redaction"] == "applied"
+    # Only known once the content was sent: a second entry.
+    late = _audit(session, "file.download_redaction_skipped")
+    assert late.id > download.id
+    assert {
+        "path": "app.log",
+        "reason": "redaction_unsupported_encoding",
+        "offset": MIDSTREAM_REFUSED_AT,
+    }.items() <= late.event_metadata.items()
+    assert "member" not in late.event_metadata
+    assert _scratch_files(store) == []
+
+
+def test_a_download_cut_short_after_the_refusal_still_says_so(session, downloads, tmp_path):
+    # The client closes the connection once it has the content up to the
+    # refusal: the response closes the generator, and the second entry is
+    # written all the same.
+    _, _, source, _ = downloads
+    user = session.exec(select(User)).one()
+    original = tmp_path / "midstream.log"
+    original.write_bytes(MIDSTREAM)
+    stream = archive_module._redacted_chunks(
+        original,
+        compile_rules(all_rules()),
+        None,
+        archive_module._late_refusal_recorder(session, user, source, {"path": "app.log"}),
+    )
+    first = next(stream)
+    assert_no_midstream_secret(first)
+    stream.close()
+    late = _audit(session, "file.download_redaction_skipped")
+    assert {
+        "path": "app.log",
+        "reason": "redaction_unsupported_encoding",
+        "offset": MIDSTREAM_REFUSED_AT,
+    }.items() <= late.event_metadata.items()
+
+
+def test_a_download_cut_short_before_any_refusal_has_no_second_entry(session, downloads, tmp_path):
+    _, _, source, _ = downloads
+    user = session.exec(select(User)).one()
+    original = tmp_path / "plain.log"
+    original.write_bytes(MIDSTREAM_START * 4096)
+    stream = archive_module._redacted_chunks(
+        original,
+        compile_rules(all_rules()),
+        None,
+        archive_module._late_refusal_recorder(session, user, source, {"path": "app.log"}),
+    )
+    next(stream)
+    stream.close()
+    assert _audits(session, "file.download_redaction_skipped") == []
+
+
+def test_a_download_without_utf32_part_way_has_no_second_entry(session, downloads):
+    _, client, source, folder = downloads
+    (folder / "app.log").write_bytes(MIDSTREAM_START + MIDSTREAM_UTF16)
+    response = _download(client, source, "app.log")
+    assert_no_midstream_secret(response.content)
+    assert _audits(session, "file.download_redaction_skipped") == []
+
+
+def test_a_folder_zip_leaves_out_a_file_that_turns_utf32_part_way(session, downloads, store):
+    _, client, source, folder = downloads
+    (folder / "sub").mkdir()
+    (folder / "sub" / "app.log").write_text(SAMPLE)
+    (folder / "sub" / "mixed.log").write_bytes(MIDSTREAM)
+    (folder / "sub" / "mixed.log.gz").write_bytes(gzip.compress(MIDSTREAM))
+    (folder / "sub" / "bundle.zip").write_bytes(
+        _zip_bytes({"inner.log": SAMPLE_BYTES, "mixed.log": MIDSTREAM})
+    )
+
+    response = _download_zip(client, source, "sub")
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert sorted(zf.namelist()) == ["REDACTION-SKIPPED.txt", "app.log", "bundle.zip"]
+        with zipfile.ZipFile(io.BytesIO(zf.read("bundle.zip"))) as inner:
+            assert sorted(inner.namelist()) == ["REDACTION-SKIPPED.txt", "inner.log"]
+            assert "mixed.log: in an encoding" in inner.read("REDACTION-SKIPPED.txt").decode()
+        skipped = zf.read("REDACTION-SKIPPED.txt").decode()
+        for name in zf.namelist():
+            assert_no_midstream_secret(zf.read(name))
+    for name in ("mixed.log", "mixed.log.gz", "bundle.zip/mixed.log"):
+        assert f"{name}: in an encoding redaction doesn't support (UTF-32)" in skipped
+    # The .gz file and the archive are prepared before the ZIP starts.
+    assert _audit(session, "folder.download").event_metadata["skipped_count"] == 2
+    late = _audit(session, "file.download_redaction_skipped")
+    assert {
+        "path": "sub",
+        "reason": "redaction_unsupported_encoding",
+        "skipped_count": 1,
+        "skipped": ["sub/mixed.log"],
+    }.items() <= late.event_metadata.items()
+    assert _scratch_files(store) == []
+
+
+def test_a_gz_member_that_turns_utf32_part_way_is_refused(session, downloads, store):
+    _, client, source, folder = downloads
+    (folder / "bundle.zip").write_bytes(_zip_bytes({"mixed.log.gz": gzip.compress(MIDSTREAM)}))
+    response = _download(client, source, "bundle.zip", member="mixed.log.gz")
+    assert response.status_code == 409
+    denied = _audit(session, "file.download_denied")
+    assert denied.event_metadata["reason"] == "redaction_unsupported_encoding"
+    assert _audits(session, "file.download") == []
+    assert _scratch_files(store) == []

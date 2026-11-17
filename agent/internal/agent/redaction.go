@@ -345,6 +345,9 @@ func redactStream(src io.Reader, red *redaction, final bool, blockSize int, star
 			}
 		}
 		if eof {
+			// Refused part way (UTF-32), the rest is still read, without
+			// being sent, so SourceOffset is the end of the content, as on
+			// the server.
 			break
 		}
 		n, err = io.ReadFull(src, buf)
@@ -356,7 +359,7 @@ func redactStream(src io.Reader, red *redaction, final bool, blockSize int, star
 	if err := write(redactor.Finish(final)); err != nil {
 		return RedactionInfo{}, err
 	}
-	return RedactionInfo{
+	info := RedactionInfo{
 		Redacted:        true,
 		Digest:          red.rules.Digest(),
 		SourceSize:      redactor.SourceSize,
@@ -364,7 +367,12 @@ func redactStream(src io.Reader, red *redaction, final bool, blockSize int, star
 		TrailingPartial: redactor.TrailingPartial,
 		Counts:          redactor.Counts,
 		HeadDigest:      redact.HeadDigest(red.headKey, head, redactor.SourceOffset),
-	}, nil
+	}
+	if redactor.RefusedAt >= 0 {
+		refused := redactor.RefusedAt
+		info.RefusedEncodingAt = &refused
+	}
+	return info, nil
 }
 
 // withContent opens what a fetch asks for and passes it to fn: the file
@@ -650,6 +658,11 @@ func sendArchiveMember(
 		// it can't read.
 		return announce(e, gunzipped, memberSkip(err))
 	}
+	if info.RefusedEncodingAt != nil {
+		// UTF-32 part way: withdrawn and left out whole, as the server
+		// leaves out a member that turns UTF-32 part way.
+		return announce(e, gunzipped, "unsupported_encoding")
+	}
 	total.SourceSize += info.SourceSize
 	for rule, count := range info.Counts {
 		total.Counts[rule] += count
@@ -761,12 +774,26 @@ func HandleReadRangeRedacted(basePath, relPath string, offset, length int64, red
 			return RedactedReadRangeResult{}, errors.New("the redacted read doesn't fit in one answer")
 		}
 		if len(body) <= maxRangeLength {
-			if withLineOffsets {
+			if read.RefusedAt >= 0 && !skipped {
+				// UTF-32 part way: the rest of what was read is refused.
+				refused := readFrom + int64(read.RefusedAt)
+				result.RefusedEncodingAt = &refused
+			}
+			if withLineOffsets && result.RefusedEncodingAt == nil {
 				// The original lines the redacted ones stand for: those read,
 				// or the line with no end that was skipped.
 				originals := []int64{next - offset}
 				if !skipped {
-					originals = lineLengths(data[read.Begin:read.End], encoding, readFrom+int64(read.Begin))
+					// Read as UTF16Unsure from UnionAt on, the lines there end
+					// at every newline byte.
+					union := read.End
+					if read.UnionAt >= 0 {
+						union = read.UnionAt
+					}
+					originals = append(
+						lineLengths(data[read.Begin:union], encoding, readFrom+int64(read.Begin)),
+						lineLengths(data[union:read.End], redact.Bytes, readFrom+int64(union))...,
+					)
 				}
 				changed, err := changedLines(body[:len(body)-partial], originals)
 				if err != nil {

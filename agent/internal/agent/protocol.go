@@ -138,15 +138,18 @@ type FetchEnd struct {
 // of an unfinished last line), TrailingPartial how many bytes at the end of
 // the content stand for that line, Counts the values replaced by rule name,
 // and HeadDigest identifies the file by its first bytes (HMAC with the
-// block's head_key) without sending them.
+// block's head_key) without sending them. RefusedEncodingAt, when the
+// content turned UTF-32 part way, is where the refused rest starts in the
+// original: the content then ends with the refusal marker.
 type RedactionInfo struct {
-	Redacted        bool           `json:"redacted"`
-	Digest          string         `json:"digest"`
-	SourceSize      int64          `json:"source_size"`
-	SourceOffset    int64          `json:"source_offset"`
-	TrailingPartial int            `json:"trailing_partial"`
-	Counts          map[string]int `json:"counts"`
-	HeadDigest      string         `json:"head_digest,omitempty"`
+	Redacted          bool           `json:"redacted"`
+	Digest            string         `json:"digest"`
+	SourceSize        int64          `json:"source_size"`
+	SourceOffset      int64          `json:"source_offset"`
+	TrailingPartial   int            `json:"trailing_partial"`
+	Counts            map[string]int `json:"counts"`
+	HeadDigest        string         `json:"head_digest,omitempty"`
+	RefusedEncodingAt *int64         `json:"refused_encoding_at,omitempty"`
 }
 
 // RedactedFetchEnd closes a fetch or a fetch_archive sent with a `redact`
@@ -184,7 +187,8 @@ type ListArchiveResult struct {
 // Skipped, with no content after it, says why a member asked for isn't
 // sent: "not_found" (missing, a folder, or a link or device in a tar),
 // "encrypted", "nested_archive" (an archive can't be redacted as it is),
-// "unsupported_encoding" (UTF-32), "unsupported_format" (compressed in a
+// "unsupported_encoding" (UTF-32, from the start or part way; one found part
+// way is announced again after its content), "unsupported_format" (compressed in a
 // format redaction doesn't decompress), "too_large" (over max_decompressed
 // once decompressed) or "unreadable" (a corrupt member or .gz member). A
 // member found too large or unreadable while it is sent is announced again,
@@ -233,21 +237,26 @@ type ReadRangeResult struct {
 // line with no end skipped), in order; every other line is as long as its
 // original. The lines are the original's from NextOffset back, so the
 // server knows where each one starts in the file.
+//
+// RefusedEncodingAt, when the content turned UTF-32 part way, is where the
+// refused rest starts in the original: the content ends with the refusal
+// marker, NextOffset is ReadEnd, and ChangedLines is empty.
 type RedactedReadRangeResult struct {
-	Type            string         `json:"type"`
-	ID              string         `json:"id"`
-	Size            int64          `json:"size"`
-	DataB64         string         `json:"data_b64"`
-	Redacted        bool           `json:"redacted"`
-	Digest          string         `json:"digest"`
-	NextOffset      int64          `json:"next_offset"`
-	ReadEnd         int64          `json:"read_end"`
-	HeadDigest      string         `json:"head_digest"`
-	NextHeadDigest  string         `json:"next_head_digest"`
-	Counts          map[string]int `json:"counts"`
-	TrailingPartial int            `json:"trailing_partial"`
-	Aligned         bool           `json:"aligned"`
-	ChangedLines    *[][2]int64    `json:"changed_lines,omitempty"`
+	Type              string         `json:"type"`
+	ID                string         `json:"id"`
+	Size              int64          `json:"size"`
+	DataB64           string         `json:"data_b64"`
+	Redacted          bool           `json:"redacted"`
+	Digest            string         `json:"digest"`
+	NextOffset        int64          `json:"next_offset"`
+	ReadEnd           int64          `json:"read_end"`
+	HeadDigest        string         `json:"head_digest"`
+	NextHeadDigest    string         `json:"next_head_digest"`
+	Counts            map[string]int `json:"counts"`
+	TrailingPartial   int            `json:"trailing_partial"`
+	Aligned           bool           `json:"aligned"`
+	ChangedLines      *[][2]int64    `json:"changed_lines,omitempty"`
+	RefusedEncodingAt *int64         `json:"refused_encoding_at,omitempty"`
 }
 
 // ErrorResult reports a command failure. AgentRegistry.resolve_response

@@ -198,8 +198,9 @@ SKIPPED_REASONS = frozenset(
     }
 )
 # Left out once part of it was sent: the agent announces the member again,
-# right after its content, which withdraws what was sent of it.
-_WITHDRAWN_REASONS = frozenset({"too_large", "unreadable"})
+# right after its content, which withdraws what was sent of it (over the
+# limit or unreadable part way, or turned UTF-32 part way).
+_WITHDRAWN_REASONS = frozenset({"too_large", "unreadable", "unsupported_encoding"})
 _HEAD_DIGEST_RE = re.compile(r"^[0-9a-f]{32}$")
 _LIMIT_RE = re.compile(r"over the (\d+)-byte limit")
 
@@ -271,7 +272,10 @@ class RedactedFetch:
     rule name, how many bytes of the original it read (`source_size`),
     where a Tail goes on from (`source_offset`), how many bytes at the end
     stand for an unfinished last line, and the head digest of the original
-    up to `source_offset` (None for an archive's members)."""
+    up to `source_offset` (None for an archive's members). When the content
+    turned UTF-32 part way, `refused_encoding_at` is where the refused rest
+    starts in the original (the content then ends with the refusal
+    marker)."""
 
     counts: dict[str, int]
     source_size: int
@@ -279,6 +283,7 @@ class RedactedFetch:
     trailing_partial: int
     head_digest: str | None
     size: int
+    refused_encoding_at: int | None = None
 
 
 def _counts(value) -> dict[str, int]:
@@ -316,8 +321,21 @@ def _verified(result: dict, block: dict) -> RedactedFetch:
         or (head is not None and not (isinstance(head, str) and _HEAD_DIGEST_RE.match(head)))
     ):
         raise _unverified("closing message")
+    refused = _refused_encoding_at(result, 0, source_size)
     counts = _counts(result.get("counts"))
-    return RedactedFetch(counts, source_size, source_offset, partial, head, size)
+    return RedactedFetch(counts, source_size, source_offset, partial, head, size, refused)
+
+
+def _refused_encoding_at(result: dict, low: int, high: int) -> int | None:
+    """The agent's `refused_encoding_at` (where it refused the rest of the
+    content, UTF-32 part way), which must lie in [low, high]; None when the
+    answer has none."""
+    if result.get("refused_encoding_at") is None:
+        return None
+    refused = as_int(result.get("refused_encoding_at"))
+    if refused is None or not low <= refused <= high:
+        raise _unverified("refused_encoding_at")
+    return refused
 
 
 def fetch_redacted(
@@ -394,7 +412,9 @@ class RedactedRange:
     bytes at the end stand for an unfinished last line, and whether the
     content starts at the line after the offset. With line offsets asked
     (the alerts), `lines` is each whole redacted line with where it starts
-    in the original."""
+    in the original. When the content turned UTF-32 part way,
+    `refused_encoding_at` is where the refused rest starts in the original
+    (the content then ends with the refusal marker, and `lines` is None)."""
 
     size: int
     data: bytes
@@ -406,6 +426,7 @@ class RedactedRange:
     trailing_partial: int
     aligned: bool
     lines: tuple[tuple[int, bytes], ...] | None = None
+    refused_encoding_at: int | None = None
 
 
 def _line_positions(
@@ -501,8 +522,9 @@ def read_range_redacted(
     ):
         raise _unverified("read_range answer")
     aligned = result.get("aligned") is True
+    refused = _refused_encoding_at(result, offset, read_end)
     lines = None
-    if line_offsets:
+    if line_offsets and refused is None:
         lines = _line_positions(
             data, partial, offset, next_offset, aligned, result.get("changed_lines")
         )
@@ -517,6 +539,7 @@ def read_range_redacted(
         trailing_partial=partial,
         aligned=aligned,
         lines=lines,
+        refused_encoding_at=refused,
     )
 
 

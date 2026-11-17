@@ -18,14 +18,18 @@ func seedRedact(f *testing.F) {
 		"a fe80::1%eth0 b GB82 WEST 1234 5698 7654 32\npartial",
 		"\xff\xfe\x00\x00t\x00o\x00k\x00e\x00n\x00=\x00x\x00\n\x00",
 		"token=\xc3\xa9\xffx " + string(bytes.Repeat([]byte("~"), 80)) + " Bearer abcdefgh12345678\n",
+		// Encoding changes part way: UTF-16 and UTF-32 lines after ASCII ones.
+		"ok!\np\x00a\x00s\x00s\x00w\x00o\x00r\x00d\x00=\x00h\x00u\x00n\x00t\x00e\x00r\x002\x00\n\x00x=1\n",
+		"ok\ns\x00\x00\x00e\x00\x00\x00c\x00\x00\x00r\x00\x00\x00\nmore=1\n",
+		string(bytes.Repeat([]byte("x "), 40)) + "A\x00\x00\x00B\x00\x00\x00C\x00\x00\x00D\x00\x00\x00\nnext token=zz\n",
 	} {
 		f.Add([]byte(s), uint16(len(s)/2), uint8(40), uint8(0))
 	}
 }
 
 // FuzzRedactBlockCuts: content fed whole and in two blocks gives the same
-// output and counts, as bytes and as UTF-16 content served as bytes
-// (UTF16Unsure), with any long-line limit; final and not final.
+// output, counts and reading changes, as bytes and as UTF-16 content served
+// as bytes (UTF16Unsure), with any long-line limit; final and not final.
 func FuzzRedactBlockCuts(f *testing.F) {
 	seedRedact(f)
 	rules := allRules(f)
@@ -40,7 +44,8 @@ func FuzzRedactBlockCuts(f *testing.F) {
 		whole, r1 := run(t, rules, opts, [][]byte{data}, final)
 		split, r2 := run(t, rules, opts, [][]byte{data[:at], data[at:]}, final)
 		if !bytes.Equal(whole, split) || !sameCounts(r1.Counts, r2.Counts) ||
-			r1.SourceOffset != r2.SourceOffset || r1.TrailingPartial != r2.TrailingPartial {
+			r1.SourceOffset != r2.SourceOffset || r1.TrailingPartial != r2.TrailingPartial ||
+			r1.RefusedAt != r2.RefusedAt || r1.UnionAt != r2.UnionAt {
 			t.Fatalf("cut %d changes the result:\n%q %v\n%q %v", at, whole, r1.Counts, split, r2.Counts)
 		}
 	})
@@ -85,6 +90,9 @@ func FuzzRedactWindow(f *testing.F) {
 		}
 		if w.Begin < at || w.Begin > len(data) || w.End < w.Begin || w.End > len(data) {
 			t.Fatalf("window [%d, %d) for start %d in %d bytes", w.Begin, w.End, at, len(data))
+		}
+		if w.RefusedAt >= 0 && (w.RefusedAt < w.Begin || w.End != len(data)) {
+			t.Fatalf("refused at %d in window [%d, %d) of %d bytes", w.RefusedAt, w.Begin, w.End, len(data))
 		}
 	})
 }

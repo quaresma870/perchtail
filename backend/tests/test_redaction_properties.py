@@ -319,9 +319,40 @@ def test_no_piece_of_a_value_survives_a_long_line_cut_in_unsure_utf16(
 @SETTINGS
 @given(st.binary(max_size=300), st.lists(st.integers(min_value=0), max_size=4))
 def test_arbitrary_bytes_never_break_streaming(data, cuts):
-    whole, _ = redact_bytes(data, ALL, final=False, max_line_bytes=50)
+    whole, result = redact_bytes(data, ALL, final=False, max_line_bytes=50)
     points = sorted({cut % (len(data) + 1) for cut in cuts})
     blocks = [data[a:b] for a, b in zip([0, *points], [*points, len(data)], strict=True)]
     redactor = Redactor(ALL, max_line_bytes=50)
     out = b"".join(redactor.feed(block) for block in blocks) + redactor.finish(final=False)
     assert out == whole
+    assert (redactor.refused_at, redactor.union_at) == (result.refused_at, result.union_at)
+
+
+@SETTINGS
+@given(
+    st.lists(PIECES, max_size=12),
+    st.sampled_from(SECRETS + [text for text, _ in KEYED]),
+    st.sampled_from(["utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"]),
+    st.lists(st.integers(min_value=0), max_size=4),
+)
+def test_a_value_in_utf16_or_utf32_part_way_never_survives(pieces, text, encoding, cuts):
+    """Content read as bytes that turns UTF-16 part way is read as
+    UTF16_UNSURE from that line; UTF-32 part way refuses the rest. Either
+    way the value never comes out, whatever the block cuts."""
+    before = _join(pieces) + b"\n"
+    if len(before) % 2:
+        # The UTF-16 line starts on an even offset, as its readings do.
+        before = b"#" + before
+    data = before + f"{text}\n".encode(encoding) + b"after line\n"
+    whole, result = redact_bytes(data, ALL)
+    value = dict(KEYED).get(text, text)
+    assert value.encode(encoding) not in whole
+    if encoding.startswith("utf-32"):
+        assert (result.refused_at, result.union_at) == (len(before), None)
+        assert whole.endswith(b"[redacted: unsupported encoding]")
+    else:
+        assert (result.refused_at, result.union_at) == (None, len(before))
+    points = sorted({cut % (len(data) + 1) for cut in cuts})
+    blocks = [data[a:b] for a, b in zip([0, *points], [*points, len(data)], strict=True)]
+    redactor = Redactor(ALL)
+    assert b"".join(redactor.feed(block) for block in blocks) + redactor.finish() == whole

@@ -1201,6 +1201,121 @@ func TestRedactedReadRangeRefusesUTF32(t *testing.T) {
 	}
 }
 
+// utf32LE is s in UTF-32 LE (ASCII only).
+func utf32LE(s string) []byte {
+	var out []byte
+	for _, r := range s {
+		out = append(out, byte(r), 0, 0, 0)
+	}
+	return out
+}
+
+// Content that turns UTF-32 part way: the rest is refused with the marker,
+// and the answer says where, in the original, it started.
+var (
+	midstreamStart   = "plain start of the log, long enough to be read as bytes here\n"
+	midstreamRefused = int64(len(midstreamStart) + len("then plain\n"))
+	midstream        = append(append([]byte(midstreamStart+"then plain\n"), utf32LE("password=hunter2\n")...), "card 4111 1111 1111 1111\n"...)
+)
+
+func TestRedactedFetchRefusesTheRestOfContentThatTurnsUTF32(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "app.log", midstream)
+	sent := collect(t, base, Command{
+		Type: "fetch", ID: "f", Path: "app.log", ChunkSize: minChunkSize, Redact: redactJSON(t, testRules, ""),
+	})
+	data, last := streamed(t, sent, minChunkSize)
+	assertNoSecret(t, "the fetch", data)
+	if !bytes.HasSuffix(data, []byte("[redacted: unsupported encoding]")) || bytes.Contains(data, utf32LE("hunter2")) {
+		t.Errorf("data %q", data)
+	}
+	end := last.(RedactedFetchEnd)
+	if end.RefusedEncodingAt == nil || *end.RefusedEncodingAt != midstreamRefused {
+		t.Errorf("refused at %v, want %d", end.RefusedEncodingAt, midstreamRefused)
+	}
+	// Read to its end all the same: the Tail goes on after it.
+	if end.SourceOffset != int64(len(midstream)) || end.SourceSize != int64(len(midstream)) {
+		t.Errorf("end %+v", end)
+	}
+	// Content that doesn't turn UTF-32 says nothing.
+	writeFile(t, base, "plain.log", []byte(secretLog))
+	_, last = streamed(t, collect(t, base, Command{
+		Type: "fetch", ID: "f", Path: "plain.log", ChunkSize: minChunkSize, Redact: redactJSON(t, testRules, ""),
+	}), minChunkSize)
+	if encoded, _ := json.Marshal(last); strings.Contains(string(encoded), "refused_encoding_at") {
+		t.Errorf("refused_encoding_at sent for plain content: %s", encoded)
+	}
+}
+
+func TestRedactedReadRangeRefusesTheRestOfContentThatTurnsUTF32(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "app.log", midstream)
+	for _, lines := range []bool{false, true} {
+		answer := handleCommand(Config{BasePath: base}, Command{
+			Type: "read_range", ID: "r", Path: "app.log", Length: maxRangeLength,
+			Redact: redactJSON(t, testRules, ""), WithLineOffsets: lines,
+		})
+		result, ok := answer.(RedactedReadRangeResult)
+		if !ok {
+			t.Fatalf("answer = %#v", answer)
+		}
+		if lines && (result.ChangedLines == nil || len(*result.ChangedLines) != 0) {
+			t.Errorf("changed lines %v, want an empty list", result.ChangedLines)
+		}
+		data, _ := base64.StdEncoding.DecodeString(result.DataB64)
+		assertNoSecret(t, "the read", data)
+		if !bytes.HasSuffix(data, []byte("[redacted: unsupported encoding]")) {
+			t.Errorf("data %q", data)
+		}
+		if result.RefusedEncodingAt == nil || *result.RefusedEncodingAt != midstreamRefused ||
+			result.NextOffset != int64(len(midstream)) || result.TrailingPartial != 0 {
+			t.Errorf("result %+v", result)
+		}
+	}
+}
+
+// The alerts' line offsets follow content read as UTF16Unsure from a line of
+// clear UTF-16 content with ASCII text in it: its lines end at every newline
+// byte from there.
+func TestRedactedReadRangeLinesOfUTF16ThatTurnsToBytes(t *testing.T) {
+	base := t.TempDir()
+	content := append([]byte{0xff, 0xfe}, utf16LE("first line\nsecond line\n")...)
+	content = append(content, "password=hunter2\nnext\n"...)
+	// A UTF-16 newline ends the UTF-16 line the ASCII text is in.
+	content = append(content, utf16LE("tail\n")...)
+	writeFile(t, base, "app.log", content)
+	result, data, positions := readRangeLines(t, base, "app.log", 0)
+	assertNoSecret(t, "the read", data)
+	ascii := int64(2 + 2*len("first line\nsecond line\n"))
+	password := ascii + int64(len("password=hunter2\n"))
+	want := []int64{0, 2 + 2*int64(len("first line\n")), ascii, password, password + int64(len("next\n"))}
+	if fmt.Sprint(positions) != fmt.Sprint(want) || result.RefusedEncodingAt != nil {
+		t.Errorf("lines at %v, want %v (%+v)", positions, want, result)
+	}
+}
+
+func TestFetchArchiveLeavesOutAMemberThatTurnsUTF32(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{
+		{name: "a.log", content: secretLog},
+		{name: "mixed.log", content: string(midstream)},
+	}))
+	sent := collect(t, base, Command{
+		Type: "fetch_archive", ID: "z", Path: "logs.zip", ChunkSize: minChunkSize, MaxDecompressed: 1 << 20,
+		Members: []string{"a.log", "mixed.log"}, Redact: redactJSON(t, testRules, "source"),
+	})
+	var last ArchiveMember
+	for _, msg := range sent {
+		if m, ok := msg.(ArchiveMember); ok {
+			last = m
+		}
+	}
+	// Announced again after its content, as skipped: that withdraws it.
+	if last.Name != "mixed.log" || last.Skipped != "unsupported_encoding" {
+		t.Errorf("last announcement %+v", last)
+	}
+}
+
 func TestRedactedReadRangePastTheEnd(t *testing.T) {
 	base := t.TempDir()
 	writeFile(t, base, "app.log", []byte("short\n"))
