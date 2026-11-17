@@ -158,6 +158,7 @@ Releases are immutable once published: a published release accepts no new assets
    It refuses a tag whose code carries another version or has no CHANGELOG section, and a tag whose release is already published.
 3. It builds the agent binaries and `SHA256SUMS`, signs `SHA256SUMS` into `SHA256SUMS.sig` with the agent release signing key (below), pushes `ghcr.io/quaresma870/perchtail:X.Y.Z` with the signed agent binaries inside and its SBOM, and creates a draft release with all of them attached and the CHANGELOG section as notes. A tag with a suffix becomes a pre-release.
 4. Review the draft (notes, assets), edit the notes if needed, and publish it. Publishing a full release moves the image's `X.Y` and `latest` tags to it; a pre-release never does.
+5. Once a full release is published, set `PREVIOUS_RELEASE_IMAGE` in `.github/workflows/ci.yml` to its image pinned by digest (`docker buildx imagetools inspect ghcr.io/quaresma870/perchtail:X.Y.Z` prints it), in a PR into `dev`: CI's upgrade test then upgrades from that release.
 
 To fix a draft, push the fix, delete the draft and its tag, and run the workflow again. Once a release is published, a fix needs a new version.
 
