@@ -93,8 +93,10 @@ jobs:
       - name: Build
         run: npm run build
 
+      # High and critical advisories fail, except the ones listed with a
+      # reason and an expiry date in .github/npm-audit-exceptions.json.
       - name: Dependency vulnerability scan (npm audit)
-        run: npm audit --audit-level=high
+        run: python3 ../.github/scripts/npm_audit.py --level high .
 
   e2e:
     runs-on: ubuntu-latest
@@ -449,3 +451,5 @@ jobs:
         run: |
           pip install zizmor==1.32.0
           zizmor --offline --min-severity low .github/workflows/
+      - name: Test the CI scripts
+        run: python3 -m unittest discover -s .github/scripts/tests -v
