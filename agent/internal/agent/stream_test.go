@@ -32,7 +32,7 @@ func TestStreamFetchSendsChunksInOrder(t *testing.T) {
 	writeFile(t, base, "app.log", content)
 
 	var got [][]byte
-	chunks, size, err := StreamFetch(base, "app.log", minChunkSize, 0, func(data []byte) error {
+	chunks, size, err := StreamFetch(base, "app.log", "", minChunkSize, 0, func(data []byte) error {
 		got = append(got, append([]byte(nil), data...))
 		return nil
 	})
@@ -51,7 +51,7 @@ func TestStreamFetchOfAnEmptyFileSendsNothing(t *testing.T) {
 	base := t.TempDir()
 	writeFile(t, base, "empty.log", nil)
 
-	chunks, size, err := StreamFetch(base, "empty.log", minChunkSize, 0, func([]byte) error {
+	chunks, size, err := StreamFetch(base, "empty.log", "", minChunkSize, 0, func([]byte) error {
 		t.Fatal("send called for an empty file")
 		return nil
 	})
@@ -64,7 +64,7 @@ func TestStreamFetchRefusesAFileOverTheLimitBeforeReading(t *testing.T) {
 	base := t.TempDir()
 	writeFile(t, base, "big.log", make([]byte, 5000))
 
-	_, _, err := StreamFetch(base, "big.log", minChunkSize, 4000, func([]byte) error {
+	_, _, err := StreamFetch(base, "big.log", "", minChunkSize, 4000, func([]byte) error {
 		t.Fatal("send called for a file over the limit")
 		return nil
 	})
@@ -80,7 +80,7 @@ func TestStreamFetchRefusesSymlinkOutOfBase(t *testing.T) {
 	if err := os.Symlink(filepath.Join(outside, "secret.log"), filepath.Join(base, "link.log")); err != nil {
 		t.Skip("symlinks not available:", err)
 	}
-	if _, _, err := StreamFetch(base, "link.log", minChunkSize, 0, func([]byte) error { return nil }); err == nil {
+	if _, _, err := StreamFetch(base, "link.log", "link.log", minChunkSize, 0, func([]byte) error { return nil }); err == nil {
 		t.Error("expected an error for a symlink leading out of the base path")
 	}
 }
@@ -91,7 +91,7 @@ func TestStreamFetchReturnsTheSendError(t *testing.T) {
 	broken := errors.New("connection broken")
 
 	calls := 0
-	_, _, err := StreamFetch(base, "app.log", minChunkSize, 0, func([]byte) error {
+	_, _, err := StreamFetch(base, "app.log", "", minChunkSize, 0, func([]byte) error {
 		calls++
 		return broken
 	})
@@ -278,7 +278,7 @@ func TestStreamFetchCapsTheChunkSizeTheBackendAsksFor(t *testing.T) {
 	writeFile(t, base, "app.log", make([]byte, 2*maxChunkSize+10))
 
 	var sizes []int
-	_, _, err := StreamFetch(base, "app.log", 1<<40, 0, func(data []byte) error {
+	_, _, err := StreamFetch(base, "app.log", "", 1<<40, 0, func(data []byte) error {
 		sizes = append(sizes, len(data))
 		return nil
 	})

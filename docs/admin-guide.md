@@ -98,7 +98,7 @@ Rules decide which files and folders of a source are visible. They belong to the
 - A regular expression matches anywhere in the path unless you anchor it with `^` and `$`. Rules use RE2: backreferences and lookaround are refused when you save.
 - Rules are evaluated in order and the **last matching rule wins**. A path that no rule matches is hidden.
 - A source with **zero rules shows nothing**. The source's page warns about it and **Browse** stays disabled until there is a rule.
-- Rules ignore letter case on SMB and WinRM sources and on push agents running on Windows, and respect it everywhere else.
+- Include rules follow the source's filesystem: they ignore letter case on SMB and WinRM sources and on push agents running on Windows, and respect it everywhere else. Exclude rules ignore letter case on every source.
 
 Folders follow the rules too: a folder is shown only if some file below it could be visible. To hide a whole folder reliably, use a glob exclude such as `secret/**`. [Preparing a source server](source-setup.md#principles-that-apply-to-every-protocol) explains how folders, archives and links are handled.
 

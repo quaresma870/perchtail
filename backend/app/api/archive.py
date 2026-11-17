@@ -51,11 +51,19 @@ from app.audit import record_audit_event
 from app.auth.models import Capability, User
 from app.auth.rbac import require_capability
 from app.collectors import local as local_collector
-from app.collectors.agent import AgentRedactionError, redaction_block
+from app.collectors.agent import (
+    AGENT_UPDATE_REQUIRED,
+    AgentRedactionError,
+    AgentUpdateRequiredError,
+    redaction_block,
+    require_links,
+)
 from app.collectors.base import (
+    LINK_TARGET_HIDDEN,
     RANGE_MAX_BYTES,
     DirEntry,
     FetchTooLargeError,
+    PathOutsideBaseError,
     RangeNotSupportedError,
     SourceError,
     SourceNotFoundError,
@@ -64,6 +72,7 @@ from app.collectors.base import (
     is_truncated,
     max_fetch_bytes,
 )
+from app.collectors.errors import target_check_for
 from app.collectors.registry import CONNECTORS
 from app.config import get_settings
 from app.crypto import follow_head_key
@@ -518,7 +527,7 @@ def _materialize(
         if not member or not _visible(source, f"{path}/{member}", rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         try:
-            with connector.local_copy(source, path) as archive_local:
+            with connector.local_copy(source, path, rules=rules) as archive_local:
                 raw_name = resolve_member_name(archive_local, filename, member)
                 extract_member(
                     archive_local, filename, raw_name, destination, _max_decompressed_bytes()
@@ -543,7 +552,7 @@ def _materialize(
 
     if is_transparent_gzip(filename):
         try:
-            with connector.local_copy(source, path) as raw_local:
+            with connector.local_copy(source, path, rules=rules) as raw_local:
                 decompress_gzip(raw_local, destination, _max_decompressed_bytes())
         except DecompressionLimitError as exc:
             raise _too_large(exc) from exc
@@ -551,13 +560,13 @@ def _materialize(
 
     if is_archive(filename):
         # Read from the source once: the same copy is checked and served.
-        with connector.local_copy(source, path) as archive_local:
+        with connector.local_copy(source, path, rules=rules) as archive_local:
             if check_whole_archive:
                 _require_whole_archive_allowed(source, path, Path(archive_local), rules)
             shutil.copyfile(archive_local, destination)
         return filename
 
-    connector.fetch_file(source, path, destination)
+    connector.fetch_file(source, path, destination, rules=rules)
     return filename
 
 
@@ -721,9 +730,9 @@ def _browse(
             # Redaction applies and the agent redacts on its host: it lists
             # the archive itself, so the archive never leaves the host only
             # to be listed (#382, #249).
-            members, listing_cut = connector.call("list_archive", source, archive_path)
+            members, listing_cut = connector.call("list_archive", source, archive_path, rules=rules)
         else:
-            with connector.local_copy(source, archive_path) as archive_local:
+            with connector.local_copy(source, archive_path, rules=rules) as archive_local:
                 members = list_members(archive_local, archive_name)
         if all_members:
             if member_dir:
@@ -967,7 +976,7 @@ def _resolve_redacted(
         logger.warning("archive.redaction_whole_archive_refused", source_id=source.id, path=path)
         raise WholeArchiveRefused(_AUDIT_REDACTION_ARCHIVE_REASON)
     if agent_rules is not None:
-        return _resolve_on_agent(source, path, member, limits, owner, agent_rules)
+        return _resolve_on_agent(source, path, member, limits, owner, agent_rules, rules)
 
     complete = member is not None or is_transparent_gzip(filename)
     store = get_scratch_store()
@@ -979,7 +988,7 @@ def _resolve_redacted(
         plain = destination.with_name(f"{destination.name}.plain")
         try:
             if source.protocol == Protocol.local and not complete:
-                original = _local_plain_path(source, path)
+                original = _local_plain_path(source, path, rules)
                 served_filename = filename
             else:
                 served_filename = _materialize(source, path, member, rules, fetched)
@@ -1011,6 +1020,7 @@ def _resolve_on_agent(
     limits: Limits,
     owner: str,
     agent_rules: list[dict],
+    rules: list[Rule],
 ) -> _Resolved:
     """_resolve_redacted when the agent redacts on its host (#382, #249):
     it reads the file, the archive member or the .gz file (decompressed)
@@ -1042,6 +1052,7 @@ def _resolve_on_agent(
                     block,
                     member=member,
                     decompress=decompress,
+                    rules=rules,
                 )
                 if followable and fetched.head_digest is None:
                     raise AgentRedactionError("the agent sent no head digest", code="unverified")
@@ -1078,12 +1089,15 @@ def _decompress_gzip_member(compressed: Path, destination: Path) -> None:
         raise RedactionUnreadableRefused() from exc
 
 
-def _local_plain_path(source: Source, path: str) -> Path:
+def _local_plain_path(source: Source, path: str, rules: list[Rule]) -> Path:
+    """A local file served in place, followed through a link only when the
+    rules show where it leads (collectors.base.require_target)."""
     _require_local_source_allowed(source)
     if source_roots.is_multi_root(source):
         rooted, inner = source_roots.split(source, path)
-        return local_collector.resolve_path(rooted, inner)
-    return local_collector.resolve_path(source, path)
+        label = path.partition("/")[0]
+        return local_collector.resolve_path(rooted, inner, target_check_for(source, rules, label))
+    return local_collector.resolve_path(source, path, target_check_for(source, rules))
 
 
 def _resolve_content(
@@ -1124,7 +1138,7 @@ def _resolve_content(
     )
 
     if not needs_scratch:
-        resolved = _local_plain_path(source, path)
+        resolved = _local_plain_path(source, path, rules)
         if is_archive(filename):
             _require_whole_archive_allowed(source, path, resolved, rules)
         return _Resolved(resolved, filename, None)
@@ -1143,6 +1157,17 @@ def _resolve_content(
             store.release(key)
             raise
     return _Resolved(destination, served_filename, key)
+
+
+# Reads refused before any content was served, audited by the endpoints that
+# serve content with the reason _refused_read_reason gives.
+_REFUSED_READS = (PathOutsideBaseError, AgentUpdateRequiredError)
+
+
+def _refused_read_reason(exc: BaseException) -> str:
+    if isinstance(exc, AgentUpdateRequiredError):
+        return AGENT_UPDATE_REQUIRED
+    return LINK_TARGET_HIDDEN
 
 
 def _audit_refusal(
@@ -1195,6 +1220,12 @@ def _resolve_content_audited(
     except AuditedRefusal as exc:
         refused_path = path if member is None else f"{path}/{normalize_member_name(member)}"
         _audit_refusal(session, user, source, denied_action, refused_path, exc.reason)
+        raise
+    except _REFUSED_READS as exc:
+        # A link to outside the base path or to something the rules hide
+        # (answered as 404, app/api/errors.py), or an agent to update:
+        # recorded here with the path.
+        _audit_refusal(session, user, source, denied_action, path, _refused_read_reason(exc))
         raise
 
 
@@ -1461,7 +1492,7 @@ def follow_file(
     if agent_rules is not None:
         with get_limiter().connector(limits, source.id):
             answer = _follow_on_agent(
-                connector, source, path, offset, head, agent_rules, user, session
+                connector, source, path, offset, head, agent_rules, rules, user, session
             )
         if isinstance(answer, Response):
             return answer
@@ -1474,8 +1505,13 @@ def follow_file(
         # One round trip: the size, the start of the file and the new bytes.
         with get_limiter().connector(limits, source.id):
             size, first, data = connector.read_range(
-                source, path, read_from, RANGE_MAX_BYTES, FOLLOW_HEAD_BYTES
+                source, path, read_from, RANGE_MAX_BYTES, FOLLOW_HEAD_BYTES, rules=rules
             )
+    except _REFUSED_READS as exc:
+        _audit_refusal(
+            session, user, source, "file.open_denied", path, _refused_read_reason(exc), follow=True
+        )
+        raise
     except RangeNotSupportedError as exc:
         raise _follow_unsupported(
             "This source's agent is older than 0.6 and can't send only the new lines"
@@ -1634,6 +1670,7 @@ def _follow_on_agent(
     offset: int,
     head: str | None,
     agent_rules: list[dict],
+    rules: list[Rule],
     user: User,
     session: Session,
 ) -> tuple[bytes, dict[str, str], int | None] | Response:
@@ -1641,17 +1678,22 @@ def _follow_on_agent(
     the agent reads, from a little before `offset`, only whole lines and
     redacts them (the same answer as _follow_redacted), and never sends the
     start of the file, only its digests. A refusal (UTF-32, a compressed
-    format) is audited as when the server redacts; the last item is where
-    the agent refused the rest of what it read (UTF-32 part way), or
-    None."""
+    format, a link the rules hide, an agent to update) is audited as when
+    the server redacts; the last item is where the agent refused the rest
+    of what it read (UTF-32 part way), or None."""
     block = redaction_block(source.id, agent_rules, "utf-8")
     try:
         with _agent_refusals(agent_rules):
             read = connector.call(
-                "read_range_redacted", source, path, offset, RANGE_MAX_BYTES, block
+                "read_range_redacted", source, path, offset, RANGE_MAX_BYTES, block, rules=rules
             )
     except AuditedRefusal as exc:
         _audit_refusal(session, user, source, "file.open_denied", path, exc.reason, follow=True)
+        raise
+    except _REFUSED_READS as exc:
+        _audit_refusal(
+            session, user, source, "file.open_denied", path, _refused_read_reason(exc), follow=True
+        )
         raise
     changed = head is not None and offset > 0 and head != read.head_digest
     if offset > read.size or changed:
@@ -2027,6 +2069,7 @@ _AGENT_FILE_SKIPS = {
 # than refusing the archive as one it can't read.
 _AGENT_ARCHIVE_ERRORS_KEPT = (
     AgentRedactionError,
+    AgentUpdateRequiredError,
     SourceUnreachableError,
     SourcePermissionError,
     SourceNotFoundError,
@@ -2057,7 +2100,7 @@ def _rebuild_on_agent(
     agent left out is listed in REDACTION-SKIPPED.txt. The original never
     reaches the server. Raises _ArchiveUnreadable when the listing was cut,
     so the archive would be missing members without saying so."""
-    members, cut = connector.call("list_archive", source, virtual_path)
+    members, cut = connector.call("list_archive", source, virtual_path, rules=rules)
     if cut:
         logger.warning(
             "archive.redaction_archive_listing_cut", source_id=source.id, path=virtual_path
@@ -2090,6 +2133,7 @@ def _rebuild_on_agent(
             wanted,
             member_dir,
             redaction_block(source.id, agent_rules, "source"),
+            rules=rules,
         )
         entries: list[tuple[str, Path, float | None]] = []
         for index, item in enumerate(received):
@@ -2177,6 +2221,7 @@ def _prepare_on_agent(
                     redaction_block(source.id, agent_rules, "source"),
                     member=member,
                     decompress=decompress,
+                    rules=rules,
                 )
                 if member is not None and decompress:
                     if fetched.refused_encoding_at is not None:
@@ -2258,7 +2303,7 @@ def _prepare_redacted_download(
         try:
             fetched = work_dir / "source"
             if in_place:
-                original = _local_plain_path(source, path)
+                original = _local_plain_path(source, path, rules)
                 served_filename = filename
             else:
                 served_filename = _materialize(
@@ -2357,6 +2402,11 @@ def _download_redacted(
         except AuditedRefusal as exc:
             refused_path = path if member is None else f"{path}/{normalize_member_name(member)}"
             _audit_refusal(session, user, source, "file.download_denied", refused_path, exc.reason)
+            raise
+        except _REFUSED_READS as exc:
+            _audit_refusal(
+                session, user, source, "file.download_denied", path, _refused_read_reason(exc)
+            )
             raise
     except BaseException:
         transfer.release()
@@ -2615,7 +2665,7 @@ def _check_archives(
             planned.append((entry, None))
             continue
         destination = tmp_dir / f"archive-{index}"
-        connector.fetch_file(source, entry.path, destination)
+        connector.fetch_file(source, entry.path, destination, rules=rules)
         if _archive_has_hidden_members(source, entry.path, destination, rules):
             destination.unlink()
             skipped.append(_arcname(entry.path, request_root))
@@ -2634,6 +2684,7 @@ def _skipped_list_name(entries: list[DirEntry], request_root: str) -> str:
 def _stream_zip(
     connector,
     source: Source,
+    rules: list[Rule],
     planned: list[tuple[DirEntry, Path | None]],
     request_root: str,
     tmp_dir: Path,
@@ -2662,7 +2713,7 @@ def _stream_zip(
                 destination = fetched if fetched is not None else tmp_dir / f"member-{index}"
                 try:
                     if fetched is None:
-                        connector.fetch_file(source, entry.path, destination)
+                        connector.fetch_file(source, entry.path, destination, rules=rules)
                     remaining -= destination.stat().st_size
                     if remaining < 0:
                         raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
@@ -2755,7 +2806,7 @@ def _prepare_redacted_folder(
         original = tmp_dir / f"source-{index}"
         prepared = tmp_dir / f"prepared-{index}"
         try:
-            connector.fetch_file(source, entry.path, original)
+            connector.fetch_file(source, entry.path, original, rules=rules)
             fetched_total += original.stat().st_size
             if fetched_total > limit:
                 raise FetchTooLargeError(
@@ -2820,6 +2871,7 @@ def _prepare_folder_entry_on_agent(
                 plain,
                 redaction_block(source.id, agent_rules, "source"),
                 decompress=True,
+                rules=rules,
             )
             if fetched.refused_encoding_at is not None:
                 # UTF-32 part way: left out whole, as when the server
@@ -2839,7 +2891,7 @@ def _prepare_folder_entry_on_agent(
         if exc.code in _AGENT_FILE_SKIPS:
             return _AGENT_FILE_SKIPS[exc.code]
         raise _agent_refusal(exc, agent_rules) from exc
-    except SourceUnreachableError:
+    except (SourceUnreachableError, AgentUpdateRequiredError):
         raise
     except SourceError as exc:
         # The agent couldn't read it (a corrupt archive or .gz file), as a
@@ -2857,6 +2909,7 @@ def _prepare_folder_entry_on_agent(
 def _stream_redacted_zip(
     connector,
     source: Source,
+    rules: list[Rule],
     planned: list[_RedactedEntry],
     request_root: str,
     tmp_dir: Path,
@@ -2894,11 +2947,11 @@ def _stream_redacted_zip(
                         compress = zipfile.ZIP_DEFLATED
                         if agent_rules is not None:
                             fetched, reason = _fetch_redacted_file_on_agent(
-                                connector, source, entry.path, redacted, agent_rules
+                                connector, source, entry.path, redacted, agent_rules, rules
                             )
                             remaining -= fetched
                         else:
-                            connector.fetch_file(source, entry.path, original)
+                            connector.fetch_file(source, entry.path, original, rules=rules)
                             remaining -= original.stat().st_size
                         if remaining < 0:
                             raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
@@ -2947,7 +3000,12 @@ def _stream_redacted_zip(
 
 
 def _fetch_redacted_file_on_agent(
-    connector, source: Source, path: str, destination: Path, agent_rules: list[dict]
+    connector,
+    source: Source,
+    path: str,
+    destination: Path,
+    agent_rules: list[dict],
+    rules: list[Rule],
 ) -> tuple[int, str | None]:
     """A plain file of a redacted folder ZIP, redacted on the agent into
     `destination`. Returns the bytes of the original the agent read, and
@@ -2959,6 +3017,7 @@ def _fetch_redacted_file_on_agent(
             path,
             destination,
             redaction_block(source.id, agent_rules, "source"),
+            rules=rules,
         )
     except AgentRedactionError as exc:
         if exc.code in _AGENT_FILE_SKIPS:
@@ -3156,6 +3215,7 @@ def _download_folder_zip_redacted(
     stream = _stream_redacted_zip(
         connector,
         source,
+        rules,
         planned,
         path,
         tmp_dir,
@@ -3222,6 +3282,10 @@ def download_folder_zip(
     rules = _rules_for(session, source.id)
     if path and not _dir_visible(source, path, rules):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    if source.protocol == Protocol.agent:
+        # Refused before anything is listed or sent (audited as
+        # access.denied), not cut short once the ZIP has started.
+        require_links(source)
     connector = _connector(source)
 
     limits = current_limits(session)
@@ -3302,6 +3366,7 @@ def download_folder_zip(
     stream = _stream_zip(
         connector,
         source,
+        rules,
         planned,
         path,
         tmp_dir,

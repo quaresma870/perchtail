@@ -76,7 +76,8 @@ A disabled source isn't contacted at all. Opening it answers "This source is dis
 - **"Authentication to the source failed"**: wrong username, password or key, or the key isn't in the account's `authorized_keys`. PerchTail takes Ed25519, ECDSA and RSA keys in OpenSSH or PEM format, without a passphrase. A key with a passphrase fails when PerchTail connects, not when you save the source: **Test connection** shows "Authentication to the source failed", and the log has "SSH private key is protected by a passphrase; use a key without one (see docs/source-setup.md)".
 - **"Not found on the source" for the base path, on an account with a `ChrootDirectory`**: the base path is relative to the chroot, usually `/`. **Test connection** says so: "If this account has a ChrootDirectory, Base path is relative to the chroot (usually /)."
 - **Timeouts**: the TCP connection must open within 10 seconds. After that, the SSH banner, the login and every SFTP read must answer within `REMOTE_READ_TIMEOUT_SECONDS` (60 by default). A server that stalls fails with "Can't reach the source". Raise the value for a slow link; lower it to fail faster.
-- **Rules and letter case**: on SSH sources, rules are case-sensitive. `secret/**` doesn't hide `SECRET/`.
+- **Rules and letter case**: on SSH sources, include rules are case-sensitive: `**/*.log` doesn't show `APP.LOG`. Exclude rules ignore case everywhere, so `secret/**` also hides `SECRET/`.
+- **A link is missing from the listing, or answers "not found"**: a symlink is shown and read only when it leads inside the base path to a file or folder the rules show. Check the rules against where the link leads, not only its name; the audit log records each refusal with the reason `link_target_hidden`.
 
 ### SMB
 
@@ -134,7 +135,7 @@ See [agent-service.md](agent-service.md) for installing and running the agent.
 - **"Not found on the source" for every path**: `PERCHTAIL_BASE_PATH` doesn't exist on the host. The agent doesn't check it at startup.
 - **"The source account has no read permission for this path"**: the agent's account can't read that path.
 - **Tail reloads the whole file each time**: agents older than 0.6 can't read only the new part of a file, so the viewer reloads the whole file instead. Upgrade the agent. The source page shows **Agent version** "not reported yet (agent older than 0.6, or never connected)" for such an agent.
-- **Rules ignore letter case on a Windows agent** (as NTFS does), but are case-sensitive while **Agent OS** shows "not reported yet": agents older than 0.5.1 don't report their OS.
+- **Rules ignore letter case on a Windows agent** (as NTFS does), but include rules are case-sensitive while **Agent OS** shows "not reported yet": agents older than 0.5.1 don't report their OS.
 - **A folder shows fewer entries than it holds**: an agent lists at most 50,000 entries of a folder, or fewer once the list nears 8 MiB, and the rules are applied afterwards on the server.
 - **Upgrades from the portal fail**: **Settings → Agents** shows the reason in **Last result**. Common ones: the host set `PERCHTAIL_REMOTE_UPGRADE=false`; the agent can't write to its binary's folder; the agent is a local build ("this agent's version is not a release"); the host can't download the binaries; the service doesn't restart the agent after it exits with code 3 on Windows (**Didn't come back** after 10 minutes). An agent older than 0.7 shows **Too old to upgrade remotely**: upgrade it by hand once. See [agent-service.md](agent-service.md#7-upgrading).
 

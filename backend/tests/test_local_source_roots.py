@@ -4,6 +4,7 @@ from app.api.auth import get_current_active_user
 from app.api.sources import router as sources_router
 from app.auth.models import Role, User
 from app.collectors import local as local_collector
+from app.collectors.base import LinkTargetHiddenError
 from app.config import get_settings
 from app.db import get_session
 from app.models import Customer, PatternKind, Protocol, Rule, RuleType, Source
@@ -135,7 +136,8 @@ def test_symlink_out_of_base_path_is_not_followed(allowed_root, tmp_path):
 
     names = [e.name for e in local_collector.list_directory(source, rules)]
     assert names == ["real.log"]
-    with pytest.raises(local_collector.LocalPathNotAllowedError):
+    # Answered as 404 and audited (link_target_hidden), like a hidden path.
+    with pytest.raises(LinkTargetHiddenError):
         local_collector.resolve_path(source, "link.log")
 
 

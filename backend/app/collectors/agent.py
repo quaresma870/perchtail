@@ -5,21 +5,42 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, NoReturn
 
-from app.agent_registry import FEATURE_REDACTION, AgentCommandError, get_agent_registry
+from app.agent_registry import (
+    FEATURE_LINKS,
+    FEATURE_REDACTION,
+    AgentCommandError,
+    get_agent_registry,
+)
 from app.archives import ArchiveMember, DecompressionLimitError
 from app.collectors import base as collector_base
-from app.collectors.base import DirEntry, DirListing, SourceError
+from app.collectors.base import (
+    DirEntry,
+    DirListing,
+    LinkTargetHiddenError,
+    SourceError,
+    TargetCheck,
+)
 from app.config import get_settings
 from app.crypto import follow_head_key
 from app.json_values import as_int
 from app.models import Rule, Source
 from app.redaction import ENGINE_VERSION, MAX_LINE_BYTES, PEM_MAX_LINES, rules_digest
-from app.rules import is_entry_visible, rules_case_insensitive
+from app.rules import (
+    is_dir_visible,
+    is_entry_visible,
+    is_linked_entry_visible,
+    is_safe_relative_path,
+    rules_case_insensitive,
+)
 from app.scratch import scratch_temp_dir
 
 __all__ = [
+    "AGENT_UPDATE_REQUIRED",
     "AgentRedactionError",
+    "AgentUpdateRequiredError",
     "DirEntry",
+    "FOLLOWS_LINKS",
+    "agent_update_required",
     "fetch_archive",
     "fetch_file",
     "fetch_redacted",
@@ -29,7 +50,18 @@ __all__ = [
     "read_range",
     "read_range_redacted",
     "redaction_block",
+    "require_links",
 ]
+
+# Follows links inside the base path, checking the rules on their target
+# (collectors/errors.py passes it a target_check): the agent says where each
+# path really is (FEATURE_LINKS) and reads it only once the server asked for
+# that target.
+FOLLOWS_LINKS = True
+
+# The audit reason of content refused because the source's agent doesn't
+# say where links lead (an agent older than FEATURE_LINKS).
+AGENT_UPDATE_REQUIRED = "agent_update_required"
 
 # Size of each fetch_chunk the agent sends (#205): about 1.4 MB once
 # base64-encoded, well under uvicorn's 16 MiB WebSocket message limit.
@@ -42,6 +74,79 @@ FETCH_CHUNK_BYTES = 1024 * 1024
 AGENT_LIST_MAX_ENTRIES = 50_000
 
 
+class AgentUpdateRequiredError(SourceError):
+    """The source's agent doesn't say where links lead (FEATURE_LINKS), so
+    nothing of its files is read: open, follow, download, folder ZIP,
+    archives and alerts are refused until it is updated. Listing goes on.
+    The message only asks for the update."""
+
+    status_code = 409
+    public_message = (
+        "This source's agent must be updated before its files can be read. "
+        "Ask an administrator to update it from Settings → Agents."
+    )
+    error_code = AGENT_UPDATE_REQUIRED
+
+
+def require_links(source: Source) -> None:
+    """Refuses content from a connected agent that doesn't say where links
+    lead (AgentUpdateRequiredError). An agent that isn't connected fails
+    the command itself, as before."""
+    registry = get_agent_registry()
+    if registry.is_connected(source.id) and FEATURE_LINKS not in registry.features(source.id):
+        raise AgentUpdateRequiredError(
+            f"the agent of source {source.id} doesn't announce {FEATURE_LINKS}"
+        )
+
+
+def agent_update_required(source: Source) -> bool:
+    """Whether the source's agent, as it last connected, doesn't say where
+    links lead, so its files can't be read until it is updated (shown in
+    Settings → Agents). False for one that never connected."""
+    if source.agent_last_seen_at is None:
+        return False
+    return FEATURE_LINKS not in (source.agent_features or "").split(",")
+
+
+def _real_path(value) -> str | None:
+    """A real path from the agent, when it is one a rule can be checked on:
+    canonical, relative to the base path, and not the base itself."""
+    if isinstance(value, str) and value and is_safe_relative_path(value):
+        return value
+    return None
+
+
+def _following_links(source: Source, relative_path: str, target_check: TargetCheck, send):
+    """Sends a content command through `send(expect_real)`, first expecting
+    `relative_path` itself. When the agent answers that the path really is
+    elsewhere (a link, the path itself or a folder above it), it is asked
+    again for that target, only if `target_check` allows it, so the rules
+    see where the link leads, not only its name; a link out of the base
+    path, to something the rules hide, or that changed between the two
+    commands is refused (LinkTargetHiddenError). The agent reads nothing
+    before it is asked for where the path really is."""
+    require_links(source)
+    attempt = relative_path
+    for _ in range(2):
+        try:
+            return send(attempt)
+        except AgentCommandError as exc:
+            if exc.code == "links_missing":
+                raise AgentUpdateRequiredError(str(exc)) from exc
+            if exc.code != "link_target":
+                raise
+            real = None if exc.outside else _real_path(exc.real)
+            if (
+                attempt != relative_path
+                or real is None
+                or target_check is None
+                or not target_check(real)
+            ):
+                raise LinkTargetHiddenError(relative_path) from exc
+            attempt = real
+    raise LinkTargetHiddenError(relative_path)  # pragma: no cover - the loop returns or raises
+
+
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:
     """Sends a `list` command down the source's connected agent (see
     app/agent_registry.py) and waits for its response — same live,
@@ -50,7 +155,14 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     this app dials directly.
 
     The listing is cut at AGENT_LIST_MAX_ENTRIES entries (#347), here too
-    in case an older agent sent more: a DirListing with `truncated` set."""
+    in case an older agent sent more: a DirListing with `truncated` set.
+
+    From an agent that says where links lead (FEATURE_LINKS), as for local
+    and SSH sources: a folder a link leads to must be one the rules show
+    (`real_dir`), and an entry a link leads elsewhere is listed only when
+    the rules show its own path and its target too (`target`). An entry
+    whose target isn't a path the rules can be checked on is left out."""
+    links = FEATURE_LINKS in get_agent_registry().features(source.id)
     result = get_agent_registry().send_command_sync(
         source.id, "list", path=relative_path, max_entries=AGENT_LIST_MAX_ENTRIES
     )
@@ -58,11 +170,35 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
     raw_entries = result.get("entries") or []
     entries = DirListing()
     entries.truncated = bool(result.get("truncated")) or len(raw_entries) > AGENT_LIST_MAX_ENTRIES
+    if links and "real_dir" in result:
+        real_dir = result.get("real_dir")
+        if not (
+            isinstance(real_dir, str)
+            and (real_dir == "" or is_safe_relative_path(real_dir))
+            and is_dir_visible(real_dir, rules, case_insensitive=case_insensitive)
+        ):
+            raise LinkTargetHiddenError(relative_path)
+        entries.real_dir = real_dir if real_dir != relative_path else None
     for raw in raw_entries[:AGENT_LIST_MAX_ENTRIES]:
         child_path = f"{relative_path}/{raw['name']}" if relative_path else raw["name"]
-        if not is_entry_visible(
-            child_path, raw["is_dir"], rules, case_insensitive=case_insensitive
-        ):
+        target = None
+        if links and "target" in raw:
+            target = raw.get("target")
+            if not (isinstance(target, str) and (target == "" or is_safe_relative_path(target))):
+                continue
+            if target == child_path:
+                target = None
+        if target == "":
+            visible = False  # a link to the base path itself: nothing to check it on
+        elif links:
+            visible = is_linked_entry_visible(
+                child_path, raw["is_dir"], target, rules, case_insensitive=case_insensitive
+            )
+        else:
+            visible = is_entry_visible(
+                child_path, raw["is_dir"], rules, case_insensitive=case_insensitive
+            )
+        if not visible:
             continue
         # mtime_ms (#273): agents from 0.6 on; None from older ones.
         mtime_ms = raw.get("mtime_ms")
@@ -73,12 +209,15 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                 is_dir=raw["is_dir"],
                 size=raw["size"],
                 mtime=mtime_ms / 1000 if isinstance(mtime_ms, int) else None,
+                target=target,
             )
         )
     return entries
 
 
-def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
+def fetch_file(
+    source: Source, relative_path: str, destination: Path, *, target_check: TargetCheck = None
+) -> None:
     """Fetch-on-open into `destination` — the agent reads the file off its
     own local disk and sends it back over the same connection,
     base64-encoded (same trade-off as collectors/winrm.py: correctness and
@@ -89,19 +228,28 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     `destination` as it arrives (#205), so neither side holds the whole
     file in memory, and a large file stays under the WebSocket message
     limit. An agent older than 0.5.3 ignores `chunk_size` and sends the
-    whole file in one message, handled as before."""
+    whole file in one message, handled as before.
+
+    Through a link, only when `target_check` allows where it leads
+    (_following_links)."""
     limit = collector_base.max_fetch_bytes()
-    try:
+
+    def send(expect_real: str) -> dict:
         with destination.open("wb") as sink:
-            result = get_agent_registry().send_command_sync(
+            return get_agent_registry().send_command_sync(
                 source.id,
                 "fetch",
                 path=relative_path,
+                expect_real=expect_real,
                 chunk_size=FETCH_CHUNK_BYTES,
                 max_bytes=limit,
                 sink=sink,
                 limit=limit,
+                require_feature=FEATURE_LINKS,
             )
+
+    try:
+        result = _following_links(source, relative_path, target_check, send)
     except BaseException as exc:
         destination.unlink(missing_ok=True)  # no partial file left behind
         if isinstance(exc, AgentCommandError) and exc.code == "too_large":
@@ -118,33 +266,46 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
 
 
 @contextmanager
-def local_copy(source: Source, relative_path: str):
+def local_copy(source: Source, relative_path: str, *, target_check: TargetCheck = None):
     """Yields a local filesystem path with `relative_path`'s content, for
     callers that need to run zipfile/tarfile/gzip against it — same pattern
     as the other remote connectors (ssh.py, smb.py, winrm.py)."""
     with scratch_temp_dir() as tmp:
         path = Path(tmp) / "fetched"
-        fetch_file(source, relative_path, path)
+        fetch_file(source, relative_path, path, target_check=target_check)
         yield path
 
 
 def read_range(
-    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+    source: Source,
+    relative_path: str,
+    offset: int,
+    length: int,
+    head: int = 0,
+    *,
+    target_check: TargetCheck = None,
 ) -> collector_base.RangeRead:
     """Incremental follow (#254): the agent reads the file's first `head`
     bytes and up to `length` bytes from `offset` off its own disk, and
     answers with the file's size. An agent older than 0.6 doesn't know the
     command: RangeNotSupportedError, and the viewer reloads the whole file
-    instead."""
-    try:
-        result = get_agent_registry().send_command_sync(
+    instead. Through a link, only when `target_check` allows where it
+    leads (_following_links)."""
+
+    def send(expect_real: str) -> dict:
+        return get_agent_registry().send_command_sync(
             source.id,
             "read_range",
             path=relative_path,
+            expect_real=expect_real,
             offset=max(int(offset), 0),
             length=max(min(int(length), collector_base.RANGE_MAX_BYTES), 0),
             head_length=max(min(int(head), collector_base.RANGE_MAX_HEAD_BYTES), 0),
+            require_feature=FEATURE_LINKS,
         )
+
+    try:
+        result = _following_links(source, relative_path, target_check, send)
     except AgentCommandError as exc:
         if "unknown command type" in str(exc).lower():
             raise collector_base.RangeNotSupportedError(str(exc)) from exc
@@ -346,6 +507,7 @@ def fetch_redacted(
     *,
     member: str | None = None,
     decompress: bool = False,
+    target_check: TargetCheck = None,
 ) -> RedactedFetch:
     """Fetches `relative_path` into `destination`, redacted on the agent with
     `block`: the archive member `member` of it, and/or decompressed (a .gz
@@ -353,7 +515,8 @@ def fetch_redacted(
     answer that doesn't prove it is deleted (AgentRedactionError). A
     refusal raises AgentRedactionError with the agent's code; past
     MAX_FETCH_MB, FetchTooLargeError; past MAX_DECOMPRESSED_MB once
-    extracted or decompressed, DecompressionLimitError."""
+    extracted or decompressed, DecompressionLimitError. Through a link,
+    only when `target_check` allows where it leads (_following_links)."""
     limit = collector_base.max_fetch_bytes()
     max_decompressed = _max_decompressed_bytes()
     expanding = member is not None or decompress
@@ -370,16 +533,21 @@ def fetch_redacted(
     if expanding:
         fields["max_decompressed"] = max_decompressed
     sink_limit = (max_decompressed if expanding else limit) * REDACTED_GROWTH_LIMIT
-    try:
+
+    def send(expect_real: str) -> dict:
         with destination.open("wb") as sink:
-            result = get_agent_registry().send_command_sync(
+            return get_agent_registry().send_command_sync(
                 source.id,
                 "fetch",
                 sink=sink,
                 limit=sink_limit,
-                require_feature=FEATURE_REDACTION,
+                require_feature=(FEATURE_REDACTION, FEATURE_LINKS),
+                expect_real=expect_real,
                 **fields,
             )
+
+    try:
+        result = _following_links(source, relative_path, target_check, send)
         return _verified(result, block)
     except AgentCommandError as exc:
         destination.unlink(missing_ok=True)
@@ -470,27 +638,35 @@ def read_range_redacted(
     block: dict,
     *,
     line_offsets: bool = False,
+    target_check: TargetCheck = None,
 ) -> RedactedRange:
     """The redacted Tail on the agent: up to `length` bytes from `offset`
     (plus context before it, never sent), only whole lines, redacted on the
     host. The file's first bytes are never asked for, only their digests.
     `line_offsets` (the alerts) also asks where each line starts in the
-    original (RedactedRange.lines); an answer without them isn't used."""
+    original (RedactedRange.lines); an answer without them isn't used.
+    Through a link, only when `target_check` allows where it leads
+    (_following_links)."""
     offset = max(int(offset), 0)
     fields: dict = {}
     if line_offsets:
         fields["with_line_offsets"] = True
-    try:
-        result = get_agent_registry().send_command_sync(
+
+    def send(expect_real: str) -> dict:
+        return get_agent_registry().send_command_sync(
             source.id,
             "read_range",
             path=relative_path,
+            expect_real=expect_real,
             offset=offset,
             length=max(min(int(length), collector_base.RANGE_MAX_BYTES), 0),
             redact=block,
-            require_feature=FEATURE_REDACTION,
+            require_feature=(FEATURE_REDACTION, FEATURE_LINKS),
             **fields,
         )
+
+    try:
+        result = _following_links(source, relative_path, target_check, send)
     except AgentCommandError as exc:
         _raise_command_error(exc, expanding=False)
     if result.get("redacted") is not True or result.get("digest") != block["digest"]:
@@ -543,18 +719,27 @@ def read_range_redacted(
     )
 
 
-def list_archive(source: Source, relative_path: str) -> tuple[list[ArchiveMember], bool]:
+def list_archive(
+    source: Source, relative_path: str, *, target_check: TargetCheck = None
+) -> tuple[list[ArchiveMember], bool]:
     """The members of the archive at `relative_path`, listed on the agent
     (app.archives.list_members's answer), so the archive never leaves the
-    host just to be listed. Returns them and whether the listing was cut."""
-    try:
-        result = get_agent_registry().send_command_sync(
+    host just to be listed. Returns them and whether the listing was cut.
+    Through a link, only when `target_check` allows where it leads
+    (_following_links)."""
+
+    def send(expect_real: str) -> dict:
+        return get_agent_registry().send_command_sync(
             source.id,
             "list_archive",
             path=relative_path,
+            expect_real=expect_real,
             max_entries=AGENT_LIST_MAX_ENTRIES,
-            require_feature=FEATURE_REDACTION,
+            require_feature=(FEATURE_REDACTION, FEATURE_LINKS),
         )
+
+    try:
+        result = _following_links(source, relative_path, target_check, send)
     except AgentCommandError as exc:
         if exc.message_type == "feature_error":
             _raise_command_error(exc, expanding=False)
@@ -673,7 +858,13 @@ class _MemberFiles:
 
 
 def fetch_archive(
-    source: Source, relative_path: str, members: list[str], directory: Path, block: dict
+    source: Source,
+    relative_path: str,
+    members: list[str],
+    directory: Path,
+    block: dict,
+    *,
+    target_check: TargetCheck = None,
 ) -> tuple[list[ReceivedMember], RedactedFetch]:
     """The members `members` (names as list_archive gave them) of the
     archive at `relative_path`, each redacted on the agent, in one pass
@@ -681,14 +872,19 @@ def fetch_archive(
     decompressed (`gunzipped`), and one the agent can't redact is announced
     as skipped, with no content. Every member asked for must be accounted
     for; otherwise, or for an answer that doesn't prove it was redacted,
-    every file is deleted (AgentRedactionError)."""
+    every file is deleted (AgentRedactionError). Through a link, only when
+    `target_check` allows where it leads (_following_links)."""
     max_decompressed = _max_decompressed_bytes()
     files = _MemberFiles(directory, set(members), max_decompressed * REDACTED_GROWTH_LIMIT)
-    try:
-        result = get_agent_registry().send_command_sync(
+
+    def send(expect_real: str) -> dict:
+        # The agent refuses a link before it sends any member, so nothing
+        # of the first attempt is in `files`.
+        return get_agent_registry().send_command_sync(
             source.id,
             "fetch_archive",
             path=relative_path,
+            expect_real=expect_real,
             members=list(dict.fromkeys(members)),
             chunk_size=FETCH_CHUNK_BYTES,
             max_bytes=collector_base.max_fetch_bytes(),
@@ -696,8 +892,11 @@ def fetch_archive(
             redact=block,
             sink=files,
             archive=True,
-            require_feature=FEATURE_REDACTION,
+            require_feature=(FEATURE_REDACTION, FEATURE_LINKS),
         )
+
+    try:
+        result = _following_links(source, relative_path, target_check, send)
         files.close()
         total = _verified(result, block)
         if not files.complete():

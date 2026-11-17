@@ -57,7 +57,7 @@ A Svelte 5 single-page app in TypeScript, built with Vite. Routing is hash-based
 
 ### Push agent (`agent/`)
 
-A Go program (module `github.com/quaresma870/perchtail/agent`, one dependency: `gorilla/websocket`) for hosts PerchTail can't reach inbound. It dials out to `/agent/connect` over a WebSocket, authenticates with its source's enrollment token, and answers list, fetch and ranged-read commands for files under `PERCHTAIL_BASE_PATH`. It never pushes files on its own. It refuses a plain `ws://` URL unless `PERCHTAIL_ALLOW_INSECURE=true`. It can be upgraded from Settings → Agents: it installs a new binary only if `SHA256SUMS` carries a valid Ed25519 signature from the release key built into it (`internal/agent/upgrade_signing_key.pub`) and the version is newer than its own. Configuration and service setup: `agent/README.md`.
+A Go program (module `github.com/quaresma870/perchtail/agent`, one dependency: `gorilla/websocket`) for hosts PerchTail can't reach inbound. It dials out to `/agent/connect` over a WebSocket, authenticates with its source's enrollment token, and answers list, fetch and ranged-read commands for files under `PERCHTAIL_BASE_PATH`. It never pushes files on its own. It refuses a plain `ws://` URL unless `PERCHTAIL_ALLOW_INSECURE=true`. With the `links/1` feature it reports where each listed path really is and reads a file only when it really is where the command's `expect_real` says (`internal/agent/links.go`), answering a `link_target` error with the real path otherwise; the server checks its rules on that target and asks again (`app/collectors/agent.py`, `_following_links`). The server never reads content from an agent without `links/1` (`AgentUpdateRequiredError`, 409, audited as `agent_update_required`); listing goes on, and Settings → Agents shows it needs updating. It can be upgraded from Settings → Agents: it installs a new binary only if `SHA256SUMS` carries a valid Ed25519 signature from the release key built into it (`internal/agent/upgrade_signing_key.pub`) and the version is newer than its own. Configuration and service setup: `agent/README.md`.
 
 ### Scheduler and jobs
 
@@ -98,7 +98,8 @@ Implemented in `app/rules.py`.
 - Rules are evaluated in `order`, and the last match wins, as in `.gitignore`.
 - Patterns are globs (`**`, `*`, `?`) by default; a `re:` prefix makes a rule a regular expression. Rule regexes are compiled with RE2 (`google-re2`), so they run in linear time; backreferences and lookaround are rejected.
 - A source with no rules shows nothing.
-- Matching is case-insensitive for SMB and WinRM sources and for agents that report Windows.
+- Exclude rules match case-insensitively on every source. Include rules are case-insensitive for SMB and WinRM sources and for agents that report Windows, case-sensitive elsewhere.
+- Links are judged by where they lead: on local, SSH and agent sources, the rules are checked on the path asked for and on its real path (where a symlink or junction, the path itself or a folder above it, leads), in listings (`DirEntry.target`, `DirListing.real_dir`) and in every read (`collectors/base.py`, `require_target`; the connectors get a `target_check` built from the rules by `collectors/errors.py`, and without one follow no link). A link out of the base path or to something hidden answers 404, audited as `link_target_hidden`. SMB and WinRM refuse every link.
 
 ## Live browsing & ephemeral fetch behavior
 

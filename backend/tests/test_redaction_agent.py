@@ -21,7 +21,12 @@ from datetime import UTC, datetime
 
 import pytest
 from app import system_settings
-from app.agent_registry import FEATURE_REDACTION, AgentCommandError, get_agent_registry
+from app.agent_registry import (
+    FEATURE_LINKS,
+    FEATURE_REDACTION,
+    AgentCommandError,
+    get_agent_registry,
+)
 from app.alerts import _line_lengths
 from app.api.archive import FOLLOW_CONTEXT_BYTES, FOLLOW_WINDOW_BYTES, unsupported_compressed_format
 from app.api.archive import router as archive_router
@@ -147,7 +152,8 @@ class FakeAgent:
         if command_type == "list":
             return self._list(fields["path"])
         if command_type == "list_archive":
-            assert require_feature == FEATURE_REDACTION
+            assert require_feature == (FEATURE_REDACTION, FEATURE_LINKS)
+            assert fields["expect_real"] == fields["path"]
             data = self.files[fields["path"]]
             try:
                 entries = _archive_entries(fields["path"], data)
@@ -163,7 +169,8 @@ class FakeAgent:
         assert command_type in ("fetch", "read_range", "fetch_archive"), command_type
         if "redact" not in fields:
             raise AssertionError(f"{command_type} without a redact block: the original would leave")
-        assert require_feature == FEATURE_REDACTION
+        assert require_feature == (FEATURE_REDACTION, FEATURE_LINKS)
+        assert fields["expect_real"] == fields["path"]
         block = fields["redact"]
         assert block["digest"] == rules_digest(block["rules"])
         if self.refuse is not None:
@@ -720,7 +727,7 @@ def test_a_connection_without_the_feature_is_never_sent_the_rules(agent_source, 
     client, source, agent = agent_source
 
     def refuse(*args, require_feature=None, **kwargs):
-        assert require_feature == FEATURE_REDACTION
+        assert FEATURE_REDACTION in require_feature
         raise AgentCommandError(
             "the agent doesn't support redaction/1",
             code="feature_missing",
@@ -1186,7 +1193,8 @@ def test_without_redaction_the_agent_gets_the_commands_of_before(session, agent_
 
     def plain_agent(source_id, command_type, timeout=30.0, **fields):
         seen.append((command_type, fields))
-        assert "redact" not in fields and "require_feature" not in fields
+        # Only the links feature is required: nothing about redaction.
+        assert "redact" not in fields and fields.get("require_feature") == FEATURE_LINKS
         return {"content_b64": base64.b64encode(SAMPLE_BYTES).decode()}
 
     registry = get_agent_registry()

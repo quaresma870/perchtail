@@ -79,6 +79,11 @@ type Command struct {
 	// Set on a "read_range" with a `redact` block, for the alerts: also say
 	// where each redacted line was in the original (ChangedLines).
 	WithLineOffsets bool `json:"with_line_offsets,omitempty"`
+	// Set on "fetch", "read_range", "list_archive" and "fetch_archive"
+	// (FeatureLinks): where Path really is, relative to the base path, as
+	// the server checked its rules on it; empty means Path itself. Read only
+	// when it is there, refused with a "link_target" error otherwise.
+	ExpectReal string `json:"expect_real,omitempty"`
 }
 
 // DirEntryWire mirrors what collectors/agent.py's list_directory expects
@@ -90,16 +95,22 @@ type DirEntryWire struct {
 	// Last modification in Unix milliseconds (#273, agents from 0.6), for
 	// sorting the explorer by time.
 	MTimeMs int64 `json:"mtime_ms"`
+	// Where the entry really is, relative to the base path, when a link
+	// (the entry itself or a folder above it) leads elsewhere inside it
+	// (FeatureLinks); "" is the base path itself. Absent otherwise.
+	Target *string `json:"target,omitempty"`
 }
 
 // ListResult answers a "list" command. Truncated (#347) says the folder
 // has more entries than were sent: the listing stopped at the entry or
-// size cap (ListDirectory).
+// size cap (ListDirectory). RealDir (FeatureLinks) is where the folder
+// listed really is, relative to the base path, when a link leads there.
 type ListResult struct {
 	Type      string         `json:"type"`
 	ID        string         `json:"id"`
 	Entries   []DirEntryWire `json:"entries"`
 	Truncated bool           `json:"truncated,omitempty"`
+	RealDir   *string        `json:"real_dir,omitempty"`
 }
 
 // FetchResult answers a "fetch" command from a backend that doesn't ask
@@ -267,14 +278,19 @@ type RedactedReadRangeResult struct {
 // there. A command with a `redact` block that can't be redacted is
 // answered with Type "redaction_error" before anything else is sent (see
 // redactionError for its codes); Rule is then the id of the rule that
-// can't run, when one can't.
+// can't run, when one can't. Code "link_target" (FeatureLinks) refuses a
+// path that isn't where ExpectReal said, before anything is read: Real is
+// where it is, relative to the base path, or Outside says it leads out of
+// the base path.
 type ErrorResult struct {
-	Type  string `json:"type"`
-	ID    string `json:"id"`
-	Error string `json:"error"`
-	Code  string `json:"code,omitempty"`
-	Size  int64  `json:"size,omitempty"`
-	Rule  any    `json:"rule,omitempty"`
+	Type    string  `json:"type"`
+	ID      string  `json:"id"`
+	Error   string  `json:"error"`
+	Code    string  `json:"code,omitempty"`
+	Size    int64   `json:"size,omitempty"`
+	Rule    any     `json:"rule,omitempty"`
+	Real    *string `json:"real,omitempty"`
+	Outside bool    `json:"outside,omitempty"`
 }
 
 // Pong answers the server's application-level "ping" (#333), which it

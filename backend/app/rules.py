@@ -159,6 +159,11 @@ def glob_matches(pattern: str, path: str, *, ignore_case: bool = False) -> bool:
 
 
 def _rule_matches(path: str, rule: Rule, ignore_case: bool) -> bool:
+    # Exclude rules never depend on case, on any protocol: a path can reach
+    # a file under another spelling of its name (Windows OpenSSH, a local
+    # filesystem that ignores case), so `secrets/**` also hides `SECRETS/x`.
+    # Include rules keep the source's own case sensitivity.
+    ignore_case = ignore_case or rule.type == RuleType.exclude
     if rule.pattern_kind == PatternKind.regex:
         compiled = _compile_regex(rule.pattern, ignore_case)
         if compiled is None:
@@ -176,9 +181,10 @@ def is_visible(path: str, rules: list[Rule], *, case_insensitive: bool = False) 
     default".
 
     `case_insensitive` must be set for sources whose filesystem is
-    case-insensitive (see rules_case_insensitive): otherwise `SECRET/x`
-    would slip past an exclude rule written as `secret/**` while still
-    opening the very same file.
+    case-insensitive (see rules_case_insensitive), so include rules match
+    every spelling there. Exclude rules ignore case on every source
+    (_rule_matches): `SECRET/x` never slips past `secret/**`, even on a
+    source whose filesystem PerchTail can't tell ignores case.
 
     A path with a control character is never visible: it can't be opened
     either (is_safe_relative_path), and a name ending in a newline could
@@ -293,9 +299,9 @@ def is_dir_visible(dir_path: str, rules: list[Rule], *, case_insensitive: bool =
         ):
             continue
         covered = any(
-            later.type == RuleType.exclude
-            and later.pattern_kind == PatternKind.glob
-            and _glob_covers_everything_below(later.pattern, segments, case_insensitive)
+            later.type == RuleType.exclude and later.pattern_kind == PatternKind.glob
+            # Excludes ignore case (_rule_matches).
+            and _glob_covers_everything_below(later.pattern, segments, True)
             for later in ordered[i + 1 :]
         )
         if not covered:
@@ -314,6 +320,25 @@ def is_entry_visible(
     if is_dir:
         return is_dir_visible(path, rules, case_insensitive=case_insensitive)
     return is_visible(path, rules, case_insensitive=case_insensitive)
+
+
+def is_linked_entry_visible(
+    path: str,
+    is_dir: bool,
+    target: str | None,
+    rules: list[Rule],
+    *,
+    case_insensitive: bool = False,
+) -> bool:
+    """is_entry_visible for an entry a link may lead elsewhere (`target`,
+    where it really is relative to the base path, or None): both its own
+    path and its target must be visible, so a link can't show a file or a
+    folder the rules hide under another name."""
+    if not is_entry_visible(path, is_dir, rules, case_insensitive=case_insensitive):
+        return False
+    return target is None or is_entry_visible(
+        target, is_dir, rules, case_insensitive=case_insensitive
+    )
 
 
 def rules_case_insensitive(source: Source) -> bool:

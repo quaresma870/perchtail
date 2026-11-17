@@ -252,12 +252,13 @@ func zipMTimeMs(zf *zip.File) int64 {
 // as the server's list_members (a tar's links, devices and FIFOs left
 // out), with the caps of ListDirectory: at most maxEntries members (0, or
 // anything above MaxListEntries, means MaxListEntries) and maxListBytes of
-// them, truncated past either.
-func ListArchive(basePath, relPath string, maxEntries int) ([]ArchiveMemberWire, bool, error) {
+// them, truncated past either. The archive must really be at expectReal
+// (openFile).
+func ListArchive(basePath, relPath, expectReal string, maxEntries int) ([]ArchiveMemberWire, bool, error) {
 	if maxEntries <= 0 || maxEntries > MaxListEntries {
 		maxEntries = MaxListEntries
 	}
-	f, closeFile, err := openFile(basePath, relPath)
+	f, closeFile, err := openFile(basePath, relPath, expectReal)
 	if err != nil {
 		return nil, false, err
 	}
@@ -286,37 +287,6 @@ func ListArchive(basePath, relPath string, maxEntries int) ([]ArchiveMemberWire,
 		return nil, false, err
 	}
 	return members, truncated, nil
-}
-
-// openFile opens relPath under basePath through os.Root, so neither the
-// path nor a symlink on it can lead out of basePath; it must be a file.
-func openFile(basePath, relPath string) (*os.File, func(), error) {
-	if !IsSafeRelativePath(relPath) {
-		return nil, nil, fmt.Errorf("unsafe path: %q", relPath)
-	}
-	root, err := os.OpenRoot(basePath)
-	if err != nil {
-		return nil, nil, err
-	}
-	f, err := root.Open(rootName(relPath))
-	if err != nil {
-		_ = root.Close()
-		return nil, nil, err
-	}
-	closeAll := func() {
-		_ = f.Close()
-		_ = root.Close()
-	}
-	st, err := f.Stat()
-	if err != nil {
-		closeAll()
-		return nil, nil, err
-	}
-	if st.IsDir() {
-		closeAll()
-		return nil, nil, fmt.Errorf("%s: is a directory", relPath)
-	}
-	return f, closeAll, nil
 }
 
 // resolveMemberName is the server's resolve_member_name: the member's name

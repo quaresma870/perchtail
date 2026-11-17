@@ -14,7 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app import request_context
 from app.audit import record_audit_event
 from app.auth.rbac import ConcealedDenial, PermissionDenied
-from app.collectors.base import PathOutsideBaseError, SourceError
+from app.collectors.base import LINK_TARGET_HIDDEN, PathOutsideBaseError, SourceError
 from app.db import get_session
 from app.logging_config import get_logger
 from app.scratch import ScratchFullError
@@ -70,11 +70,18 @@ def _request_session(request: Request):
     return value, None
 
 
-def _record_denial(request: Request, exc: StarletteHTTPException, user_id: int) -> None:
+def _record_denial(
+    request: Request,
+    exc: StarletteHTTPException | None,
+    user_id: int,
+    reason: str | None = None,
+    extra: dict | None = None,
+) -> None:
     route = request.scope.get("route")
     attempted = f"{request.method} {getattr(route, 'path', request.url.path)}"
     target_type, target_id = _target(request.path_params)
-    reason = _reason(exc)
+    if reason is None:
+        reason = _reason(exc) if exc is not None else "forbidden"
     session, generator = _request_session(request)
     try:
         # Whatever the refused request left pending is never committed with
@@ -86,7 +93,7 @@ def _record_denial(request: Request, exc: StarletteHTTPException, user_id: int) 
             action="access.denied",
             target_type=target_type,
             target_id=target_id,
-            metadata={"attempted": attempted, "reason": reason},
+            metadata={"attempted": attempted, "reason": reason, **(extra or {})},
         )
         session.commit()
     finally:
@@ -123,6 +130,13 @@ async def access_denied(request: Request, exc: StarletteHTTPException):
 
 
 async def source_error_handler(request: Request, exc: SourceError) -> JSONResponse:
+    from app.collectors.agent import AGENT_UPDATE_REQUIRED, AgentUpdateRequiredError
+
+    if isinstance(exc, AgentUpdateRequiredError):
+        # Content refused from an agent to update: audited as access.denied
+        # with the path asked for, unless the endpoint already recorded it
+        # (the file.*_denied events of open, follow and download).
+        await _audit_refused_path(request, AGENT_UPDATE_REQUIRED)
     logger.warning(
         "source.error",
         error_type=type(exc).__name__,
@@ -137,8 +151,26 @@ async def source_error_handler(request: Request, exc: SourceError) -> JSONRespon
 
 
 async def path_outside_base(request: Request, exc: PathOutsideBaseError) -> JSONResponse:
-    # Same answer as a rule-hidden path: nothing about the target leaks.
+    """Same answer as a rule-hidden path, so nothing about the target leaks;
+    audited as `access.denied` (`link_target_hidden`, with the path asked
+    for) unless the endpoint already recorded it (the file.*_denied events
+    of open, follow and download)."""
+    await _audit_refused_path(request, LINK_TARGET_HIDDEN)
     return JSONResponse(status_code=404, content={"detail": "not found"})
+
+
+async def _audit_refused_path(request: Request, reason: str) -> None:
+    """Records a refused read as `access.denied` with `reason` and the path
+    asked for, unless the endpoint already audited it. A failure to record
+    never changes the answer."""
+    context = request_context.current()
+    if context is not None and context.user_id is not None and not context.denial_handled:
+        path = request.query_params.get("path")
+        extra = {"path": path} if path is not None else None
+        try:
+            await run_in_threadpool(_record_denial, request, None, context.user_id, reason, extra)
+        except Exception:  # noqa: BLE001 - never turn the refusal into a 500
+            logger.exception("access.denied.audit_failed")
 
 
 async def scratch_full(request: Request, exc: ScratchFullError) -> JSONResponse:

@@ -39,6 +39,7 @@ const row = (fields: Partial<AgentRow> = {}): AgentRow => ({
   connected: true,
   agent_version: '0.6.0',
   outdated: true,
+  update_required: false,
   policy: 'inherit',
   effective_policy: 'manual',
   failures: 0,

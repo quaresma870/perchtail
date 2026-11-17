@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
@@ -20,14 +21,20 @@ class DirEntry:
     # device:inode), when the connector knows it: recursive walks keep the
     # ones they've listed, so a symlink loop ends (#347). Not compared.
     real_key: str | None = field(default=None, compare=False)
+    # Where the entry really is, relative to the base path, when a link
+    # (the entry itself or a folder above it) leads somewhere else; None
+    # when it is where its path says. Rules are checked on both.
+    target: str | None = field(default=None, compare=False)
 
 
 class DirListing(list):
     """What list_directory returns when the source cut the listing short
     (an agent caps a huge folder, #347): a list of DirEntry with
-    `truncated` set."""
+    `truncated` set. `real_dir` is where the listed folder really is,
+    relative to the base path, when a link leads there (None otherwise)."""
 
     truncated: bool = False
+    real_dir: str | None = None
 
 
 def is_truncated(entries) -> bool:
@@ -118,6 +125,34 @@ class PathOutsideBaseError(PermissionError):
     """A requested path resolves (on the source host, symlinks included) to
     somewhere outside the source's base path. Answered as 404, the same as
     a path the rules hide, so it reveals nothing about what's out there."""
+
+
+# The audit reason of a path refused as PathOutsideBaseError: a link that
+# leads outside the base path or to something the rules hide.
+LINK_TARGET_HIDDEN = "link_target_hidden"
+
+
+class LinkTargetHiddenError(PathOutsideBaseError):
+    """A requested path reaches its file or folder through a link (a
+    symlink, itself or a folder above it) whose target is outside the base
+    path or hidden by the rules. Answered as 404 like PathOutsideBaseError;
+    the endpoints that serve content audit it (`link_target_hidden`)."""
+
+
+# Called with where a path really is, relative to the base path, when a link
+# leads there: whether the rules let it be read. None means no link may be
+# followed at all (fail closed).
+TargetCheck = Callable[[str], bool] | None
+
+
+def require_target(requested: str, real: str, check: TargetCheck) -> None:
+    """Refuses `requested` when it really is at `real` (a link leads there)
+    and `check` doesn't allow that: rules are checked on the target, not only
+    on the link's name. Nothing to check when the path is where it says."""
+    if real == requested:
+        return
+    if check is None or not check(real):
+        raise LinkTargetHiddenError(requested)
 
 
 class FetchTooLargeError(ValueError):
