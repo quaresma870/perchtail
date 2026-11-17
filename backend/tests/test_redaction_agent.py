@@ -570,6 +570,30 @@ def test_follow_is_redacted_on_the_agent(session, agent_source):
     assert all(e.event_metadata["redaction_at"] == "agent" for e in event)
 
 
+def test_follow_on_the_agent_takes_a_connector_slot(session, agent_source):
+    """When the agent redacts, a poll needs a free connector slot too: 503
+    with Retry-After, and nothing is asked of the agent or audited."""
+    from app import system_settings
+    from app.limits import SOURCE_KEY, current_limits, get_limiter
+
+    client, source, agent = agent_source
+    agent.files["app.log"] = SAMPLE_BYTES
+    system_settings.set_int(session, SOURCE_KEY, 1)
+    session.commit()
+    held = get_limiter().connector(current_limits(session), source.id)
+    try:
+        busy = client.get(f"/sources/{source.id}/follow", params={"path": "app.log", "offset": 0})
+    finally:
+        held.release()
+    assert busy.status_code == 503
+    assert "retry-after" in busy.headers
+    assert agent.commands == []
+    assert session.exec(select(AuditLog).where(AuditLog.action == "file.follow")).all() == []
+    freed = client.get(f"/sources/{source.id}/follow", params={"path": "app.log", "offset": 0})
+    assert freed.status_code == 200, freed.text
+    assert [kind for kind, _ in agent.commands] == ["read_range"]
+
+
 def test_follow_from_the_start_and_a_rotated_file(agent_source):
     client, source, agent = agent_source
     agent.files["app.log"] = SAMPLE_BYTES

@@ -163,8 +163,16 @@ release ships (0.x releases may include breaking changes between minors).
 - **Changing your own email to one another account has is refused with a neutral message**, not a 409 saying the address is used.
 - **Changing your own password gives your session a new token**, besides ending the other sessions, and **turning MFA on or off ends your other sessions** (`session.revoke` with reason `mfa_enable` or `mfa_disable`).
 - **A request's `x-request-id` is kept only when it is at most 64 letters, digits, `.`, `_` or `-`**; otherwise PerchTail gives the request a new one. The identity provider's `error` and `error_description` on the SSO callback are cut to 200 characters in the log.
+- **Every Tail is audited**: `file.follow` is written once per Tail of a file in a session, whatever byte it starts from, with that byte in `offset`, and again when it reads from before that byte. Before, a Tail that didn't start at the beginning of the file and didn't say it was starting read the file without a record.
+- A Tail poll takes a connector slot while it reads, like opening a file, so the concurrency limits in Settings → System cover it: past them it gets 503 with `Retry-After`.
+- Closing a file in the viewer releases only the copy that session opened; another viewer's copy of the same file stays until that viewer closes it.
+- An SSH fetch stops copying as soon as the file passes `MAX_FETCH_MB`, instead of transferring all of a file that grew after its size was checked.
+- The access report's CSV also neutralises cells that start with a tab, a carriage return or a line feed, with spaces before `=`, `+`, `-` or `@`, or with their full-width forms (`＝`, `＋`, `－`, `＠`), which spreadsheets read as formulas too.
+- Listing an SMB server's shares ends with an error when the server answers with a malformed fragment length or more than 1 MiB, instead of waiting forever.
 
 ### Fixed
+- Opening or downloading a zip member that is encrypted, or compressed with a method PerchTail can't read, answered 500. It's now refused with 409, with or without redaction, and audited as `file.open_denied` or `file.download_denied` with the reason `member_encrypted` or `member_unsupported_compression`.
+- A redacted folder ZIP over a listing the source cut short, or nested too deep, answered 500. It's now refused with 403 and audited as `file.download_denied` with the reason `listing_truncated` or `too_deep`.
 - In the role editor, the **Target** list of a new grant now follows the scope type picked; it kept listing the targets of the first one.
 - The release workflow's check that the CHANGELOG has a section for the version could fail at random once the CHANGELOG grew large; it now reads the whole file before looking.
 - Dragging the corner of a text box no longer pushes it out of its card. The YAML import box can be made wider and taller, and its card grows with it; the other text boxes (rule paste mode, private keys, certificates) only grow downwards.

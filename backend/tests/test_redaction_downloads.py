@@ -655,6 +655,33 @@ def test_an_archive_zipfile_cant_read_is_refused_and_audited(session, downloads,
     assert event.event_metadata["reason"] == "redaction_whole_archive"
 
 
+@pytest.mark.parametrize(
+    "kind, reason",
+    [("encrypted", "member_encrypted"), ("method", "member_unsupported_compression")],
+)
+@pytest.mark.parametrize(
+    "endpoint, action", [("open", "file.open_denied"), ("download", "file.download_denied")]
+)
+def test_an_unreadable_zip_member_is_an_audited_refusal_when_redacted(
+    session, downloads, kind, reason, endpoint, action
+):
+    _, client, source, folder = downloads
+    if kind == "encrypted":
+        data = _mark_encrypted(_zip_bytes({"big.log": SAMPLE_BYTES, "app.log": b"x"}), "big.log")
+        (folder / "bundle.zip").write_bytes(data)
+    else:
+        zip_with_unsupported_method(folder / "bundle.zip", "big.log", SAMPLE_BYTES)
+
+    response = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "bundle.zip", "member": "big.log"}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "archive_member_unreadable"
+    denied = _audit(session, action).event_metadata
+    assert (denied["path"], denied["reason"]) == ("bundle.zip/big.log", reason)
+
+
 def test_downloads_are_redacted_for_users_who_arent_super_admins(session, downloads):
     app, client, source, folder = downloads
     customer = Customer(name="Acme")
@@ -812,6 +839,38 @@ def test_a_folder_zip_names_its_list_apart_from_a_file_of_the_same_name(download
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
         assert zf.read("REDACTION-SKIPPED.txt") == b"mine"
         assert "wider.log:" in zf.read("REDACTION-SKIPPED (PerchTail).txt").decode()
+
+
+def test_a_redacted_folder_zip_over_a_truncated_listing_is_an_audited_refusal(
+    session, downloads, store, monkeypatch
+):
+    """A walk that can't list every file refuses the redacted ZIP too:
+    403, audited, never a 500."""
+    from app.collectors.base import DirEntry, DirListing
+
+    _, client, source, folder = downloads
+    (folder / "sub").mkdir()
+
+    def cut_short(source, rules, relative_path=""):
+        if relative_path == "":
+            return DirListing([DirEntry(name="sub", path="sub", is_dir=True, size=0)])
+        listing = DirListing([DirEntry(name="a.log", path="sub/a.log", is_dir=False, size=1)])
+        listing.truncated = True
+        return listing
+
+    monkeypatch.setattr("app.collectors.local.list_directory", cut_short)
+    response = _download_zip(client, source)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "This folder has more entries than a ZIP can list; narrow it to a subfolder"
+    )
+    denied = _audit(session, "file.download_denied").event_metadata
+    assert denied["path"] == ""
+    assert denied["reason"] == "listing_truncated"
+    assert denied["truncated_folder"] == "sub"
+    assert _audits(session, "folder.download") == []
+    assert _scratch_files(store) == []
 
 
 def test_a_folder_zip_without_suffix_keeps_its_name(session, downloads):

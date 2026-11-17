@@ -95,6 +95,17 @@ def _reset_limits_and_disk_floor(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_follow_audits():
+    # app.api.archive remembers which Tails it has audited in a module-level
+    # object; ids and paths repeat from one test to the next.
+    from app.api.archive import _follow_audits
+
+    _follow_audits.clear()
+    yield
+    _follow_audits.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_login_throttle():
     # app.login_throttle keeps its state in a module-level dict (see its
     # docstring), so one test's failed-login attempts would otherwise bleed

@@ -34,6 +34,16 @@ def _bounded_copy(src: BinaryIO, destination: Path, max_bytes: int | None) -> No
         raise
 
 
+class MemberUnreadableError(Exception):
+    """An archive member that can't be extracted: encrypted, or compressed
+    with a method zipfile can't read. `reason` is SKIP_ENCRYPTED or
+    SKIP_UNSUPPORTED_COMPRESSION."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class ArchiveMember:
     name: str
@@ -173,11 +183,21 @@ def extract_member(
     The cap counts bytes actually produced, not the size the archive
     header claims, since a crafted header can lie. A member that doesn't
     exist, or a tar member that isn't a regular file (a link, a device),
-    raises KeyError: as far as the caller knows, it isn't there. Zip
-    members are always read as stored -- zipfile never follows a link."""
+    raises KeyError: as far as the caller knows, it isn't there. An
+    encrypted zip member, or one compressed with a method zipfile can't
+    read, raises MemberUnreadableError. Zip members are always read as
+    stored -- zipfile never follows a link."""
     if _is_zip(filename):
-        with zipfile.ZipFile(local_path) as zf, zf.open(member_name) as src:
-            _bounded_copy(src, destination, max_bytes)
+        with zipfile.ZipFile(local_path) as zf:
+            info = zf.getinfo(member_name)
+            if info.flag_bits & _ZIP_ENCRYPTED:
+                raise MemberUnreadableError(SKIP_ENCRYPTED)
+            try:
+                src = zf.open(info)
+            except NotImplementedError as exc:
+                raise MemberUnreadableError(SKIP_UNSUPPORTED_COMPRESSION) from exc
+            with src:
+                _bounded_copy(src, destination, max_bytes)
         return
     if _is_tar_gz(filename):
         with tarfile.open(local_path, mode="r:gz") as tf:

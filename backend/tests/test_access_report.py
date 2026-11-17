@@ -400,8 +400,34 @@ def test_safe_cell_prefixes_formula_starts(value):
     assert access_report.safe_cell(value) == "'" + value
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "\nx",
+        "\n=1",
+        " =1",
+        "  +1",
+        " -1",
+        " @x",
+        " =1",
+        "　=1",
+        "＝1",
+        "＋1",
+        "－1",
+        "＠x",
+        " ＝1",
+    ],
+)
+def test_safe_cell_prefixes_hidden_formula_starts(value):
+    """A line feed, whitespace before a formula character, or a full-width
+    formula character still reads as a formula in a spreadsheet."""
+    assert access_report.safe_cell(value) == "'" + value
+
+
 def test_safe_cell_leaves_ordinary_values():
     assert access_report.safe_cell("alice") == "alice"
+    assert access_report.safe_cell(" alice") == " alice"
+    assert access_report.safe_cell("Alice Smith-Jones") == "Alice Smith-Jones"
     assert access_report.safe_cell(None) == ""
     assert access_report.safe_cell(12) == "12"
 

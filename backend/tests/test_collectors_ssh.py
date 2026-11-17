@@ -34,6 +34,11 @@ class FakeSFTPClient:
         self.closed = False
         self.requested_paths = []
         self.fetched_paths = []
+        # Bytes the server sent while copying files.
+        self.bytes_sent = 0
+        # What stat() reports instead of the real size, by path: a file that
+        # grows after it is stat'ed.
+        self.stat_sizes: dict[str, int] = {}
 
     def normalize(self, path):
         path = posixpath.normpath(path)
@@ -53,7 +58,13 @@ class FakeSFTPClient:
 
     def get(self, remote_path, local_path):
         self.fetched_paths.append(remote_path)
+        self.bytes_sent += len(self._files[remote_path])
         Path(local_path).write_bytes(self._files[remote_path])
+
+    def open(self, remote_path, mode="r"):
+        assert mode == "rb"
+        self.fetched_paths.append(remote_path)
+        return _RemoteFile(self, self._files[remote_path])
 
     def stat(self, remote_path):
         name = remote_path.rsplit("/", 1)[-1]
@@ -61,10 +72,27 @@ class FakeSFTPClient:
             return FakeAttr(name, True)
         if remote_path not in self._files:
             raise FileNotFoundError(remote_path)
-        return FakeAttr(name, False, len(self._files[remote_path]))
+        size = self.stat_sizes.get(remote_path, len(self._files[remote_path]))
+        return FakeAttr(name, False, size)
 
     def close(self):
         self.closed = True
+
+
+class _RemoteFile(io.BytesIO):
+    """An open remote file: counts the bytes the server sends."""
+
+    def __init__(self, sftp: FakeSFTPClient, content: bytes):
+        super().__init__(content)
+        self._sftp = sftp
+
+    def prefetch(self, file_size=None):
+        pass
+
+    def read(self, size=-1):
+        chunk = super().read(size)
+        self._sftp.bytes_sent += len(chunk)
+        return chunk
 
 
 class FakeChannel:
@@ -486,6 +514,24 @@ def test_fetch_refuses_a_file_over_max_fetch_mb_before_transferring_it(monkeypat
     with pytest.raises(FetchTooLargeError):
         ssh_module.fetch_file(_source(), "big.log", destination)
     assert not destination.exists()
+    assert sftp.bytes_sent == 0
+
+
+def test_fetch_stops_copying_a_file_that_grows_past_max_fetch_mb(monkeypatch, tmp_path):
+    """A file small when stat'ed that grows past MAX_FETCH_MB during the
+    transfer: the copy stops at the limit instead of reading it all."""
+    from app.collectors.base import _CHUNK, FetchTooLargeError
+
+    sftp = FakeSFTPClient(files={"/var/log/appname/big.log": b"x" * (8 * _CHUNK)})
+    sftp.stat_sizes["/var/log/appname/big.log"] = 10
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 1024)
+
+    destination = tmp_path / "out"
+    with pytest.raises(FetchTooLargeError):
+        ssh_module.fetch_file(_source(), "big.log", destination)
+    assert not destination.exists()
+    assert sftp.bytes_sent <= 1024 + _CHUNK
 
 
 # --- containment: symlinks must not lead outside base_path (lab F-10) ------
