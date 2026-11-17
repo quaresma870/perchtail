@@ -379,3 +379,45 @@ def test_throughput_regression():
     started = time.monotonic()
     redact_stream(io.BytesIO(data), io.BytesIO(), ALL)
     assert time.monotonic() - started < 30
+
+
+def test_looking_for_a_change_of_encoding_stays_cheap_on_nul_rich_content():
+    """UTF-16 text and binary content full of NULs (runs off the even
+    offsets included) are looked at for windows without a slowdown, as wide
+    a bound as test_throughput_regression's."""
+    utf16 = ("x" + SAMPLE).encode("utf-16-le") * (2 * 1024 * 1024 // (2 * len(SAMPLE)))
+    binary = (b"\x05\x00\x07\x00\x00\x00a\x00b\x00c\x00" + b"\n") * (1024 * 1024 // 15)
+    started = time.monotonic()
+    redact_stream(io.BytesIO(utf16), io.BytesIO(), ALL, source_encoding=UTF16_LE)
+    redact_stream(io.BytesIO(utf16[1:]), io.BytesIO(), ALL)
+    redact_stream(io.BytesIO(binary), io.BytesIO(), ALL)
+    assert time.monotonic() - started < 30
+
+
+def test_the_refusal_marker_goes_back_to_utf16_for_a_download():
+    data = "ok line\n".encode("utf-16-le") + "token=abc\n".encode("utf-32-le")
+    out, result = redact_bytes(
+        data, ALL, source_encoding=UTF16_LE, output_encoding="source", final=True
+    )
+    assert out == "ok line\n[redacted: unsupported encoding]".encode("utf-16-le")
+    assert result.refused_at == len("ok line\n") * 2
+    assert result.source_offset == len(data)
+
+
+def test_a_private_key_open_when_utf16_turns_to_bytes_stays_hidden():
+    data = (
+        "-----BEGIN RSA PRIVATE KEY-----\n".encode("utf-16-le")
+        + b"MIIEsecretkeybodyline\n"
+        + "-----END RSA PRIVATE KEY-----\n".encode("utf-16-le")
+        + b"after\n"
+    )
+    out, result = redact_bytes(data, ALL, source_encoding=UTF16_LE)
+    assert result.union_at == len("-----BEGIN RSA PRIVATE KEY-----\n") * 2
+    assert b"MIIEsecretkeybody" not in out
+    assert out.startswith(b"[redacted: private key]\n")
+
+
+def test_without_rules_nothing_is_looked_at():
+    data = b"ok\n" + "token=abc\n".encode("utf-32-le")
+    out, result = redact_bytes(data, [])
+    assert out == data and result.refused_at is None

@@ -49,6 +49,16 @@ How it works:
 - The `iban` detector searches with overlap: when a match fails its check,
   the search goes on from the byte after the start of the match, so a code
   like `AB12` just before an IBAN doesn't hide it.
+- Content can change encoding part way (encodings.find_reading_change):
+  every line is looked at in the reading it is read in. From the start of
+  a line of bytes content that looks UTF-16, or of a line of clear UTF-16
+  content with ASCII text in it, to the end of the read, the content is
+  read as UTF16_UNSURE (served as bytes). From the start of a line that
+  looks UTF-32, the rest is refused: `[redacted: unsupported encoding]`
+  takes its place, the rest is read without being sent, and refused_at
+  says where it started. A window that only the dropped part of a long
+  line holds changes the reading from the next line. Each read looks again
+  at its own lines: a Tail poll doesn't know what an earlier read found.
 
 The agent's Go engine (agent/internal/redact) implements the same
 behaviour; agent/internal/redact/testdata/vectors.json holds the shared
@@ -71,10 +81,14 @@ import re2
 
 from app.redaction import checks
 from app.redaction.encodings import (
+    CHANGE_CARRY_BYTES,
     UTF16_BE,
     UTF16_LE,
     UTF16_UNSURE,
+    UTF32,
     UnsupportedEncodingError,
+    find_reading_change,
+    strongest_reading_change,
 )
 
 ENGINE_VERSION = 1
@@ -87,6 +101,7 @@ HEAD_BYTES = 64
 MAX_RULE_LENGTH = 4096
 
 INCOMPLETE_LINE_LABEL = "incomplete line"
+UNSUPPORTED_ENCODING_LABEL = "unsupported encoding"
 
 _DETECTORS = json.loads(Path(__file__).with_name("detectors.json").read_text(encoding="utf-8"))
 DETECTOR_NAMES: tuple[str, ...] = tuple(d["name"] for d in _DETECTORS["detectors"])
@@ -329,8 +344,14 @@ class Redactor:
     - output_encoding: "utf-8" (what the viewer reads) or "source" (UTF-16
       encoded back, for downloads). Bytes and UTF16_UNSURE content is
       served as bytes either way.
-    - origin: the file offset of the first byte fed (it only matters for
-      UTF16_UNSURE, whose UTF-16 readings are aligned on even offsets).
+    - origin: the file offset of the first byte fed (it matters for
+      UTF16_UNSURE, whose UTF-16 readings are aligned on even offsets, and
+      for refused_at and union_at).
+    - refused_at: None, or the file offset from which the rest was refused
+      (a line that looks UTF-32, see the module docstring).
+    - union_at: None, or the file offset from which the content was read as
+      UTF16_UNSURE although it didn't start so; from there on lines end at
+      every newline byte.
     - With no rules the content passes through unchanged, byte for byte."""
 
     def __init__(
@@ -359,6 +380,7 @@ class Redactor:
         self._reencode = source_encoding is not None and output_encoding == "source"
         if max_line_bytes < self._unit or pem_max_lines < 1:
             raise ValueError("max_line_bytes and pem_max_lines must be positive")
+        self._max_line_bytes = max_line_bytes
         self._max_line = max_line_bytes - max_line_bytes % self._unit
         self._long_line = marker(long_line_label(max_line_bytes))
         self._pem_max = pem_max_lines
@@ -376,10 +398,17 @@ class Redactor:
         # where the last private-key BEGIN ends and the last END starts.
         self._pem_carry = b""
         self._pem_found: list[list[int | None]] = []
+        # While a long line is being dropped: its last bytes read, looked at
+        # again with the next piece, and how the windows in the dropped part
+        # change the reading from the next line.
+        self._rest_carry = b""
+        self._rest_change: str | None = None
         self.counts: dict[str, int] = {}
         self.source_size = 0
         self.source_offset = 0
         self.trailing_partial = 0
+        self.refused_at: int | None = None
+        self.union_at: int | None = None
 
     # -- public API ---------------------------------------------------------
 
@@ -387,19 +416,21 @@ class Redactor:
         self.source_size += len(data)
         if self.passthrough:
             return bytes(data)
+        if self.refused_at is not None:
+            return b""
         buffer = self._buffer
         buffer += data
         out: list[bytes] = []
-        while True:
+        while self.refused_at is None:
             if self._overflow:
                 index = self._find_newline(buffer, 0)
                 at = self._origin + self._consumed
                 if index < 0:
                     size = len(buffer) - len(buffer) % self._unit
-                    self._pem_tail_feed(bytes(buffer[:size]), at)
+                    self._dropped_feed(bytes(buffer[:size]), at)
                     self._drop(size)
                     break
-                self._pem_tail_feed(bytes(buffer[:index]), at)
+                self._dropped_feed(bytes(buffer[:index]), at)
                 self._pem_tail_end()
                 self._drop(index + len(self._newline))
                 out.append(self._encode_marker(b"\n"))
@@ -407,19 +438,31 @@ class Redactor:
                 self._line_start = self._consumed
                 self._line_output = 0
                 self._line_counts = {}
+                if self._rest_change is not None:
+                    change, self._rest_change = self._rest_change, None
+                    out.append(self._change_reading(change, self._origin + self._consumed))
                 continue
             index = self._rfind_newline(buffer)
             if index >= 0:
                 end = index + len(self._newline)
-                block = bytes(buffer[:end])
                 at = self._origin + self._consumed
-                self._drop(end)
-                out.append(self._lines(block, at, emit=True))
+                text, used = self._lines(bytes(buffer[:end]), at, emit=True)
+                out.append(text)
+                if self.refused_at is not None:
+                    break
+                self._drop(used)
                 self._line_start = self._consumed
+                if used < end:
+                    # The reading changed: the rest is split into lines again.
+                    continue
             if len(buffer) > self._max_line:
-                self._line_counts = {}
                 at = self._origin + self._consumed
                 source = bytes(buffer[: self._max_line])
+                change = self._reading_change(source, at)
+                if change is not None:
+                    out.append(self._change_reading(change[1], at))
+                    continue
+                self._line_counts = {}
                 piece = self._segment(source, at, self._line_counts)
                 piece += self._encode_marker(self._long_line)
                 out.append(piece)
@@ -427,10 +470,14 @@ class Redactor:
                 self._overflow = True
                 size = len(buffer) - len(buffer) % self._unit
                 self._pem_tail_start(source, at)
-                self._pem_tail_feed(bytes(buffer[self._max_line : size]), at + self._max_line)
+                self._rest_carry = source[-CHANGE_CARRY_BYTES:]
+                self._rest_change = None
+                self._dropped_feed(bytes(buffer[self._max_line : size]), at + self._max_line)
                 self._drop(size)
                 continue
             break
+        if self.refused_at is not None:
+            buffer.clear()
         return b"".join(out)
 
     def finish(self, final: bool = True) -> bytes:
@@ -441,8 +488,10 @@ class Redactor:
         `[redacted: incomplete line]`, source_offset is where it starts and
         trailing_partial is how many bytes of the output it took."""
         self.trailing_partial = 0
-        if self.passthrough:
+        if self.passthrough or self.refused_at is not None:
+            # Refused: what was read is done with, sent or not.
             self.source_offset = self.source_size
+            self._buffer.clear()
             return b""
         out = b""
         if self._overflow:
@@ -457,7 +506,7 @@ class Redactor:
                         del self.counts[name]
         elif self._buffer:
             if final:
-                out = self._lines(bytes(self._buffer), self._origin + self._consumed, emit=True)
+                out = self._all_lines(bytes(self._buffer), self._origin + self._consumed)
                 self.source_offset = self.source_size
             else:
                 out = self._encode_marker(marker(INCOMPLETE_LINE_LABEL))
@@ -475,6 +524,50 @@ class Redactor:
         if not self.passthrough and self._rules.pem is not None and data:
             self._lines(data, at, emit=False)
 
+    # -- readings ------------------------------------------------------------
+
+    def _reading(self) -> str | None:
+        return UTF16_UNSURE if self._union else self._encoding
+
+    def _reading_change(self, data: bytes, at: int) -> tuple[int, str] | None:
+        return find_reading_change(data, at, self._reading())
+
+    def _change_reading(self, reading: str, at: int) -> bytes:
+        """Reads the content from file offset `at`, the start of a line, as
+        `reading`: UTF16_UNSURE, or UTF32, which refuses the rest. Returns
+        what to send in its place (the marker for a refusal)."""
+        if reading == UTF32:
+            self.refused_at = at
+            self._buffer.clear()
+            self._overflow = False
+            return self._encode_marker(marker(UNSUPPORTED_ENCODING_LABEL))
+        if self._encoding is not None:
+            # Clear UTF-16: its private-key state goes on in the reading of
+            # the same byte order.
+            state = self._pem[0]
+            big = self._encoding == UTF16_BE
+            self._pem = (_PemState(), _PemState() if big else state, state if big else _PemState())
+        self.union_at = at
+        self._union = True
+        self._encoding = None
+        self._unit = 1
+        self._newline = b"\n"
+        self._reencode = False
+        self._max_line = self._max_line_bytes
+        return b""
+
+    def _dropped_feed(self, source: bytes, at: int) -> None:
+        """The next piece of the dropped part of a long line: read for
+        private keys and for windows that change the reading."""
+        self._pem_tail_feed(source, at)
+        if self._rest_change == UTF32 or not source:
+            return
+        text = self._rest_carry + source
+        change = strongest_reading_change(text, at - len(self._rest_carry), self._reading())
+        if change is not None:
+            self._rest_change = change
+        self._rest_carry = text[-CHANGE_CARRY_BYTES:]
+
     # -- lines ---------------------------------------------------------------
 
     def _drop(self, size: int) -> None:
@@ -488,21 +581,36 @@ class Redactor:
             index = data.find(self._newline, index + 1, end)
         return index
 
-    def _rfind_newline(self, data) -> int:
-        index = data.rfind(self._newline)
+    def _rfind_newline(self, data, end: int | None = None) -> int:
+        end = len(data) if end is None else end
+        index = data.rfind(self._newline, 0, end)
         while index >= 0 and index % self._unit:
             index = data.rfind(self._newline, 0, index + 1)
         return index
 
-    def _lines(self, block: bytes, at: int, *, emit: bool) -> bytes:
+    def _all_lines(self, block: bytes, at: int) -> bytes:
+        """_lines on the whole block, through every change of reading."""
+        out: list[bytes] = []
+        while block and self.refused_at is None:
+            text, used = self._lines(block, at, emit=True)
+            out.append(text)
+            block = block[used:]
+            at += used
+        return b"".join(out)
+
+    def _lines(self, block: bytes, at: int, *, emit: bool) -> tuple[bytes, int]:
         """Redacts a block of whole lines (the last one may lack its
         newline only at the end of the content) that starts at file offset
-        `at`, giving the lines over max_line_bytes the long-line marker."""
+        `at`, giving the lines over max_line_bytes the long-line marker.
+        Returns the output and how much of the block it covers: less than
+        all of it when the reading changed at the start of a line (the rest
+        is to be split into lines again), all of it when the rest was
+        refused."""
         newline = self._newline
         if len(block) <= self._max_line + len(newline) or (
             self._unit == 1 and max(map(len, block.split(b"\n"))) <= self._max_line
         ):
-            return self._redact_source(block, at, self.counts, emit)
+            return self._short_lines(block, at, emit)
         out: list[bytes] = []
         start = 0
         pending = 0
@@ -512,25 +620,49 @@ class Redactor:
             after = len(block) if index < 0 else index + len(newline)
             if end - start > self._max_line:
                 if pending < start:
-                    out.append(
-                        self._redact_source(block[pending:start], at + pending, self.counts, emit)
-                    )
+                    text, used = self._short_lines(block[pending:start], at + pending, emit)
+                    out.append(text)
+                    if used < start - pending or self.refused_at is not None:
+                        return b"".join(out), pending + used
                 piece = block[start : start + self._max_line]
+                if emit and (change := self._reading_change(piece, at + start)) is not None:
+                    out.append(self._change_reading(change[1], at + start))
+                    return b"".join(out), start
                 out.append(self._segment(piece, at + start, self.counts, emit))
                 self._pem_tail_start(piece, at + start)
-                self._pem_tail_feed(
-                    block[start + self._max_line : end], at + start + self._max_line
-                )
+                rest = block[start + self._max_line : end]
+                self._pem_tail_feed(rest, at + start + self._max_line)
                 self._pem_tail_end()
+                rest_change = None
                 if emit:
+                    carry = piece[-CHANGE_CARRY_BYTES:]
+                    rest_change = strongest_reading_change(
+                        carry + rest, at + start + self._max_line - len(carry), self._reading()
+                    )
                     out.append(self._encode_marker(self._long_line))
                     if index >= 0:
                         out.append(self._encode_marker(b"\n"))
                 pending = after
+                if rest_change is not None:
+                    out.append(self._change_reading(rest_change, at + after))
+                    return b"".join(out), after
             start = after
         if pending < len(block):
-            out.append(self._redact_source(block[pending:], at + pending, self.counts, emit))
-        return b"".join(out)
+            text, used = self._short_lines(block[pending:], at + pending, emit)
+            out.append(text)
+            return b"".join(out), pending + used
+        return b"".join(out), len(block)
+
+    def _short_lines(self, block: bytes, at: int, emit: bool) -> tuple[bytes, int]:
+        """_lines for a block with no line over max_line_bytes: up to the
+        start of the first line whose windows change the reading."""
+        if emit and (change := self._reading_change(block, at)) is not None:
+            index, reading = change
+            newline = self._rfind_newline(block, index)
+            line = 0 if newline < 0 else newline + len(self._newline)
+            out = self._redact_source(block[:line], at, self.counts, emit) if line else b""
+            return out + self._change_reading(reading, at + line), line
+        return self._redact_source(block, at, self.counts, emit), len(block)
 
     def _segment(self, piece: bytes, at: int, counts: dict[str, int], emit: bool = True) -> bytes:
         """The first max_line_bytes of a long line: only the part before
@@ -838,6 +970,10 @@ class RedactionResult:
     source_offset: int = 0
     trailing_partial: int = 0
     output_size: int = 0
+    # File offsets (see Redactor): where the rest was refused, and where the
+    # content started to be read as UTF16_UNSURE.
+    refused_at: int | None = None
+    union_at: int | None = None
 
 
 def redact_bytes(
@@ -878,6 +1014,8 @@ def _result(redactor: Redactor, output_size: int) -> RedactionResult:
         source_offset=redactor.source_offset,
         trailing_partial=redactor.trailing_partial,
         output_size=output_size,
+        refused_at=redactor.refused_at,
+        union_at=redactor.union_at,
     )
 
 
@@ -886,7 +1024,10 @@ class WindowResult:
     """A redacted read from the middle of a file. Offsets are indexes into
     the data passed in: the output is the redaction of data[begin:end] (plus
     the incomplete-line marker when trailing_partial > 0), and the next
-    read should start at end."""
+    read should start at end. refused_at: None, or where the rest was
+    refused (the output then ends with the refusal marker and end is the
+    end of data); union_at: None, or where the content started to be read
+    as UTF16_UNSURE, its lines ending at every newline byte from there."""
 
     data: bytes
     counts: dict[str, int]
@@ -894,6 +1035,8 @@ class WindowResult:
     end: int
     aligned: bool
     trailing_partial: int
+    refused_at: int | None = None
+    union_at: int | None = None
 
 
 def redact_window(
@@ -951,6 +1094,8 @@ def redact_window(
         end=begin + redactor.source_offset,
         aligned=begin != start,
         trailing_partial=redactor.trailing_partial,
+        refused_at=None if redactor.refused_at is None else redactor.refused_at - base_offset,
+        union_at=None if redactor.union_at is None else redactor.union_at - base_offset,
     )
 
 

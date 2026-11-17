@@ -674,6 +674,84 @@ def test_the_context_read_before_the_offset_is_never_sent(viewer):
     assert response.content == b"new line\n"
 
 
+# Content that changes encoding part way: plain text, then a UTF-16 line,
+# then plain text, then a UTF-32 line and plain text after it.
+MIDSTREAM_START = b"2024-05-01 10:20:30 service started, nothing to see in this line\n"
+MIDSTREAM_UTF16 = "user password=hunter2 card 4111 1111 1111 1111\n".encode("utf-16-le")
+MIDSTREAM_MIDDLE = b"plain again\n"
+MIDSTREAM_UTF32 = "token=Sup3rS3cret\n".encode("utf-32-le")
+MIDSTREAM_AFTER = b"after alice@example.com\n"
+MIDSTREAM = MIDSTREAM_START + MIDSTREAM_UTF16 + MIDSTREAM_MIDDLE + MIDSTREAM_UTF32 + MIDSTREAM_AFTER
+MIDSTREAM_REFUSED_AT = len(MIDSTREAM_START + MIDSTREAM_UTF16 + MIDSTREAM_MIDDLE)
+
+
+def assert_no_midstream_secret(data: bytes) -> None:
+    for secret in ("hunter2", "4111 1111 1111 1111", "Sup3rS3cret", "alice@example.com"):
+        for encoding in ("utf-8", "utf-16-le", "utf-32-le"):
+            assert secret.encode(encoding) not in data, (secret, encoding)
+
+
+def test_open_reads_content_that_changes_encoding_part_way(session, viewer):
+    _, client, source, folder = viewer
+    (folder / "app.log").write_bytes(MIDSTREAM)
+
+    response = _open(client, source, "app.log")
+    assert response.status_code == 200
+    assert response.content.startswith(MIDSTREAM_START)
+    assert response.content.endswith(b"[redacted: unsupported encoding]")
+    assert_no_midstream_secret(response.content)
+    # The Tail goes on after what was read.
+    assert response.headers["x-source-offset"] == str(len(MIDSTREAM))
+    assert response.headers["x-follow-partial"] == "0"
+    event = session.exec(select(AuditLog).where(AuditLog.action == "file.open")).one()
+    assert event.event_metadata["redaction"] == "applied"
+    assert event.event_metadata["redaction_refused"] == "redaction_unsupported_encoding"
+    assert event.event_metadata["redaction_refused_offset"] == MIDSTREAM_REFUSED_AT
+    assert "offset" not in event.event_metadata
+
+
+def test_open_without_a_change_of_encoding_says_nothing_refused(session, viewer):
+    _, client, source, folder = viewer
+    (folder / "app.log").write_bytes(MIDSTREAM_START + MIDSTREAM_UTF16)
+    response = _open(client, source, "app.log")
+    assert_no_midstream_secret(response.content)
+    event = session.exec(select(AuditLog).where(AuditLog.action == "file.open")).one()
+    assert "redaction_refused" not in event.event_metadata
+    assert "redaction_refused_offset" not in event.event_metadata
+
+
+def test_follow_refuses_the_rest_part_way_and_audits_every_such_poll(session, viewer):
+    _, client, source, folder = viewer
+    log = folder / "app.log"
+    log.write_bytes(MIDSTREAM_START)
+    first = _poll(client, source, 0, start=True)
+    assert first.content == MIDSTREAM_START
+    with log.open("ab") as f:
+        f.write(MIDSTREAM[len(MIDSTREAM_START) :])
+
+    # Not the start of the Tail, but the refusal is audited all the same,
+    # with the offset this poll read from.
+    response = _poll(client, source, len(MIDSTREAM_START), first.headers["x-follow-head"])
+    assert response.content.endswith(b"[redacted: unsupported encoding]")
+    assert_no_midstream_secret(response.content)
+    assert response.headers["x-follow-offset"] == str(len(MIDSTREAM))
+    events = session.exec(select(AuditLog).where(AuditLog.action == "file.follow")).all()
+    assert len(events) == 2
+    assert events[0].event_metadata["offset"] == 0
+    assert "redaction_refused" not in events[0].event_metadata
+    assert "redaction_refused_offset" not in events[0].event_metadata
+    assert events[1].event_metadata["offset"] == len(MIDSTREAM_START)
+    assert events[1].event_metadata["redaction_refused"] == "redaction_unsupported_encoding"
+    assert events[1].event_metadata["redaction_refused_offset"] == MIDSTREAM_REFUSED_AT
+
+    # A later poll that meets no UTF-32 isn't audited.
+    with log.open("ab") as f:
+        f.write(b"more plain\n")
+    later = _poll(client, source, len(MIDSTREAM), response.headers["x-follow-head"])
+    assert later.content == b"more plain\n"
+    assert len(session.exec(select(AuditLog).where(AuditLog.action == "file.follow")).all()) == 2
+
+
 class _FakeSFTP:
     def __init__(self, files: dict[str, str]):
         self.files = {path: content.encode() for path, content in files.items()}

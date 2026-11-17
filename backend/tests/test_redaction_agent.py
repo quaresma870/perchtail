@@ -50,9 +50,13 @@ from fastapi.testclient import TestClient
 from sqlmodel import select
 
 from tests.test_redaction_endpoints import (
+    MIDSTREAM,
+    MIDSTREAM_REFUSED_AT,
+    MIDSTREAM_START,
     SAMPLE,
     _enable_redaction,
     all_rules,
+    assert_no_midstream_secret,
     assert_no_secret,
     compressed_sample,
 )
@@ -223,7 +227,7 @@ class FakeAgent:
         out, result, head = self._redact(content, block, final)
         sink.write(out)
         key = base64.b64decode(block["head_key"])
-        return {
+        answer = {
             "type": "fetch_result",
             "streamed": True,
             "chunks": 1,
@@ -236,6 +240,9 @@ class FakeAgent:
             "counts": result.counts,
             "head_digest": head_digest(key, head, result.source_offset),
         }
+        if result.refused_at is not None:
+            answer["refused_encoding_at"] = result.refused_at
+        return answer
 
     def _read_range(self, fields, block):
         assert "head_length" not in fields  # the start of the file is never asked for
@@ -287,14 +294,19 @@ class FakeAgent:
             body = marker(long_line_label(min(read_end - offset, FOLLOW_WINDOW_BYTES))) + b"\n"
             counts, partial, next_offset = {}, 0, read_end
         next_offset = max(next_offset, offset)
-        if fields.get("with_line_offsets"):
+        if window.refused_at is not None and not skipped:
+            answer["refused_encoding_at"] = read_from + window.refused_at
+        elif fields.get("with_line_offsets"):
             # As the agent's changedLines: the original length of each whole
-            # redacted line whose length changed.
+            # redacted line whose length changed (lines end at every newline
+            # byte from where it was read as UTF16_UNSURE).
             begin = window.begin
+            union = window.end if window.union_at is None else window.union_at
             originals = (
                 [next_offset - offset]
                 if skipped
-                else _line_lengths(data[begin : window.end], encoding, read_from + begin)
+                else _line_lengths(data[begin:union], encoding, read_from + begin)
+                + _line_lengths(data[union : window.end], None, read_from + union)
             )
             lines = body[: len(body) - partial].split(b"\n")[:-1]
             assert len(lines) == len(originals)
@@ -360,6 +372,13 @@ class FakeAgent:
             sink.start_member({**announce, "gunzipped": gunzipped})
             sink.write(out)
             seq += 2
+            if result.refused_at is not None:
+                # As the agent: UTF-32 part way, announced again as skipped.
+                sink.start_member(
+                    {**announce, "gunzipped": gunzipped, "skipped": "unsupported_encoding"}
+                )
+                seq += 1
+                continue
             total_size += len(out)
             source_size += result.source_size
             for rule, count in result.counts.items():
@@ -970,6 +989,114 @@ def test_a_folder_zip_is_redacted_on_the_agent(session, agent_source, scratch_st
             assert fields["redact"]["output_encoding"] == "source"
     event = _audit(session, "folder.download")
     assert event.event_metadata["redaction_at"] == "agent"
+    assert _scratch_files(scratch_store) == []
+
+
+# -- content that turns UTF-32 part way ----------------------------------------------
+
+
+def test_open_and_follow_on_the_agent_refuse_utf32_part_way(session, agent_source):
+    client, source, agent = agent_source
+    agent.files["app.log"] = MIDSTREAM
+
+    opened = client.get(f"/sources/{source.id}/open", params={"path": "app.log"})
+    assert opened.status_code == 200, opened.text
+    assert opened.content.endswith(b"[redacted: unsupported encoding]")
+    assert_no_midstream_secret(opened.content)
+    assert opened.headers["x-source-offset"] == str(len(MIDSTREAM))
+    event = _audit(session, "file.open")
+    assert event.event_metadata["redaction_at"] == "agent"
+    assert event.event_metadata["redaction_refused"] == "redaction_unsupported_encoding"
+    assert event.event_metadata["redaction_refused_offset"] == MIDSTREAM_REFUSED_AT
+    assert "offset" not in event.event_metadata
+
+    polled = client.get(
+        f"/sources/{source.id}/follow",
+        params={"path": "app.log", "offset": len(MIDSTREAM_START)},
+    )
+    assert polled.status_code == 200, polled.text
+    assert polled.content.endswith(b"[redacted: unsupported encoding]")
+    assert_no_midstream_secret(polled.content)
+    assert polled.headers["x-follow-offset"] == str(len(MIDSTREAM))
+    # The first poll of this Tail: audited with the offset it starts from
+    # and the refusal.
+    follow = _audit(session, "file.follow")
+    assert follow.event_metadata["offset"] == len(MIDSTREAM_START)
+    assert follow.event_metadata["redaction_refused"] == "redaction_unsupported_encoding"
+    assert follow.event_metadata["redaction_refused_offset"] == MIDSTREAM_REFUSED_AT
+
+    # The same poll again doesn't start a Tail, but its refusal is audited.
+    again = client.get(
+        f"/sources/{source.id}/follow",
+        params={"path": "app.log", "offset": len(MIDSTREAM_START)},
+    )
+    assert again.status_code == 200, again.text
+    follows = session.exec(select(AuditLog).where(AuditLog.action == "file.follow")).all()
+    assert len(follows) == 2
+    assert follows[1].event_metadata["offset"] == len(MIDSTREAM_START)
+    assert follows[1].event_metadata["redaction_refused_offset"] == MIDSTREAM_REFUSED_AT
+
+    # A later poll of the same Tail that meets no UTF-32 isn't audited.
+    agent.files["app.log"] = MIDSTREAM + b"more plain\n"
+    later = client.get(
+        f"/sources/{source.id}/follow",
+        params={"path": "app.log", "offset": len(MIDSTREAM)},
+    )
+    assert later.status_code == 200, later.text
+    assert later.content == b"more plain\n"
+    assert len(session.exec(select(AuditLog).where(AuditLog.action == "file.follow")).all()) == 2
+
+
+def test_an_agent_answer_with_a_refusal_out_of_range_is_discarded(agent_source):
+    client, source, agent = agent_source
+    agent.files["app.log"] = MIDSTREAM
+    agent.tamper = {"refused_encoding_at": len(MIDSTREAM) + 1}
+    response = client.get(f"/sources/{source.id}/open", params={"path": "app.log"})
+    assert response.status_code == 502
+
+
+def test_downloads_on_the_agent_that_turn_utf32_part_way(session, agent_source, scratch_store):
+    client, source, agent = agent_source
+    agent.files["app.log"] = MIDSTREAM
+    agent.files["logs.zip"] = _zip_bytes({"mixed.log.gz": gzip.compress(MIDSTREAM)})
+    agent.files["dir/app.log"] = SAMPLE_BYTES
+    agent.files["dir/mixed.log"] = MIDSTREAM
+    agent.files["dir/mixed.log.gz"] = gzip.compress(MIDSTREAM)
+    agent.files["dir/bundle.zip"] = _zip_bytes({"a.log": SAMPLE_BYTES, "mixed.log": MIDSTREAM})
+
+    # A file is sent with the marker, and its entry says where it was refused.
+    plain = client.get(f"/sources/{source.id}/download", params={"path": "app.log"})
+    assert plain.status_code == 200, plain.text
+    assert plain.content.endswith(b"[redacted: unsupported encoding]")
+    assert_no_midstream_secret(plain.content)
+    download = _audit(session, "file.download")
+    assert download.event_metadata["redaction_refused"] == "redaction_unsupported_encoding"
+    assert download.event_metadata["redaction_refused_offset"] == MIDSTREAM_REFUSED_AT
+    assert "offset" not in download.event_metadata
+
+    # A .gz member is compressed again whole: refused, as on the server.
+    gz_member = client.get(
+        f"/sources/{source.id}/download", params={"path": "logs.zip", "member": "mixed.log.gz"}
+    )
+    assert gz_member.status_code == 409
+    denied = _audit(session, "file.download_denied")
+    assert denied.event_metadata["reason"] == "redaction_unsupported_encoding"
+
+    # In a folder ZIP, such files and members are left out and listed.
+    response = client.get(f"/sources/{source.id}/download-zip", params={"path": "dir"})
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert sorted(zf.namelist()) == ["REDACTION-SKIPPED.txt", "app.log", "bundle.zip"]
+        with zipfile.ZipFile(io.BytesIO(zf.read("bundle.zip"))) as inner:
+            assert sorted(inner.namelist()) == ["REDACTION-SKIPPED.txt", "a.log"]
+        listed = zf.read("REDACTION-SKIPPED.txt").decode()
+        for name in zf.namelist():
+            assert_no_midstream_secret(zf.read(name))
+    for name in ("mixed.log", "mixed.log.gz", "bundle.zip/mixed.log"):
+        assert f"{name}: in an encoding redaction doesn't support (UTF-32)" in listed
+    late = _audit(session, "file.download_redaction_skipped")
+    assert late.event_metadata["reason"] == "redaction_unsupported_encoding"
+    assert late.event_metadata["skipped"] == ["dir/mixed.log"]
     assert _scratch_files(scratch_store) == []
 
 
