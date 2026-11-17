@@ -135,7 +135,7 @@ func refusal(t *testing.T, sent []any, code string) ErrorResult {
 	return result
 }
 
-func TestConnectAnnouncesRedaction(t *testing.T) {
+func TestConnectAnnouncesRedactionAndLinks(t *testing.T) {
 	got := make(chan string, 1)
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -147,8 +147,8 @@ func TestConnectAnnouncesRedaction(t *testing.T) {
 	defer server.Close()
 	cfg := Config{ServerURL: "ws" + strings.TrimPrefix(server.URL, "http"), Token: "t"}
 	_, _ = connectAndServe(context.Background(), cfg, newUpgrader(cfg))
-	if features := <-got; features != "redaction/1" {
-		t.Fatalf("features header = %q, want redaction/1", features)
+	if features := <-got; features != "redaction/1,links/1" {
+		t.Fatalf("features header = %q, want redaction/1,links/1", features)
 	}
 }
 
@@ -560,7 +560,7 @@ func TestListArchive(t *testing.T) {
 		{name: "fifo", flag: tar.TypeFifo},
 	}))
 
-	zipped, truncated, err := ListArchive(base, "logs.ZIP", 0)
+	zipped, truncated, err := ListArchive(base, "logs.ZIP", "", 0)
 	if err != nil || truncated {
 		t.Fatal(err, truncated)
 	}
@@ -573,7 +573,7 @@ func TestListArchive(t *testing.T) {
 		t.Errorf("zip members = %+v", zipped)
 	}
 
-	tarred, _, err := ListArchive(base, "logs.tar.gz", 0)
+	tarred, _, err := ListArchive(base, "logs.tar.gz", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,11 +585,11 @@ func TestListArchive(t *testing.T) {
 		t.Errorf("tar members = %+v (links and FIFOs aren't listed)", tarred)
 	}
 
-	first, truncated, err := ListArchive(base, "logs.tar.gz", 1)
+	first, truncated, err := ListArchive(base, "logs.tar.gz", "", 1)
 	if err != nil || !truncated || len(first) != 1 {
 		t.Errorf("capped: %+v %v %v", first, truncated, err)
 	}
-	if _, _, err := ListArchive(base, "../logs.zip", 0); err == nil {
+	if _, _, err := ListArchive(base, "../logs.zip", "", 0); err == nil {
 		t.Error("an unsafe path was listed")
 	}
 	writeFile(t, base, "app.log", []byte("x"))

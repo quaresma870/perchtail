@@ -22,8 +22,12 @@ def _rule(order, type_, pattern, kind=PatternKind.glob) -> Rule:
     return Rule(source_id=1, order=order, type=type_, pattern=pattern, pattern_kind=kind)
 
 
-def _mock_registry(monkeypatch, send_command_sync_result=None, side_effect=None):
+def _mock_registry(
+    monkeypatch, send_command_sync_result=None, side_effect=None, features=("links/1",)
+):
     fake_registry = MagicMock()
+    fake_registry.is_connected.return_value = True
+    fake_registry.features.return_value = frozenset(features)
     if side_effect is not None:
         fake_registry.send_command_sync.side_effect = side_effect
     else:
@@ -109,7 +113,8 @@ def test_local_copy_yields_a_temp_path_with_the_fetched_content(monkeypatch):
 def test_windows_agent_rules_ignore_case(monkeypatch):
     """#189: NTFS treats SECRET and secret as one folder, so an exclude
     written as secret/** must hide SECRET/ on a Windows agent, as it does
-    over SMB and WinRM. Other agents keep case-sensitive rules."""
+    over SMB and WinRM. Other agents keep case-sensitive include rules;
+    exclude rules ignore case everywhere."""
     from app.rules import rules_case_insensitive
 
     _mock_registry(
@@ -132,7 +137,9 @@ def test_windows_agent_rules_ignore_case(monkeypatch):
 
     for other in (_source(agent_os="linux"), _source(agent_os=None)):
         assert rules_case_insensitive(other) is False
-        assert [e.name for e in agent_module.list_directory(other, rules)] == ["SECRET"]
+        # SECRET is hidden by the exclude whatever the case; App.LOG isn't
+        # matched by the case-sensitive include.
+        assert [e.name for e in agent_module.list_directory(other, rules)] == []
 
 
 def test_fetch_file_asks_for_chunks_and_writes_the_stream(monkeypatch, tmp_path):
@@ -189,7 +196,14 @@ def test_read_range_sends_the_offset_and_a_capped_length(monkeypatch):
         b"line two\n",
     )
     registry.send_command_sync.assert_called_once_with(
-        7, "read_range", path="app.log", offset=9, length=1 << 20, head_length=4096
+        7,
+        "read_range",
+        path="app.log",
+        expect_real="app.log",
+        offset=9,
+        length=1 << 20,
+        head_length=4096,
+        require_feature="links/1",
     )
 
 

@@ -279,9 +279,9 @@
           {#if source.agent_os === 'windows'}
             Windows — rules ignore case
           {:else if source.agent_os}
-            {osName(source.agent_os)} — rules are case-sensitive
+            {osName(source.agent_os)} — include rules are case-sensitive
           {:else}
-            not reported yet (agent older than 0.5.1, or never connected) — rules are case-sensitive
+            not reported yet (agent older than 0.5.1, or never connected) — include rules are case-sensitive
           {/if}
         </dd>
         <dt>Agent version</dt>

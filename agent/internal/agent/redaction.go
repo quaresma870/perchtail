@@ -230,11 +230,20 @@ func errorResult(cmd Command, errType string, err error) ErrorResult {
 	}
 	result := ErrorResult{Type: errType, ID: cmd.ID, Error: err.Error()}
 	var tooLarge *TooLargeError
+	var link *LinkTargetError
 	switch {
 	case errors.As(err, &tooLarge):
 		result.Code, result.Size = "too_large", tooLarge.Size
 	case errors.Is(err, ErrMemberNotFound):
 		result.Code = "not_found"
+	case errors.As(err, &link):
+		// Where it really is goes to the server only, which checks its
+		// rules on it (FeatureLinks); nothing of the content was read.
+		result.Code, result.Outside = "link_target", link.Outside
+		if !link.Outside {
+			real := link.Real
+			result.Real = &real
+		}
 	}
 	return result
 }
@@ -388,7 +397,7 @@ func withContent(basePath string, cmd Command, redacting bool, fn func(io.Reader
 	default:
 		return fmt.Errorf("unsupported decompression %q", cmd.Decompress)
 	}
-	f, closeFile, err := openFile(basePath, cmd.Path)
+	f, closeFile, err := openFile(basePath, cmd.Path, cmd.ExpectReal)
 	if err != nil {
 		return err
 	}
@@ -507,7 +516,7 @@ func serveFetchArchive(ctx context.Context, cfg Config, cmd Command, send func(a
 }
 
 func fetchArchive(basePath string, cmd Command, red *redaction, out *chunkSender, total *RedactionInfo) error {
-	f, closeFile, err := openFile(basePath, cmd.Path)
+	f, closeFile, err := openFile(basePath, cmd.Path, cmd.ExpectReal)
 	if err != nil {
 		return err
 	}
@@ -682,11 +691,13 @@ func sendArchiveMember(
 // The file's first bytes are only used for the digests, never sent.
 // withLineOffsets (the alerts) adds ChangedLines, so the server knows where
 // each redacted line starts in the original.
-func HandleReadRangeRedacted(basePath, relPath string, offset, length int64, red *redaction, withLineOffsets bool) (RedactedReadRangeResult, error) {
+//
+// The file must really be at expectReal (openFile).
+func HandleReadRangeRedacted(basePath, relPath, expectReal string, offset, length int64, red *redaction, withLineOffsets bool) (RedactedReadRangeResult, error) {
 	if offset < 0 || length < 0 {
 		return RedactedReadRangeResult{}, fmt.Errorf("invalid range: offset %d, length %d", offset, length)
 	}
-	f, closeFile, err := openFile(basePath, relPath)
+	f, closeFile, err := openFile(basePath, relPath, expectReal)
 	if err != nil {
 		return RedactedReadRangeResult{}, err
 	}

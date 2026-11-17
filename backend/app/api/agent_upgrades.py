@@ -46,6 +46,7 @@ from app.auth.rbac import (
     require_global_capability,
     source_in_reach,
 )
+from app.collectors.agent import agent_update_required
 from app.db import get_session
 from app.logging_config import get_logger
 from app.models import AgentUpgradeRun, Protocol, Source
@@ -286,6 +287,9 @@ class AgentRow(BaseModel):
     connected: bool
     agent_version: str | None
     outdated: bool
+    # The agent last connected without saying where links lead
+    # (FEATURE_LINKS): its files can't be read until it is updated.
+    update_required: bool
     policy: policies.SourcePolicy
     effective_policy: policies.SystemPolicy
     failures: int
@@ -317,6 +321,7 @@ def _row(
         connected=get_agent_registry().is_connected(source.id),
         agent_version=source.agent_version,
         outdated=is_newer(APP_VERSION, source.agent_version),
+        update_required=agent_update_required(source),
         policy=(
             source.agent_upgrade_policy
             if source.agent_upgrade_policy in policies.SOURCE_POLICIES

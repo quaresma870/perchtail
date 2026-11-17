@@ -115,7 +115,7 @@ func connectAndServe(ctx context.Context, cfg Config, upgrades *upgrader) (time.
 	// NTFS does (#189); it can only know which OS this is if told.
 	header.Set(OSHeader, runtime.GOOS)
 	header.Set(VersionHeader, Version)
-	header.Set(FeaturesHeader, FeatureRedaction)
+	header.Set(FeaturesHeader, FeatureRedaction+","+FeatureLinks)
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.ServerURL, header)
 	if err != nil {
@@ -318,7 +318,7 @@ func serveCommand(ctx context.Context, cfg Config, cmd Command, send func(any) e
 
 	var sendErr error
 	seq := 0
-	chunks, size, err := StreamFetch(cfg.BasePath, cmd.Path, cmd.ChunkSize, cmd.MaxBytes,
+	chunks, size, err := StreamFetch(cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.ChunkSize, cmd.MaxBytes,
 		func(data []byte) error {
 			if ctx.Err() != nil {
 				return errCancelled
@@ -339,12 +339,7 @@ func serveCommand(ctx context.Context, cfg Config, cmd Command, send func(any) e
 		return nil
 	}
 	if err != nil {
-		result := ErrorResult{Type: "fetch_error", ID: cmd.ID, Error: err.Error()}
-		var tooLarge *TooLargeError
-		if errors.As(err, &tooLarge) {
-			result.Code, result.Size = "too_large", tooLarge.Size
-		}
-		return send(result)
+		return send(errorResult(cmd, "fetch_error", err))
 	}
 	return send(FetchEnd{Type: "fetch_result", ID: cmd.ID, Streamed: true, Chunks: chunks, Size: size})
 }
@@ -356,15 +351,18 @@ func serveCommand(ctx context.Context, cfg Config, cmd Command, send func(any) e
 func handleCommand(cfg Config, cmd Command) any {
 	switch cmd.Type {
 	case "list":
-		entries, truncated, err := ListDirectory(cfg.BasePath, cmd.Path, cmd.MaxEntries)
+		listing, err := ListDirectory(cfg.BasePath, cmd.Path, cmd.MaxEntries)
 		if err != nil {
-			return ErrorResult{Type: "list_error", ID: cmd.ID, Error: err.Error()}
+			return errorResult(cmd, "list_error", err)
 		}
-		return ListResult{Type: "list_result", ID: cmd.ID, Entries: entries, Truncated: truncated}
+		return ListResult{
+			Type: "list_result", ID: cmd.ID, Entries: listing.Entries,
+			Truncated: listing.Truncated, RealDir: listing.RealDir,
+		}
 	case "list_archive":
-		members, truncated, err := ListArchive(cfg.BasePath, cmd.Path, cmd.MaxEntries)
+		members, truncated, err := ListArchive(cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.MaxEntries)
 		if err != nil {
-			return ErrorResult{Type: "list_archive_error", ID: cmd.ID, Error: err.Error()}
+			return errorResult(cmd, "list_archive_error", err)
 		}
 		return ListArchiveResult{Type: "list_archive_result", ID: cmd.ID, Members: members, Truncated: truncated}
 	case "fetch":
@@ -372,9 +370,9 @@ func handleCommand(cfg Config, cmd Command) any {
 			// Only ever streamed (serveCommand); never the content as it is.
 			return ErrorResult{Type: "fetch_error", ID: cmd.ID, Error: "this fetch can only be streamed"}
 		}
-		content, err := HandleFetch(cfg.BasePath, cmd.Path)
+		content, err := HandleFetch(cfg.BasePath, cmd.Path, cmd.ExpectReal)
 		if err != nil {
-			return ErrorResult{Type: "fetch_error", ID: cmd.ID, Error: err.Error()}
+			return errorResult(cmd, "fetch_error", err)
 		}
 		return FetchResult{
 			Type:       "fetch_result",
@@ -387,16 +385,16 @@ func handleCommand(cfg Config, cmd Command) any {
 			if err != nil {
 				return errorResult(cmd, "read_range_error", err)
 			}
-			result, err := HandleReadRangeRedacted(cfg.BasePath, cmd.Path, cmd.Offset, cmd.Length, red, cmd.WithLineOffsets)
+			result, err := HandleReadRangeRedacted(cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.Offset, cmd.Length, red, cmd.WithLineOffsets)
 			if err != nil {
 				return errorResult(cmd, "read_range_error", err)
 			}
 			result.Type, result.ID = "read_range_result", cmd.ID
 			return result
 		}
-		size, head, data, err := HandleReadRange(cfg.BasePath, cmd.Path, cmd.Offset, cmd.Length, cmd.HeadLength)
+		size, head, data, err := HandleReadRange(cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.Offset, cmd.Length, cmd.HeadLength)
 		if err != nil {
-			return ErrorResult{Type: "read_range_error", ID: cmd.ID, Error: err.Error()}
+			return errorResult(cmd, "read_range_error", err)
 		}
 		return ReadRangeResult{
 			Type:    "read_range_result",

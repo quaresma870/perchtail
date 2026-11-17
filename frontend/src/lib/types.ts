@@ -656,6 +656,9 @@ export interface AgentRow {
   connected: boolean
   agent_version: string | null
   outdated: boolean
+  // It last connected without saying where links lead: its files can't be
+  // read until it's updated.
+  update_required: boolean
   policy: AgentUpgradePolicy
   effective_policy: AgentUpgradeSystemPolicy
   failures: number

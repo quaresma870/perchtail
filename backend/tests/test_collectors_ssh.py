@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import app.collectors.ssh as ssh_module
 import paramiko
 import pytest
+from app.collectors.base import LinkTargetHiddenError
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 from structlog.testing import capture_logs
 
@@ -596,11 +597,93 @@ def test_fetch_through_an_inward_symlink_reads_the_resolved_target(monkeypatch, 
     sftp = _escape_fixture()
     monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
 
-    ssh_module.fetch_file(_source(), "inner.log", tmp_path / "out")
+    checked = []
+
+    def target_check(real):
+        checked.append(real)
+        return True
+
+    ssh_module.fetch_file(_source(), "inner.log", tmp_path / "out", target_check=target_check)
 
     assert (tmp_path / "out").read_bytes() == b"hello"
-    # The resolved real path is what gets read, not the link's own path.
+    # The resolved real path is what gets read, not the link's own path,
+    # and the rules were asked about it.
     assert sftp.fetched_paths == ["/var/log/appname/app.log"]
+    assert checked == ["app.log"]
+
+
+def _hidden_target_fixture():
+    return FakeSFTPClient(
+        listing=[
+            FakeAttr("app.log", False, 5),
+            FakeAttr("current.log", False, 9, is_link=True),
+            FakeAttr("sneaky.log", False, 9, is_link=True),
+            FakeAttr("logs", False, 4, is_link=True),
+        ],
+        files={
+            "/var/log/appname/app.log": b"hello",
+            "/var/log/appname/secret/key.log": b"TOP SECRET",
+        },
+        symlinks={
+            "/var/log/appname/current.log": "/var/log/appname/app.log",
+            "/var/log/appname/sneaky.log": "/var/log/appname/secret/key.log",
+            "/var/log/appname/logs": "/var/log/appname/secret",
+        },
+        dirs={"/var/log/appname", "/var/log/appname/secret"},
+    )
+
+
+_HIDE_SECRET = [_rule(0, RuleType.include, "**/*"), _rule(1, RuleType.exclude, "secret/**")]
+
+
+def test_listing_leaves_out_inward_links_whose_target_the_rules_hide(monkeypatch):
+    sftp = _hidden_target_fixture()
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    entries = {e.name: e for e in ssh_module.list_directory(_source(), _HIDE_SECRET)}
+
+    assert set(entries) == {"app.log", "current.log"}
+    assert entries["current.log"].target == "app.log"
+    assert entries["app.log"].target is None
+
+
+def test_browse_into_a_linked_folder_whose_target_is_hidden_is_refused(monkeypatch):
+    sftp = _hidden_target_fixture()
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    with pytest.raises(LinkTargetHiddenError):
+        ssh_module.list_directory(_source(), _HIDE_SECRET, "logs")
+    assert sftp.requested_paths == []
+
+
+def test_fetch_through_a_link_to_a_hidden_file_is_refused(monkeypatch, tmp_path):
+    from app.collectors.registry import CONNECTORS
+
+    sftp = _hidden_target_fixture()
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    with pytest.raises(LinkTargetHiddenError):
+        CONNECTORS[Protocol.ssh].fetch_file(
+            _source(), "sneaky.log", tmp_path / "out", rules=_HIDE_SECRET
+        )
+    assert sftp.fetched_paths == []
+    CONNECTORS[Protocol.ssh].fetch_file(
+        _source(), "current.log", tmp_path / "out", rules=_HIDE_SECRET
+    )
+    assert (tmp_path / "out").read_bytes() == b"hello"
+
+
+def test_fetch_through_an_inward_symlink_needs_its_target_allowed(monkeypatch, tmp_path):
+    sftp = _escape_fixture()
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    with pytest.raises(LinkTargetHiddenError):
+        ssh_module.fetch_file(_source(), "inner.log", tmp_path / "out")
+    with pytest.raises(LinkTargetHiddenError):
+        ssh_module.fetch_file(
+            _source(), "inner.log", tmp_path / "out", target_check=lambda real: False
+        )
+    assert sftp.fetched_paths == []
 
 
 def test_a_symlinked_base_path_is_resolved_before_comparing(monkeypatch, tmp_path):

@@ -21,9 +21,15 @@ import re
 from dataclasses import replace
 from types import ModuleType
 
-from app.collectors.base import DirEntry, DirListing, SourceNotFoundError, is_truncated
+from app.collectors.base import (
+    DirEntry,
+    DirListing,
+    LinkTargetHiddenError,
+    SourceNotFoundError,
+    is_truncated,
+)
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
-from app.rules import is_entry_visible, rules_case_insensitive
+from app.rules import is_entry_visible, is_linked_entry_visible, rules_case_insensitive
 
 # The admin-configurable limit (Settings -> System, `source_max_roots`)
 # can be set anywhere from 1 (several folders turned off) to this hard cap.
@@ -110,10 +116,22 @@ def list_directory(
     entries = DirListing()
     listed = module.list_directory(rooted, ALLOW_ALL, rest)
     entries.truncated = is_truncated(listed)
+    # A folder a link leads to (DirListing.real_dir) must be one the rules
+    # show too, on its virtual path, as for a single-root source.
+    real_dir = getattr(listed, "real_dir", None)
+    if real_dir is not None:
+        entries.real_dir = f"{label}/{real_dir}" if real_dir else label
+        if not is_entry_visible(entries.real_dir, True, rules, case_insensitive=case_insensitive):
+            raise LinkTargetHiddenError(relative_path)
     for entry in listed:
         full = f"{label}/{entry.path}"
-        if is_entry_visible(full, entry.is_dir, rules, case_insensitive=case_insensitive):
-            entries.append(replace(entry, path=full))
+        target = None
+        if entry.target is not None:
+            target = f"{label}/{entry.target}" if entry.target else label
+        if is_linked_entry_visible(
+            full, entry.is_dir, target, rules, case_insensitive=case_insensitive
+        ):
+            entries.append(replace(entry, path=full, target=target))
     return entries
 
 

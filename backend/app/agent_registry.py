@@ -61,7 +61,10 @@ class AgentCommandError(AgentError):
     `message_type` is the message's own type: "unknown_error" means the
     agent doesn't know the command (#319: an agent older than 0.7 asked to
     upgrade); "redaction_error" that it refused to redact (#382, #249), with
-    `rule` the id of the rule it can't run, when that's why."""
+    `rule` the id of the rule it can't run, when that's why. Code
+    "link_target" (FEATURE_LINKS) refuses a path that isn't where the
+    command expected: `real` is where it is, relative to the base path, or
+    `outside` says it leads out of the base path."""
 
     def __init__(
         self,
@@ -71,18 +74,28 @@ class AgentCommandError(AgentError):
         size: int | None = None,
         message_type: str | None = None,
         rule: int | None = None,
+        real: str | None = None,
+        outside: bool = False,
     ):
         super().__init__(message)
         self.code = code
         self.size = size
         self.message_type = message_type
         self.rule = rule
+        self.real = real
+        self.outside = outside
 
 
 # What a connection announced it can do (X-PerchTail-Agent-Features): the
 # agent redacts on its host what it sends for a command with a `redact`
 # block, and lists and extracts archives itself (#382, #249).
 FEATURE_REDACTION = "redaction/1"
+# The agent says where links lead: a listing carries each entry's real path
+# when a link leads elsewhere, and a content command is read only when its
+# path really is where the command expects (`expect_real`), refused with a
+# "link_target" error otherwise (collectors/agent.py). Content is never read
+# from an agent without it.
+FEATURE_LINKS = "links/1"
 
 
 class ArchiveSink(Protocol):
@@ -365,6 +378,7 @@ class AgentRegistry:
         message_type = message.get("type", "")
         if isinstance(message_type, str) and message_type.endswith("_error"):
             code = message.get("code")
+            real = message.get("real")
             future.set_exception(
                 AgentCommandError(
                     str(message.get("error", "agent command failed")),
@@ -372,6 +386,8 @@ class AgentRegistry:
                     size=as_int(message.get("size")),
                     message_type=message_type,
                     rule=as_int(message.get("rule")),
+                    real=real if isinstance(real, str) else None,
+                    outside=message.get("outside") is True,
                 )
             )
             return
@@ -478,19 +494,23 @@ class AgentRegistry:
         sink: BinaryIO | ArchiveSink | None = None,
         limit: int | None = None,
         archive: bool = False,
-        require_feature: str | None = None,
+        require_feature: str | tuple[str, ...] | None = None,
     ) -> dict:
         with self._lock:
             connection = self._connections.get(source_id)
         if connection is None:
             raise AgentNotConnectedError(f"no agent connected for source {source_id}")
-        if require_feature is not None and require_feature not in connection.features:
+        required = (require_feature,) if isinstance(require_feature, str) else require_feature
+        for feature in required or ():
+            if feature in connection.features:
+                continue
             # The agent reconnected without it since the caller checked: the
             # command is never sent, so an agent that would ignore it can't
-            # answer with what it was meant to keep on its host.
+            # answer with what it was meant to keep on its host. A missing
+            # FEATURE_LINKS is coded apart: the agent must be updated.
             raise AgentCommandError(
-                f"the agent doesn't support {require_feature}",
-                code="feature_missing",
+                f"the agent doesn't support {feature}",
+                code="links_missing" if feature == FEATURE_LINKS else "feature_missing",
                 message_type="feature_error",
             )
 
@@ -546,7 +566,7 @@ class AgentRegistry:
         sink: BinaryIO | ArchiveSink | None = None,
         limit: int | None = None,
         archive: bool = False,
-        require_feature: str | None = None,
+        require_feature: str | tuple[str, ...] | None = None,
         command_id: str | None = None,
         **fields,
     ) -> dict:
@@ -560,9 +580,10 @@ class AgentRegistry:
         timeout then applies to the wait for each chunk, not to the whole
         transfer. With `archive` (a fetch_archive, #382, #249), `sink` is an
         ArchiveSink and also gets the archive_member messages, and `limit`
-        counts the content of every member. With `require_feature`, the
-        command is only sent to a connection that announced that feature
-        (AgentCommandError coded "feature_missing" otherwise). `command_id`
+        counts the content of every member. With `require_feature` (one or
+        several), the command is only sent to a connection that announced
+        them (AgentCommandError coded "feature_missing" otherwise, or
+        "links_missing" for FEATURE_LINKS). `command_id`
         sets the command's id, for a caller that tracks later messages about
         it (an upgrade's progress, #319)."""
         if self._loop is None:

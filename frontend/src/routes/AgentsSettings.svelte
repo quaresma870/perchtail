@@ -459,7 +459,12 @@
                     <span class="status status-fail">not connected</span>
                   {/if}
                 </td>
-                <td class:outdated={row.outdated}>{row.agent_version ?? 'unknown'}</td>
+                <td class:outdated={row.outdated}>
+                  {row.agent_version ?? 'unknown'}
+                  {#if row.update_required}
+                    <div class="sub update-required">Update required: its files can't be read until it's updated</div>
+                  {/if}
+                </td>
                 <td>{overview.version}</td>
                 <td>
                   <select
@@ -716,6 +721,7 @@
     color: var(--danger);
   }
   .sub.suspended,
+  .sub.update-required,
   .outdated {
     color: var(--warning);
   }

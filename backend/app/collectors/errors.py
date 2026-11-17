@@ -14,6 +14,7 @@ from types import ModuleType
 from app import source_roots
 from app.collectors.base import (
     FetchTooLargeError,
+    LinkTargetHiddenError,
     PathOutsideBaseError,
     RangeNotSupportedError,
     SourceAuthError,
@@ -24,7 +25,9 @@ from app.collectors.base import (
     SourcePermissionError,
     SourceTLSError,
     SourceUnreachableError,
+    TargetCheck,
 )
+from app.rules import is_visible, rules_case_insensitive
 from app.scratch import ScratchFullError
 
 Translator = Callable[[BaseException], SourceError | None]
@@ -240,6 +243,10 @@ def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | 
     if isinstance(exc, AgentTimeoutError):
         return SourceUnreachableError(text, public_message="The agent didn't answer in time")
     if isinstance(exc, AgentCommandError):
+        if exc.code == "link_target":
+            # A link out of the base path (FEATURE_LINKS): 404, audited as
+            # link_target_hidden, like a link the rules hide.
+            return LinkTargetHiddenError(text)
         lowered = text.lower()
         # Go's os.Root refuses a path through a symlink that leaves the base
         # ("openat x: path escapes from parent"), and the agent refuses
@@ -308,6 +315,22 @@ def translated(translate: Translator) -> Iterator[None]:
         raise mapped from exc
 
 
+def target_check_for(source, rules, label: str = "") -> TargetCheck:
+    """The target_check (collectors.base.require_target) for a read on
+    `source` with its visibility `rules`: where a link leads must be a file
+    the rules show, on its virtual path (`label/...` inside a root of a
+    source with several). None, so no link is followed, without rules."""
+    if rules is None:
+        return None
+    case_insensitive = rules_case_insensitive(source)
+    prefix = f"{label}/" if label else ""
+
+    def check(real: str) -> bool:
+        return is_visible(prefix + real, rules, case_insensitive=case_insensitive)
+
+    return check
+
+
 class TranslatingConnector:
     """Wraps a collector module so every list/fetch raises SourceError types.
     Anything else (helpers like local.resolve_path) is forwarded as is."""
@@ -329,34 +352,61 @@ class TranslatingConnector:
                 return source_roots.list_directory(self._module, source, rules, relative_path)
             return self._module.list_directory(source, rules, relative_path)
 
-    def fetch_file(self, source, relative_path: str, destination):
-        with tracked(source), translated(self._translate):
-            if source_roots.is_multi_root(source):
-                source, relative_path = source_roots.split(source, relative_path)
-            return self._module.fetch_file(source, relative_path, destination)
+    def _link_kwargs(self, source, rules, label: str) -> dict:
+        """For a connector that follows links (FOLLOWS_LINKS): the
+        target_check its reads get, built from the source's `rules` on the
+        virtual path (`label/...` for a root of a source with several). With
+        no rules, no link is followed (fail closed). SMB and WinRM refuse
+        every link themselves and take no target_check."""
+        if not getattr(self._module, "FOLLOWS_LINKS", False):
+            return {}
+        return {"target_check": target_check_for(source, rules, label)}
 
-    def read_range(self, source, relative_path: str, offset: int, length: int, head: int = 0):
+    def _split(self, source, relative_path: str):
+        """(the source or its root, the path inside it, the root's label)."""
+        if source_roots.is_multi_root(source):
+            rooted, rest = source_roots.split(source, relative_path)
+            return rooted, rest, relative_path.partition("/")[0]
+        return source, relative_path, ""
+
+    # `rules` are the source's visibility rules: a read through a link is
+    # allowed only when they show where the link leads too
+    # (collectors.base.require_target). The caller has already checked the
+    # requested path itself.
+
+    def fetch_file(self, source, relative_path: str, destination, *, rules=None):
+        with tracked(source), translated(self._translate):
+            target, path, label = self._split(source, relative_path)
+            link = self._link_kwargs(source, rules, label)
+            return self._module.fetch_file(target, path, destination, **link)
+
+    def read_range(
+        self, source, relative_path: str, offset: int, length: int, head: int = 0, *, rules=None
+    ):
         """Incremental follow (#254): a RangeRead (collectors/base.py)."""
         with tracked(source), translated(self._translate):
-            if source_roots.is_multi_root(source):
-                source, relative_path = source_roots.split(source, relative_path)
-            return self._module.read_range(source, relative_path, offset, length, head)
+            target, path, label = self._split(source, relative_path)
+            link = self._link_kwargs(source, rules, label)
+            return self._module.read_range(target, path, offset, length, head, **link)
 
-    def call(self, name: str, source, *args, **kwargs):
+    def call(self, name: str, source, *args, rules=None, **kwargs):
         """One of the collector's own functions that take the source first
         (the agent's redacted commands, #382, #249), with its errors
         translated and the source's reachability tracked like the calls
-        above. Single-root sources only (push agents)."""
+        above. Single-root sources only (push agents). `rules`, for one that
+        reads content, are the source's visibility rules: through a link, it
+        reads only when they show where the link leads."""
+        link = self._link_kwargs(source, rules, "") if rules is not None else {}
         with tracked(source), translated(self._translate):
-            return getattr(self._module, name)(source, *args, **kwargs)
+            return getattr(self._module, name)(source, *args, **kwargs, **link)
 
     @contextmanager
-    def local_copy(self, source, relative_path: str):
+    def local_copy(self, source, relative_path: str, *, rules=None):
         # Only the fetch is translated; exceptions from the caller's `with`
         # body propagate unchanged.
         with ExitStack() as stack:
             with tracked(source), translated(self._translate):
-                if source_roots.is_multi_root(source):
-                    source, relative_path = source_roots.split(source, relative_path)
-                local = stack.enter_context(self._module.local_copy(source, relative_path))
+                target, path, label = self._split(source, relative_path)
+                link = self._link_kwargs(source, rules, label)
+                local = stack.enter_context(self._module.local_copy(target, path, **link))
             yield local

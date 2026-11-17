@@ -1,5 +1,6 @@
 import time
 
+import pytest
 from app.agent_registry import get_agent_registry
 from app.api.agent_ws import _hash_token
 from app.api.agent_ws import router as agent_ws_router
@@ -225,7 +226,8 @@ def test_a_streamed_fetch_through_the_endpoint_lands_in_the_destination(session,
         with _client(session) as client:
             registry.bind_loop(client.portal.call(asyncio.get_running_loop))
             with client.websocket_connect(
-                "/agent/connect", headers={"authorization": "Bearer s3cret"}
+                "/agent/connect",
+                headers={"authorization": "Bearer s3cret", "x-perchtail-agent-features": "links/1"},
             ) as ws:
                 assert _wait_until(lambda: registry.is_connected(source.id))
                 thread = threading.Thread(target=fetch)
@@ -233,6 +235,7 @@ def test_a_streamed_fetch_through_the_endpoint_lands_in_the_destination(session,
 
                 command = ws.receive_json()
                 assert command["type"] == "fetch" and command["path"] == "app.log"
+                assert command["expect_real"] == "app.log"
                 assert command["chunk_size"] == agent_collector.FETCH_CHUNK_BYTES
                 for seq, part in enumerate([content[:12], content[12:]]):
                     ws.send_json(
@@ -258,6 +261,38 @@ def test_a_streamed_fetch_through_the_endpoint_lands_in_the_destination(session,
 
     assert errors == []
     assert destination.read_bytes() == content
+
+
+def test_nothing_is_read_from_a_connected_agent_without_links(session, tmp_path):
+    """An agent that doesn't say where links lead is never sent a content
+    command: it must be updated first. Listing still works."""
+    import asyncio
+
+    from app.collectors import agent as agent_collector
+
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    previous_loop = registry._loop
+    try:
+        with _client(session) as client:
+            registry.bind_loop(client.portal.call(asyncio.get_running_loop))
+            with client.websocket_connect(
+                "/agent/connect",
+                headers={
+                    "authorization": "Bearer s3cret",
+                    "x-perchtail-agent-features": "redaction/1",
+                },
+            ):
+                assert _wait_until(lambda: registry.is_connected(source.id))
+                with pytest.raises(agent_collector.AgentUpdateRequiredError):
+                    agent_collector.fetch_file(source, "app.log", tmp_path / "fetched")
+                with pytest.raises(agent_collector.AgentUpdateRequiredError):
+                    agent_collector.read_range(source, "app.log", 0, 10)
+                assert not (tmp_path / "fetched").exists()
+                session.refresh(source)
+                assert agent_collector.agent_update_required(source)
+    finally:
+        registry.bind_loop(previous_loop)
 
 
 def test_connect_records_the_version_the_agent_reports(session):

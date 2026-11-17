@@ -1305,8 +1305,8 @@ def test_folder_zip_archive_left_out_does_not_count_against_the_limit(
     monkeypatch.setattr(get_settings(), "max_fetch_mb", limit / 1024**2)
     real_fetch = local_connector.fetch_file
 
-    def growing_fetch(source_, relative_path, destination):
-        real_fetch(source_, relative_path, destination)
+    def growing_fetch(source_, relative_path, destination, **kwargs):
+        real_fetch(source_, relative_path, destination, **kwargs)
         if relative_path == "app.log":
             Path(destination).write_text("x" * (limit - 5))
 

@@ -55,6 +55,7 @@ from app.models import (
     AlertFileState,
     FileNameEntry,
     Folder,
+    Protocol,
     Rule,
     Source,
 )
@@ -308,24 +309,31 @@ def _redacted_lines(output: bytes, lengths: list[int], begin: int) -> list[tuple
 
 
 def _read_redacted(
-    connector, source: Source, state: AlertFileState, rules: CompiledRules
+    connector,
+    source: Source,
+    state: AlertFileState,
+    rules: CompiledRules,
+    visibility: list[Rule],
 ) -> list[tuple[int, bytes]]:
     """Redacted on the server: what was appended since `state`, as
     (offset in the original, redacted line) for each whole line, as the
-    Tail's (app.api.archive._follow_redacted). Moves `state` on."""
+    Tail's (app.api.archive._follow_redacted). Moves `state` on. A link is
+    only followed when the `visibility` rules show where it leads."""
     from app.api.archive import unsupported_compressed_format
 
     offset = state.offset
     read_from = max(0, offset - CONTEXT_BYTES)
     size, first, data = connector.read_range(
-        source, state.file_path, read_from, READ_BYTES, HEAD_BYTES
+        source, state.file_path, read_from, READ_BYTES, HEAD_BYTES, rules=visibility
     )
     if offset > size or (
         state.head is not None and offset > 0 and head_hash(source.id, first, offset) != state.head
     ):
         # Rotated or rewritten: everything in it is new.
         offset = read_from = 0
-        size, first, data = connector.read_range(source, state.file_path, 0, READ_BYTES, HEAD_BYTES)
+        size, first, data = connector.read_range(
+            source, state.file_path, 0, READ_BYTES, HEAD_BYTES, rules=visibility
+        )
     if unsupported_compressed_format(first):
         raise UnreadableContentError(
             "content compressed in a format redaction doesn't read",
@@ -374,12 +382,13 @@ def _read_redacted(
 
 
 def _read_on_agent(
-    connector, source: Source, state: AlertFileState, block: dict
+    connector, source: Source, state: AlertFileState, block: dict, visibility: list[Rule]
 ) -> list[tuple[int, bytes]]:
     """Redacted on the agent's host: the same answer as _read_redacted,
     with where each line starts in the original worked out from the
     agent's line offsets; the original never leaves the host. Moves
-    `state` on."""
+    `state` on. A link is only followed when the `visibility` rules show
+    where it leads."""
     from app.collectors.agent import AgentRedactionError
 
     def read_from(offset: int):
@@ -392,6 +401,7 @@ def _read_on_agent(
                 READ_BYTES,
                 block,
                 line_offsets=True,
+                rules=visibility,
             )
         except AgentRedactionError as exc:
             if exc.code in ("unsupported_encoding", "unsupported_format"):
@@ -412,6 +422,27 @@ def _read_on_agent(
     return list(read.lines or ())
 
 
+def _reads_from(alert: Alert, source: Source) -> bool:
+    """Whether the alert may read the source's files now: not from an agent
+    that doesn't say where links lead (collectors.agent.require_links),
+    whose files wait where they are until it is updated; that is logged once
+    per alert and source, until it reads again."""
+    from app.collectors.agent import AgentUpdateRequiredError, require_links
+
+    key = (alert.id, source.id, "")
+    if source.protocol == Protocol.agent:
+        try:
+            require_links(source)
+        except AgentUpdateRequiredError:
+            if not _note_unreadable(key, ("agent_update_required",)):
+                logger.warning(
+                    "alert.agent_update_required", alert_id=alert.id, source_id=source.id
+                )
+            return False
+    _clear_unreadable(key)
+    return True
+
+
 def _read_file(
     connector,
     source: Source,
@@ -419,15 +450,18 @@ def _read_file(
     matches,
     stats: PassStats,
     redaction: SourceRedaction | None = None,
+    rules: list[Rule] | None = None,
 ):
     """Reads what was appended to one file since `state` and returns the
     matching lines; moves `state` on. With `redaction`, the query runs on
-    the redacted lines and only those are kept."""
+    the redacted lines and only those are kept. `rules` are the source's
+    visibility rules: a file reached through a link is only read when they
+    show where the link leads (without them, no link is followed)."""
     if redaction is not None:
         if redaction.block is not None:
-            lines = _read_on_agent(connector, source, state, redaction.block)
+            lines = _read_on_agent(connector, source, state, redaction.block, rules)
         else:
-            lines = _read_redacted(connector, source, state, redaction.rules)
+            lines = _read_redacted(connector, source, state, redaction.rules, rules)
         hits = []
         for position, raw in lines:
             line = raw.decode("utf-8", errors="replace").rstrip("\r")
@@ -438,7 +472,7 @@ def _read_file(
         stats.files_read += 1
         return hits
     size, first, data = connector.read_range(
-        source, state.file_path, state.offset, READ_BYTES, HEAD_BYTES
+        source, state.file_path, state.offset, READ_BYTES, HEAD_BYTES, rules=rules
     )
     if state.offset > size or (
         state.head is not None
@@ -447,7 +481,9 @@ def _read_file(
     ):
         # Rotated or rewritten: everything in it is new.
         state.offset = 0
-        size, first, data = connector.read_range(source, state.file_path, 0, READ_BYTES, HEAD_BYTES)
+        size, first, data = connector.read_range(
+            source, state.file_path, 0, READ_BYTES, HEAD_BYTES, rules=rules
+        )
     chunk = _complete_lines(data, at_limit=len(data) >= READ_BYTES)
     hits: list[Hit] = []
     position = state.offset
@@ -560,6 +596,8 @@ def check_alert(session: Session, alert: Alert, stats: PassStats | None = None) 
         # records the source's status from this same thread, and would wait
         # on this session's lock until the busy timeout.
         session.commit()
+        if not _reads_from(alert, source):
+            continue
         started = time.monotonic()
         # Current sizes come from listing each folder once (one connection
         # per folder), so only files whose size changed are read -- a read
@@ -582,7 +620,7 @@ def check_alert(session: Session, alert: Alert, stats: PassStats | None = None) 
                 break
             key = (alert.id, source.id, state.file_path)
             try:
-                hits.extend(_read_file(connector, source, state, matches, stats, redaction))
+                hits.extend(_read_file(connector, source, state, matches, stats, redaction, rules))
             except Exception as exc:  # noqa: BLE001 - one file never stops the pass
                 if isinstance(exc, UnreadableContentError):
                     # It waits where it is; logged again only once it changed.

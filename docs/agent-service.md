@@ -256,9 +256,13 @@ If your change control doesn't allow the agent to replace its own binary, keep t
 
 The agent refuses paths that leave `PERCHTAIL_BASE_PATH`, including through a symbolic link or a junction that points outside it. That doesn't replace the operating system's permissions: an account that can read only the log folder is still the real boundary.
 
+A link inside `PERCHTAIL_BASE_PATH` (a symbolic link, or on Windows also a junction) is followed only to a file or folder the source's rules show: the agent tells the server where each path really is, and reads it only once the server, having checked its rules on that target, asks for it. `current.log -> app-2026-11-16.log` keeps working; a link to a file the rules hide is left out of the listing and can't be opened.
+
 ## 7. Upgrading
 
 The agent never upgrades itself on its own. It upgrades when you replace the binary, or when the server asks it to and the host allows it.
+
+From 0.7, the server reads files only from an agent that tells it where links lead (an agent from 0.7 on). An older agent stays connected and its folders can still be browsed, but opening, following, downloading (files, folder ZIPs and archives) and alerts are refused with a message asking for the agent to be updated, each refusal recorded in the audit log (reason `agent_update_required`). **Settings → Agents** marks such an agent with **Update required**. Agents older than 0.7 must be upgraded by hand once, as below.
 
 ### Upgrading by hand
 

@@ -11,16 +11,28 @@ from pathlib import Path
 import paramiko
 
 from app.collectors import base as collector_base
-from app.collectors.base import DirEntry, PathOutsideBaseError
+from app.collectors.base import (
+    DirEntry,
+    DirListing,
+    LinkTargetHiddenError,
+    PathOutsideBaseError,
+    TargetCheck,
+    require_target,
+)
 from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
 from app.models import Rule, Source
-from app.rules import is_entry_visible
+from app.rules import is_dir_visible, is_linked_entry_visible
 from app.scratch import scratch_temp_dir
+
+# Follows links inside the base path, checking the rules on their target
+# (collectors/errors.py passes it a target_check).
+FOLLOWS_LINKS = True
 
 __all__ = [
     "DirEntry",
+    "FOLLOWS_LINKS",
     "PathOutsideBaseError",
     "TrustOnFirstUsePolicy",
     "fetch_file",
@@ -237,15 +249,32 @@ def _is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root if root == "/" else root + "/")
 
 
-def _resolve_contained(sftp: paramiko.SFTPClient, source: Source, relative_path: str) -> str:
+def _relative_to_root(real: str, root: str) -> str:
+    """Where `real` (inside `root`, both as the server resolved them) is,
+    relative to `root`; "" for the root itself."""
+    if real == root:
+        return ""
+    prefix = root if root.endswith("/") else root + "/"
+    return real[len(prefix) :]
+
+
+def _resolve_contained(
+    sftp: paramiko.SFTPClient,
+    source: Source,
+    relative_path: str,
+    target_check: TargetCheck = None,
+) -> str:
     """Resolves `relative_path` on the server (SSH_FXP_REALPATH, which
     follows symlinks) and returns the real path, refusing anything that
     ends up outside the resolved base path. Without this, a symlink inside
     the base path (`escape -> /etc`) would let anyone with `view` on the
     source read whatever the SSH account can read -- the base path and the
-    rules only ever saw the link's name. The caller must then use the
-    returned real path, not the joined one, so the link can't be swapped
-    between this check and the read."""
+    rules only ever saw the link's name. When a link leads somewhere else
+    inside the base path, `target_check` must allow where it leads
+    (collectors.base.require_target), so a link can't reach a file the
+    rules hide either. The caller must then use the returned real path, not
+    the joined one, so the link can't be swapped between this check and
+    the read."""
     root = sftp.normalize(source.base_path)
     joined = posixpath.join(source.base_path, relative_path) if relative_path else source.base_path
     try:
@@ -258,7 +287,8 @@ def _resolve_contained(sftp: paramiko.SFTPClient, source: Source, relative_path:
             source_id=source.id,
             path=relative_path,
         )
-        raise PathOutsideBaseError(relative_path)
+        raise LinkTargetHiddenError(relative_path)
+    require_target(relative_path, _relative_to_root(real, root), target_check)
     return real
 
 
@@ -270,14 +300,23 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
 
     Symlinks are resolved on the server: one that points outside the base
     path is left out of the listing entirely, and one that points inside it
-    is shown as whatever it points to (file or directory)."""
+    is shown as whatever it points to (file or directory), only when the
+    rules show both its own path and where it leads (DirEntry.target)."""
     client = _connect(source)
     try:
         sftp = _open_sftp(client)
         try:
             root = sftp.normalize(source.base_path)
-            remote_path = _resolve_contained(sftp, source, relative_path)
-            entries = []
+            remote_path = _resolve_contained(
+                sftp,
+                source,
+                relative_path,
+                lambda real: is_dir_visible(real, rules, case_insensitive=False),
+            )
+            real_dir = _relative_to_root(remote_path, root)
+            entries = DirListing()
+            if real_dir != relative_path:
+                entries.real_dir = real_dir
             for attr in sftp.listdir_attr(remote_path):
                 child_path = f"{relative_path}/{attr.filename}" if relative_path else attr.filename
                 mode = attr.st_mode or 0
@@ -288,18 +327,21 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                 real_key = posixpath.join(remote_path, attr.filename)
                 if stat_module.S_ISLNK(mode):
                     try:
-                        target = sftp.normalize(posixpath.join(remote_path, attr.filename))
-                        if not _is_within(target, root):
+                        real_key = sftp.normalize(posixpath.join(remote_path, attr.filename))
+                        if not _is_within(real_key, root):
                             continue
-                        target_attr = sftp.stat(target)
+                        target_attr = sftp.stat(real_key)
                     except OSError:
                         continue  # dangling link: nothing to show
                     mode = target_attr.st_mode or 0
                     size = target_attr.st_size or 0
                     mtime = getattr(target_attr, "st_mtime", None)
-                    real_key = target
+                real_path = _relative_to_root(real_key, root)
+                target = real_path if real_path != child_path else None
                 is_dir = stat_module.S_ISDIR(mode)
-                if not is_entry_visible(child_path, is_dir, rules, case_insensitive=False):
+                if not is_linked_entry_visible(
+                    child_path, is_dir, target, rules, case_insensitive=False
+                ):
                     continue
                 entries.append(
                     DirEntry(
@@ -309,6 +351,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                         size=size,
                         mtime=float(mtime) if mtime is not None else None,
                         real_key=real_key if is_dir else None,
+                        target=target,
                     )
                 )
             return entries
@@ -318,7 +361,9 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         client.close()
 
 
-def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
+def fetch_file(
+    source: Source, relative_path: str, destination: Path, *, target_check: TargetCheck = None
+) -> None:
     """Fetch-on-open into `destination` — always a fresh transfer, the
     caller (scratch.py) never reuses a prior fetch's bytes. A file over
     MAX_FETCH_MB is refused before the transfer starts, from its size, and
@@ -328,7 +373,7 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     try:
         sftp = _open_sftp(client)
         try:
-            remote_path = _resolve_contained(sftp, source, relative_path)
+            remote_path = _resolve_contained(sftp, source, relative_path, target_check)
             size = sftp.stat(remote_path).st_size or 0
             if size > limit:
                 raise collector_base.too_large(size, limit)
@@ -344,18 +389,24 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
 
 
 @contextmanager
-def local_copy(source: Source, relative_path: str):
+def local_copy(source: Source, relative_path: str, *, target_check: TargetCheck = None):
     """Yields a local filesystem path with `relative_path`'s content, for
     callers (api/archive.py) that need to run zipfile/tarfile/gzip against
     it — remote protocols have no choice but to fetch a copy first."""
     with scratch_temp_dir() as tmp:
         path = Path(tmp) / "fetched"
-        fetch_file(source, relative_path, path)
+        fetch_file(source, relative_path, path, target_check=target_check)
         yield path
 
 
 def read_range(
-    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+    source: Source,
+    relative_path: str,
+    offset: int,
+    length: int,
+    head: int = 0,
+    *,
+    target_check: TargetCheck = None,
 ) -> collector_base.RangeRead:
     """Incremental follow (#254): the file's size, its first `head` bytes and
     up to `length` bytes from `offset`, read with an SFTP seek -- nothing before the offset is
@@ -364,7 +415,7 @@ def read_range(
     try:
         sftp = _open_sftp(client)
         try:
-            remote_path = _resolve_contained(sftp, source, relative_path)
+            remote_path = _resolve_contained(sftp, source, relative_path, target_check)
             with sftp.open(remote_path, "rb") as f:
                 size = f.stat().st_size or 0
                 return collector_base.read_range_from(f, size, offset, length, head)
