@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
@@ -654,6 +655,270 @@ func TestAnUnreadableArchiveOrGzHasItsOwnCode(t *testing.T) {
 	missing, ok := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: "gone.zip"}).(ErrorResult)
 	if !ok || missing.Code != "" {
 		t.Errorf("a missing archive: %#v", missing)
+	}
+}
+
+// As the server's tarfile and zipfile: a .tar.gz that ends before its first
+// header (a few bytes, or nothing at all, once decompressed) isn't a tar,
+// and a zip member whose local header is damaged can't be read, though the
+// zip's index lists it. A .tar.gz holding a tar with no members (only its
+// end-of-archive blocks) is an empty archive.
+func TestAnArchiveCutBeforeItsFirstHeaderOrAMemberWithADamagedHeaderIsUnreadable(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "short.tar.gz", gzipped(t, "just some text\n"))
+	writeFile(t, base, "nothing.tar.gz", gzipped(t, ""))
+	damaged := zipOf(t, []zipMember{{name: "app.log", content: "a line\n"}})
+	if !bytes.HasPrefix(damaged, []byte("PK\x03\x04")) {
+		t.Fatalf("the zip doesn't start with a local header: % x", damaged[:4])
+	}
+	damaged = append([]byte("PK\x00\x00"), damaged[4:]...)
+	writeFile(t, base, "damaged.zip", damaged)
+	writeFile(t, base, "empty.tgz", tarGzOf(t, nil))
+	cfg := Config{BasePath: base}
+
+	for _, name := range []string{"short.tar.gz", "nothing.tar.gz"} {
+		answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: name})
+		if result, ok := answer.(ErrorResult); !ok || result.Type != "list_archive_error" || result.Code != "archive_unreadable" {
+			t.Errorf("list_archive %s: %#v", name, answer)
+		}
+	}
+
+	answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: "damaged.zip"})
+	if listed, ok := answer.(ListArchiveResult); !ok || len(listed.Members) != 1 || listed.Members[0].Name != "app.log" {
+		t.Errorf("list_archive damaged.zip: %#v", answer)
+	}
+
+	for _, name := range []string{"short.tar.gz", "nothing.tar.gz", "damaged.zip"} {
+		for _, redacting := range []bool{false, true} {
+			cmd := Command{
+				Type: "fetch", ID: "f", Path: name, Member: "app.log", ChunkSize: minChunkSize,
+				MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Code != "archive_unreadable" {
+				t.Errorf("fetch %s (redacting %v) ended with %#v", name, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+
+	answer = handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: "empty.tgz"})
+	if empty, ok := answer.(ListArchiveResult); !ok || len(empty.Members) != 0 || empty.Truncated {
+		t.Errorf("list_archive empty.tgz: %#v", answer)
+	}
+}
+
+// longNameTar is a tar whose only member has a name too long for a ustar
+// header, so it starts with a pax ('x') or GNU ('L') long-name header and
+// its data: 1024 bytes before the member's own header.
+func longNameTar(t *testing.T, format tar.Format, flag byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	content := []byte("a line of the log\n")
+	header := &tar.Header{
+		Name: strings.Repeat("n", 150) + ".log", Mode: 0o644, Size: int64(len(content)),
+		Typeflag: tar.TypeReg, Format: format,
+	}
+	if err := tw.WriteHeader(header); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	if raw[156] != flag || len(raw) < 1536 {
+		t.Fatalf("not a tar starting with a %q header: flag %q, %d bytes", flag, raw[156], len(raw))
+	}
+	return raw
+}
+
+// storedGzip is data gzipped without compression, so a cut in the .gz
+// cuts the data at about the same offset.
+func storedGzip(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w, err := gzip.NewWriterLevel(&buf, gzip.NoCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// As the server's tarfile: a .tar.gz lists empty only when its first block
+// is all zeros (the end of an archive with no members); one that ends
+// before its first whole entry is unreadable, a pax or GNU long-name header
+// followed by nothing, or by part of the entry's header, included.
+func TestATarGzEndingBeforeItsFirstEntryIsUnreadableUnlessItStartsWithZeros(t *testing.T) {
+	base := t.TempDir()
+	pax := longNameTar(t, tar.FormatPAX, tar.TypeXHeader)
+	gnu := longNameTar(t, tar.FormatGNU, tar.TypeGNULongName)
+	global := globalHeaderTar(t, true)
+	unreadable := map[string][]byte{
+		"pax-header-then-nothing.tar.gz": gzipped(t, string(pax[:1024])),
+		"pax-cut-in-the-header.tar.gz":   gzipped(t, string(pax[:1124])),
+		"gnu-name-then-nothing.tar.gz":   gzipped(t, string(gnu[:1024])),
+		"pax-gzip-cut.tar.gz":            storedGzip(t, pax)[:1100],
+		// A global pax header (git archive writes one) isn't an entry.
+		"global-header-then-nothing.tar.gz": gzipped(t, string(global[:1024])),
+		"global-cut-in-the-header.tar.gz":   gzipped(t, string(global[:1124])),
+		"global-gzip-cut.tar.gz":            storedGzip(t, global)[:1100],
+		"global-header-then-end.tar.gz":     gzipped(t, string(globalHeaderTar(t, false))),
+	}
+	writeFile(t, base, "global-and-a-member.tar.gz", gzipped(t, string(global)))
+	for name, content := range unreadable {
+		writeFile(t, base, name, content)
+	}
+	writeFile(t, base, "one-zero-block.tar.gz", gzipped(t, string(make([]byte, 512))))
+	writeFile(t, base, "two-zero-blocks.tar.gz", gzipped(t, string(make([]byte, 1024))))
+	cfg := Config{BasePath: base}
+	member := strings.Repeat("n", 150) + ".log"
+
+	for name := range unreadable {
+		answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: name})
+		if result, ok := answer.(ErrorResult); !ok || result.Code != "archive_unreadable" {
+			t.Errorf("list_archive %s: %#v", name, answer)
+		}
+		for _, redacting := range []bool{false, true} {
+			cmd := Command{
+				Type: "fetch", ID: "f", Path: name, Member: member, ChunkSize: minChunkSize,
+				MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Code != "archive_unreadable" {
+				t.Errorf("fetch %s (redacting %v) ended with %#v", name, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+	for _, name := range []string{"one-zero-block.tar.gz", "two-zero-blocks.tar.gz"} {
+		answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: name})
+		if empty, ok := answer.(ListArchiveResult); !ok || len(empty.Members) != 0 {
+			t.Errorf("list_archive %s: %#v", name, answer)
+		}
+	}
+	// A whole member after the global header lists and opens.
+	answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: "global-and-a-member.tar.gz"})
+	if listed, ok := answer.(ListArchiveResult); !ok || len(listed.Members) != 1 || listed.Members[0].Name != "app.log" {
+		t.Errorf("list_archive global-and-a-member.tar.gz: %#v", answer)
+	}
+	data, _ := streamed(t, collect(t, base, Command{
+		Type: "fetch", ID: "f", Path: "global-and-a-member.tar.gz", Member: "app.log", ChunkSize: minChunkSize,
+		MaxDecompressed: 1 << 20,
+	}), minChunkSize)
+	if string(data) != "a line of the log\n" {
+		t.Errorf("fetch app.log after a global header: %q", data)
+	}
+}
+
+// globalHeaderTar is a tar that starts with a global pax header and its
+// data (1024 bytes), as git archive writes, then app.log when withMember is
+// set, then the end-of-archive blocks.
+func globalHeaderTar(t *testing.T, withMember bool) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	global := &tar.Header{Typeflag: tar.TypeXGlobalHeader, PAXRecords: map[string]string{"comment": strings.Repeat("c", 40)}}
+	if err := tw.WriteHeader(global); err != nil {
+		t.Fatal(err)
+	}
+	if withMember {
+		content := []byte("a line of the log\n")
+		header := &tar.Header{Name: "app.log", Mode: 0o644, Size: int64(len(content)), Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	if raw[156] != tar.TypeXGlobalHeader || len(raw) < 2048 {
+		t.Fatalf("not a tar starting with a global header: flag %q, %d bytes", raw[156], len(raw))
+	}
+	return raw
+}
+
+// zipWithHeaderAt is a zip of one member, app.log, whose index says its
+// local header is at offset (at the last bytes of the file, or past its
+// end).
+func zipWithHeaderAt(t *testing.T, offset func(size int) int) []byte {
+	t.Helper()
+	data := zipOf(t, []zipMember{{name: "app.log", content: "a line\n"}})
+	central := bytes.Index(data, []byte("PK\x01\x02"))
+	if central < 0 {
+		t.Fatal("no central directory header")
+	}
+	binary.LittleEndian.PutUint32(data[central+42:], uint32(offset(len(data))))
+	return data
+}
+
+// As the server's zipfile ("Truncated file header"): a member whose local
+// header is cut short, or past the end of the file, can't be read, though
+// the zip's index lists it.
+func TestAZipMemberWhoseLocalHeaderIsCutShortIsUnreadable(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "near-the-end.zip", zipWithHeaderAt(t, func(size int) int { return size - 10 }))
+	writeFile(t, base, "past-the-end.zip", zipWithHeaderAt(t, func(size int) int { return size + 100 }))
+	cfg := Config{BasePath: base}
+
+	for _, name := range []string{"near-the-end.zip", "past-the-end.zip"} {
+		answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: name})
+		if listed, ok := answer.(ListArchiveResult); !ok || len(listed.Members) != 1 || listed.Members[0].Name != "app.log" {
+			t.Errorf("list_archive %s: %#v", name, answer)
+		}
+		for _, redacting := range []bool{false, true} {
+			cmd := Command{
+				Type: "fetch", ID: "f", Path: name, Member: "app.log", ChunkSize: minChunkSize,
+				MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Code != "archive_unreadable" {
+				t.Errorf("fetch %s (redacting %v) ended with %#v", name, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+}
+
+// An encrypted zip member is refused with a code of its own, which the
+// server answers as when it finds one itself (member_encrypted).
+func TestAnEncryptedZipMemberHasItsOwnCode(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{
+		{name: "app.log", content: "a line\n"},
+		{name: "locked.log", content: "x", encrypted: true},
+	}))
+	for _, redacting := range []bool{false, true} {
+		cmd := Command{
+			Type: "fetch", ID: "f", Path: "logs.zip", Member: "locked.log", ChunkSize: minChunkSize,
+			MaxDecompressed: 1 << 20,
+		}
+		if redacting {
+			cmd.Redact = redactJSON(t, testRules, "")
+		}
+		sent := collect(t, base, cmd)
+		if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Type != "fetch_error" || result.Code != "member_encrypted" {
+			t.Errorf("fetch locked.log (redacting %v) ended with %#v", redacting, sent[len(sent)-1])
+		}
 	}
 }
 

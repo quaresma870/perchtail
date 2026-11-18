@@ -241,7 +241,7 @@ A `.tar.gz` or `.tgz` with more than 50,000 entries (files, folders and links to
 
 An archive that can't be read (damaged, or another kind of file under an archive's name) answers "This archive can't be read: it is damaged, or it isn't really a .zip or .tar.gz file." when you expand it or open or download a file inside it. A `.gz` file that can't be decompressed answers "This compressed file can't be read: it is damaged, or it isn't really a .gz file."
 
-A file inside a `.zip` that is encrypted, or compressed with a method PerchTail can't read, is refused, to open and to download: "This archive member is encrypted or compressed with a method PerchTail can't read, so it can't be opened."
+A file inside a `.zip` that is encrypted, or compressed with a method PerchTail can't read, is refused, to open and to download: "This archive member is encrypted or compressed with a method PerchTail can't read, so it can't be opened." On a source read through a push agent that reads archives on its host (when redaction is on), a file compressed with a method the agent can't read answers "The source returned an error" instead.
 
 An archive can be downloaded whole only when none of its files is hidden on purpose by the rules. Otherwise the download is refused with "This archive can't be downloaded whole: open or download its files one by one." The files you can see in it still open and download one by one.
 

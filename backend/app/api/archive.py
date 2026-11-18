@@ -65,6 +65,7 @@ from app.collectors.base import (
     PathOutsideBaseError,
     SourceArchiveUnreadableError,
     SourceError,
+    SourceMemberUnreadableError,
     SourceNotFoundError,
     SourcePermissionError,
     SourceUnreachableError,
@@ -445,7 +446,9 @@ def _agent_unreadable(source: Source, path: str, member: str | None) -> Iterator
     archive_unreadable or gzip_unreadable code) gets the refusals the
     server gives when it reads them itself: ArchiveUnreadableRefused, or,
     for a .gz member it can't decompress to redact,
-    RedactionUnreadableRefused (_decompress_gzip_member). An older agent
+    RedactionUnreadableRefused (_decompress_gzip_member). A member the
+    agent finds encrypted (SourceMemberUnreadableError, its member_encrypted
+    code) gets MemberUnreadableRefused, as in _materialize. An older agent
     answers without a code: that stays the source's own error."""
     try:
         yield
@@ -453,6 +456,11 @@ def _agent_unreadable(source: Source, path: str, member: str | None) -> Iterator
         if exc.gzip and member is not None:
             raise RedactionUnreadableRefused() from exc
         raise _archive_unreadable(source, path, exc, gzip=exc.gzip) from exc
+    except SourceMemberUnreadableError as exc:
+        logger.warning(
+            "archive.member_unreadable", source_id=source.id, path=path, reason=exc.reason
+        )
+        raise MemberUnreadableRefused(exc.reason) from exc
 
 
 # The first bytes of the compressed formats PerchTail doesn't decompress.

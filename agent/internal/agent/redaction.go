@@ -238,6 +238,8 @@ func errorResult(cmd Command, errType string, err error) ErrorResult {
 		result.Code, result.Size = "too_large", tooLarge.Size
 	case errors.Is(err, ErrMemberNotFound):
 		result.Code = "not_found"
+	case errors.Is(err, errMemberEncrypted):
+		result.Code = "member_encrypted"
 	case errors.As(err, &archiveErr):
 		result.Code = "archive_unreadable"
 	case errors.As(err, &gzipErr):

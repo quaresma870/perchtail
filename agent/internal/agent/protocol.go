@@ -275,10 +275,11 @@ type RedactedReadRangeResult struct {
 // "_error" as a failure, regardless of which command it was answering.
 // Code "too_large" (with Size) lets the backend answer 413, as it does
 // for the other connectors; "not_found" an archive member that isn't
-// there; "archive_unreadable" an archive that can't be read as one and
+// there; "archive_unreadable" an archive that can't be read as one,
 // "gzip_unreadable" a .gz file or member that can't be decompressed
-// (damaged, or not that kind of file), which the backend refuses as it
-// refuses those it reads itself. A command with a `redact` block that can't be redacted is
+// (damaged, or not that kind of file) and "member_encrypted" a zip member
+// stored encrypted, which the backend refuses as it refuses those it reads
+// itself. A command with a `redact` block that can't be redacted is
 // answered with Type "redaction_error" before anything else is sent (see
 // redactionError for its codes); Rule is then the id of the rule that
 // can't run, when one can't. Code "link_target" (FeatureLinks) refuses a

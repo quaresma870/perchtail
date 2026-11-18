@@ -3,6 +3,7 @@ package agent
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
@@ -29,6 +30,8 @@ var ErrMemberNotFound = errors.New("member not found")
 
 // errMemberEncrypted is a zip member stored encrypted: the agent has no
 // password and never sends its encrypted bytes as if they were content.
+// Answered with the code "member_encrypted" (errorResult), which the server
+// refuses as it refuses an encrypted member it finds itself.
 var errMemberEncrypted = errors.New("member is encrypted")
 
 // archiveUnreadableError is an archive that can't be read as one: damaged,
@@ -68,6 +71,33 @@ func unreadable(err error, wrap func(error) error) error {
 }
 
 var errEmptyArchive = errors.New("the archive is empty")
+
+// errNoTarHeader is a .tar.gz whose content, once decompressed, ends before
+// its first whole entry.
+var errNoTarHeader = errors.New("the archive ends before its first entry")
+
+// tarBlockSize is the size of a tar header block.
+const tarBlockSize = 512
+
+// headReader keeps the first tar block read through it.
+type headReader struct {
+	r    io.Reader
+	head []byte
+}
+
+func (h *headReader) Read(p []byte) (int, error) {
+	n, err := h.r.Read(p)
+	if room := tarBlockSize - len(h.head); room > 0 {
+		h.head = append(h.head, p[:min(n, room)]...)
+	}
+	return n, err
+}
+
+// startsWithZeros says the first block was read whole and is all zeros:
+// the end of an archive with no members.
+func (h *headReader) startsWithZeros() bool {
+	return len(h.head) == tarBlockSize && bytes.Count(h.head, []byte{0}) == tarBlockSize
+}
 
 func archiveUnreadable(err error) error {
 	return unreadable(err, func(err error) error { return &archiveUnreadableError{err} })
@@ -152,6 +182,17 @@ func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) e
 				encrypted: zf.Flags&0x1 != 0,
 				open: func() (io.Reader, error) {
 					r, err := zf.Open()
+					// A member whose local header is damaged or cut short,
+					// though the index lists it, can't be read, as the
+					// server's zipfile says (BadZipFile). io.EOF here is the
+					// header cut short, never the end of the content, so it
+					// is marked too. An I/O error from the file itself and
+					// a compression method the agent can't read keep their
+					// errors.
+					var ioErr *fs.PathError
+					if err != nil && !errors.Is(err, zip.ErrAlgorithm) && !errors.As(err, &ioErr) {
+						return nil, &archiveUnreadableError{err}
+					}
 					if err != nil {
 						return nil, err
 					}
@@ -176,9 +217,21 @@ func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) e
 			return archiveUnreadable(err)
 		}
 		defer gz.Close()
-		tr := tar.NewReader(gz)
-		for {
+		read := &headReader{r: gz}
+		tr := tar.NewReader(read)
+		for sawEntry := false; ; {
 			header, err := tr.Next()
+			// As the server's tarfile: an archive that ends before its first
+			// whole entry lists empty only when its first block is all zeros
+			// (the end of an archive with no members). Less than a block,
+			// nothing at all, or a pax or GNU long-name header followed by
+			// nothing or by part of the entry's header is not a tar. A global
+			// pax header (git archive writes one), which archive/tar gives as
+			// an entry of its own, isn't one: tarfile reads it with the
+			// header after it.
+			if !sawEntry && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) && !read.startsWithZeros() {
+				return archiveUnreadable(errNoTarHeader)
+			}
 			// io.ErrUnexpectedEOF: the archive ends inside the last member,
 			// whose reads then fail with errTruncatedMember (unreadable, as a
 			// truncated zip member); the members before it are whole.
@@ -187,6 +240,9 @@ func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) e
 			}
 			if err != nil && !errors.Is(err, tar.ErrInsecurePath) {
 				return archiveUnreadable(err)
+			}
+			if header.Typeflag != tar.TypeXGlobalHeader {
+				sawEntry = true
 			}
 			entry := archiveEntry{
 				name:    tarName(header),

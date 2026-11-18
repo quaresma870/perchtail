@@ -98,6 +98,22 @@ class SourceArchiveUnreadableError(SourceError):
         self.gzip = gzip
 
 
+class SourceMemberUnreadableError(SourceError):
+    """An agent found the archive member it was asked for stored encrypted
+    (its code member_encrypted). The archive routes answer it as they answer
+    one the server finds itself (409 archive_member_unreadable, audited
+    with the reason member_encrypted)."""
+
+    status_code = 409
+    public_message = "This archive member can't be opened"
+    error_code = "archive_member_unreadable"
+
+    def __init__(self, detail: str = "", *, reason: str):
+        super().__init__(detail)
+        # app.archives' SKIP_ENCRYPTED.
+        self.reason = reason
+
+
 class SourceUnreachableError(SourceError):
     status_code = 502
     public_message = "Can't reach the source"

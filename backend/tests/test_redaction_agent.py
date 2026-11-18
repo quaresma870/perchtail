@@ -54,6 +54,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
+from tests.test_redaction_downloads import _mark_encrypted
 from tests.test_redaction_endpoints import (
     MIDSTREAM,
     MIDSTREAM_REFUSED_AT,
@@ -234,7 +235,24 @@ class FakeAgent:
                     message_type="fetch_error",
                 ) from exc
             by_name = {normalize_member_name(n): read for n, _, _, _, read in entries}
-            content = by_name[member]()
+            if name.lower().endswith(".zip"):
+                infos = zipfile.ZipFile(io.BytesIO(content)).infolist()
+                if any(
+                    normalize_member_name(i.filename) == member and i.flag_bits & 0x1 for i in infos
+                ):
+                    raise AgentCommandError(
+                        "member is encrypted", code="member_encrypted", message_type="fetch_error"
+                    )
+            try:
+                # A member whose own header is damaged, or cut short, is
+                # unreadable as its archive is.
+                content = by_name[member]()
+            except (zipfile.BadZipFile, tarfile.TarError, OSError, EOFError) as exc:
+                raise AgentCommandError(
+                    "zip: not a valid zip file",
+                    code="archive_unreadable",
+                    message_type="fetch_error",
+                ) from exc
         elif is_archive(name) or (is_transparent_gzip(name) and not decompress):
             raise _refusal("not_redactable")
         if decompress:
@@ -918,6 +936,82 @@ def test_a_member_of_an_archive_the_agent_cant_read_is_refused_and_audited(
     assert response.json()["detail"]["error_code"] == "archive_unreadable"
     event = _audit(session, action)
     assert event.event_metadata["path"] == "broken.zip/app.log"
+    assert event.event_metadata["reason"] == "archive_unreadable"
+    assert _scratch_files(scratch_store) == []
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "action"), [("open", "file.open_denied"), ("download", "file.download_denied")]
+)
+def test_an_encrypted_zip_member_on_the_agent_is_refused_as_on_the_server(
+    session, agent_source, scratch_store, endpoint, action
+):
+    """The agent says the member is encrypted (member_encrypted): the same
+    audited 409 as when the server finds one itself, not a 502, and the
+    other members still open."""
+    client, source, agent = agent_source
+    agent.files["logs.zip"] = _mark_encrypted(
+        _zip_bytes({"big.log": b"secret", "app.log": SAMPLE_BYTES}), "big.log"
+    )
+    response = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "logs.zip", "member": "big.log"}
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error_code"] == "archive_member_unreadable"
+    event = _audit(session, action)
+    assert event.event_metadata["path"] == "logs.zip/big.log"
+    assert event.event_metadata["reason"] == "member_encrypted"
+    assert _scratch_files(scratch_store) == []
+    readable = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "logs.zip", "member": "app.log"}
+    )
+    assert readable.status_code == 200, readable.text
+
+
+@pytest.mark.parametrize(
+    "content", [gzip.compress(b"just some text\n"), gzip.compress(b"")], ids=["short", "nothing"]
+)
+def test_a_tar_gz_the_agent_finds_no_header_in_is_refused_as_on_the_server(
+    session, agent_source, scratch_store, content
+):
+    """Less than one tar block once decompressed, or nothing: the agent
+    answers archive_unreadable (TestAnArchiveCutBeforeItsFirstHeader...),
+    refused as the server refuses it, when browsed and when opened."""
+    client, source, agent = agent_source
+    agent.files["logs.tar.gz"] = content
+    browsed = client.get(f"/sources/{source.id}/browse", params={"path": "logs.tar.gz"})
+    assert browsed.status_code == 409, browsed.text
+    assert browsed.json()["detail"]["error_code"] == "archive_unreadable"
+    opened = client.get(
+        f"/sources/{source.id}/open", params={"path": "logs.tar.gz", "member": "app.log"}
+    )
+    assert (opened.status_code, opened.json()) == (browsed.status_code, browsed.json())
+    assert _audit(session, "file.open_denied").event_metadata["reason"] == "archive_unreadable"
+    assert _scratch_files(scratch_store) == []
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "action"), [("open", "file.open_denied"), ("download", "file.download_denied")]
+)
+def test_a_zip_member_with_a_damaged_header_on_the_agent_is_refused_and_audited(
+    session, agent_source, scratch_store, endpoint, action
+):
+    """The index lists the member, so the zip browses; reading the member
+    fails on its damaged header: archive_unreadable, not a 502."""
+    client, source, agent = agent_source
+    content = _zip_bytes({"app.log": b"a line\n"})
+    assert content.startswith(b"PK\x03\x04")
+    agent.files["logs.zip"] = b"PK\x00\x00" + content[4:]
+    browsed = client.get(f"/sources/{source.id}/browse", params={"path": "logs.zip"})
+    response = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "logs.zip", "member": "app.log"}
+    )
+    assert browsed.status_code == 200, browsed.text
+    assert [entry["name"] for entry in browsed.json()] == ["app.log"]
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error_code"] == "archive_unreadable"
+    event = _audit(session, action)
+    assert event.event_metadata["path"] == "logs.zip/app.log"
     assert event.event_metadata["reason"] == "archive_unreadable"
     assert _scratch_files(scratch_store) == []
 
