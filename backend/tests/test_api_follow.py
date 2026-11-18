@@ -6,7 +6,7 @@ from app.api.archive import FOLLOW_HEAD_BYTES
 from app.api.archive import router as archive_router
 from app.api.auth import get_current_active_user
 from app.auth.models import AuditLog, Role, User
-from app.collectors.base import RANGE_MAX_BYTES, RangeNotSupportedError
+from app.collectors.base import RANGE_MAX_BYTES
 from app.db import get_session
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 from fastapi import FastAPI
@@ -144,19 +144,6 @@ def test_compressed_files_cant_be_followed(follow, name):
     client, source, log = follow
     (log.parent / name).write_bytes(b"\x1f\x8b not really")
     response = client.get(f"/sources/{source.id}/follow", params={"path": name, "offset": 0})
-    assert response.status_code == 409
-    assert response.json()["detail"]["error_code"] == "follow_unsupported"
-
-
-def test_an_old_agent_falls_back_to_reloading(follow, monkeypatch):
-    client, source, log = follow
-    log.write_bytes(b"line\n")
-
-    def refuse(*args, **kwargs):
-        raise RangeNotSupportedError('unknown command type "read_range"')
-
-    monkeypatch.setattr("app.collectors.local.read_range", refuse)
-    response = _poll(client, source, 0)
     assert response.status_code == 409
     assert response.json()["detail"]["error_code"] == "follow_unsupported"
 

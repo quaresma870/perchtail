@@ -316,6 +316,7 @@ def test_a_corrupt_gz_member_is_refused_and_audited(session, downloads):
 
     response = _download(client, source, "bundle.zip", member="app.log.gz")
     assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "redaction_unreadable"
     assert_no_secret(response.text)
     event = _audit(session, "file.download_denied")
     assert event.event_metadata["reason"] == "redaction_unreadable"

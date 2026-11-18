@@ -159,7 +159,9 @@ class FakeAgent:
                 entries = _archive_entries(fields["path"], data)
             except (zipfile.BadZipFile, tarfile.TarError, OSError, EOFError) as exc:
                 raise AgentCommandError(
-                    "zip: not a valid zip file", message_type="list_archive_error"
+                    "zip: not a valid zip file",
+                    code="archive_unreadable",
+                    message_type="list_archive_error",
                 ) from exc
             return {
                 "members": [
@@ -223,13 +225,25 @@ class FakeAgent:
             target = member.rsplit("/", 1)[-1]
             if is_archive(target) or (is_transparent_gzip(target) and not decompress):
                 raise _refusal("not_redactable")
-            entries = _archive_entries(name, content)
+            try:
+                entries = _archive_entries(name, content)
+            except (zipfile.BadZipFile, tarfile.TarError, OSError, EOFError) as exc:
+                raise AgentCommandError(
+                    "zip: not a valid zip file",
+                    code="archive_unreadable",
+                    message_type="fetch_error",
+                ) from exc
             by_name = {normalize_member_name(n): read for n, _, _, _, read in entries}
             content = by_name[member]()
         elif is_archive(name) or (is_transparent_gzip(name) and not decompress):
             raise _refusal("not_redactable")
         if decompress:
-            content = gzip.decompress(content)
+            try:
+                content = gzip.decompress(content)
+            except (OSError, EOFError) as exc:
+                raise AgentCommandError(
+                    "gzip: invalid header", code="gzip_unreadable", message_type="fetch_error"
+                ) from exc
         final = member is not None or decompress or block["output_encoding"] == "source"
         out, result, head = self._redact(content, block, final)
         sink.write(out)
@@ -876,6 +890,68 @@ def test_a_corrupt_archive_on_the_agent_is_refused_and_audited(session, agent_so
     assert response.status_code == 403, response.text
     reason = _audit(session, "file.download_denied").event_metadata["reason"]
     assert reason == "redaction_whole_archive"
+
+
+def test_an_archive_the_agent_cant_list_is_refused_as_on_the_server(session, agent_source):
+    """The agent says it can't read the archive (archive_unreadable): the
+    same 409 as when the server lists one it can't read, not a 502."""
+    client, source, agent = agent_source
+    agent.files["broken.zip"] = b"just some text\n" * 10
+    response = client.get(f"/sources/{source.id}/browse", params={"path": "broken.zip"})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error_code"] == "archive_unreadable"
+    assert _kinds(agent) == ["list_archive"]
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "action"), [("open", "file.open_denied"), ("download", "file.download_denied")]
+)
+def test_a_member_of_an_archive_the_agent_cant_read_is_refused_and_audited(
+    session, agent_source, scratch_store, endpoint, action
+):
+    client, source, agent = agent_source
+    agent.files["broken.zip"] = b"just some text\n" * 10
+    response = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "broken.zip", "member": "app.log"}
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error_code"] == "archive_unreadable"
+    event = _audit(session, action)
+    assert event.event_metadata["path"] == "broken.zip/app.log"
+    assert event.event_metadata["reason"] == "archive_unreadable"
+    assert _scratch_files(scratch_store) == []
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "action"), [("open", "file.open_denied"), ("download", "file.download_denied")]
+)
+def test_a_gz_file_the_agent_cant_decompress_is_refused_and_audited(
+    session, agent_source, scratch_store, endpoint, action
+):
+    """A plain .gz file that isn't gzip: the same refusal as on the server."""
+    client, source, agent = agent_source
+    agent.files["broken.log.gz"] = b"just some text\n" * 10
+    response = client.get(f"/sources/{source.id}/{endpoint}", params={"path": "broken.log.gz"})
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["error_code"] == "archive_unreadable"
+    assert ".gz" in detail["message"]
+    assert _audit(session, action).event_metadata["reason"] == "archive_unreadable"
+    assert _scratch_files(scratch_store) == []
+
+
+def test_a_gz_member_the_agent_cant_decompress_is_refused_as_on_the_server(
+    session, agent_source, scratch_store
+):
+    """As the server refuses a .gz member it can't decompress to redact."""
+    client, source, agent = agent_source
+    agent.files["logs.zip"] = _zip_bytes({"old.log.gz": b"not gzip at all\n"})
+    response = client.get(
+        f"/sources/{source.id}/open", params={"path": "logs.zip", "member": "old.log.gz"}
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error_code"] == "redaction_unreadable"
+    assert _audit(session, "file.open_denied").event_metadata["reason"] == "redaction_unreadable"
 
 
 @pytest.mark.parametrize(

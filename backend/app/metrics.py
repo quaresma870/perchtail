@@ -94,7 +94,7 @@ def render_metrics(health) -> str:
     limits = health.limits
     out.gauge(
         "connector_slots_in_use",
-        "Listings, opens, downloads and folder ZIPs talking to sources now.",
+        "Listings, opens, Tail polls, downloads and folder ZIPs talking to sources now.",
         limits.global_in_use,
     )
     out.gauge("connector_slots_max", "How many may run at once in all.", limits.global_max)

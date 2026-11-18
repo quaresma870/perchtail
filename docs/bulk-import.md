@@ -42,7 +42,7 @@ A source:
 | `protocol` | yes | `ssh`, `smb`, `winrm`, `local` or `agent` |
 | `host` | yes | |
 | `port` | no | the protocol's default otherwise |
-| `base_path` | yes, unless `roots` | checked as in the source editor, see [Base path](source-setup.md#base-path) |
+| `base_path` | yes, unless `roots` | checked as in the source editor, see [Base path](source-setup.md#base-path); a push-agent source's is trimmed and only refused when it contains control characters, in the editor too |
 | `roots` | no | two or more `{label, path}` to read several folders, at most **Folders per source** (Settings → System) or, for an existing source that already has more, as many as it has, and not for push-agent sources; see [Several folders in one source](source-setup.md#several-folders-in-one-source) |
 | `enabled` | no | default `true` |
 | `search_indexing_enabled` | no | removed in 0.7 with the content index: ignored with a warning, refused from 1.0 |

@@ -1,7 +1,7 @@
 """Server-side limits on connector work (#344).
 
-Listings, opens, downloads, folder ZIPs and archive listings each hold a
-worker thread and a connection to a source for as long as they run. Without
+Listings, opens, Tail polls, downloads, folder ZIPs and archive listings
+each hold a worker thread and a connection to a source for as long as they run. Without
 a limit a few users opening big folders, or a script, can take every worker
 while the rest of the app waits. Each such request takes a slot first:
 

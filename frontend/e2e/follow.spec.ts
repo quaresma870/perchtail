@@ -46,6 +46,70 @@ test('follow appends only the new lines of a growing log', async ({ page }) => {
   await page.getByRole('button', { name: 'Tail', exact: true }).click()
 })
 
+async function openSystemLog(page: Page) {
+  await page.goto('/#/viewer')
+  await page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
+  await page.locator('.tree-body').getByRole('button', { name: 'perchtail.log' }).click()
+  await expect(page.locator('.tab.active .tab-label')).toContainText('perchtail.log')
+  await expect(page.locator('.cm-content')).not.toBeEmpty()
+}
+
+const isFollow = (url: URL) => url.pathname.endsWith('/follow')
+
+test('a refusal Tail can do nothing about stops it, keeps the tab and offers no Try again', async ({ page }) => {
+  await openSystemLog(page)
+  const opened = await page.locator('.cm-content').innerText()
+  // A 409 with a code, as the server answers for a source whose agent must
+  // be updated: polling again won't change it.
+  await page.route(isFollow, (route) =>
+    route.fulfill({
+      status: 409,
+      json: {
+        detail: "This source's agent must be updated before its files can be read.",
+        error_code: 'agent_update_required',
+      },
+    }),
+  )
+  const reloads: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/open?')) reloads.push(request.url())
+  })
+
+  const tail = page.getByRole('button', { name: 'Tail', exact: true })
+  await tail.click()
+
+  const notice = page.getByRole('alert').filter({ hasText: 'Tail stopped.' })
+  await expect(notice).toContainText("This source's agent must be updated before its files can be read.")
+  await expect(tail).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('button', { name: 'Try again' })).toHaveCount(0)
+  expect(await page.locator('.cm-content').innerText()).toBe(opened)
+  expect(reloads).toEqual([])
+})
+
+test('a file Tail can only reload whole is reloaded, not followed', async ({ page }) => {
+  await openSystemLog(page)
+  // As the server answers for a .gz file or an archive member.
+  await page.route(isFollow, (route) =>
+    route.fulfill({
+      status: 409,
+      json: {
+        detail: { message: 'Compressed files and archives can only be reloaded whole', error_code: 'follow_unsupported' },
+      },
+    }),
+  )
+  const reloaded = page.waitForRequest((request) => request.url().includes('/open?'), { timeout: 20_000 })
+
+  const tail = page.getByRole('button', { name: 'Tail', exact: true })
+  await tail.click()
+  await reloaded
+
+  await expect(tail).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('alert').filter({ hasText: 'reloaded whole' })).toHaveCount(0)
+  await expect(page.locator('.cm-content')).not.toBeEmpty()
+
+  await tail.click()
+})
+
 test('the new-lines notice stays over the log with Find all open', async ({ page }) => {
   // A short window, so even a short log is taller than the editor and Tail
   // raises the notice instead of scrolling.

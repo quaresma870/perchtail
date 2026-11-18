@@ -1,6 +1,6 @@
 """Storage and search for the file-name index (#304): the SQLite-specific
-part, kept in one module so another database (PostgreSQL, #306) only needs
-its own version of these functions.
+part, kept in one module. PostgreSQL support is planned for after 1.0
+(#306, ROADMAP.md); this is the module it would need its own version of.
 
 `file_name_entry` (app/models.py FileNameEntry) holds one row per file; the
 `file_name_fts` FTS5 table indexes its `path` with the trigram tokenizer,

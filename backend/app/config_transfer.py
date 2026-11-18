@@ -362,9 +362,7 @@ def _parse_source(
             if not isinstance(raw_path, str):
                 problems.append(Problem(f"{where}.base_path", "base_path (or roots) is required"))
                 return
-            base_path = (
-                raw_path if protocol == Protocol.agent else _validate_base_path(protocol, raw_path)
-            )
+            base_path = _validate_base_path(protocol, raw_path)
     except HTTPException as exc:
         problems.append(Problem(f"{where}.base_path", str(exc.detail)))
         return

@@ -48,7 +48,7 @@ PerchTail also checks sources in the background: **Settings → System → Sourc
 - The source stays failing until an operation on it works. Browsing it is never blocked by the backoff. **Test connection** on the source page, or the check button next to the source in the Viewer ("Check the connection now"), tries it at once; both are shown to users with **Manage sources** on the source.
 - The failure count is kept in the database, so a restart doesn't reset it.
 
-A disabled source isn't contacted at all. Opening it answers "This source is disabled. An admin can turn it back on in its settings."
+A disabled source isn't contacted at all. Opening it answers "This source is disabled. An admin can turn it back on in its settings." (409, with the code `source_disabled`): the viewer offers no **Try again**, and a tab following a file from it stops Tail.
 
 ## Problems by connector
 
@@ -122,7 +122,7 @@ A disabled source isn't contacted at all. Opening it answers "This source is dis
 See [agent-service.md](agent-service.md) for installing and running the agent.
 
 - **"This source's agent must be updated before its files can be read. Ask an administrator to update it from Settings → Agents."** (409): the agent is older than 0.7 and doesn't tell the server where links lead (it doesn't announce `links/1`). It stays connected and its folders can still be browsed, but opening, Tail, downloads, folder ZIPs and archives are refused, audited with the reason `agent_update_required`; alerts on its files wait where they are (the log has `alert.agent_update_required`). **Settings → Agents** shows "Update required: its files can't be read until it's updated" under the agent. Agents older than 0.7 can't be upgraded from the portal: upgrade each one by hand once (see [agent-service.md](agent-service.md)).
-- **`agent.redaction_fallback` in the log**: redaction is on and the agent doesn't announce `redaction/1`. With an agent older than 0.7 the line still appears, but the request is then refused because the agent doesn't announce `links/1` either (the 409 above): nothing is read from it. Upgrade the agent (see [redaction.md](redaction.md#where-content-is-redacted)).
+- **`agent.redaction_fallback` in the log**: redaction is on and the agent announces `links/1` but not `redaction/1`, so the server redacts what it sends. An agent older than 0.7 doesn't get this line: it announces neither, and its requests are refused (the 409 above), so nothing is read from it. Upgrade the agent (see [redaction.md](redaction.md#where-content-is-redacted)).
 - **"The agent for this source isn't connected"**: the agent isn't running, can't reach the server, or the server refused it. Check the agent's log (`journalctl -u perchtail-agent`, or the wrapper's log file on Windows):
   - `dial: websocket: bad handshake`: the server or the reverse proxy didn't accept the WebSocket. The server refuses a token it doesn't know (wrong or regenerated) and a disabled or deleted source. A reverse proxy without the WebSocket headers on `/agent/connect`, or a wrong path in `PERCHTAIL_SERVER_URL`, gives the same error. See [agent-service.md](agent-service.md#reverse-proxy).
   - `x509: certificate signed by unknown authority`: the host doesn't trust the server's certificate. Add the CA to the host's trust store.
@@ -138,7 +138,7 @@ See [agent-service.md](agent-service.md) for installing and running the agent.
 - **"Not found on the source" for every path**: `PERCHTAIL_BASE_PATH` was removed or replaced after the agent started. Restart the agent: it checks the path at startup.
 - **"The source account has no read permission for this path"**: the agent's account can't read that path.
 - **Rules ignore letter case on a Windows agent** (as NTFS does), but include rules are case-sensitive while **Agent OS** shows "not reported yet": agents older than 0.5.1 don't report their OS.
-- **A folder shows fewer entries than it holds**: an agent lists at most 50,000 entries of a folder, or fewer once the list nears 8 MiB, and the rules are applied afterwards on the server.
+- **A folder shows fewer entries than it holds**: an agent lists at most 50,000 entries of a folder, or fewer once the list nears 8 MiB, and the rules are applied afterwards on the server. The explorer then says "The source listed only part of this folder; showing the N entries it listed."
 - **Upgrades from the portal fail**: **Settings → Agents** shows the reason in **Last result**. Common ones: the host set `PERCHTAIL_REMOTE_UPGRADE=false`; the agent can't write to its binary's folder; the agent is a local build ("this agent's version is not a release"); the host can't download the binaries; the service doesn't restart the agent after it exits with code 3 on Windows (**Didn't come back** after 10 minutes). An agent older than 0.7 shows **Too old to upgrade remotely**: upgrade it by hand once. See [agent-service.md](agent-service.md#7-upgrading).
 
 ## Sign-in problems
@@ -191,7 +191,7 @@ The scheme isn't compared, so a proxy that terminates TLS and talks plain HTTP t
 
 ### SSO
 
-When SSO sign-in fails after the identity provider, the sign-in page shows "SSO sign-in failed — please try again or use your local account." When PerchTail can't start the sign-in (the first three rows below), the browser shows "Could not reach the identity provider" (502) instead, and more than 20 attempts a minute from one address get 429 "Too many sign-in attempts. Try again later." The reason is only in the server log. Local accounts keep working alongside SSO.
+When SSO sign-in fails, whether PerchTail can't start it (the first four rows below) or it fails after the identity provider, the browser comes back to the sign-in page, which shows "SSO sign-in failed — please try again or use your local account." More than 20 attempts a minute from one address get 429 "Too many sign-in attempts. Try again later." The reason is only in the server log. Local accounts keep working alongside SSO.
 
 | Log event | Cause | What to do |
 |---|---|---|
@@ -242,11 +242,13 @@ The limits are in **Settings → System → Limits**: **Listings and downloads a
 
 A folder or an archive shows at most **Entries per listing** entries (**Settings → System → Limits**, 5000 by default, 100 to 20,000): a folder keeps its folders first, an archive its first members by path. The explorer then says "Showing the first N entries; narrow with the search." The search finds files beyond that limit through the file-name index.
 
-A `.tar.gz` or `.tgz` is read in one pass, up to 50,000 entries (files, folders and links together) and 8 MiB of names. A bigger one shows the same message under it, whatever the number of entries listed, and its members past that point answer "not found". Its whole download is refused when the source has an exclude rule, and its redacted download is always refused. Split such archives into smaller ones. An archive with more than 1 MiB of headers for one entry, or of global pax headers in all, or with headers chained deeper than PerchTail follows, can't be read.
+A `.tar.gz` or `.tgz` is read in one pass, up to 50,000 entries (files, folders and links together) and 8 MiB of names. A bigger one says "This archive has more entries than were read; showing the N read." under it (or the message above, when what was read still fills **Entries per listing**), and its members past that point answer "not found". Its whole download is refused when the source has an exclude rule, and its redacted download is always refused. Split such archives into smaller ones. An archive with more than 1 MiB of headers for one entry, or of global pax headers in all, or with headers chained deeper than PerchTail follows, can't be read.
 
 ### Archive members and folder ZIPs refused
 
 - "This archive member is encrypted or compressed with a method PerchTail can't read, so it can't be opened." (409): a `.zip` member that is encrypted, or compressed with a method PerchTail can't read, to open or to download. Audited as `file.open_denied` or `file.download_denied` with the reason `member_encrypted` or `member_unsupported_compression`.
+- "This archive can't be read: it is damaged, or it isn't really a .zip or .tar.gz file." (409): a `.zip`, `.tar.gz` or `.tgz` that can't be read as one, when it is expanded in the explorer or a file inside it is opened or downloaded; a `.tar.gz` whose headers are too large, or chained deeper than PerchTail follows, too. A file inside it is audited as `file.open_denied` or `file.download_denied` with the reason `archive_unreadable`, and the log has `archive.unreadable` with the error type. On a push agent that lists and reads archives on its host (redaction on), the agent says it can't read the archive, with the same answer, audit and log, except that a `.tar.gz` holding almost nothing (under 512 bytes once decompressed, or nothing at all) lists as empty, and a `.zip` whose index is intact but one of its files is damaged answers that file with "The source returned an error". Downloaded whole, it is sent as it is, unless the source has an exclude rule or downloads are redacted (below).
+- "This compressed file can't be read: it is damaged, or it isn't really a .gz file." (409): a `.gz` file opened or downloaded on its own that can't be decompressed. Audited as `file.open_denied` or `file.download_denied` with the reason `archive_unreadable`.
 - "This archive can't be downloaded whole: open or download its files one by one." (403): the archive holds a file an exclude rule hides (files no rule matches don't count), or, when the source has an exclude rule, it can't be read as an archive, its listing was cut short or it holds another archive. With redacted downloads, a whole archive is rebuilt instead, and the same message means it couldn't be read or rebuilt (a `.tar.gz` whose listing was cut short, for example).
 - "This folder is nested too deeply for a ZIP; narrow it to a subfolder" and "This folder has more entries than a ZIP can list; narrow it to a subfolder" (409, or 403 for a redacted folder ZIP): the folder has folders 32 or more levels down, or a push agent cut a listing inside it short. Audited as `file.download_denied` with the reason `too_deep` or `listing_truncated`.
 
@@ -256,6 +258,7 @@ With redaction on ([redaction.md](redaction.md)), content redaction can't handle
 
 - "This file is in an encoding redaction doesn't support (UTF-32), so it can't be shown." (409, `redaction_unsupported_encoding`). Content that turns UTF-32 part way shows `[redacted: unsupported encoding]` from there instead.
 - "This file is in a compressed format redaction doesn't support, so it can't be shown." (409, `redaction_unsupported_format`): bzip2, xz, zstd, 7z or rar content, or gzip or zip content in a file whose name doesn't say so (such as a rotated `app.log.1`).
+- "This compressed file can't be read, so it can't be redacted." (409, `redaction_unreadable`): a `.gz` file inside an archive that can't be read as gzip, opened or downloaded on its own. Audited with the reason `redaction_unreadable`.
 - "The redaction rules can't be applied. An administrator needs to check them." (500): a stored rule can't be compiled. The log has `redaction.rules_invalid` with the source and the error; fix or delete the rule in **Settings → Redaction** or in the source's **Redaction** section.
 
 ## Startup failures
@@ -282,8 +285,10 @@ By design. Every open fetches the file fresh from the source into scratch space,
 
 Tail normally reads only what was added since the last poll. It reloads the whole file instead:
 
-- for a `.gz` file or a file inside an archive, and whenever the server answers a Tail poll with 409: the tab switches to reloading the whole file without a message, and the **Tail** button's tooltip then says it "reloads the whole file";
+- for a `.gz` file or a file inside an archive, which the server can't read from an offset (it answers a Tail poll with 409 `follow_unsupported`): the tab switches to reloading the whole file without a message, and the **Tail** button's tooltip then says it "reloads the whole file (compressed files and archive members)";
 - once, when the file was rotated or truncated: "<file> was rotated or truncated: reloaded from the start."
+
+Any other refusal of a Tail check is shown as the server sends it, such as "This source's agent must be updated before its files can be read…". When it won't change at the next check (a disabled source, an agent to update, content redaction can't read), Tail stops, the tab keeps what it had, and the message ends with "The tab keeps what it had; Tail stopped."; a file locked on the source is tried again at the next check.
 
 ### Why does a user see no sources?
 
@@ -299,7 +304,7 @@ The rules hide it, it is a link (or is reached through one) that leads out of th
 
 ### Why did the viewer turn a severity indicator off?
 
-The viewer says "A severity indicator took too long to match and is turned off until you reload the page:" followed by the pattern. Indicators are matched in the browser, apart from the page, on the first 2000 characters of each line; one that takes more than a second in all over the lines in view, or over the whole file for **Previous problem** and **Next problem**, is turned off in that browser tab until the page is reloaded, and the others keep working. Make the pattern cheaper in **Settings → Severity indicators**: anchor it, avoid nested repetition such as `(a+)+`, or match a fixed word instead. New patterns are saved only in the rules' RE2 syntax (no backreferences or lookaround) and up to 1000 characters; one saved before with either keeps working but must be rewritten before it can be saved again.
+The viewer says "A severity indicator took too long to match and is turned off until you reload the page:" followed by the pattern. Indicators are matched in the browser, apart from the page, on the first 2000 characters of each line; one that takes more than a second in all over the lines in view, or over the whole file for **Previous problem** and **Next problem**, is turned off in that browser tab until the page is reloaded, and the others keep working. Make the pattern cheaper in **Settings → Severity indicators**: anchor it, avoid nested repetition such as `(a+)+`, or match a fixed word instead. New patterns are saved only in the rules' RE2 syntax (no backreferences or lookaround) and up to 1000 characters; one saved before with either, or longer, keeps working and can still be switched off, given another level or switches, or deleted; only a change to its pattern must follow them.
 
 ### How do I reset a password if someone is locked out?
 

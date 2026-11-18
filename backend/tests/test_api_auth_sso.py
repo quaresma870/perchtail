@@ -2,6 +2,7 @@ import json
 import time
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 from app.api.auth import router as auth_router
 from app.auth.models import (
@@ -18,6 +19,7 @@ from app.bootstrap import seed_no_access_role
 from app.config import get_settings
 from app.crypto import encrypt_secret
 from app.db import get_session
+from app.webhook_safety import UnsafeWebhookURLError
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -135,16 +137,33 @@ def test_sso_login_redirects_to_the_idp_authorization_endpoint(client, session, 
     assert "nonce" in params
 
 
-def test_sso_login_returns_502_when_idp_is_unreachable(client, session, monkeypatch):
+def _assert_sso_error_redirect(response) -> None:
+    """The browser is sent back to the login page with the neutral SSO
+    error, as when the callback fails, not left on a JSON body."""
+    assert response.status_code == 302
+    assert response.headers["location"].endswith("/#/login?sso_error=1")
+    assert "perchtail_sso_state" not in response.cookies
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectTimeout("timed out"),
+        httpx.ConnectError("[Errno 111] Connection refused"),
+        UnsafeWebhookURLError("idp.example.com resolves to a non-public address"),
+    ],
+)
+def test_sso_login_sends_back_to_the_login_page_when_the_idp_is_unreachable(
+    client, session, monkeypatch, error
+):
     _make_enabled_provider(session)
 
     def _boom(issuer):
-        raise ConnectionError("timed out")
+        raise error
 
     monkeypatch.setattr(oidc, "fetch_discovery_document", _boom)
 
-    response = client.get("/auth/sso/login")
-    assert response.status_code == 502
+    _assert_sso_error_redirect(client.get("/auth/sso/login"))
 
 
 def _issuer_mismatch(issuer):
@@ -166,9 +185,8 @@ def test_sso_login_refuses_a_discovery_document_for_another_issuer(client, sessi
 
     response = client.get("/auth/sso/login")
 
-    assert response.status_code == 502
-    assert response.json()["detail"] == "Could not reach the identity provider"
-    assert "location" not in response.headers
+    _assert_sso_error_redirect(response)
+    assert ISSUER not in response.headers["location"]
     [entry] = _sso_login_failures(session)
     assert entry.event_metadata["reason"] == "issuer_mismatch"
 
@@ -264,10 +282,7 @@ def test_the_flow_uses_pkce_s256_end_to_end(client, session, monkeypatch):
 def test_sso_login_refuses_an_http_issuer_stored_before_https_was_required(client, session):
     _make_enabled_provider(session, issuer="http://idp.example.com")
 
-    response = client.get("/auth/sso/login")
-
-    assert response.status_code == 502
-    assert response.json()["detail"] == "Could not reach the identity provider"
+    _assert_sso_error_redirect(client.get("/auth/sso/login"))
 
 
 def test_callback_reuses_the_same_user_on_a_second_login(client, session, monkeypatch):

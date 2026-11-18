@@ -458,7 +458,9 @@ async def _started(app: FastAPI, settings):
         catch_up=True,
     )
     # Scheduled backup (#334): ticks every few minutes and backs up once the
-    # interval set in Settings -> System has gone by; 0 (the default) is off.
+    # interval set in Settings -> System has gone by; 0 is off. 24 hours on a
+    # new install; an install upgraded from before 0.7.0 keeps 0
+    # (app/system_settings.py, backup_interval_hours).
     register_job(scheduler, "backup", "Scheduled backup", run_scheduled_backup, BACKUP_TICK)
     register_db_upkeep_jobs(scheduler)
     scheduler.start()

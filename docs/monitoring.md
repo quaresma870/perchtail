@@ -223,7 +223,7 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `update_check.failed` | warning | The update check couldn't reach GitHub. |
 | `sso.login.discovery_failed`, `sso.login.insecure_idp_url`, `sso.login.issuer_mismatch`, `sso.callback.no_access_role_missing` | error | SSO sign-in can't work: the provider can't be reached or is on an address the policy refuses, its issuer or an endpoint isn't `https://`, its discovery document names another issuer, or the no-access role is missing. |
 | `client_address.untrusted_forwarded_header` | warning | The first request since startup that carried `X-Forwarded-For` or `Forwarded` from a peer outside `TRUSTED_PROXIES` (`peer`); `trusted_proxies_suspect` turns `true`. |
-| `agent.redaction_fallback` | warning | Redaction applies to a push-agent source whose agent doesn't announce `redaction/1`. Logged once per connection. An agent older than 0.7 also lacks `links/1`, so its content requests are refused anyway (`agent_update_required`); upgrade the agent. |
+| `agent.redaction_fallback` | warning | Redaction applies to a push-agent source whose agent announces `links/1` but not `redaction/1`, so the server redacts what it sends. Logged once per connection. An agent older than 0.7 announces neither and isn't logged here: its content requests are refused (`agent_update_required`); upgrade the agent. |
 
 ## Zabbix
 

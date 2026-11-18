@@ -187,6 +187,42 @@ test("accessibility: a source's Redaction section", async ({ page }) => {
   await expectNoSeriousViolations(page)
 })
 
+test('accessibility: Settings -> SSO', async ({ page }) => {
+  // A provider and two mappings, one to a role outside the viewer's access
+  // (as a delegated admin sees it), stubbed so every part of the page is
+  // checked. Nothing is saved.
+  await page.route('**/sso', (route) =>
+    route.fulfill({
+      json: [
+        {
+          id: 1,
+          protocol: 'oidc',
+          name: 'Corporate SSO',
+          enabled: true,
+          issuer: 'https://login.example.test/tenant',
+          client_id: 'perchtail',
+          scopes: 'openid profile email',
+          group_claim: 'groups',
+          secret_unreadable: false,
+        },
+      ],
+    }),
+  )
+  await page.route('**/sso/group-mappings', (route) =>
+    route.fulfill({
+      json: [
+        { id: 1, order: 0, group_name: 'log-readers', role_id: 9001, role_name: 'Log readers', role_outside_authority: false },
+        { id: 2, order: 1, group_name: 'platform-admins', role_id: 9002, role_name: null, role_outside_authority: true },
+      ],
+    }),
+  )
+  await page.goto('/#/settings/sso')
+  await settled(page, 'SSO settings')
+  await expect(page.getByLabel('Issuer URL')).toHaveValue('https://login.example.test/tenant')
+  await expect(page.getByText('A role outside your access')).toBeVisible()
+  await expectNoSeriousViolations(page)
+})
+
 test('accessibility: Settings -> Email', async ({ page }) => {
   await page.goto('/#/settings/email')
   await settled(page, 'Email settings')

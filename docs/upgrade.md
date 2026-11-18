@@ -163,7 +163,7 @@ docker compose pull && docker compose up -d
 
 They assume `docker-compose.yml` uses the published image. If yours builds from a checkout (`build: .`), follow [Upgrading with Docker](#upgrading-with-docker) instead.
 
-The steps shown for an install from source follow [Upgrading an install from source](#upgrading-an-install-from-source), with the paths of [install-from-source.md](install-from-source.md); adjust them if your paths differ.
+The steps shown for an install from source follow [Upgrading an install from source](#upgrading-an-install-from-source), with the paths of [install-from-source.md](install-from-source.md) and `pip install --require-hashes`; adjust them if your paths differ.
 
 ## Rolling back
 
@@ -239,7 +239,7 @@ Push agents upgraded in between stay on the newer version: an agent never downgr
 - **SMB signing is a setting of each SMB source.** Every source keeps requiring signed messages; one whose server can't sign can turn **Require signing** off ([source-setup.md](source-setup.md#4-protocol-version-and-auth)).
 - **A WinRM source reads only paths on a drive.** One saved with a UNC (`\\server\share`) or device (`\\?\`, `\\.\`) path stops being read: change it to a drive path of the WinRM host, or read the share through an SMB source ([source-setup.md](source-setup.md#base-path)).
 - **A `.tar.gz` with more than 50,000 entries** lists only its first 50,000, and its members past them can't be opened: split it into smaller archives ([user-guide.md](user-guide.md#archives)).
-- **Severity regexes use the rules' syntax** (RE2, at most 1000 characters). One saved before with lookaround or a backreference, or longer, keeps working, but any change to it, even to its level or switches, is refused until it is rewritten; it can still be deleted ([admin-guide.md](admin-guide.md#severity-indicators)).
+- **Severity regexes use the rules' syntax** (RE2, at most 1000 characters). One saved before with lookaround or a backreference, or longer, keeps working, and can still be switched off, given another level or switches, or deleted; only a change to its pattern must follow the new rules ([admin-guide.md](admin-guide.md#severity-indicators)).
 
 ### Search and alerts
 

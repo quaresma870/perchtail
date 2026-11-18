@@ -477,6 +477,38 @@ def test_the_credential_key_check_uses_the_smtp_password_when_it_is_the_only_sec
     assert backup.credential_key_matches(db, salt, "a-rotated-key") is False
 
 
+def test_restore_refuses_a_credential_key_when_alert_webhooks_are_the_only_secret(env, monkeypatch):
+    from app.models import Alert
+    from app.timeutils import utcnow
+
+    with Session(env.engine) as session:
+        source = session.exec(select(Source)).one()
+        source.credential_ref = None
+        user = session.exec(select(User)).one()
+        user.mfa_secret_encrypted = None
+        session.add(
+            Alert(
+                user_id=user.id,
+                name="errors",
+                query="error",
+                webhook_url_encrypted=crypto.encrypt_secret("https://hooks.example.com/s3cret"),
+                created_at=utcnow(),
+            )
+        )
+        session.commit()
+    _reload(monkeypatch, BACKUP_ENCRYPTION_KEY=BACKUP_KEY)
+    path = backup.create_backup("manual")
+    env.engine.dispose()
+    before = _tree(env.data)
+    _reload(monkeypatch, CREDENTIAL_ENCRYPTION_KEY="a-rotated-key")
+    with pytest.raises(BackupError, match="--force"):
+        backup.restore_backup(path)
+    assert _tree(env.data) == before
+
+    result = backup.restore_backup(path, force=True)
+    assert result.key_check is False
+
+
 def test_restore_puts_the_backup_back_and_keeps_the_previous_data(env, monkeypatch):
     path = backup.create_backup("manual")
     salt = Path(env.settings.credential_salt_path).read_bytes()

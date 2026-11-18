@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"strings"
@@ -29,6 +30,52 @@ var ErrMemberNotFound = errors.New("member not found")
 // errMemberEncrypted is a zip member stored encrypted: the agent has no
 // password and never sends its encrypted bytes as if they were content.
 var errMemberEncrypted = errors.New("member is encrypted")
+
+// archiveUnreadableError is an archive that can't be read as one: damaged,
+// cut short, or another kind of file under a .zip or .tar.gz name. Its
+// listing or a member's content fails with it, answered with the code
+// "archive_unreadable" (errorResult), which the server refuses as it
+// refuses an archive it can't read itself.
+type archiveUnreadableError struct{ err error }
+
+func (e *archiveUnreadableError) Error() string { return e.err.Error() }
+func (e *archiveUnreadableError) Unwrap() error { return e.err }
+
+// gzipUnreadableError is a .gz file or member that can't be decompressed:
+// damaged, cut short, or not gzip at all. Answered with the code
+// "gzip_unreadable".
+type gzipUnreadableError struct{ err error }
+
+func (e *gzipUnreadableError) Error() string { return e.err.Error() }
+func (e *gzipUnreadableError) Unwrap() error { return e.err }
+
+// unreadable marks err, from reading an archive or decompressing a .gz,
+// with wrap, unless it isn't about the content: the end of it, a limit, an
+// I/O error from the file itself, a cancelled command, or an error marked
+// already (the archive under a .gz member failing first).
+func unreadable(err error, wrap func(error) error) error {
+	var tooLarge *TooLargeError
+	var ioErr *fs.PathError
+	var archiveErr *archiveUnreadableError
+	var gzipErr *gzipUnreadableError
+	switch {
+	case err == nil, errors.Is(err, io.EOF), errors.Is(err, errCancelled),
+		errors.As(err, &tooLarge), errors.As(err, &ioErr),
+		errors.As(err, &archiveErr), errors.As(err, &gzipErr):
+		return err
+	}
+	return wrap(err)
+}
+
+var errEmptyArchive = errors.New("the archive is empty")
+
+func archiveUnreadable(err error) error {
+	return unreadable(err, func(err error) error { return &archiveUnreadableError{err} })
+}
+
+func gzipUnreadable(err error) error {
+	return unreadable(err, func(err error) error { return &gzipUnreadableError{err} })
+}
 
 func isZipName(name string) bool { return strings.HasSuffix(strings.ToLower(name), ".zip") }
 
@@ -91,7 +138,7 @@ func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) e
 		// A member named ../x or /x is reported (ErrInsecurePath) with a
 		// reader that works: names are only shown, never used as paths.
 		if err != nil && !errors.Is(err, zip.ErrInsecurePath) {
-			return err
+			return archiveUnreadable(err)
 		}
 		for _, zf := range zr.File {
 			entryName := zipName(zf)
@@ -121,8 +168,12 @@ func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) e
 			return err
 		}
 		gz, err := gzip.NewReader(f)
+		if errors.Is(err, io.EOF) {
+			// An empty file: not a .tar.gz, as the server's tarfile says.
+			err = errEmptyArchive
+		}
 		if err != nil {
-			return err
+			return archiveUnreadable(err)
 		}
 		defer gz.Close()
 		tr := tar.NewReader(gz)
@@ -135,7 +186,7 @@ func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) e
 				return nil
 			}
 			if err != nil && !errors.Is(err, tar.ErrInsecurePath) {
-				return err
+				return archiveUnreadable(err)
 			}
 			entry := archiveEntry{
 				name:    tarName(header),
@@ -174,7 +225,7 @@ func (s *strictMemberReader) Read(p []byte) (int, error) {
 	if errors.Is(err, io.ErrUnexpectedEOF) {
 		err = errTruncatedMember
 	}
-	return n, err
+	return n, archiveUnreadable(err)
 }
 
 // clampSize is a zip header's size as an int64 (a crafted header can claim
@@ -384,5 +435,9 @@ func (l *limitedReader) Read(p []byte) (int, error) {
 // gunzip decompresses r, as the server's decompress_gzip (concatenated
 // members included).
 func gunzip(r io.Reader) (io.ReadCloser, error) {
-	return gzip.NewReader(r)
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, gzipUnreadable(err)
+	}
+	return gz, nil
 }

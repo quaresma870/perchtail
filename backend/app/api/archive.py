@@ -63,7 +63,7 @@ from app.collectors.base import (
     DirEntry,
     FetchTooLargeError,
     PathOutsideBaseError,
-    RangeNotSupportedError,
+    SourceArchiveUnreadableError,
     SourceError,
     SourceNotFoundError,
     SourcePermissionError,
@@ -146,7 +146,13 @@ def readable_source(capability: Capability):
     return dependency
 
 
-SOURCE_DISABLED = "This source is disabled. An admin can turn it back on in its settings."
+# With a code of its own: the viewer offers no Try again and stops Tail, as
+# for the other refusals that repeating doesn't resolve.
+SOURCE_DISABLED_ERROR_CODE = "source_disabled"
+SOURCE_DISABLED = {
+    "message": "This source is disabled. An admin can turn it back on in its settings.",
+    "error_code": SOURCE_DISABLED_ERROR_CODE,
+}
 logger = get_logger(__name__)
 
 _CONNECTORS = CONNECTORS
@@ -394,6 +400,61 @@ class MemberUnreadableRefused(AuditedRefusal):
         self.reason = _AUDIT_MEMBER_REASONS.get(reason, "member_unreadable")
 
 
+ARCHIVE_UNREADABLE_MESSAGE = (
+    "This archive can't be read: it is damaged, or it isn't really a .zip or .tar.gz file."
+)
+GZIP_UNREADABLE_MESSAGE = (
+    "This compressed file can't be read: it is damaged, or it isn't really a .gz file."
+)
+ARCHIVE_UNREADABLE_ERROR_CODE = "archive_unreadable"
+_AUDIT_ARCHIVE_UNREADABLE_REASON = "archive_unreadable"
+
+
+class ArchiveUnreadableRefused(AuditedRefusal):
+    """409 for a .zip or .tar.gz that can't be read as one (corrupt, or
+    really another kind of file), whether it is browsed or one of its
+    members is opened, or for a .gz file that can't be decompressed
+    (`gzip`), rather than a 500 (or, from an agent, a 502)."""
+
+    def __init__(self, *, gzip: bool = False) -> None:
+        super().__init__(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": GZIP_UNREADABLE_MESSAGE if gzip else ARCHIVE_UNREADABLE_MESSAGE,
+                "error_code": ARCHIVE_UNREADABLE_ERROR_CODE,
+            },
+        )
+        self.reason = _AUDIT_ARCHIVE_UNREADABLE_REASON
+
+
+def _archive_unreadable(
+    source: Source, path: str, exc: BaseException, *, gzip: bool = False
+) -> ArchiveUnreadableRefused:
+    """The refusal of an archive or .gz file that can't be read, logged as
+    archive.unreadable with the error's type (never its text or content)."""
+    logger.warning(
+        "archive.unreadable", source_id=source.id, path=path, error_type=type(exc).__name__
+    )
+    return ArchiveUnreadableRefused(gzip=gzip)
+
+
+@contextmanager
+def _agent_unreadable(source: Source, path: str, member: str | None) -> Iterator[None]:
+    """An agent that can't read the archive or .gz file it was asked to
+    list or read from (SourceArchiveUnreadableError: the agent's
+    archive_unreadable or gzip_unreadable code) gets the refusals the
+    server gives when it reads them itself: ArchiveUnreadableRefused, or,
+    for a .gz member it can't decompress to redact,
+    RedactionUnreadableRefused (_decompress_gzip_member). An older agent
+    answers without a code: that stays the source's own error."""
+    try:
+        yield
+    except SourceArchiveUnreadableError as exc:
+        if exc.gzip and member is not None:
+            raise RedactionUnreadableRefused() from exc
+        raise _archive_unreadable(source, path, exc, gzip=exc.gzip) from exc
+
+
 # The first bytes of the compressed formats PerchTail doesn't decompress.
 # bzip2 is "BZh", the block size ('1' to '9'), then the magic of its first
 # block or of the end of an empty stream. gzip and zip are decompressed only
@@ -440,7 +501,10 @@ class RedactionUnreadableRefused(AuditedRefusal):
     def __init__(self) -> None:
         super().__init__(
             status_code=status.HTTP_409_CONFLICT,
-            detail="This compressed file can't be read, so it can't be redacted.",
+            detail={
+                "message": "This compressed file can't be read, so it can't be redacted.",
+                "error_code": _AUDIT_REDACTION_UNREADABLE_REASON,
+            },
         )
         self.reason = _AUDIT_REDACTION_UNREADABLE_REASON
 
@@ -545,6 +609,8 @@ def _materialize(
                 "archive.member_unreadable", source_id=source.id, path=path, reason=exc.reason
             )
             raise MemberUnreadableRefused(exc.reason) from exc
+        except _UNREADABLE_ERRORS as exc:
+            raise _archive_unreadable(source, path, exc) from exc
         except KeyError as exc:
             # Not in the archive, or not a regular file (a link, a device):
             # either way there's nothing to open under that name.
@@ -557,6 +623,10 @@ def _materialize(
                 decompress_gzip(raw_local, destination, _max_decompressed_bytes())
         except DecompressionLimitError as exc:
             raise _too_large(exc) from exc
+        except _UNREADABLE_ERRORS as exc:
+            # Damaged, or not gzip at all: refused as an archive that can't
+            # be read, rather than a 500.
+            raise _archive_unreadable(source, path, exc, gzip=True) from exc
         return filename[: -len(".gz")]
 
     if is_archive(filename):
@@ -576,6 +646,11 @@ def _materialize(
 # say when there were more.
 TRUNCATED_HEADER = "X-Listing-Truncated"
 LIMIT_HEADER = "X-Listing-Limit"
+# Who cut a truncated listing when the cap didn't: "archive" (the archive's
+# reader stops at 50,000 entries, and so does an agent listing one) or
+# "source" (the source cut the folder's listing: an agent stops at 50,000
+# entries). Absent when the cap cut it, so the explorer can say which.
+CUT_BY_HEADER = "X-Listing-Cut-By"
 
 
 def _listing_max_entries(session: Session) -> int:
@@ -596,10 +671,22 @@ def _capped(entries: list[BrowseEntry], limit: int, *, flat: bool = False):
     return ordered[:limit], len(ordered) > limit
 
 
-def _set_listing_headers(response: Response, truncated: bool, limit: int) -> None:
+def _set_listing_headers(
+    response: Response, truncated: bool, limit: int, cut_by: str | None
+) -> None:
     response.headers[LIMIT_HEADER] = str(limit)
     if truncated:
         response.headers[TRUNCATED_HEADER] = "1"
+    if cut_by is not None:
+        response.headers[CUT_BY_HEADER] = cut_by
+
+
+def _cut(capped: bool, cut_before: bool, by: str) -> tuple[bool, str | None]:
+    """(truncated, cut_by) of a listing the cap may have cut (`capped`)
+    after the archive's reader or the source (`by`) may have cut it
+    (`cut_before`). When the cap cut it, the cap is what the explorer
+    shows."""
+    return capped or cut_before, (by if cut_before and not capped else None)
 
 
 def _archive_flat_entries(
@@ -670,7 +757,9 @@ def browse(
     _require_safe_path(source, path)
     limit = _listing_max_entries(session)
     with get_limiter().connector(current_limits(session), source.id):
-        entries, truncated = _browse(source, path, refresh, all_members, user, session, limit)
+        entries, truncated, cut_by = _browse(
+            source, path, refresh, all_members, user, session, limit
+        )
     if path and not refresh and system_settings.get_bool(session, "audit_folder_listings"):
         # A folder below the root (or inside an archive) that was listed:
         # what someone looked through, not only what they opened. The
@@ -688,7 +777,7 @@ def browse(
             metadata=metadata,
         )
         session.commit()
-    _set_listing_headers(response, truncated, limit)
+    _set_listing_headers(response, truncated, limit, cut_by)
     return entries
 
 
@@ -700,7 +789,7 @@ def _browse(
     user: User,
     session: Session,
     limit: int,
-) -> tuple[list[BrowseEntry], bool]:
+) -> tuple[list[BrowseEntry], bool, str | None]:
     if path == "" and not refresh:
         # Root browse == "opened this source" -- the connections home page's
         # Recent column (GET /sources/recent) reads this back. Deliberately
@@ -731,22 +820,29 @@ def _browse(
             # Redaction applies and the agent redacts on its host: it lists
             # the archive itself, so the archive never leaves the host only
             # to be listed (#382, #249).
-            members, listing_cut = connector.call("list_archive", source, archive_path, rules=rules)
+            with _agent_unreadable(source, archive_path, None):
+                members, listing_cut = connector.call(
+                    "list_archive", source, archive_path, rules=rules
+                )
         else:
-            with connector.local_copy(source, archive_path, rules=rules) as archive_local:
-                members, listing_cut = scan_members(archive_local, archive_name)
+            try:
+                with connector.local_copy(source, archive_path, rules=rules) as archive_local:
+                    members, listing_cut = scan_members(archive_local, archive_name)
+            except _UNREADABLE_ERRORS as exc:
+                # As when one of its members is opened (_materialize).
+                raise _archive_unreadable(source, archive_path, exc) from exc
         if all_members:
             if member_dir:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="all is for an archive itself, not a folder inside it",
                 )
-            flat, truncated = _capped(
+            flat, capped = _capped(
                 _archive_flat_entries(source, archive_path, members, rules), limit, flat=True
             )
-            return flat, truncated or listing_cut
+            return flat, *_cut(capped, listing_cut, "archive")
         children = tree_children(members, member_dir)
-        listed, truncated = _capped(
+        listed, capped = _capped(
             [
                 BrowseEntry(
                     name=child.name.rsplit("/", 1)[-1],
@@ -765,7 +861,7 @@ def _browse(
             ],
             limit,
         )
-        return listed, truncated or listing_cut
+        return listed, *_cut(capped, listing_cut, "archive")
 
     if all_members:
         raise HTTPException(
@@ -777,7 +873,7 @@ def _browse(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
 
     entries = connector.list_directory(source, rules, path)
-    listed, truncated = _capped(
+    listed, capped = _capped(
         [
             BrowseEntry(
                 name=entry.name,
@@ -792,7 +888,7 @@ def _browse(
         limit,
     )
     # The source may have cut the listing itself (an agent, #347).
-    return listed, truncated or is_truncated(entries)
+    return listed, *_cut(capped, is_truncated(entries), "source")
 
 
 def redaction_rules_for(session: Session, source: Source) -> CompiledRules | None:
@@ -828,8 +924,14 @@ def agent_redaction_rules(session: Session, source: Source) -> list[dict] | None
     the host (#382, #249). None when the content is redacted on the server:
     a source that isn't an agent, or an agent that can't redact on the host
     (an older one), which falls back to the server, logged once per
-    connection."""
+    connection. An agent whose files can't be read at all (require_links)
+    gets None without that log: the connector refuses the request
+    (agent_update_required, audited where it reads), so nothing falls back."""
     if source.protocol != Protocol.agent:
+        return None
+    try:
+        require_links(source)
+    except AgentUpdateRequiredError:
         return None
     registry = get_agent_registry()
     if registry.redacts_on_host(source.id):
@@ -1044,7 +1146,7 @@ def _resolve_on_agent(
         key = _scratch_key(owner, source.id, path, member)
         destination = store.acquire(key)
         try:
-            with _agent_refusals(agent_rules):
+            with _agent_refusals(agent_rules), _agent_unreadable(source, path, member):
                 fetched = connector.call(
                     "fetch_redacted",
                     source,
@@ -1461,8 +1563,8 @@ def follow_file(
     X-Follow-Reset: 1 (no body) when the file shrank or starts differently
     -- rotated or truncated -- so the viewer reloads it from the start.
 
-    409 follow_unsupported for .gz files and archive members, and for an
-    agent older than 0.6: the viewer reloads the whole file instead.
+    409 follow_unsupported for .gz files and archives: the viewer reloads
+    the whole file instead.
     Audited once per Tail of a file in a session (_FollowAudits), whatever
     offset it starts from, with that offset, and again when a poll reads
     from before the offset audited; not on every poll. A redacted poll
@@ -1513,10 +1615,6 @@ def follow_file(
             session, user, source, "file.open_denied", path, _refused_read_reason(exc), follow=True
         )
         raise
-    except RangeNotSupportedError as exc:
-        raise _follow_unsupported(
-            "This source's agent is older than 0.6 and can't send only the new lines"
-        ) from exc
 
     changed = head is not None and offset > 0 and head != _head_hash(source.id, first, offset)
     if offset > size or changed:
@@ -2214,16 +2312,17 @@ def _prepare_on_agent(
                     )
                 decompress = is_transparent_gzip(target)
                 content = work_dir / "redacted"
-                fetched = connector.call(
-                    "fetch_redacted",
-                    source,
-                    path,
-                    content,
-                    redaction_block(source.id, agent_rules, "source"),
-                    member=member,
-                    decompress=decompress,
-                    rules=rules,
-                )
+                with _agent_unreadable(source, path, member):
+                    fetched = connector.call(
+                        "fetch_redacted",
+                        source,
+                        path,
+                        content,
+                        redaction_block(source.id, agent_rules, "source"),
+                        member=member,
+                        decompress=decompress,
+                        rules=rules,
+                    )
                 if member is not None and decompress:
                     if fetched.refused_encoding_at is not None:
                         # Compressed again whole, as the server refuses one

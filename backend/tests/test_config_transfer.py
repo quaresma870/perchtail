@@ -276,6 +276,12 @@ def test_moving_a_source_to_another_folder_is_an_update(session, client):
             "base_path",
             "drive path",
         ),
+        (
+            # An agent source's base path is checked as in the editor too.
+            lambda t: t.replace("base_path: /var/log\n", 'base_path: "/var/log\\a"\n'),
+            "sources[0].base_path",
+            "Base path contains control characters",
+        ),
         (lambda t: t.replace("- include **/*.log\n", "- include re:(a\n", 1), "rules[0]", "regex"),
         (lambda t: t.replace("- exclude **/debug/**", "- hide **/debug/**"), "rules[1]", "include"),
         (lambda t: t.replace("port: 4455", "prot: 4455"), "sources[1]", "Unknown keys: prot"),

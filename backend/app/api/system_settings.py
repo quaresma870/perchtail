@@ -212,9 +212,9 @@ def _read_all(session: Session) -> SystemSettingsPublic:
 
 @router.get("", response_model=SystemSettingsPublic)
 def get_system_settings(
-    # Readable by any authenticated user, not just admins -- the frontend
-    # needs this to decide whether to render the Search nav link at all,
-    # for everyone, not only for whoever can change it.
+    # Readable by any authenticated user, not just admins: the frontend reads
+    # some of these settings for everyone, not only for whoever can change
+    # them.
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):

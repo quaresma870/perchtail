@@ -268,7 +268,7 @@ What goes in **Base path** depends on the protocol, and PerchTail refuses the ki
 | SMB | the **share name**, optionally followed by a folder inside it. Not a drive path, and not an administrative share (`C$`, `ADMIN$`) | `AppLogs` or `AppLogs\iis` |
 | WinRM | absolute Windows path on a drive of the WinRM host. Not a UNC path (`\\server\share`) or a device path (`\\?\`, `\\.\`): read a share through an SMB source instead | `D:\Logs\MyApp` |
 | Local disk | a directory under `LOCAL_SOURCE_ROOTS` | `/mnt/logs/app` |
-| Agent | documentation only: the agent's `PERCHTAIL_BASE_PATH` is what counts | |
+| Agent | documentation only: the agent's `PERCHTAIL_BASE_PATH` is what counts. Spaces around it are trimmed, and one with control characters is refused | |
 
 A WinRM source saved by an earlier version with a UNC or device path is no longer read: it answers "This source's Base path isn't a path on a drive (e.g. D:\Logs): edit the source to correct it", and the log has `winrm.base_path_not_on_drive`. Change it to a path on a drive of the WinRM host, or read the share through an SMB source.
 

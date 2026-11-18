@@ -74,7 +74,7 @@ The **Redaction** section of a source's editor, under **Settings → Sources**, 
 
 - **System rules**: every rule from **Settings → Redaction**, with whether it applies here. A rule on system-wide can be turned off for this source only (and back on); a rule off system-wide applies nowhere and can't be turned on for one source.
 - **This source's own rules**: custom rules that apply to this source only, after the system rules.
-- For a push-agent source whose agent can't redact on its host, a warning (see [Where content is redacted](#where-content-is-redacted)).
+- For a push-agent source whose agent can't redact on its host, a warning; for one older than 0.7, a warning that it must be updated before its files can be read (see [Where content is redacted](#where-content-is-redacted)).
 
 Changes in this section are saved at once, apart from the rest of the form. The rules that run on a source are the system rules that are on and that it doesn't turn off, in their order, then its own rules that are on, in theirs.
 
@@ -84,7 +84,7 @@ A source's own rules and the system rules it turns off are also in the configura
 
 - **SSH, SMB, WinRM and local sources**: on the PerchTail server, as the content arrives, before it is written to scratch, sent to a browser or queued for a webhook. Only the redacted copy is kept in scratch.
 - **Push-agent sources**: on the agent's host, by agents of version 0.7.0 and later, which announce it when they connect (`redaction/1`). The rules travel with each request, the agent redacts with the same engine (both are tested against the same test vectors), and the original content never leaves the host. Archives are listed and their files read on the host; the server only rebuilds an archive or a ZIP from what arrived redacted. The server uses an answer only when it says it was redacted with the rules it sent. If the agent can't run a custom rule, the request fails with the rule's name rather than falling back to the server.
-- **Push agents older than 0.7.0** can't redact on their host, and they don't say where links lead either (`links/1`), so PerchTail reads none of their files, with or without redaction: their folders can still be browsed, alerts skip their files, and opening, Tail, downloads, folder ZIPs and archives are refused with 409 and "This source's agent must be updated before its files can be read. Ask an administrator to update it from Settings → Agents.", audited with the reason `agent_update_required`. **Settings → Agents** marks them **Update required**, and the source editor shows the warning for an agent that can't redact on its host. Upgrade them by hand once ([agent-service.md](agent-service.md#upgrading-by-hand)).
+- **Push agents older than 0.7.0** can't redact on their host, and they don't say where links lead either (`links/1`), so PerchTail reads none of their files, with or without redaction: their folders can still be browsed, alerts skip their files, and opening, Tail, downloads, folder ZIPs and archives are refused with 409 and "This source's agent must be updated before its files can be read. Ask an administrator to update it from Settings → Agents.", audited with the reason `agent_update_required`. **Settings → Agents** marks them **Update required**, and the source editor's **Redaction** section says the agent must be updated before its files can be read. Upgrade them by hand once ([agent-service.md](agent-service.md#upgrading-by-hand)).
 
 ## What users see
 

@@ -430,6 +430,39 @@ def test_regenerate_agent_token_returns_plaintext_once(session, admin_client):
     assert source.agent_token_hash != token
 
 
+def test_the_editor_checks_an_agent_base_path_as_the_import_does(session, admin_client):
+    """An agent's base path goes through the same check as the import's
+    (config_transfer, _validate_base_path): trimmed, and refused with
+    control characters, so what the editor saves can be exported and
+    imported again."""
+    customer = _make_customer(session)
+    payload = {
+        "name": "agent01",
+        "customer_id": customer.id,
+        "protocol": "agent",
+        "host": "agent01",
+        "base_path": "/var/log\a",
+    }
+    refused = admin_client.post("/sources", json=payload)
+    assert refused.status_code == 400
+    assert "control characters" in refused.json()["detail"]
+
+    created = admin_client.post("/sources", json={**payload, "base_path": "  /var/log/app  "})
+    assert created.status_code == 201, created.text
+    assert created.json()["base_path"] == "/var/log/app"
+
+    changed = admin_client.patch(
+        f"/sources/{created.json()['id']}", json={"base_path": "/var/log/other\x1b"}
+    )
+    assert changed.status_code == 400
+    assert "control characters" in changed.json()["detail"]
+    trimmed = admin_client.patch(
+        f"/sources/{created.json()['id']}", json={"base_path": " /var/log/other "}
+    )
+    assert trimmed.status_code == 200, trimmed.text
+    assert trimmed.json()["base_path"] == "/var/log/other"
+
+
 def test_regenerate_agent_token_rejects_non_agent_protocol(session, admin_client):
     customer = _make_customer(session)
     created = admin_client.post(

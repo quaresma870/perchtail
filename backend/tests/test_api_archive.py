@@ -961,7 +961,9 @@ def test_a_disabled_source_is_not_read_whatever_the_grants(
     _make_user(session, app, is_super_admin=True)
     response = getattr(client, method)(f"/sources/{source.id}/{path}")
     assert response.status_code == 409
-    assert "disabled" in response.json()["detail"]
+    # A code of its own: the viewer offers no Try again and Tail stops.
+    assert response.json()["detail"]["error_code"] == "source_disabled"
+    assert "disabled" in response.json()["detail"]["message"]
 
 
 def test_closing_a_tab_still_works_on_a_disabled_source(session, app_client, tmp_path):
@@ -992,6 +994,7 @@ def test_checking_a_disabled_source_does_not_contact_it(session, tmp_path, monke
     _make_user(session, app, is_super_admin=True)
     response = TestClient(app).post(f"/sources/{source.id}/check")
     assert response.status_code == 409 and contacted == []
+    assert response.json()["detail"]["error_code"] == "source_disabled"
 
 
 # --- whole archives with members hidden by the rules ------------------------
@@ -1191,6 +1194,55 @@ def test_corrupt_archive_is_refused_only_when_the_source_has_an_exclude(
     assert response.status_code == expected
     if expected == 200:
         assert response.content == b"not really a zip"
+
+
+@pytest.mark.parametrize("name", ["broken.zip", "broken.tar.gz"])
+def test_a_corrupt_archive_is_refused_alike_when_browsed_and_when_a_member_is_opened(
+    app_client, session, fake_sftp, scratch_store, name
+):
+    """An archive that is really text can't be listed or opened: the
+    explorer gets the same refusal as opening one of its members, not a 500."""
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    _grant_view_and_download(session, user, source)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files[f"/var/log/appname/{name}"] = b"just some text\n" * 10
+
+    opened = client.get(f"/sources/{source.id}/open", params={"path": name, "member": "a.log"})
+    browsed = client.get(f"/sources/{source.id}/browse", params={"path": name})
+
+    assert opened.status_code == 409
+    assert opened.json()["detail"]["error_code"] == "archive_unreadable"
+    assert (browsed.status_code, browsed.json()) == (opened.status_code, opened.json())
+    event = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).one()
+    assert event.event_metadata["reason"] == "archive_unreadable"
+
+
+@pytest.mark.parametrize("endpoint", ["open", "download"])
+def test_a_gz_file_that_isnt_gzip_is_refused_not_a_500(
+    app_client, session, fake_sftp, scratch_store, endpoint
+):
+    """A .gz file that can't be decompressed (damaged, or not really gzip)
+    gets the same refusal as an archive that can't be read, audited, rather
+    than a 500."""
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    _grant_view_and_download(session, user, source)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/broken.log.gz"] = b"just some text\n" * 10
+
+    response = client.get(f"/sources/{source.id}/{endpoint}", params={"path": "broken.log.gz"})
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["error_code"] == "archive_unreadable"
+    assert ".gz" in detail["message"]
+    action = "file.open_denied" if endpoint == "open" else "file.download_denied"
+    event = session.exec(select(AuditLog).where(AuditLog.action == action)).one()
+    assert event.event_metadata["reason"] == "archive_unreadable"
+    assert list(scratch_store.root.iterdir()) == []
 
 
 def test_local_source_whole_archive_with_an_excluded_member_is_refused(

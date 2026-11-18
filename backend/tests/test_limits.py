@@ -422,6 +422,8 @@ def test_an_archive_listing_is_capped(session, client, tmp_path):
     response = client.get(f"/sources/{source.id}/browse", params={"path": "big.zip"})
     assert len(response.json()) == 100
     assert response.headers["X-Listing-Truncated"] == "1"
+    # Cut by the explorer's own cap, not by the archive's reader.
+    assert "X-Listing-Cut-By" not in response.headers
 
 
 def _tar_gz_file(path, names):
@@ -442,9 +444,11 @@ def test_a_tar_gz_past_its_entry_limit_lists_as_cut_short(session, client, tmp_p
     assert response.status_code == 200
     assert len(response.json()) == 10
     assert response.headers["X-Listing-Truncated"] == "1"
+    assert response.headers["X-Listing-Cut-By"] == "archive"
     every = client.get(f"/sources/{source.id}/browse", params={"path": "big.tar.gz", "all": "true"})
     assert len(every.json()) == 10
     assert every.headers["X-Listing-Truncated"] == "1"
+    assert every.headers["X-Listing-Cut-By"] == "archive"
 
 
 def test_a_whole_tar_gz_past_its_entry_limit_is_refused_when_rules_exclude(
@@ -557,6 +561,31 @@ def test_a_truncated_source_listing_is_marked_on_browse(session, client, tmp_pat
     response = client.get(f"/sources/{source.id}/browse")
     assert [e["name"] for e in response.json()] == ["a.log"]
     assert response.headers["X-Listing-Truncated"] == "1"
+    # Fewer entries than the cap: the source cut it (an agent stops at
+    # 50,000), so the explorer says so rather than "the first 5000".
+    assert response.headers["X-Listing-Cut-By"] == "source"
+
+
+def test_a_source_listing_past_the_cap_is_cut_by_the_cap(session, client, tmp_path, monkeypatch):
+    (tmp_path / "logs").mkdir()
+    source = _local_source(session, tmp_path / "logs")
+    _set(session, listing_max_entries=100)
+
+    def cut_short(source, rules, relative_path=""):
+        listing = DirListing(
+            [
+                DirEntry(name=f"{i:03}.log", path=f"{i:03}.log", is_dir=False, size=1)
+                for i in range(120)
+            ]
+        )
+        listing.truncated = True
+        return listing
+
+    monkeypatch.setattr("app.collectors.local.list_directory", cut_short)
+    response = client.get(f"/sources/{source.id}/browse")
+    assert len(response.json()) == 100
+    assert response.headers["X-Listing-Truncated"] == "1"
+    assert "X-Listing-Cut-By" not in response.headers
 
 
 def test_a_folder_zip_over_a_truncated_listing_is_refused_and_audited(

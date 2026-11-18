@@ -7,20 +7,28 @@
 import { api } from './api'
 import type { BrowseEntry } from './types'
 
+/** Who cut a truncated listing when the cap didn't (X-Listing-Cut-By):
+ * the archive's reader, or the source (an agent stops at 50,000 entries). */
+export type ListingCutBy = 'archive' | 'source'
+
 export interface Listing {
   entries: BrowseEntry[]
   /** The folder has more entries than these. */
   truncated: boolean
   /** The cap the server applied, when it said. */
   limit: number | null
+  /** Null when the cap cut it, or nothing did. */
+  cutBy: ListingCutBy | null
 }
 
 export function readListing(entries: BrowseEntry[], headers: Headers): Listing {
   const limit = Number(headers.get('x-listing-limit'))
+  const cutBy = headers.get('x-listing-cut-by')
   return {
     entries,
     truncated: headers.get('x-listing-truncated') === '1',
     limit: headers.has('x-listing-limit') && Number.isFinite(limit) ? limit : null,
+    cutBy: cutBy === 'archive' || cutBy === 'source' ? cutBy : null,
   }
 }
 
@@ -29,7 +37,17 @@ export async function fetchListing(url: string): Promise<Listing> {
   return readListing(data, headers)
 }
 
+/** What the explorer says under a truncated listing: the server says who
+ * cut it when the cap didn't (X-Listing-Cut-By), an archive's reader or
+ * the source, and then what's shown is what they read, not the cap. */
 export function truncatedNotice(listing: Listing): string {
+  const shownCount = listing.entries.length.toLocaleString('en')
+  if (listing.cutBy === 'archive') {
+    return `This archive has more entries than were read; showing the ${shownCount} read.`
+  }
+  if (listing.cutBy === 'source') {
+    return `The source listed only part of this folder; showing the ${shownCount} entries it listed.`
+  }
   const shown = (listing.limit ?? listing.entries.length).toLocaleString('en')
   return `Showing the first ${shown} entries; narrow with the search.`
 }

@@ -26,4 +26,10 @@ describe('upgradeSteps', () => {
     expect(steps).toContain('--chown=root:root')
     expect(steps).toContain('sudo systemctl start perchtail')
   })
+
+  it('installs the pinned backend packages with their hashes checked, as the guides do', () => {
+    expect(upgradeSteps('source', '0.6.0')).toContain(
+      'sudo /opt/perchtail-venv/bin/pip install --require-hashes -r /opt/perchtail/backend/requirements.txt',
+    )
+  })
 })

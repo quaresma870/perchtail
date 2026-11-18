@@ -60,7 +60,7 @@ Only files the source's rules allow are listed. A folder is listed when the sour
 
 A link (a symbolic link, or a junction on a Windows push agent) is judged both by its own name and by where it leads: it is listed and opens only when the rules show its own path and it leads to a file or folder inside the source that the rules also show, such as `current.log` pointing to today's log. A link that leads out of the source, or to something the rules hide, isn't listed, and opening it answers as if it didn't exist. SMB and WinRM sources never list links.
 
-A folder or archive lists at most a set number of entries (5000 by default). When there are more, the explorer says "Showing the first N entries; narrow with the search."
+A folder or archive lists at most a set number of entries (5000 by default). When there are more, the explorer says "Showing the first N entries; narrow with the search." A push agent lists at most 50,000 entries of a folder: when it stopped there with fewer visible entries than that limit, the explorer says "The source listed only part of this folder; showing the N entries it listed."
 
 ### Status
 
@@ -129,7 +129,7 @@ Click a file in the explorer or in search results. A file over 200 MB opens only
 
 A `.gz` file opens decompressed. A `.zip`, `.tar.gz` or `.tgz` file opens as a folder, see [Archives](#archives).
 
-When a file can't be opened, the viewer says why, for example that it no longer exists on the source, that it "wasn't found, or is hidden by this source's rules", or that it is over the server's size limit. **Try again** appears when retrying may help, for example when PerchTail is busy.
+When a file can't be opened, the viewer says why, for example that it no longer exists on the source, that it "wasn't found, or is hidden by this source's rules", or that it is over the server's size limit. **Try again** appears when retrying may help, for example when PerchTail is busy or the file is locked on the source, not for a refusal that won't change, such as a disabled source, an agent that must be updated, an archive that can't be read, an encrypted archive member or content redaction can't read.
 
 On a push-agent source whose agent is older than 0.7, folders still list, but nothing can be opened, followed or downloaded: the viewer says "This source's agent must be updated before its files can be read. Ask an administrator to update it from Settings → Agents."
 
@@ -197,6 +197,7 @@ Find and Find all work on what the tab holds, in your browser; they don't read t
 - If you have scrolled up, Tail doesn't move you: a button shows how many new lines arrived; click it to jump to the end.
 - If the file was rotated or truncated (it shrank, or its start changed), the tab reloads it from the start and says so.
 - If the file disappears from the source, Tail stops and the tab keeps what it had.
+- If the server refuses a check, the viewer shows why. When the refusal won't change at the next check, such as a disabled source, an agent that must be updated or content redaction can't read, Tail stops, the tab keeps what it had, and the message ends with "The tab keeps what it had; Tail stopped."; a file locked on the source is tried again at the next check.
 - With redaction on, a line still being written shows as `[redacted: incomplete line]` until a later check finds it complete, and the count of redacted values follows what the tab still holds.
 - A tab keeps at most the last 200,000 lines while Tail adds to it. Older lines are dropped from the top, and the toolbar says so. **Reload** reads the file again.
 
@@ -236,7 +237,9 @@ Download a subfolder instead.
 
 An archive inside an archive is listed as a file: it doesn't expand.
 
-A `.tar.gz` or `.tgz` with more than 50,000 entries (files, folders and links together), or more than 8 MiB of names, lists only its first entries, and the explorer says "Showing the first N entries; narrow with the search." under it. The files past them can't be opened from it. A `.tar.gz` whose headers are too large, or chained deeper than PerchTail follows, can't be read at all.
+A `.tar.gz` or `.tgz` with more than 50,000 entries (files, folders and links together), or more than 8 MiB of names, lists only its first entries, and the explorer says "This archive has more entries than were read; showing the N read." under it (or "Showing the first N entries; narrow with the search." when they fill the listing limit). The files past them can't be opened from it. A `.tar.gz` whose headers are too large, or chained deeper than PerchTail follows, can't be read at all.
+
+An archive that can't be read (damaged, or another kind of file under an archive's name) answers "This archive can't be read: it is damaged, or it isn't really a .zip or .tar.gz file." when you expand it or open or download a file inside it. A `.gz` file that can't be decompressed answers "This compressed file can't be read: it is damaged, or it isn't really a .gz file."
 
 A file inside a `.zip` that is encrypted, or compressed with a method PerchTail can't read, is refused, to open and to download: "This archive member is encrypted or compressed with a method PerchTail can't read, so it can't be opened."
 

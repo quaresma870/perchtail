@@ -575,6 +575,86 @@ def test_alerts_wait_for_an_agent_to_update_and_say_so_once(agent, monkeypatch):
     assert agent.commands == []
 
 
+def _enable_redaction(session) -> None:
+    from app import system_settings
+    from app.models import RedactionRule
+    from app.redaction_rules import seed_builtin_redaction_rules
+
+    seed_builtin_redaction_rules(session)
+    for rule in session.exec(select(RedactionRule)).all():
+        rule.enabled = True
+        session.add(rule)
+    system_settings.set_bool(session, "redaction_enabled", True)
+    system_settings.set_bool(session, "redaction_downloads", True)
+    session.commit()
+
+
+def _record_fallbacks(monkeypatch) -> tuple[list[str], list[int]]:
+    """(events the archive module logged, sources whose first-fallback flag
+    was consumed)."""
+    import app.api.archive as archive_module
+
+    logged: list[str] = []
+    consumed: list[int] = []
+    real_logger = archive_module.logger
+
+    class Recorder:
+        def __getattr__(self, level):
+            def log(event, **fields):
+                logged.append(event)
+                getattr(real_logger, level)(event, **fields)
+
+            return log
+
+    def first_redaction_fallback(source_id):
+        consumed.append(source_id)
+        return True
+
+    monkeypatch.setattr(archive_module, "logger", Recorder())
+    monkeypatch.setattr(get_agent_registry(), "first_redaction_fallback", first_redaction_fallback)
+    return logged, consumed
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "params"),
+    [
+        ("open", {"path": "app-2026.log"}),
+        ("follow", {"path": "app-2026.log", "offset": 0}),
+        ("download", {"path": "app-2026.log"}),
+    ],
+)
+def test_a_refused_agent_to_update_logs_no_redaction_fallback(
+    old_api, agent, session, monkeypatch, endpoint, params
+):
+    """An agent without links/1 that can't redact on its host either: the
+    request is refused (agent_update_required) before anything decides the
+    server redacts in its place, so agent.redaction_fallback isn't logged
+    and the once-per-connection flag is kept for a request that reads."""
+    _enable_redaction(session)
+    agent.features = frozenset()
+    logged, consumed = _record_fallbacks(monkeypatch)
+    client, source = old_api
+    response = client.get(f"/sources/{source.id}/{endpoint}", params=params)
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "agent_update_required"
+    assert "agent.redaction_fallback" not in logged
+    assert consumed == []
+    assert agent.commands == []
+
+
+def test_alerts_on_an_agent_to_update_log_no_redaction_fallback(agent, session, monkeypatch):
+    from app import alerts
+
+    _enable_redaction(session)
+    agent.features = frozenset()
+    logged, consumed = _record_fallbacks(monkeypatch)
+    source = _source()
+    redaction = alerts.source_redaction(session, source)
+    assert redaction is not None and redaction.block is None
+    assert "agent.redaction_fallback" not in logged
+    assert consumed == []
+
+
 def test_the_agents_page_says_which_agents_need_updating(session):
     from app.agent_upgrade_policy import UpgradeSettings
     from app.api.agent_upgrades import _row

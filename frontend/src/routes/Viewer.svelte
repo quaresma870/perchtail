@@ -31,7 +31,7 @@
   import { countAppended, countMatches, matchIndexAt, type MatchCount } from '../lib/find-count'
   import ToolbarIcon from '../lib/components/ToolbarIcon.svelte'
   import { buildConnectionTree } from '../lib/connection-tree'
-  import { readFetchFailure, type FetchProblem } from '../lib/fetch-errors'
+  import { readFetchFailure, readFollowFailure, tailStoppedNotice, type FetchProblem } from '../lib/fetch-errors'
   import { trackedFetch } from '../lib/server-status'
   import { parentPath, refreshFolder, startAutoRefresh, stopAutoRefresh } from '../lib/explorer-refresh'
   import { connectionsViewPreference, migrateLegacyViewChoice, savePreference } from '../lib/preferences'
@@ -495,13 +495,15 @@
   ): Promise<EndRead | FetchProblem> {
     const offset = tailStartOffset(size)
     const response = await trackedFetch(followUrl(sourceId, path, offset, null, true), { credentials: 'include' })
-    if (response.status === 409) {
-      return {
-        message: `${name} can't be read from its end (an agent older than 0.6). Open it whole or download it.`,
-        retryable: false,
+    if (!response.ok) {
+      // What the server says (an agent to update, content redaction can't
+      // read...); only a file Tail can't follow from an offset gets this.
+      const failure = await readFollowFailure(response, name)
+      if (failure.reloadWhole) {
+        return { message: `${name} can't be read from its end. Open it whole or download it.`, retryable: false }
       }
+      return { message: failure.message, retryable: failure.retryable, missing: failure.missing }
     }
-    if (!response.ok) return await readFetchFailure(response, name)
     const answer = readFollowHeaders(response.headers, offset)
     if (answer.reset) {
       const now = Number(response.headers.get('x-file-size'))
@@ -882,18 +884,29 @@
       const response = await trackedFetch(followUrl(tab.sourceId, tab.path, byteSize, followHead, start), {
         credentials: 'include',
       })
-      if (response.status === 409) {
-        // A .gz file, an archive member or an agent older than 0.6: this
-        // tab reloads the whole file from now on.
-        followStarted.add(tab.key)
-        updateTab(tab.key, { followMode: 'reload' })
-        await reloadTab(tab)
-        return
-      }
       if (!response.ok) {
-        const problem = await readFetchFailure(response, tab.name)
-        if (problem.missing) markMissing(tab)
-        else notice = problem
+        const { reloadWhole, stopFollowing, ...problem } = await readFollowFailure(response, tab.name)
+        if (reloadWhole) {
+          // A .gz file or an archive member (follow_unsupported): this tab
+          // reloads the whole file from now on.
+          followStarted.add(tab.key)
+          updateTab(tab.key, { followMode: 'reload' })
+          await reloadTab(tab)
+          return
+        }
+        if (problem.missing) {
+          markMissing(tab)
+          return
+        }
+        // A refusal the next poll won't change (an agent to update, content
+        // redaction can't read): Tail stops and the tab keeps what it had.
+        if (stopFollowing) {
+          updateTab(tab.key, { following: false })
+          followStarted.delete(tab.key)
+          notice = tailStoppedNotice(problem)
+          return
+        }
+        notice = problem
         return
       }
       followStarted.add(tab.key)
@@ -1419,7 +1432,7 @@
               aria-pressed={activeTab.following}
               title={activeTab.followMode === 'incremental'
                 ? "Show new lines as they're written, like tail -f: fetches only what was appended"
-                : "Show new lines as they're written: reloads the whole file (compressed files, archive members, agents older than 0.6)"}
+                : "Show new lines as they're written: reloads the whole file (compressed files and archive members)"}
               on:click={toggleFollow}
             >
               {#if activeTab.following}<span class="live-dot" aria-hidden="true"></span>{/if}
