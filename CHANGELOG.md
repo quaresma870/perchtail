@@ -8,6 +8,10 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.7.0-rc.1] - 2026-11-18
+
+A feature and security release: redaction, password recovery by email, the access review, encrypted backups, links judged by where they lead, and hardening across authentication, authorization, connectors and the push agent. Read Upgrading before upgrading: push agents must be updated before their files can be read, administrators must use MFA, and several defaults and permissions change.
+
 ### Upgrading
 - **The content index and the Search page are gone** (#303). The migration drops their tables, so the space they took comes back; nothing can be kept. The `SEARCH_INDEX_*` environment variables are ignored.
 - **Alerts read new lines live** (#305). Existing alerts keep their name, query, source and webhook, and start again at the end of each file they watch. Their query is now plain text (anywhere in a line, any letter case) or a regular expression, not full-text search syntax: an alert that used operators like `AND` or quotes needs its query rewritten.
@@ -2068,7 +2072,8 @@ admin/viewer UI (Vite + Svelte), packaged as a single Docker image.
 
 What comes next is in [ROADMAP.md](ROADMAP.md).
 
-[Unreleased]: https://github.com/quaresma870/perchtail/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/quaresma870/perchtail/compare/v0.7.0-rc.1...HEAD
+[0.7.0-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.6.4...v0.7.0-rc.1
 [0.6.4]: https://github.com/quaresma870/perchtail/compare/v0.6.3...v0.6.4
 [0.6.4-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.6.3...v0.6.4-rc.1
 [0.6.3]: https://github.com/quaresma870/perchtail/compare/v0.6.2...v0.6.3
