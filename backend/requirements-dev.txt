@@ -1609,9 +1609,9 @@ ruff==0.17.5 \
     --hash=sha256:ec4ecf40fb4d6e1265b009dbe551727920926fc0f769070c452d6d84b422a74d \
     --hash=sha256:f93d2b7d449ed9545304f6923699ca20d13c675b69f258481709a08ae61076db
     # via -r requirements-dev.in
-schemathesis==4.33.2 \
-    --hash=sha256:bb74c68ce4f518aab43e5083010c75531d9707283ddb54b9261dc87d0497be5e \
-    --hash=sha256:c3386b8494c7e4dc6fcaa6f84d22860689b3f2d63fa64148db892750457cd94f
+schemathesis==4.33.4 \
+    --hash=sha256:17967c0bc57b4d81b2bab8e3536dbe83d3af76ff03145fe580e0d5c2f181368c \
+    --hash=sha256:6b9b2f17d12e6474d5a53d8a61d0d8e10620c259249cb30a2d7cf2cd6688b56d
     # via -r requirements-dev.in
 smbprotocol==1.17.0 \
     --hash=sha256:bcc27edfff7d727a7eb30424138766e1ee216ae2ffc1af03dab0448f29c4731c \
