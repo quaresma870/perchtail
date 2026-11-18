@@ -39,7 +39,7 @@ PerchTail gives support and ops engineers one place to browse, open, and downloa
 log files live from a mix of Linux and Windows servers — without installing
 anything on those servers, and without permanently copying their content anywhere.
 
-You configure **sources** (a host and how to reach it — SSH/SFTP, SMB, WinRM, or a push agent), attach **rules** (which files and folders are visible, glob or regex, evaluated in order), and PerchTail lists and fetches matching files live, opened in a Notepad++/VS-Code-style viewer and downloadable as single files or zipped folders. A `.zip` or `.tar.gz` archive opens as a folder whose files go through the same rules; an archive with a file whose last matching rule is an exclude can't be downloaded whole (its other files still open and download one by one), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Nothing is proactively mirrored or cached across views — every open is a fresh fetch, because the logs behind it are still being written.
+You configure **sources** (a host and how to reach it — SSH/SFTP, SMB, WinRM, or a push agent), attach **rules** (which files and folders are visible, glob or regex, evaluated in order), and PerchTail lists and fetches matching files live, opened in a Notepad++/VS-Code-style viewer and downloadable as single files or zipped folders. A `.zip`, `.tar.gz` or `.tgz` archive opens as a folder whose files go through the same rules; an archive with a file whose last matching rule is an exclude can't be downloaded whole (its other files still open and download one by one; with [redaction](docs/redaction.md) applied to downloads, it is rebuilt without them instead), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Nothing is proactively mirrored or cached across views — every open is a fresh fetch, because the logs behind it are still being written.
 
 RBAC is built in from day one: access is scoped per customer/environment, not just
 per user, so a support engineer working one account can't accidentally browse
@@ -138,7 +138,7 @@ version (amd64 and arm64), for example:
     image: ghcr.io/quaresma870/perchtail:0.6.4
 ```
 
-Each [GitHub release](https://github.com/quaresma870/perchtail/releases) also carries the push-agent binaries, their `SHA256SUMS`, `SHA256SUMS.sig` (its Ed25519 signature with the release key), the image's SBOM, and `perchtail-image.json` with `perchtail-image.json.sig`, which name the release's image by digest and are signed with the same key, all attached before the release is published. The image carries the same signed agent binaries, for upgrading agents from the portal. `latest` and `X.Y` tags only move when a full release is published, never with a pre-release.
+Each [GitHub release](https://github.com/quaresma870/perchtail/releases) also carries the push-agent binaries, their `SHA256SUMS`, `SHA256SUMS.sig` (its Ed25519 signature with the release key), the image's SBOM, and `perchtail-image.json` with `perchtail-image.json.sig`, which name the release's image by digest and are signed with the same key, all attached before the release is published. The image carries the same signed agent binaries, for upgrading agents from the portal. `latest` and `X.Y` tags only move when a full release is published, never with a pre-release, and `latest` only to the newest full release: a fix for an older line (for example a 0.6.x after 0.7.0) moves its own `X.Y` tag and leaves `latest` where it is.
 
 On first startup (only when the database has zero users), PerchTail creates a break-glass super-admin account with a randomly generated password. The password is never logged: it is written to `initial-admin-password` in `DATA_DIR` (`/data/db` in the container), readable only by PerchTail's user, and the log says where:
 
@@ -146,7 +146,7 @@ On first startup (only when the database has zero users), PerchTail creates a br
 docker compose exec perchtail cat /data/db/initial-admin-password
 ```
 
-Open `http://localhost:8080`, sign in with that username/password (`admin` by default — override with `INITIAL_ADMIN_USERNAME` in `.env` before first startup), and you'll be forced to set your own password immediately; the file is deleted when you do. Super admins and every account with an administrative capability must then set up two-factor authentication (TOTP) before they can do anything else. From there: **Settings → Sources → + Add source** to point PerchTail at a server (see [docs/source-setup.md](docs/source-setup.md) for what the source side needs configured first), attach a rule so something is actually visible (a source with zero rules shows nothing, by design), and open **Viewer** to browse it.
+Open `http://localhost:8080`, sign in with that username/password (`admin` by default — override with `INITIAL_ADMIN_USERNAME` in `.env` before first startup), and you'll be forced to set your own password immediately; the file is deleted when you do. Super admins and every local account whose role has a global capability must then set up two-factor authentication (TOTP) before they can do anything else. From there: **Settings → Sources → + Add source** to point PerchTail at a server (see [docs/source-setup.md](docs/source-setup.md) for what the source side needs configured first), attach a rule so something is actually visible (a source with zero rules shows nothing, by design), and open **Viewer** to browse it.
 
 State (the SQLite database, rotated application logs, and the ephemeral
 scratch cache) lives in the `perchtail-data` Docker volume, so it survives
@@ -198,7 +198,7 @@ example on a network without internet access). `HTTPS_PROXY` is honoured.
 The source overview also shows each push agent's version, and flags agents
 older than the server.
 
-**Push-agent upgrades.** **Settings → Agents** (for users who can manage sources) lists every push agent with its version and upgrades them to the server's version: off by default, then manually (one agent, or every outdated one) or automatically inside a weekly window in the server's time zone, a few at a time. Each agent can follow that policy or have its own; after a number of failed upgrades in a row (3 by default) automatic upgrades skip an agent until it's resumed, and every attempt is kept with who asked, the versions and the result. The agent downloads the release from the server (the Docker image carries the signed agent binaries) or from GitHub, installs it only if the release signature and checksum verify and the version is newer than its own, and restarts into it; anything that fails leaves the current version running. Each host can refuse with `PERCHTAIL_REMOTE_UPGRADE=false`. Agents older than 0.7 are upgraded by hand once. See [agent/README.md](agent/README.md#upgrades-from-the-portal) for what the host needs (a writable binary folder, a service that restarts the agent).
+**Push-agent upgrades.** **Settings → Agents** (for roles with **Create new sources**) lists the push agents of the sources where the role holds **Manage sources**, which every action on an agent also needs, with their version, and upgrades them to the server's version: off by default, then manually (one agent, or every outdated one) or automatically inside a weekly window in the server's time zone, a few at a time. Each agent can follow that policy or have its own; after a number of failed upgrades in a row (3 by default) automatic upgrades skip an agent until it's resumed, and every attempt is kept with who asked, the versions and the result. The agent downloads the release from the server (the Docker image carries the signed agent binaries) or from GitHub, installs it only if the release signature and checksum verify and the version is newer than its own, and restarts into it; anything that fails leaves the current version running. Each host can refuse with `PERCHTAIL_REMOTE_UPGRADE=false`. Agents older than 0.7 are upgraded by hand once ([docs/agent-service.md](docs/agent-service.md#upgrading-by-hand)); until then their folders can still be browsed, but none of their files can be opened, followed or downloaded, and Settings → Agents marks them "Update required". See [agent/README.md](agent/README.md#upgrades-from-the-portal) for what the host needs (a writable binary folder, a service that restarts the agent).
 
 ## Deployment: reverse proxy (nginx) + TLS
 
@@ -255,7 +255,7 @@ older than the server.
    PerchTail doesn't need `X-Forwarded-Proto` trusted to behave correctly —
    its CSRF Origin-check only ever compares `Host`, deliberately never
    scheme, precisely so it works the same whether or not a proxy sits in
-   front (see the CSRF notes in docs/design-decisions.md if you're curious why). It's
+   front (see the CSRF notes in [docs/design-decisions.md](docs/design-decisions.md#sessions-and-csrf) if you're curious why). It's
    sent above anyway since it's a generally useful signal for nginx's own
    access logs.
 
@@ -283,6 +283,7 @@ Installing and running PerchTail:
 - [docs/monitoring.md](docs/monitoring.md) — the liveness and readiness probes and who may call them, the detailed health endpoint and its token, Prometheus `/metrics`, the Zabbix 7.0 and 8.0 templates, and the log events worth alerting on
 - [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — rotating `CREDENTIAL_ENCRYPTION_KEY` without losing access to what's already encrypted
 - [docs/high-availability.md](docs/high-availability.md) — whether and how to run PerchTail behind a load balancer or on Kubernetes, and what lives in the process
+- [docs/sizing.md](docs/sizing.md) — sizing guide: the hardware profiles and how they are measured with the load-test kit in `loadtest/` (its figures are still to be measured)
 - [docs/troubleshooting.md](docs/troubleshooting.md) — troubleshooting and FAQ
 
 Security:
@@ -311,6 +312,7 @@ Project:
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and submit changes
 - [CLAUDE.md](CLAUDE.md) — architecture brief for contributors
+- [docs/design-decisions.md](docs/design-decisions.md) — why PerchTail is built the way it is, including decisions that were later replaced, and the open items
 - [frontend/README.md](frontend/README.md) — developing the web interface: dev server, checks, tests and build
 - [ROADMAP.md](ROADMAP.md) — milestones and what's next
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability, and how fast fixes ship
@@ -318,7 +320,7 @@ Project:
 
 ## License
 
-PerchTail is free software under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only), from 0.7.0 on. You can use, change and share it, including running it for others; if you change it and let people use your changed version over a network, you have to offer them its source under the same license. Releases up to 0.6.1 were published under the MIT license and stay under it.
+PerchTail is free software under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only), from 0.7.0 on. You can use, change and share it, including running it for others; if you change it and let people use your changed version over a network, you have to offer them its source under the same license. Releases up to 0.6.4 were published under the MIT license and stay under it.
 
 Contributions are accepted under the [Contributor License Agreement](CLA.md) (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 

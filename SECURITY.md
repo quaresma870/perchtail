@@ -22,7 +22,7 @@ No release is ever deleted. Fixes ship as a new patch release of a supported lin
 | 0.6 | Active support, as the latest release. It reaches end of life when 0.7.0 is released. |
 | 0.5 and earlier | End of life since 0.6.0 was released on 2026-11-07. |
 
-Releases up to 0.6.1 are under the MIT license; later releases are under the AGPL-3.0-only.
+Releases up to 0.6.4 are under the MIT license; later releases are under the AGPL-3.0-only.
 
 ## Reporting a vulnerability
 
@@ -55,8 +55,9 @@ Particularly interested in reports involving:
 
 - Credential storage or the encryption-at-rest mechanism for source credentials
 - RBAC/grant-resolution logic — anything that lets a role reach a customer or source it wasn't granted
-- Auth provider implementations (local, OIDC, SAML) — session handling, token validation, SSO callback handling
-- Path traversal or injection via rule patterns, source configuration, or the archive browse/download endpoints
+- Auth provider implementations (local and OIDC) — session handling, token validation, SSO callback handling
+- Redaction: anything that lets content a redaction rule should replace reach a browser, a download or a webhook in clear
+- Path traversal or injection via rule patterns, source configuration, or the archive browse/download endpoints, including a symlink or junction that reaches a file the rules hide
 - Anything that could turn a read-only viewing feature into a write path back to a source (this project's core invariant is that it never writes to sources)
 
 ## Disclosure

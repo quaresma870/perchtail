@@ -12,7 +12,23 @@ It dials out to the PerchTail server and keeps one WebSocket connection open. Th
 
 The agent reads only under one local folder, `PERCHTAIL_BASE_PATH`. The source's rules in PerchTail then decide which of those files users see.
 
-One agent serves one source. A second agent that connects with the same token replaces the first one, and the two keep replacing each other: give each host its own source and token.
+One agent serves one source. A second agent that connects with the same token replaces the first one, and the two keep replacing each other: give each host its own source and token. Each replacement is recorded in the audit log as `agent.connection_replaced` with both addresses, and when they differ the source's page warns that two agents may be using the token, until an agent next connects without taking over another connection.
+
+### What the agent tells the server
+
+Each time it connects, the agent sends its operating system (shown as **Agent OS** on the source's page), its version (**Agent version**) and the features it supports. PerchTail keeps them with the source and decides from the features, not from the version, what it can ask of the agent. Agents from 0.7 on announce two:
+
+- `links/1`: the agent says where each path really is when a symbolic link (or, on Windows, a junction) leads elsewhere, and reads a file only once the server has checked its rules on that target (see [Permissions](#6-permissions-of-the-agents-account)). PerchTail reads no file content from an agent without it: see [Upgrading](#7-upgrading).
+- `redaction/1`: when redaction applies to the source, the agent redacts on its host what it sends (files, archive members, decompressed `.gz` files, Tail and alert reads), with the rules the server sends with each request, and lists and reads archives there, so the original content never leaves the host. Without it, the server redacts what the agent sends ([redaction.md](redaction.md#where-content-is-redacted)).
+
+Agents older than 0.7 announce neither.
+
+### Limits
+
+- A folder listing holds at most 50,000 entries, or fewer once the answer nears 8 MiB; the agent says when it stopped there, and the rules are applied afterwards on the server, so a huge folder may show fewer matches than it holds. An archive's listing has the same caps.
+- The agent works on at most 8 commands at once, of which at most 2 redact; the others wait.
+- File content travels in pieces of at most 1 MiB. The server sets the largest file it accepts (`MAX_FETCH_MB`) and the most decompression may produce (`MAX_DECOMPRESSED_MB`) in each request, and the agent refuses past them ([configuration.md](configuration.md#sources-and-connectors)).
+- A command fails when the agent hasn't answered within 30 seconds or, while it sends a file, when 30 seconds pass without a new piece.
 
 ## Before you start
 
@@ -52,11 +68,12 @@ The agent checks its configuration once, at startup. When a check fails, it logs
 - `PERCHTAIL_SERVER_URL` must parse as a URL with a host. Otherwise: `PERCHTAIL_SERVER_URL "<value>" is not a valid URL`.
 - The URL must start with `wss://`. A `ws://` URL is refused unless `PERCHTAIL_ALLOW_INSECURE` is true. Any other scheme (`https://`, for example) is refused with `PERCHTAIL_SERVER_URL must start with wss:// (got "https")`.
 - `PERCHTAIL_ALLOW_INSECURE` counts as true for `1`, `true`, `yes` or `on`, in any letter case. Any other value, a typo included, counts as false, so the agent stays on `wss://`.
+- `PERCHTAIL_BASE_PATH` must be a folder the agent's account can read. Otherwise: `PERCHTAIL_BASE_PATH "<path>" doesn't exist`, `... is not a folder`, `... can't be read: <reason>` or `... is not readable by the agent's account: <reason>`.
 - `PERCHTAIL_REMOTE_UPGRADE` accepts `true`, `1`, `yes`, `on` (allowed) and `false`, `0`, `no`, `off` (refused), in any letter case. Unset or empty allows upgrades. Any other value stops the agent with `PERCHTAIL_REMOTE_UPGRADE must be true or false (got "<value>")`, so a typo can't leave upgrades on.
 
-The agent doesn't check `PERCHTAIL_BASE_PATH` at startup. If the folder doesn't exist or the agent's account can't read it, the agent still connects, and browsing the source fails with "Not found on the source" or "The source account has no read permission for this path". Use **Test connection** on the source page to check it.
+Once the folder exists and can be read, a file or folder below it that the account can't read still fails when it is browsed, with "The source account has no read permission for this path". Use **Test connection** on the source page to check the base path through the agent.
 
-The agent logs to standard error, one line per event, for example `agent: connected to wss://perchtail.example.com/agent/connect`. Its first line gives its version: `perchtail-agent 0.7.0`.
+The agent logs to standard error, one line per event, after the date and time, for example `agent: connected to wss://perchtail.example.com/agent/connect`. Once its configuration is checked, it logs its version: `perchtail-agent 0.7.0`.
 
 ## 3. Connection, TLS and the reverse proxy
 
@@ -242,7 +259,7 @@ For upgrades from the portal, also give it Modify rights on the agent's folder:
 icacls "C:\Program Files\PerchTail Agent" /grant "NT SERVICE\PerchTailAgent:(OI)(CI)M"
 ```
 
-On Windows, PerchTail matches the source's rules without regard to letter case, as NTFS does. The agent reports its OS each time it connects, and the source page shows it as **Agent OS**.
+On Windows, PerchTail matches the source's include rules without regard to letter case, as NTFS does. The agent reports its OS each time it connects, and the source page shows it as **Agent OS**. Exclude rules ignore letter case on every agent, Linux included.
 
 ## 6. Permissions of the agent's account
 
@@ -262,7 +279,7 @@ A link inside `PERCHTAIL_BASE_PATH` (a symbolic link, or on Windows also a junct
 
 The agent never upgrades itself on its own. It upgrades when you replace the binary, or when the server asks it to and the host allows it.
 
-From 0.7, the server reads files only from an agent that tells it where links lead (an agent from 0.7 on). An older agent stays connected and its folders can still be browsed, but opening, following, downloading (files, folder ZIPs and archives) and alerts are refused with a message asking for the agent to be updated, each refusal recorded in the audit log (reason `agent_update_required`). **Settings → Agents** marks such an agent with **Update required**. Agents older than 0.7 must be upgraded by hand once, as below.
+From 0.7, the server reads files only from an agent that tells it where links lead (the `links/1` feature, agents from 0.7 on; see [What the agent tells the server](#what-the-agent-tells-the-server)). An older agent stays connected and its folders can still be listed (browsing, **Test connection**, the file-name index), but opening, Tail, downloads, folder ZIPs and archives are refused with 409 and "This source's agent must be updated before its files can be read. Ask an administrator to update it from Settings → Agents.", each refusal recorded in the audit log with the reason `agent_update_required`. Alerts don't read its files, and pick up where they were once it is updated; the server log has `alert.agent_update_required` once per alert and source, until its files can be read again. In **Settings → Agents**, the agent's version is followed by "Update required: its files can't be read until it's updated". Agents older than 0.7 must be upgraded by hand once, as below, so plan it right after the server's upgrade.
 
 ### Upgrading by hand
 
@@ -350,7 +367,7 @@ The upgrade counts as **Upgraded** only once the agent reconnects with the new v
 
 Click an agent's **Last result** to see every attempt: when it started, who asked (a user, or **Schedule**), the versions, the result and how long it took. The source page shows the last result too.
 
-The Docker image carries the signed agent binaries of its own version, so hosts without internet access can upgrade. A server installed from source doesn't, and the page says so ("This server doesn't carry the agent binaries"); agents then download from GitHub, so their hosts need to reach `github.com`. To serve the binaries from a source install, put the release's `SHA256SUMS`, `SHA256SUMS.sig` and `perchtail-agent-*` files of the server's version in a folder and set `AGENT_BINARIES_DIR` to it (see [configuration.md](configuration.md)).
+The release Docker images carry the signed agent binaries of their own version, so hosts without internet access can upgrade. A server installed from source, or an image built from a checkout, doesn't, and the page says so ("This server doesn't carry the agent binaries", with the reason); agents then download from GitHub, so their hosts need to reach `github.com`. To serve the binaries from a source install, put the release's `SHA256SUMS`, `SHA256SUMS.sig` and `perchtail-agent-*` files of the server's version in a folder and set `AGENT_BINARIES_DIR` to it (see [configuration.md](configuration.md)).
 
 A host can always refuse with `PERCHTAIL_REMOTE_UPGRADE=false`, whatever the policy.
 
@@ -368,5 +385,6 @@ Upgrade these agents [by hand](#upgrading-by-hand) once. Check at the same time 
 - The source page shows **Agent** as connected, the **Agent OS** and the **Agent version**.
 - In the Viewer, the status dot before the source has the tooltip "Agent connected". When the agent is away, it reads "Agent not connected (last seen ...)".
 - **Test connection** on the source page lists the base path through the agent.
+- A file opens in the Viewer. Listing alone doesn't show that an agent older than 0.7 must be updated; **Settings → Agents** does.
 
 If something doesn't work, see [Push agent](troubleshooting.md#push-agent) in the troubleshooting guide.

@@ -1,6 +1,6 @@
 # Verifying a release
 
-Every release from 0.7.0 on can be checked before you run it: the container image is signed with [cosign](https://docs.sigstore.dev/cosign/) without a long-lived key, the image and the push-agent binaries carry GitHub build provenance, and the release lists what is inside each part in CycloneDX SBOMs. This page shows how to check each of them. Releases before 0.7.0 have only the checksums and the Ed25519 signature described under "Push-agent binaries".
+Every release from 0.7.0 on can be checked before you run it: the container image is signed with [cosign](https://docs.sigstore.dev/cosign/) without a long-lived key, the image and the push-agent binaries carry GitHub build provenance, and the release lists what is inside each part in CycloneDX SBOMs. This page shows how to check each of them. Releases before 0.7.0 have only the agents' `SHA256SUMS`, the image's SBOM and the image's BuildKit provenance in the registry: the Ed25519 signatures, the cosign signature and the GitHub build provenance (`gh attestation verify`) start with 0.7.0.
 
 The examples use version `0.7.0`; put the version you are installing in its place.
 
@@ -10,7 +10,7 @@ The examples use version `0.7.0`; put the version you are installing in its plac
 |---|---|---|
 | `ghcr.io/quaresma870/perchtail:<version>` | The container image (amd64, arm64) | cosign signature and build provenance |
 | `perchtail-image.json`, `perchtail-image.json.sig` | The image's digest, signed with the release key | Ed25519 signature |
-| `perchtail-agent-<version>-<os>-<arch>` | The push-agent binaries | build provenance, `SHA256SUMS` and its Ed25519 signature |
+| `perchtail-agent-<version>-<os>-<arch>` | The push-agent binaries: `linux-amd64`, `linux-arm64` and `windows-amd64.exe` | build provenance, `SHA256SUMS` and its Ed25519 signature |
 | `SHA256SUMS`, `SHA256SUMS.sig` | Checksums of the agent binaries, signed with the release key | Ed25519 signature |
 | `perchtail-<version>.sbom.cyclonedx.json` | SBOM of the image | |
 | `perchtail-backend-…`, `perchtail-frontend-…`, `perchtail-agent-<version>.sbom.cyclonedx.json` | SBOMs of the backend, frontend and agent dependencies | |

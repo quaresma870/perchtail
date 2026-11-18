@@ -15,7 +15,7 @@
 | `name_index_sweep` | every minute; lists the sources that are due |
 | `source_checks` | every minute; checks the sources that are due |
 | `agent_upgrades` | every minute; ends timed-out upgrades and runs automatic ones inside the window |
-| `backup` | every 5 minutes; backs up once the interval in Settings → System has gone by (off by default) |
+| `backup` | every 5 minutes; backs up once the interval in Settings → System has gone by (24 hours on a new install; 0 turns it off) |
 | `wal_checkpoint` | every hour |
 | `session_purge`, `update_check` | every hour |
 | `audit_purge` | every `AUDIT_PURGE_INTERVAL_SECONDS` (a day) |
@@ -27,11 +27,12 @@
 
 - the push agents' WebSocket connections: a command for an agent can only go through the process it's connected to;
 - the connector limits (Settings → System → Limits): the slots in use per source and per user, and the count of refused requests in `/monitoring/health`;
-- login throttling: failed sign-ins and lockouts per username and per client address, so a restart clears every lockout;
+- login throttling: failed sign-ins and lockouts per username and per client address, so a restart clears every lockout; and the other rate limits: SSO sign-in starts, password-recovery requests and token checks, webhook tests and test emails;
 - the counting of repeated failed sign-ins before they're written to the audit log;
 - which files in the scratch cache are open (the files themselves are on local disk under `SCRATCH_DIR`, and are cleared at startup);
 - the file-name index passes and source checks queued or running;
-- the result of the last live alert pass (`alerts` in `/monitoring/health`), the time of the last failed scheduled backup, and whether the log size limit deleted logs early (`logs.size_limit_deleted_early`).
+- the identity provider's discovery document, reused for 10 minutes;
+- the result of the last live alert pass (`alerts` in `/monitoring/health`), the time of the last failed scheduled backup, whether the log size limit deleted logs early (`logs.size_limit_deleted_early`), whether a forwarded header came from a proxy outside `TRUSTED_PROXIES` (`trusted_proxies_suspect`), and an agent connection that replaced another one (the warning on the source's page).
 
 Everything else (sources, rules, users, roles, sessions, settings, the file-name index, alert positions and pending webhook calls, the audit log, agent upgrade history and job records) is in the database.
 
@@ -42,7 +43,7 @@ Every solution below is compatible with nginx in front (see the main [README](..
 | Solution | Load balancing type | What changes vs. today | Effort |
 | --- | --- | --- | --- |
 | 0 — Single replica, self-healing | None (one pod; a proxy just routes to it) | Nothing in the app | None — works today |
-| 1 — Active-passive (warm standby) | Failover only, never simultaneous | Continuous DB replication (e.g. Litestream) + a promotion mechanism | Small–medium |
+| 1 — Active-passive (warm standby) | Failover only, never simultaneous | Not built in: continuous DB replication (e.g. Litestream) and a promotion mechanism you set up and test yourself | Small–medium, outside PerchTail |
 | 2 — Sticky-session active-active | Client/session affinity | Nothing in the app, but doesn't fix the real problem (see below) | Low, but don't stop here |
 | 3 — True active-active | Standard round-robin / least-connections | Not possible today: needs a shared database instead of SQLite, the in-memory state shared, and the scheduler in a process of its own | Large changes in PerchTail |
 
@@ -183,7 +184,7 @@ Nothing here requires an application change. This is the recommended default for
 Two flavors, in increasing order of how much downtime a failure actually costs:
 
 - **1a — faster failover, no new infrastructure.** Tighten Solution 0's probe intervals and rely on Kubernetes rescheduling the pod quickly. This is really Solution 0 tuned, not a new architecture.
-- **1b — real warm standby with data continuity.** Continuously replicate the SQLite file to object storage (e.g. [Litestream](https://litestream.io/)), and keep a second pod provisioned but not `Ready` (its readiness probe deliberately fails, or its replica count is held at 0 until promotion) — on primary failure, restore the latest replicated snapshot into the standby and flip it to serving. This meaningfully shortens recovery time compared to "wait for a fresh pod to reschedule against an empty PVC," but promotion isn't instant or fully automatic without extra tooling (a controller watching primary health and re-pointing the `Service` selector, or a manual runbook step) — it trades some downtime for real data continuity, not zero downtime. PerchTail has no built-in replication or standby: this is a setup you build and test yourself. PerchTail checkpoints and truncates SQLite's write-ahead log every hour (the `wal_checkpoint` job), and a replication tool must cope with that. The standby needs its own `DATA_DIR`, the same `CREDENTIAL_ENCRYPTION_KEY` and a copy of the credential salt, which lives in `DATA_DIR` next to the database.
+- **1b — real warm standby with data continuity.** Continuously replicate the SQLite file to object storage (e.g. [Litestream](https://litestream.io/)), and keep a second pod provisioned with its replica count held at 0 until promotion — not merely kept out of `Ready`: a running PerchTail runs every background job whether or not it serves traffic, so a standby that runs would check sources and call alert webhooks from its stale copy. On primary failure, restore the latest replicated snapshot into the standby and flip it to serving. This meaningfully shortens recovery time compared to "wait for a fresh pod to reschedule against an empty PVC," but promotion isn't instant or fully automatic without extra tooling (a controller watching primary health and re-pointing the `Service` selector, or a manual runbook step) — it trades some downtime for real data continuity, not zero downtime. PerchTail has no built-in replication or standby: this is a setup you build and test yourself. PerchTail checkpoints and truncates SQLite's write-ahead log every hour (the `wal_checkpoint` job), and a replication tool must cope with that. The standby needs its own `DATA_DIR`, the same `CREDENTIAL_ENCRYPTION_KEY` and a copy of the credential salt and of SSH `known_hosts`, which live in `DATA_DIR` next to the database and aren't in the SQLite file a replication tool copies.
 
 Neither flavor needs another database, a scheduler redesign, or shared in-memory state — the standby is never live at the same time as the primary, so none of Solution 3's problems apply.
 

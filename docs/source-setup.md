@@ -110,7 +110,7 @@ Allow TCP 22 (or your custom SSH port) inbound from the PerchTail connector's IP
 
 ### 6. Host-key pinning
 
-PerchTail keeps every SSH server's host key in `SSH_KNOWN_HOSTS_PATH` (`/data/db/ssh_known_hosts` in Docker). If a pinned key ever changes, the connection fails. That is the man-in-the-middle check.
+PerchTail keeps every SSH server's host key in `SSH_KNOWN_HOSTS_PATH` (`/data/db/ssh_known_hosts` in Docker). If a pinned key ever changes, the connection fails. That is the man-in-the-middle check. Deleting a source, or changing its host or port, removes the old host's key from the file when no other source uses that host and port, audited as `source.pins_removed`.
 
 What happens the *first* time PerchTail sees a host depends on `SSH_HOST_KEY_POLICY`:
 
@@ -151,7 +151,7 @@ icacls "C:\ProgramData\AppName\Logs" /grant "DOMAIN\svc-perchtail:(OI)(CI)RX"
 
 - Require SMB3+; disable SMBv1 on the host entirely if it's still enabled anywhere — it's deprecated and insecure.
 - PerchTail's connector authenticates over NTLM regardless of whether the source is domain-joined — the stored credential is only a username and password, with no way to supply a realm or keytab for Kerberos. Require NTLMv2 as the minimum on the share side.
-- Enable SMB signing. PerchTail requires signed messages by default (**Require signing** in the source editor, `smb_require_signing` in a bulk import) and refuses a server that doesn't sign; turn it off only for a server that can't sign, and the source's page then warns about it. **Encrypt** (`smb_encrypt`) also asks for SMB 3 encryption of the whole session and refuses a server that can't encrypt; without it the server decides.
+- Enable SMB signing. PerchTail requires signed messages by default (**Require signing** under **SMB security** in the source editor, `smb_require_signing` in a bulk import) and refuses a server that doesn't sign; turn it off only for a server that can't sign, and the editor and the source's page then warn about it. **Encrypt (SMB 3)** (`smb_encrypt`, off by default) also asks for SMB 3 encryption of the whole session and refuses a server that can't encrypt; without it the server decides.
 
 ### 5. Firewall
 
@@ -161,7 +161,7 @@ Allow TCP 445 inbound from the PerchTail connector's IP only.
 
 > **Read this before choosing WinRM.** There are two ways to connect, and they differ a lot in what the stored credential can do:
 >
-> - **Through PerchTail's read-only JEA endpoint (recommended, 0.6+).** The source names the endpoint in **JEA endpoint**, and PerchTail speaks PSRP to it. The endpoint runs in `NoLanguage` mode and only exposes PerchTail's own functions, which list and read files under the folders you allow and refuse junctions and links. The account needs no administrator rights and no remote shell: if the credential leaks, it can read those logs and nothing else. See step 2, option A.
+> - **Through PerchTail's read-only JEA endpoint (recommended, 0.6+).** The source names the endpoint in **JEA endpoint (optional)**, and PerchTail speaks PSRP to it. The endpoint runs in `NoLanguage` mode and only exposes PerchTail's own functions, which list and read files under the folders you allow and refuse junctions and links. The account needs no administrator rights and no remote shell: if the credential leaks, it can read those logs and nothing else. See step 2, option A.
 > - **Through a WinRS remote shell** (JEA endpoint left empty). Windows only lets an account open that shell if it is a local **Administrator**, or if the WinRM service's `RootSDDL` is widened to grant it (`GXGR`). Either way the credential has a **full remote shell** on the host. See step 2, option B.
 >
 > An [SMB share](#smb-windows-shares) of the log folder, or the [push agent](#agent-push-agent-for-hosts-not-reachable-inbound), are still simpler where either is possible.
@@ -172,7 +172,7 @@ Allow TCP 445 inbound from the PerchTail connector's IP only.
 winrm quickconfig
 ```
 
-Then add an HTTPS listener (port 5986) with a certificate the PerchTail host can verify. In the source editor, set **Scheme** to HTTPS (the default for new sources). If the certificate comes from an internal CA or is self-signed, paste that CA certificate (PEM) into **CA certificate**. It is trusted for that source only, without changing the server-wide trust store or setting `REQUESTS_CA_BUNDLE`.
+Then add an HTTPS listener (port 5986) with a certificate the PerchTail host can verify. In the source editor, set **Scheme** to HTTPS (the default for new sources). If the certificate comes from an internal CA or is self-signed, paste that CA certificate (PEM) into **CA certificate (PEM, optional)**. It is trusted for that source only, without changing the server-wide trust store or setting `REQUESTS_CA_BUNDLE`. Deleting the source, or changing its host, port or CA certificate, removes the old certificate's file when no other source uses it, audited as `source.pins_removed`.
 
 Plain HTTP (port 5985) still has NTLM encrypt the WinRM messages, but the server isn't authenticated, so a machine in the middle can impersonate it. Use it only on a network you control.
 
@@ -190,7 +190,7 @@ A dedicated local or domain account, e.g. `svc-perchtail`, used for nothing else
 
 It installs the role, records the folders it may read (`%ProgramData%\PerchTail\jea-roots.txt`, changeable by administrators only) and registers the endpoint `PerchTail`. In the source editor, set **JEA endpoint** to `PerchTail`; the **Base path** must be one of those folders or inside one. The account needs nothing else: not Administrators, not **Remote Management Users**, not `RootSDDL`. Details in [`docs/examples/jea/README.md`](examples/jea/README.md).
 
-**Option B -- a WinRS shell.** Leave **JEA endpoint** empty. For the reasons above the account then needs one of:
+**Option B -- a WinRS shell.** Leave **JEA endpoint** empty; the source editor and the source's page then warn that the account needs remote-shell rights. For the reasons above the account then needs one of:
 
 - membership of the local **Administrators** group; or
 - an entry in the WinRM `RootSDDL` granting it execute and read (`GXGR`):
@@ -219,6 +219,8 @@ Under **Settings → Sources**, create a source with protocol **Agent (push)** a
 
 Download the prebuilt binary for the host's OS and architecture from the release, and check it against `SHA256SUMS` (see [Download](../agent/README.md#download)), or build it from `agent/` with the version set (see [Build](../agent/README.md#build)). Put it in a folder of its own, for example `/opt/perchtail-agent/` on Linux; upgrades from the portal need that folder to be writable by the agent's account (see below).
 
+Use an agent of the same release as the server. The server reads files only from an agent that tells it where links lead (agents from 0.7 on): an older agent stays connected and its folders can still be browsed, but opening, Tail, downloads, folder ZIPs and archives are refused with "This source's agent must be updated…", and alerts skip its files, until it is updated, and **Settings → Agents** marks it **Update required**.
+
 ### 3. Configure and run it
 
 The agent reads five environment variables, and has no configuration file. The first three are required:
@@ -231,7 +233,9 @@ The agent reads five environment variables, and has no configuration file. The f
 | `PERCHTAIL_ALLOW_INSECURE` | unset | `true` allows a plain `ws://` URL. By default the agent refuses anything but `wss://`. Testing or trusted networks only. |
 | `PERCHTAIL_REMOTE_UPGRADE` | unset (allowed) | `false` refuses every upgrade from the portal, whatever the server asks. |
 
-Run it under a process supervisor so it restarts on failure or reboot: systemd on Linux. On Windows the agent is a console program, not a Windows service: run it as a service through a wrapper such as NSSM or WinSW (see [agent/README.md](../agent/README.md#what-the-host-needs)). It reconnects with exponential backoff and jitter on its own if the connection drops, and notices a connection that died silently, but something still needs to restart the process itself if it exits. Run it as a least-privilege account that only has read access under `PERCHTAIL_BASE_PATH` — same read-only, scope-to-what's-needed principle as every other protocol here, just enforced by the OS account the agent runs as instead of a protocol-level ACL.
+The agent stops at startup, with a non-zero exit code and a message naming the problem, when `PERCHTAIL_BASE_PATH` doesn't exist, isn't a folder or can't be read by its account.
+
+Run it under a process supervisor so it restarts on failure or reboot: systemd on Linux. On Windows the agent is a console program, not a Windows service: run it as a service through a wrapper such as NSSM or WinSW (see [agent/README.md](../agent/README.md#what-the-host-needs), and [agent-service.md](agent-service.md) for a full setup on Linux and Windows). It reconnects with exponential backoff and jitter on its own if the connection drops, and notices a connection that died silently, but something still needs to restart the process itself if it exits. Run it as a least-privilege account that only has read access under `PERCHTAIL_BASE_PATH` — same read-only, scope-to-what's-needed principle as every other protocol here, just enforced by the OS account the agent runs as instead of a protocol-level ACL.
 
 To upgrade the agent from the portal later (Settings → Agents, off by default), that account also needs write access to the folder holding the agent's binary, and the supervisor must restart the agent when it exits: see [Upgrades from the portal](../agent/README.md#upgrades-from-the-portal) for a systemd unit and the Windows service settings.
 
@@ -262,11 +266,13 @@ What goes in **Base path** depends on the protocol, and PerchTail refuses the ki
 |---|---|---|
 | SSH/SFTP | absolute path on the host (relative to the chroot, if the account has one) | `/var/log/myapp` |
 | SMB | the **share name**, optionally followed by a folder inside it. Not a drive path, and not an administrative share (`C$`, `ADMIN$`) | `AppLogs` or `AppLogs\iis` |
-| WinRM | absolute Windows path, on any drive | `D:\Logs\MyApp` |
+| WinRM | absolute Windows path on a drive of the WinRM host. Not a UNC path (`\\server\share`) or a device path (`\\?\`, `\\.\`): read a share through an SMB source instead | `D:\Logs\MyApp` |
 | Local disk | a directory under `LOCAL_SOURCE_ROOTS` | `/mnt/logs/app` |
 | Agent | documentation only: the agent's `PERCHTAIL_BASE_PATH` is what counts | |
 
-Instead of typing it, use **Browse…** next to the field. It connects with the host and credential in the form and lists folders only, never file names: `/` and down over SSH, the drives and then folders over WinRM (with a JEA endpoint, the folders the endpoint allows), and the host's shares (the ones the account can see, without `C$`/`ADMIN$`/`IPC$`) and then folders over SMB. Browsing is limited to users who can manage sources, and each listing is written to the audit log. A saved source's stored credential is only ever sent to the host and port it was saved for: to browse another host, or to save the source with a new host or port, type the credential again.
+A WinRM source saved by an earlier version with a UNC or device path is no longer read: it answers "This source's Base path isn't a path on a drive (e.g. D:\Logs): edit the source to correct it", and the log has `winrm.base_path_not_on_drive`. Change it to a path on a drive of the WinRM host, or read the share through an SMB source.
+
+Instead of typing it, use **Browse…** next to the field. It connects with the host and credential in the form and lists folders only, never file names: `/` and down over SSH, the drives and then folders over WinRM (with a JEA endpoint, the folders the endpoint allows), and the host's shares (the ones the account can see, without `C$`/`ADMIN$`/`IPC$`) and then folders over SMB. Browsing is limited to users who can manage sources (for a saved source, **Manage sources** on that source), and each listing is written to the audit log. A connection that can't be made gets the same message whatever the reason; the reason is in the server log. A saved source's stored credential is only ever sent to the host and port it was saved for, and browsing a saved source always reaches its saved host and port: to browse another host, or to save the source with a new host or port, type the credential again.
 
 Rules are relative to the base path. Changing the base path or a folder (or the host or port) means the same rules now apply to whatever is at the new location, so check they still match; the source's file-name index and alert positions are cleared, and the audit log records the old and new values.
 
@@ -276,4 +282,4 @@ A source can read several folders on the same host with the same credential, for
 
 ## Testing a source
 
-Once configured, add the source under **Settings → Sources** with the matching protocol, host, port, credential and **Base path**, then click **Test connection** on the source's page to confirm reachability and permissions before attaching rules. To add many sources at once, see [bulk import](bulk-import.md).
+Once configured, add the source under **Settings → Sources** with the matching protocol, host, port, credential and **Base path**, then click **Test connection** on the source's page (it needs **Manage sources** on the source) to confirm reachability and permissions before attaching rules. To add many sources at once, see [bulk import](bulk-import.md).
