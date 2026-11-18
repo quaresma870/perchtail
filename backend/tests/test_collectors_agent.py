@@ -207,12 +207,14 @@ def test_read_range_sends_the_offset_and_a_capped_length(monkeypatch):
     )
 
 
-def test_an_agent_older_than_0_6_cant_read_a_range(monkeypatch):
+def test_an_agent_error_on_a_range_read_is_not_taken_for_an_old_agent(monkeypatch):
+    """Every agent asked for a range knows read_range (0.6), since one
+    without links/1 (older than 0.7) is refused first: an error naming an
+    unknown command is an agent error like any other, not a fallback."""
     from app.agent_registry import AgentCommandError
-    from app.collectors.base import RangeNotSupportedError
 
     _mock_registry(monkeypatch, side_effect=AgentCommandError('unknown command type "read_range"'))
-    with pytest.raises(RangeNotSupportedError):
+    with pytest.raises(AgentCommandError):
         agent_module.read_range(_source(), "app.log", 0, 10)
 
 

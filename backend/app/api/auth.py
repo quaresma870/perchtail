@@ -955,6 +955,13 @@ def sso_login(request: Request, session: Session = Depends(get_session)):
         raise _too_many_attempts(retry_after, "Too many sign-in attempts. Try again later.")
 
     app_settings = get_settings()
+    # Every failure past this point sends the browser back to the login page
+    # with the same neutral SSO error as a failed callback (sso_callback),
+    # rather than leaving it on a JSON body; the log says why.
+    login_error_redirect = RedirectResponse(
+        f"{app_settings.public_base_url}/#/login?sso_error=1",
+        status_code=status.HTTP_302_FOUND,
+    )
     raw_config = read_provider_config(provider.config)
     if raw_config is None:
         # The provider's settings can't be decrypted with the current key:
@@ -966,10 +973,7 @@ def sso_login(request: Request, session: Session = Depends(get_session)):
             client_ip=request.client.host if request.client else None,
             reason="secret_unreadable",
         )
-        return RedirectResponse(
-            f"{app_settings.public_base_url}/#/login?sso_error=1",
-            status_code=status.HTTP_302_FOUND,
-        )
+        return login_error_redirect
     oidc_settings = parse_oidc_settings(raw_config)
     nonce = secrets.token_urlsafe(32)
     # PKCE (RFC 7636, S256): the verifier travels only inside the encrypted
@@ -986,10 +990,8 @@ def sso_login(request: Request, session: Session = Depends(get_session)):
         # Configured before HTTPS was required: a clear line for the admin
         # in the log, the usual answer for whoever tried to sign in.
         logger.error("sso.login.insecure_idp_url", error=str(exc))
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach the identity provider"
-        ) from exc
-    except IssuerMismatchError as exc:
+        return login_error_redirect
+    except IssuerMismatchError:
         # The discovery document speaks for another issuer: its endpoints
         # and keys aren't the configured IdP's. Audited, and answered like
         # any other unreachable IdP.
@@ -999,14 +1001,12 @@ def sso_login(request: Request, session: Session = Depends(get_session)):
             client_ip=request.client.host if request.client else None,
             reason="issuer_mismatch",
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach the identity provider"
-        ) from exc
+        return login_error_redirect
     except Exception as exc:  # noqa: BLE001 - surfaced as a clean error, not a raw 500
+        # Discovery failed: the IdP can't be reached, its address is refused
+        # (_idp_request's address policy), or it answered with an error.
         logger.error("sso.login.discovery_failed", error=str(exc))
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Could not reach the identity provider"
-        ) from exc
+        return login_error_redirect
 
     response = RedirectResponse(authorize_url, status_code=status.HTTP_302_FOUND)
     # Binds this flow to this browser (see SSO_STATE_COOKIE_NAME above) --

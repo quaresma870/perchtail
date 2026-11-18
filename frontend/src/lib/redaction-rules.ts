@@ -108,10 +108,16 @@ export function inheritedRules(system: RedactionRule[], effective: RedactionRule
 }
 
 /** The warning for a push-agent source whose agent can't redact on its
- * host, or null. The server then redacts what the agent sends, so the
- * original leaves the host; an agent that never connected isn't known yet. */
+ * host, or null. An agent that doesn't say where links lead (links/1) gets
+ * none of its files read until it is updated, so there is nothing for
+ * anyone to redact; one that does but can't redact has the server redact
+ * what it sends, so the original leaves the host. An agent that never
+ * connected isn't known yet. */
 export function agentRedactionWarning(source: Pick<Source, 'protocol' | 'agent_version' | 'agent_features'>): string | null {
   if (source.protocol !== 'agent' || source.agent_version === null) return null
+  if (!source.agent_features.includes('links/1')) {
+    return `This agent (${source.agent_version}) must be updated before its files can be read: until then nothing is opened, followed or downloaded from it. Update it from Settings → Agents.`
+  }
   if (source.agent_features.includes('redaction/1')) return null
   return `This agent (${source.agent_version}) can't redact on its host: PerchTail redacts what it sends, so the original content leaves the host. Upgrade it (Settings → Agents) to redact on the host.`
 }

@@ -438,6 +438,7 @@ def test_open_of_a_corrupt_gz_member_is_refused_and_audited(session, viewer, scr
 
     response = _open(client, source, "bundle.zip", member="inner/app.log.gz")
     assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "redaction_unreadable"
     assert_no_secret(response.text)
     event = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).one()
     assert event.event_metadata["reason"] == "redaction_unreadable"

@@ -14,7 +14,8 @@ file itself stays; only the lock on it matters. While held, it says which
 process holds it (host, PID, version and when it took the lock), so the
 refusal can name it.
 
-High availability with several instances comes with PostgreSQL (#306)."""
+Running several instances side by side, for high availability or load, is
+out of scope: they would share one SQLite database."""
 
 import json
 import os

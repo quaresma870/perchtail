@@ -680,9 +680,9 @@ def create_source(
         base_path = roots[0]["path"]
     elif payload.roots:
         base_path = _validate_base_path(payload.protocol, payload.roots[0].path)
-    elif payload.protocol == Protocol.agent:
-        base_path = payload.base_path
     else:
+        # An agent's too, as the import checks it (config_transfer): what
+        # the editor saves can be exported and imported again.
         base_path = _validate_base_path(payload.protocol, payload.base_path)
 
     source = Source(
@@ -804,11 +804,7 @@ def update_source(
             source.base_path = _validate_base_path(source.protocol, payload.roots[0].path)
     if payload.base_path is not None and not source_roots.is_multi_root(source):
         if not source_roots.same_path(source.protocol, payload.base_path, source.base_path):
-            source.base_path = (
-                payload.base_path
-                if source.protocol == Protocol.agent
-                else _validate_base_path(source.protocol, payload.base_path)
-            )
+            source.base_path = _validate_base_path(source.protocol, payload.base_path)
     if "winrm_scheme" in fields_set:
         source.winrm_scheme = _validate_winrm_scheme(source.protocol, payload.winrm_scheme)
     configuration_changed = False

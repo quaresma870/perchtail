@@ -601,6 +601,62 @@ func TestListArchive(t *testing.T) {
 	}
 }
 
+// An archive that can't be read as one (damaged, or text named .zip or
+// .tar.gz) and a .gz file that can't be decompressed are answered with codes
+// of their own, so the server refuses them as when it reads them itself,
+// rather than with the source's generic error. A missing file keeps none.
+func TestAnUnreadableArchiveOrGzHasItsOwnCode(t *testing.T) {
+	base := t.TempDir()
+	text := []byte(strings.Repeat("just some text\n", 10))
+	writeFile(t, base, "broken.zip", text)
+	writeFile(t, base, "broken.tar.gz", text)
+	writeFile(t, base, "broken.log.gz", text)
+	writeFile(t, base, "empty.tar.gz", nil)
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{{name: "old.log.gz", content: string(text)}}))
+	cfg := Config{BasePath: base}
+
+	for _, name := range []string{"broken.zip", "broken.tar.gz", "empty.tar.gz"} {
+		result, ok := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: name}).(ErrorResult)
+		if !ok || result.Type != "list_archive_error" || result.Code != "archive_unreadable" {
+			t.Errorf("list_archive %s: %#v", name, result)
+		}
+		for _, redacting := range []bool{false, true} {
+			cmd := Command{
+				Type: "fetch", ID: "f", Path: name, Member: "app.log", ChunkSize: minChunkSize,
+				MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Code != "archive_unreadable" {
+				t.Errorf("fetch %s (redacting %v) ended with %#v", name, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+
+	for _, target := range []struct{ path, member string }{{"broken.log.gz", ""}, {"logs.zip", "old.log.gz"}} {
+		for _, redacting := range []bool{false, true} {
+			cmd := Command{
+				Type: "fetch", ID: "g", Path: target.path, Member: target.member, ChunkSize: minChunkSize,
+				Decompress: "gzip", MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Code != "gzip_unreadable" {
+				t.Errorf("fetch %s %s (redacting %v) ended with %#v", target.path, target.member, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+
+	missing, ok := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: "gone.zip"}).(ErrorResult)
+	if !ok || missing.Code != "" {
+		t.Errorf("a missing archive: %#v", missing)
+	}
+}
+
 func TestFetchArchiveSendsTheMembersAskedForRedacted(t *testing.T) {
 	when := time.Date(2024, 5, 6, 7, 8, 10, 0, time.UTC)
 	content := secretLog + "tail 4111 1111 1111 1111"
@@ -827,7 +883,7 @@ func TestATruncatedZipMemberIsUnreadable(t *testing.T) {
 		}
 		sent := collect(t, base, cmd)
 		if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Type != "fetch_error" ||
-			!strings.Contains(result.Error, "declared size") {
+			!strings.Contains(result.Error, "declared size") || result.Code != "archive_unreadable" {
 			t.Errorf("fetch (redacting %v) ended with %#v", redacting, sent[len(sent)-1])
 		}
 	}
@@ -1405,7 +1461,8 @@ func TestFetchRefusesATruncatedGzAskedDecompressed(t *testing.T) {
 			}
 			sent := collect(t, base, cmd)
 			result, ok := sent[len(sent)-1].(ErrorResult)
-			if !ok || result.Type != "fetch_error" || !strings.Contains(result.Error, "end-of-stream") {
+			if !ok || result.Type != "fetch_error" || !strings.Contains(result.Error, "end-of-stream") ||
+				result.Code != "gzip_unreadable" {
 				t.Errorf("%s %s (redacting %v): ended with %#v", target.path, target.member, redacting, sent[len(sent)-1])
 			}
 		}

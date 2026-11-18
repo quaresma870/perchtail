@@ -254,7 +254,10 @@ class GroupRoleMappingPublic(BaseModel):
     order: int
     group_name: str
     role_id: int
-    role_name: str
+    # None when the role is beyond the caller's authority (a delegated admin
+    # doesn't see it in the roles list either): role_outside_authority.
+    role_name: str | None
+    role_outside_authority: bool = False
 
 
 class GroupRoleMappingCreate(BaseModel):
@@ -269,13 +272,16 @@ class GroupRoleMappingUpdate(BaseModel):
     role_id: int | None = None
 
 
-def _mapping_public(mapping: SSOGroupRoleMapping, role_name: str) -> GroupRoleMappingPublic:
+def _mapping_public(
+    mapping: SSOGroupRoleMapping, role_name: str | None, *, outside_authority: bool = False
+) -> GroupRoleMappingPublic:
     return GroupRoleMappingPublic(
         id=mapping.id,
         order=mapping.order,
         group_name=mapping.group_name,
         role_id=mapping.role_id,
-        role_name=role_name,
+        role_name=None if outside_authority else role_name,
+        role_outside_authority=outside_authority,
     )
 
 
@@ -341,9 +347,24 @@ def _require_order_within_authority(
 def list_group_mappings(
     user: User = Depends(require_manage), session: Session = Depends(get_session)
 ):
+    """Every mapping, in order. Short of super admin, a mapping whose role
+    the roles list hides from the caller (beyond their authority, see
+    rbac.role_within_authority) doesn't name it: role_name is null and
+    role_outside_authority is true."""
     mappings = session.exec(select(SSOGroupRoleMapping).order_by(SSOGroupRoleMapping.order)).all()
-    roles_by_id = {r.id: r.name for r in session.exec(select(Role)).all()}
-    return [_mapping_public(m, roles_by_id.get(m.role_id, f"#{m.role_id}")) for m in mappings]
+    roles_by_id = {r.id: r for r in session.exec(select(Role)).all()}
+    outside: dict[int, bool] = {}
+    if not user.role.is_super_admin:
+        for role_id in {m.role_id for m in mappings} & roles_by_id.keys():
+            outside[role_id] = not role_within_authority(session, user, roles_by_id[role_id])
+    return [
+        _mapping_public(
+            m,
+            roles_by_id[m.role_id].name if m.role_id in roles_by_id else f"#{m.role_id}",
+            outside_authority=outside.get(m.role_id, False),
+        )
+        for m in mappings
+    ]
 
 
 @router.post(

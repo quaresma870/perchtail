@@ -70,7 +70,7 @@ A delegated administrator (a role with `manage_users`, `manage_roles` or `manage
 - They can't reset the password of, deactivate or change the role of an account whose role has `manage_users` or `manage_roles`, even one within their authority, so one delegated administrator can't take over another. Only a super admin can.
 - A role's grants are checked as a whole after each change, so removing one grant can't make another reach further than the administrator's authority.
 - The last active super admin can't be deactivated or demoted, and the built-in roles ("Super Admin" and "No Access") can't be changed.
-- An SSO user whose groups match no mapping gets the "No Access" role at sign-in, also when they had another role before; the last active super admin keeps theirs. A delegated administrator only creates, changes or deletes a group mapping whose role is within their authority, placed before every mapping whose role isn't (the last matching mapping wins), and only a super admin deletes or turns off the SSO provider.
+- An SSO user whose groups match no mapping gets the "No Access" role at sign-in, also when they had another role before; the last active super admin keeps theirs. A delegated administrator only creates, changes or deletes a group mapping whose role is within their authority, placed before every mapping whose role isn't (the last matching mapping wins), and the mappings to a role beyond their authority don't show them its name; only a super admin deletes or turns off the SSO provider.
 
 ### Signing in
 

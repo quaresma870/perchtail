@@ -231,11 +231,17 @@ func errorResult(cmd Command, errType string, err error) ErrorResult {
 	result := ErrorResult{Type: errType, ID: cmd.ID, Error: err.Error()}
 	var tooLarge *TooLargeError
 	var link *LinkTargetError
+	var archiveErr *archiveUnreadableError
+	var gzipErr *gzipUnreadableError
 	switch {
 	case errors.As(err, &tooLarge):
 		result.Code, result.Size = "too_large", tooLarge.Size
 	case errors.Is(err, ErrMemberNotFound):
 		result.Code = "not_found"
+	case errors.As(err, &archiveErr):
+		result.Code = "archive_unreadable"
+	case errors.As(err, &gzipErr):
+		result.Code = "gzip_unreadable"
 	case errors.As(err, &link):
 		// Where it really is goes to the server only, which checks its
 		// rules on it (FeatureLinks); nothing of the content was read.
@@ -609,7 +615,7 @@ func (s *strictGzipReader) Read(p []byte) (int, error) {
 	if errors.Is(err, io.ErrUnexpectedEOF) {
 		err = errTruncatedGzip
 	}
-	return n, err
+	return n, gzipUnreadable(err)
 }
 
 func sendArchiveMember(

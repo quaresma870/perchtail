@@ -16,7 +16,7 @@ from app.collectors.base import (
     FetchTooLargeError,
     LinkTargetHiddenError,
     PathOutsideBaseError,
-    RangeNotSupportedError,
+    SourceArchiveUnreadableError,
     SourceAuthError,
     SourceError,
     SourceHostKeyError,
@@ -247,6 +247,11 @@ def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | 
             # A link out of the base path (FEATURE_LINKS): 404, audited as
             # link_target_hidden, like a link the rules hide.
             return LinkTargetHiddenError(text)
+        if exc.code in ("archive_unreadable", "gzip_unreadable"):
+            # The archive, or the .gz file to decompress, can't be read
+            # (damaged, or not that kind of file): said by its code since
+            # the 0.7.0 agent, never guessed from the text.
+            return SourceArchiveUnreadableError(text, gzip=exc.code == "gzip_unreadable")
         lowered = text.lower()
         # Go's os.Root refuses a path through a symlink that leaves the base
         # ("openat x: path escapes from parent"), and the agent refuses
@@ -280,7 +285,6 @@ _PASS_THROUGH = (
     SourceError,
     FetchTooLargeError,
     PathOutsideBaseError,
-    RangeNotSupportedError,
     ScratchFullError,
 )
 

@@ -79,8 +79,9 @@ class Settings(BaseSettings):
     ssh_host_key_policy: Literal["tofu", "strict"] = "tofu"
     # Username for the auto-seeded break-glass super-admin (see
     # app/bootstrap.py's seed_initial_super_admin) — only used on a fresh
-    # deployment with zero users; its password is randomly generated and
-    # logged once, never read from config.
+    # deployment with zero users; its password is randomly generated, never
+    # read from config, and written to DATA_DIR/initial-admin-password
+    # (mode 0600, deleted once it is changed); the log only names the file.
     initial_admin_username: str = "admin"
     # The externally-reachable URL this deployment is served at — used to
     # build the OIDC redirect_uri registered with the IdP. Deriving this from

@@ -81,13 +81,20 @@ describe('inheritedRules', () => {
 
 describe('agentRedactionWarning', () => {
   it('warns about a connected agent without redaction/1', () => {
-    expect(agentRedactionWarning({ protocol: 'agent', agent_version: '0.6.3', agent_features: [] })).toContain(
+    expect(agentRedactionWarning({ protocol: 'agent', agent_version: '0.7.0', agent_features: ['links/1'] })).toContain(
       "can't redact on its host",
     )
   })
 
+  it('says an agent without links/1 must be updated before its files can be read', () => {
+    const warning = agentRedactionWarning({ protocol: 'agent', agent_version: '0.6.3', agent_features: [] })
+    expect(warning).toContain('must be updated before its files can be read')
+    expect(warning).not.toContain('PerchTail redacts what it sends')
+    expect(warning).toContain('Settings → Agents')
+  })
+
   it('says nothing for an agent that redacts, one never seen, or another protocol', () => {
-    expect(agentRedactionWarning({ protocol: 'agent', agent_version: '0.7.0', agent_features: ['redaction/1'] })).toBeNull()
+    expect(agentRedactionWarning({ protocol: 'agent', agent_version: '0.7.0', agent_features: ['redaction/1', 'links/1'] })).toBeNull()
     expect(agentRedactionWarning({ protocol: 'agent', agent_version: null, agent_features: [] })).toBeNull()
     expect(agentRedactionWarning({ protocol: 'ssh', agent_version: null, agent_features: [] })).toBeNull()
   })

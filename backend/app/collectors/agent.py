@@ -287,10 +287,10 @@ def read_range(
 ) -> collector_base.RangeRead:
     """Incremental follow (#254): the agent reads the file's first `head`
     bytes and up to `length` bytes from `offset` off its own disk, and
-    answers with the file's size. An agent older than 0.6 doesn't know the
-    command: RangeNotSupportedError, and the viewer reloads the whole file
-    instead. Through a link, only when `target_check` allows where it
-    leads (_following_links)."""
+    answers with the file's size. Every agent that is asked knows the
+    command: it was added in 0.6, and an agent without links/1 (older than
+    0.7) is refused first (require_links). Through a link, only when
+    `target_check` allows where it leads (_following_links)."""
 
     def send(expect_real: str) -> dict:
         return get_agent_registry().send_command_sync(
@@ -304,12 +304,7 @@ def read_range(
             require_feature=FEATURE_LINKS,
         )
 
-    try:
-        result = _following_links(source, relative_path, target_check, send)
-    except AgentCommandError as exc:
-        if "unknown command type" in str(exc).lower():
-            raise collector_base.RangeNotSupportedError(str(exc)) from exc
-        raise
+    result = _following_links(source, relative_path, target_check, send)
     head_bytes = base64.b64decode(result.get("head_b64") or "")
     data = base64.b64decode(result.get("data_b64") or "")
     if (

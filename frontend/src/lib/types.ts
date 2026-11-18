@@ -371,7 +371,10 @@ export interface GroupRoleMapping {
   order: number
   group_name: string
   role_id: number
-  role_name: string
+  // Null, with role_outside_authority, for a delegated admin when the role
+  // is beyond their own authority: they don't see its name.
+  role_name: string | null
+  role_outside_authority: boolean
 }
 
 export interface SystemSettings {

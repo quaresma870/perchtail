@@ -83,6 +83,21 @@ class SourceLockedError(SourceError):
     public_message = "The file is locked by another process on the source"
 
 
+class SourceArchiveUnreadableError(SourceError):
+    """An agent couldn't read the archive or the .gz file it was asked to
+    list or read from (its codes archive_unreadable and gzip_unreadable,
+    `gzip` for the second). The archive routes answer it as they answer one
+    the server can't read (409 archive_unreadable, audited)."""
+
+    status_code = 409
+    public_message = "This archive or compressed file can't be read"
+    error_code = "archive_unreadable"
+
+    def __init__(self, detail: str = "", *, gzip: bool = False):
+        super().__init__(detail)
+        self.gzip = gzip
+
+
 class SourceUnreachableError(SourceError):
     status_code = 502
     public_message = "Can't reach the source"
@@ -200,12 +215,6 @@ def copy_with_limit(src: BinaryIO, destination: Path, limit: int) -> int:
 # trip, without fetching the rest of the file. A poll reads at
 # most this much; the agent's own cap is the same (agent/internal/agent).
 RANGE_MAX_BYTES = 1 << 20
-
-
-class RangeNotSupportedError(Exception):
-    """The source can't read a byte range: an agent older than 0.6 doesn't
-    know the read_range command. The viewer falls back to reloading the
-    whole file."""
 
 
 class RangeRead(NamedTuple):

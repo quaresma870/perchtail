@@ -28,7 +28,7 @@ export function upgradeSteps(installMethod: 'docker' | 'source', version: string
     '  /opt/perchtail-venv/bin/python -m app.backup create --reason pre-upgrade',
     'sudo systemctl stop perchtail',
     'sudo rsync -a --chown=root:root --delete --exclude .git --exclude frontend/node_modules ~/perchtail-build/ /opt/perchtail/',
-    'sudo /opt/perchtail-venv/bin/pip install -r /opt/perchtail/backend/requirements.txt',
+    'sudo /opt/perchtail-venv/bin/pip install --require-hashes -r /opt/perchtail/backend/requirements.txt',
     'sudo systemctl start perchtail          # migrates on start',
   ].join('\n')
 }
