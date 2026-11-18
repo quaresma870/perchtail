@@ -38,10 +38,7 @@ Done:
 - Secure defaults: the published port on the loopback address, container hardening, a warning for a weak credential encryption key, `Cache-Control: no-store` on file content, the API docs off by default, a daily backup on new installs, no test code in the image, private scratch and log folders, encrypted webhook URLs, SMB signing and encryption per source, and a warning for WinRM sources without JEA.
 - Security documentation: the response times and the support policy in [SECURITY.md](SECURITY.md), the audited events in [docs/audit-events.md](docs/audit-events.md), the security model in [docs/security-model.md](docs/security-model.md), a hardening guide in [docs/hardening.md](docs/hardening.md), and what is kept and what leaves the installation in [docs/data-and-retention.md](docs/data-and-retention.md).
 - Property-based API tests and accessibility checks in the end-to-end tests (#376, #377).
-
-Started:
-
-- Redaction of secrets, payment card numbers and personal data in viewed and downloaded content (#382), and masking by role (#249): the viewer, Tail, downloads and alerts get redacted content, redacted on the push agent's host when the agent can; a settings screen is still to do.
+- Redaction of secrets, payment card numbers and personal data in viewed and downloaded content (#382): the viewer, Tail, downloads and alerts get redacted content, for every user, redacted on the push agent's host when the agent can, and configured by super admins in Settings → Redaction and each source's editor.
 
 ## 1.0.0
 
@@ -65,5 +62,6 @@ For 1.1 and later releases:
 - Audit log export and forwarding (#252), and logs in Elastic Common Schema fields (#383).
 - Session policies for admins: idle timeout, lifetime, sessions per user and required MFA (#349).
 - Personal API tokens (#253).
+- Masking that depends on the user's role, on top of the redaction every user gets (#249).
 - Viewer: context menus (#287), split view with synchronized scrolling (#288), bookmark and tab shortcuts (#289), and several files merged into one timeline (#250).
 - An external penetration test (#124).

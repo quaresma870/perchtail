@@ -51,6 +51,8 @@ cd ..             # the repository root
 ruff check backend
 black --check backend
 pytest
+ruff check loadtest                            # the load-test kit
+python -m unittest discover -s loadtest/tests
 ```
 
 A change to the models needs an Alembic migration. Generate one from `backend/`, then review and edit it before committing:
@@ -109,9 +111,12 @@ gofmt -l .        # must print nothing; fix with gofmt -w .
 go test ./...
 go test ./internal/agent -run '^$' -fuzz '^FuzzIsSafeRelativePath$' -fuzztime 30s
 go test ./internal/agent -run '^$' -fuzz '^FuzzFetchStaysInBase$' -fuzztime 30s
+for target in FuzzRedactBlockCuts FuzzRedactUTF16 FuzzRedactWindow FuzzCustomRule; do
+  go test ./internal/redact -run '^$' -fuzz "^${target}\$" -fuzztime 30s
+done
 ```
 
-`go test` runs only the fuzz targets' seed corpus; the two fuzz runs explore new inputs for the path checks in `internal/agent/fuzz_test.go`. CI also cross-compiles for linux/amd64, linux/arm64 and windows/amd64, and runs `gosec` (v2.30.0) and `govulncheck`:
+`go test` runs only the fuzz targets' seed corpus; the fuzz runs explore new inputs for the path checks in `internal/agent/fuzz_test.go` and for the redaction engine in `internal/redact/fuzz_test.go`. CI also cross-compiles for linux/amd64, linux/arm64 and windows/amd64, and runs `gosec` (v2.30.0) and `govulncheck`:
 
 ```bash
 go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0

@@ -4,13 +4,13 @@ This guide explains, for the administrators who run PerchTail, how to upgrade th
 
 Related guides: [admin-guide.md](admin-guide.md), [configuration.md](configuration.md), [backup-and-restore.md](backup-and-restore.md), [agent-service.md](agent-service.md) (the push agent as a service), [troubleshooting.md](troubleshooting.md), [monitoring.md](monitoring.md), [install-from-source.md](install-from-source.md) and [user-guide.md](user-guide.md).
 
-**Contents:** [Before you upgrade](#before-you-upgrade) · [Upgrading with Docker](#upgrading-with-docker) · [Upgrading an install from source](#upgrading-an-install-from-source) · [Database migrations](#database-migrations) · [Upgrading push agents](#upgrading-push-agents) · [The Updates card](#the-updates-card) · [Rolling back](#rolling-back)
+**Contents:** [Before you upgrade](#before-you-upgrade) · [Upgrading with Docker](#upgrading-with-docker) · [Upgrading an install from source](#upgrading-an-install-from-source) · [Database migrations](#database-migrations) · [Upgrading push agents](#upgrading-push-agents) · [The Updates card](#the-updates-card) · [Rolling back](#rolling-back) · [Upgrading to 0.7.0](#upgrading-to-070)
 
 Which releases still get fixes, and for how long, is in [Support and end of life](../SECURITY.md#support-and-end-of-life).
 
 ## Before you upgrade
 
-1. **Read the release notes.** Each release in [CHANGELOG.md](../CHANGELOG.md) (also on the [GitHub release page](https://github.com/quaresma870/perchtail/releases)) has an `### Upgrading` section when an upgrade needs more than replacing the version: a setting to add, a behaviour that changed, an agent to upgrade by hand. Read it for every release between yours and the target. For example, 0.7.0's notes say that `/healthz` and `/readyz` now need authorization, and that push agents older than 0.7 must be upgraded by hand once.
+1. **Read the release notes.** Each release in [CHANGELOG.md](../CHANGELOG.md) (also on the [GitHub release page](https://github.com/quaresma870/perchtail/releases)) has an `### Upgrading` section when an upgrade needs more than replacing the version: a setting to add, a behaviour that changed, an agent to upgrade by hand. Read it for every release between yours and the target. For example, 0.7.0's notes say that `/healthz` and `/readyz` now need authorization, and that push agents older than 0.7 must be upgraded by hand once; [Upgrading to 0.7.0](#upgrading-to-070) goes through each of them.
 2. **Check which version runs.** **Settings → System**, card **Updates** (super admins), shows it under **Running**; so does the `version` field of `/monitoring/health`.
 3. **Make a backup**, while the old version still runs. From 0.7.0 on:
 
@@ -101,10 +101,13 @@ Check `sudo journalctl -u perchtail` for `startup.complete`.
 - **A database migrated by a newer version is refused by an older one.** PerchTail and `alembic upgrade` check the database's revision first; at a revision this version doesn't know, both stop with `startup.database_newer_than_app` and change nothing. That's what happens when you put the previous image back after an upgrade: run the newer version again, or restore the backup made before the upgrade ([Rolling back](#rolling-back)).
 - **An interrupted upgrade is fixed by running it again.** If the migration stops half way (the container is killed, the host restarts), start the new version again, or run `alembic upgrade head` again. A table rebuild that stopped half way is finished or cleaned up on the next run, without losing rows (the log then says `An interrupted rebuild of table ... was finished`). If a table is gone and can't be recovered, the migration stops with `Table ... is missing` and changes nothing more. If it still fails, restore the `pre-upgrade` backup with the previous version ([Rolling back](#rolling-back)) and report the error.
 - **Migrations change data.** Some drop tables or rewrite rows (0.7.0 drops the content index's tables, and gives `manage_source` to existing grants); read the release's `### Upgrading` notes.
+- **Some migrations rebuild a table.** 0.7.0 rebuilds the audit log table: on a large audit log it takes a while, and needs free disk for a second copy of the table while it runs.
 
 ## Upgrading push agents
 
 The server never upgrades itself, and push agents aren't upgraded with it. An agent older than the server keeps connecting; **Settings → Agents** and the source's page show its version and flag it as outdated. An agent is only ever upgraded to the server's own version, so upgrade the server first.
+
+From 0.7, the server reads files only from an agent that says where links lead (the `links/1` feature, which agents announce from 0.7 on; see [agent-service.md](agent-service.md#what-the-agent-tells-the-server)). After the server's upgrade, an older agent stays connected and its folders can still be browsed, but opening, Tail, downloads, folder ZIPs and archives are refused (409, "This source's agent must be updated before its files can be read…", audited with the reason `agent_update_required`) until it is upgraded; alerts on its files wait where they are. **Settings → Agents** shows "Update required" under such an agent's version. Agents older than 0.7 can only be upgraded [by hand](#by-hand), so plan it right after the server's upgrade.
 
 ### By hand
 
@@ -176,3 +179,74 @@ Everything changed since the upgrade (sources, rules, users, audit entries) is l
 Going back to a release before 0.7.0, which has no restore command: stop PerchTail, put the copy of `DATA_DIR` made before the upgrade back in place, and start the previous version.
 
 Push agents upgraded in between stay on the newer version: an agent never downgrades itself. To put an older agent back, install its binary by hand.
+
+## Upgrading to 0.7.0
+
+0.7.0 changes more than a usual release. Each item below, except the closing note on redaction, is one entry of its `### Upgrading` notes in [CHANGELOG.md](../CHANGELOG.md), with what to do and where it is explained.
+
+### Before and during the upgrade
+
+- **Back up first** with `python -m app.backup create --reason pre-upgrade` once you run 0.7.0 or later. Coming from an earlier release, the command doesn't exist yet: copy `DATA_DIR` instead ([Before you upgrade](#before-you-upgrade)).
+- **The migration rebuilds the audit log table**, so entry ids are never reused after a purge. On a large audit log it takes a while and needs free disk for a second copy of the table; the hash chain is unchanged. If it is interrupted, run it again ([Database migrations](#database-migrations)).
+- **Alert webhook URLs are encrypted by the migration**, so it must run with the same `CREDENTIAL_ENCRYPTION_KEY` and salt as PerchTail (the Docker entrypoint and the systemd unit do). From then on an alert shows only the URL's scheme, host and port, and editing an alert without typing a new URL keeps the stored one.
+- **The test hooks are refused.** `PERCHTAIL_TEST_PATCH_MODULE` is honoured only with `PERCHTAIL_TEST_MODE=true`, which only the end-to-end test server sets; set without it, PerchTail refuses to start, and the Docker image refuses both. A deployment sets neither ([configuration.md](configuration.md#other-variables)).
+
+### Network, reverse proxy and monitoring
+
+- **`/healthz` and `/readyz` need authorization**: a local caller without proxy headers (the Docker `HEALTHCHECK`), the monitoring token, or an address in `PROBE_ALLOWED_NETWORKS`. A load balancer or Kubernetes probe that called them without the token stops working until it sends the token or its network is listed ([monitoring.md](monitoring.md#who-may-call-them)).
+- **Set `TRUSTED_PROXIES` behind a reverse proxy in another container or on another host.** It decides whose `X-Forwarded-For` is believed, for the address in the audit log, the monitoring allowlists and the sign-in lockout, which now also counts failures per client address: without it, every client has the proxy's address, and five failures by anyone lock everyone out. The default is loopback only. A forwarded header from a peer outside it logs `client_address.untrusted_forwarded_header` once, and `/monitoring/health` then reports `trusted_proxies_suspect: true` until the next restart ([configuration.md](configuration.md#monitoring-and-reverse-proxy), [troubleshooting.md](troubleshooting.md#too-many-failed-login-attempts-try-again-later)).
+- **uvicorn runs with `--no-proxy-headers`**, so PerchTail alone reads `X-Forwarded-For`. The Docker image does it already; an install from source adds it to the `ExecStart` line of its systemd unit ([install-from-source.md](install-from-source.md#6-run-it-as-a-service)).
+- **`docker-compose.yml` publishes PerchTail on `127.0.0.1` only**, with a read-only root filesystem, `no-new-privileges` and every capability dropped but the few the entrypoint needs. Other machines reach it through a reverse proxy that terminates TLS; to publish it on every address again, change the port to `"8080:8000"`. If you run your own compose file or `docker run`, the README lists the settings ([README](../README.md#quick-start)).
+- **`/docs`, `/redoc` and `/openapi.json` answer 404** unless `API_DOCS=true` ([configuration.md](configuration.md#keys-security-and-sessions)).
+
+### Sign-in and accounts
+
+- **Administrators must use MFA.** Local accounts of super admins and of roles with any global capability must set up two-factor authentication: at their first sign-in after the upgrade they are taken to **Set up two-factor authentication** and can do nothing else until it is done. Make sure each of them has an authenticator app at hand. SSO accounts aren't affected ([admin-guide.md](admin-guide.md#users)).
+- **The first super admin's temporary password is no longer logged.** A fresh install writes it to `DATA_DIR/initial-admin-password`. Existing installs aren't affected, but a temporary password logged by an earlier version stays in the rotated logs until they expire ([README](../README.md#quick-start)).
+- **SSO accounts lose any PerchTail password** an admin's reset may have left on them, recorded in the audit log as `user.password_cleared` with reason `sso_account` ([audit-events.md](audit-events.md#administration)).
+- **The SSO issuer must be `https://`**, as must the endpoints its discovery document names, and it must match the document's `issuer` exactly (a trailing slash aside). A provider saved with an `http://` issuer stops signing in until it is changed; **Test connection** checks it ([sso-setup.md](sso-setup.md#1-register-perchtail-as-an-oidc-client-at-your-idp)).
+- **The identity provider must be on a public address**: an IdP reached at a private, loopback or link-local address stops signing in (`sso.login.discovery_failed` in the log) ([sso-setup.md](sso-setup.md#1-register-perchtail-as-an-oidc-client-at-your-idp)).
+- **An SSO account that no group mapping matches drops to the no-access role** at its next sign-in. Before upgrading, check that every SSO user who should keep access is in a group with a mapping ([sso-setup.md](sso-setup.md#2-group-claim-to-role-mapping-optional)).
+- **Only a super admin deletes or turns off the SSO provider.** An admin with **Manage SSO settings** short of super admin creates, changes and deletes only the group mappings whose role is within their own authority ([sso-setup.md](sso-setup.md#2-group-claim-to-role-mapping-optional)).
+- **A new SSO account's username comes from `email` only when the ID token says `email_verified: true`**; existing accounts keep theirs ([sso-setup.md](sso-setup.md#how-a-sign-in-maps-to-an-account)).
+
+### Roles, customers and grants
+
+- **Manage sources is a capability of its own.** The migration gives `manage_source` to every grant with `manage_rules` in roles with **Create new sources**. Afterwards, take it off where a role should only edit rules, and give it where a role should add sources ([admin-guide.md](admin-guide.md#grant-capabilities)).
+- **Only a super admin creates customers**, and a role with **Create new sources** sees and changes only the customers and folders its grants reach ([admin-guide.md](admin-guide.md#customers-and-folders)).
+- **Duplicate grants are merged**: where a role had several grants on the same customer, folder or source, the migration keeps the one with the lowest id and records each deleted one as a `role_grant.delete` with reason `duplicate_scope`. Check those roles' grants ([audit-events.md](audit-events.md#administration)).
+- **Sources take their folder's customer.** The migration gives a source saved in a folder with another customer, or none, the folder's customer, lists its id in the migration log and records it as a `source.update` with no user and reason `folder_customer`. Check those sources' grants ([admin-guide.md](admin-guide.md#customers-and-folders)).
+- **Test connection and checking a source's status need Manage sources** on the source: a role with only **View** no longer sees **Test connection** or can click a status to check it again. Give `manage_source` to the grants that should keep it ([admin-guide.md](admin-guide.md#grant-capabilities)).
+- **Only a super admin acts on other user or role admins**: resetting the password of, deactivating or changing the role of an account whose role has `manage_users` or `manage_roles` is refused to anyone else, audited as `access.denied` with reason `peer_admin` ([admin-guide.md](admin-guide.md#delegated-administrators)).
+
+### Audit log
+
+- **Audit retention is at least 90 days**, or `0` to keep entries forever: the migration raises a shorter retention to 90 and records it as a `system_settings.update`. Only a super admin can shorten it from now on ([admin-guide.md](admin-guide.md#retention)).
+- **The audit chain is checked every day**: `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` now defaults to 1 ([admin-guide.md](admin-guide.md#integrity)).
+
+### Keys and backups
+
+- **A weak `CREDENTIAL_ENCRYPTION_KEY` is warned about** in the log and in **Settings → System**: change it with `python -m app.rotate_credential_key` ([credential-key-rotation.md](credential-key-rotation.md)). `CREDENTIAL_KEY_REFUSE_WEAK=true` refuses to start with one ([configuration.md](configuration.md#keys-security-and-sessions)).
+- **The scheduled backup is on by default for new installs**, every 24 hours. An existing install keeps it off: turn it on in **Settings → System**, card **Backups** ([configuration.md](configuration.md#backups-card)).
+
+### Sources, rules and archives
+
+- **Push agents must be upgraded before their files can be read**, by hand for agents older than 0.7 ([Upgrading push agents](#upgrading-push-agents)).
+- **Push agents can be upgraded from the portal from now on**, once they run 0.7. For that, the agent's account must be able to write to the folder its binary is in, and its service must restart it: `Restart=always` with systemd, and a restart on exit for a Windows service ([agent/README.md](../agent/README.md#upgrades-from-the-portal)).
+- **A push agent checks `PERCHTAIL_BASE_PATH` at startup**: one whose folder doesn't exist, isn't a folder or can't be read by its account stops with exit code 1 and a message naming the problem, and a service manager set to restart it restarts it in a loop. Check the folder before upgrading an agent ([agent/README.md](../agent/README.md#configuration)).
+- **Links are judged by where they lead** on local, SSH and agent sources: a symbolic link (or a junction on a Windows agent) to a file or folder the rules hide is no longer listed or read, even when its own name is visible. Check the rules of sources whose logs are reached through links ([source-setup.md](source-setup.md#principles-that-apply-to-every-protocol)).
+- **Exclude rules ignore letter case on every source**, glob and `re:`; include rules are unchanged ([admin-guide.md](admin-guide.md#rules)).
+- **SMB signing is a setting of each SMB source.** Every source keeps requiring signed messages; one whose server can't sign can turn **Require signing** off ([source-setup.md](source-setup.md#4-protocol-version-and-auth)).
+- **A WinRM source reads only paths on a drive.** One saved with a UNC (`\\server\share`) or device (`\\?\`, `\\.\`) path stops being read: change it to a drive path of the WinRM host, or read the share through an SMB source ([source-setup.md](source-setup.md#base-path)).
+- **A `.tar.gz` with more than 50,000 entries** lists only its first 50,000, and its members past them can't be opened: split it into smaller archives ([user-guide.md](user-guide.md#archives)).
+- **Severity regexes use the rules' syntax** (RE2, at most 1000 characters). One saved before with lookaround or a backreference, or longer, keeps working, but any change to it, even to its level or switches, is refused until it is rewritten; it can still be deleted ([admin-guide.md](admin-guide.md#severity-indicators)).
+
+### Search and alerts
+
+- **The content index and the Search page are gone.** The migration drops their tables; nothing can be kept. The `SEARCH_INDEX_*` variables are ignored ([configuration.md](configuration.md#other-variables)), and a YAML import that still sets `search_indexing_enabled` applies with a warning ([bulk-import.md](bulk-import.md#format)). File names are searched with the file-name index ([admin-guide.md](admin-guide.md#file-name-index)).
+- **Alerts read new lines live.** Existing alerts start again at the end of each file they watch, and their query is now plain text or a regular expression: rewrite a query that used full-text operators such as `AND` or quotes ([admin-guide.md](admin-guide.md#creating-an-alert)).
+- **Webhook calls changed shape**: each hit has `source_id`, `source_name`, `file_path`, `offset` and `line` instead of `line_number` and `snippet_html`. Update receivers that read `snippet_html` ([admin-guide.md](admin-guide.md#webhook-calls)).
+
+### Redaction
+
+Redaction is new in 0.7.0 and off by default, so the upgrade changes nothing until a super admin turns it on in **Settings → Redaction**. Once on, it applies to every user, super admins included; downloads are redacted too while **Redact downloads too** is on (the default); and on a push-agent source, an agent from 0.7 redacts on its own host ([redaction.md](redaction.md), [configuration.md](configuration.md#redaction)).

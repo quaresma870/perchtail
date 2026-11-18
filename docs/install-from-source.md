@@ -77,12 +77,12 @@ The defaults (`./data/db`, `./data/logs`, `./data/scratch`) are relative to the 
 
 ```bash
 sudo install -d -o perchtail -g perchtail -m 0700 /var/lib/perchtail /var/lib/perchtail/db /var/lib/perchtail/scratch
-sudo install -d -o perchtail -g perchtail -m 0750 /var/log/perchtail
+sudo install -d -o perchtail -g perchtail -m 0700 /var/log/perchtail
 ```
 
 Put them on separate filesystems where you can (at least `SCRATCH_DIR` apart from `DATA_DIR`): scratch holds every file being opened or zipped, and a full disk under it would also stop the database and the logs. PerchTail refuses a new fetch (HTTP 507) when scratch reaches `SCRATCH_MAX_GB`, or when its filesystem is down to `SCRATCH_MIN_FREE_GB` / `SCRATCH_MIN_FREE_PERCENT` free (1 GiB or 5% by default, whichever is larger), but that guard only covers scratch. A folder ZIP fetches and checks the folder's `.zip` and `.tar.gz` files before the ZIP starts, and they wait in scratch for their turn, so size scratch for all the archives in the largest folder you zip.
 
-Keep `DATA_DIR` on a local disk. The database runs in SQLite's WAL mode, which doesn't work over a network share. On every start, PerchTail sets `DATA_DIR` so that only its own user can read it (directory `0700`, files `0600`), and `BACKUP_DIR` too.
+Keep `DATA_DIR` on a local disk. The database runs in SQLite's WAL mode, which doesn't work over a network share. On every start, PerchTail sets `DATA_DIR` so that only its own user can read it (directory `0700`, files `0600`), and makes `BACKUP_DIR`, `LOG_DIR` and `SCRATCH_DIR` `0700` too.
 
 Back up `DATA_DIR` with `python -m app.backup`, run as the `perchtail` user with the service's environment file, while PerchTail runs:
 
@@ -181,7 +181,7 @@ sudo /opt/perchtail-venv/bin/pip install --require-hashes -r /opt/perchtail/back
 sudo systemctl start perchtail          # migrates on start
 ```
 
-Read the release's CHANGELOG entry first; it says when an upgrade needs anything more than this.
+Read the release's CHANGELOG entry first; it says when an upgrade needs anything more than this. If the migration stops part way (the host restarts, the service is killed), start the service again: an interrupted migration is finished on the next run ([upgrade.md](upgrade.md#database-migrations)).
 
 The first command makes an encrypted `pre-upgrade` backup while the old version still runs.
 

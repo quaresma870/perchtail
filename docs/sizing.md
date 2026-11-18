@@ -1,6 +1,6 @@
 # Sizing guide
 
-How much hardware a PerchTail instance needs for a number of users and sources, from load tests rather than estimates. Every number here was measured with the load-test kit in [`loadtest/`](../loadtest/README.md), on the release named next to it; re-run the kit to check a figure for another release or other hardware.
+How much hardware a PerchTail instance needs for a number of users and sources, from load tests rather than estimates. Every number here was measured with the load-test kit in [`loadtest/`](../loadtest/README.md), on the release named next to it; re-run the kit to check a figure for another release or other hardware. No figure has been measured yet for 0.7.0.
 
 PerchTail runs as a single process with a SQLite database (see [high-availability.md](high-availability.md)), so sizing means one machine: CPU, memory, and two disks worth thinking about, the database's and scratch. Every measurement here is of one instance with its SQLite database, with PerchTail's default limits (`MAX_FETCH_MB`, `SCRATCH_MAX_GB` and the three concurrency limits) unless a row says otherwise.
 
@@ -72,20 +72,20 @@ To be measured: the process's resident memory with no users, and its growth with
 
 ### Scratch disk
 
-Every file opened or downloaded from a remote source (SSH, SMB, WinRM, push agent) is fetched in full into scratch, and stays there while any tab has it open; a download or folder ZIP holds it only for the transfer. Local-disk sources are read in place and use no scratch. So scratch needs about the number of files open at the same time across all users, times their size: ten people with a 500 MB log open each need 5 GB. A file that grows is fetched at the size it has when it is opened; reopening it fetches it again at its new size, and Follow reads only what was appended, without scratch. Decompressed `.gz` files and archive members count at their decompressed size.
+Every file opened or downloaded from a remote source (SSH, SMB, WinRM, push agent) is fetched in full into scratch. An open's copy is its own, for the session that opened it, and stays there until the viewer closes the tab or `SCRATCH_IDLE_SECONDS` (5 minutes) after it was fetched, whichever comes first, since the browser already holds the content; a download holds its copy only for the transfer. A folder ZIP fetches its plain files one at a time, but it fetches and checks the folder's `.zip` and `.tar.gz` files (and, when downloads are redacted, its `.gz` files too) before the ZIP starts, and they wait in scratch for their turn, so size scratch for all the archives in the largest folder you zip. Local-disk sources serve plain files in place, and use scratch only for `.gz` files, archive members and redacted copies. So scratch needs about the number of files opened within a few minutes of each other across all users, times their size: ten people opening a 500 MB log each at about the same time need 5 GB. A file that grows is fetched at the size it has when it is opened; reopening it fetches it again at its new size, and Follow reads only what was appended, without scratch. Decompressed `.gz` files and archive members count at their decompressed size.
 
 Scratch is bounded by `SCRATCH_MAX_GB` (the oldest unused copies are evicted first), by `SCRATCH_MIN_FREE_GB`/`SCRATCH_MIN_FREE_PERCENT` (new fetches are refused with HTTP 507 rather than filling the disk), and per file by `MAX_FETCH_MB` and `MAX_DECOMPRESSED_MB`. Copies a closed browser never released are deleted after `SCRATCH_IDLE_SECONDS`. Put scratch on its own volume (see `docker-compose.yml`) so a burst of large opens can't fill the database's disk.
 
 ### Database disk and writes
 
-The database itself stays small; the file-name index (one row per file on every indexed source) and the audit log are what grow it. Writes matter more than size: SQLite takes one writer at a time, and every sign-in, every file open, download and Follow start (each is audited), each session's last-seen time (at most once a minute per session), each source check result and each file-name index pass is a write. The WAL grows during bursts of writes and is checkpointed back.
+The database itself stays small; the file-name index (one row per file on every indexed source) and the audit log are what grow it. Writes matter more than size: SQLite takes one writer at a time, and every sign-in, every file open, download and Follow start, every folder listed below a source's root (while **Audit folder listings** is on, the default) and every file-name search (each is audited), each session's last-seen time (at most once a minute per session), each source check result and each file-name index pass is a write. The WAL grows during bursts of writes and is checkpointed back.
 
 ### Network and source latency
 
 Nothing is cached: every folder expanded is a live listing on the source, and every open is a full fetch. The time a source takes to answer (network latency, the source's disk) adds directly to what users wait for, and holds a connector slot for that long. Polling multiplies the requests a single open page makes:
 
 - Follow: one request every `tail_interval_seconds` per followed tab, about `followed tabs ÷ tail interval` requests a second, each a ranged read on the source.
-- Auto-refresh: each expanded folder is listed again every `explorer_refresh_seconds`, about `users × expanded folders ÷ refresh interval` listings a second, plus one source list per user per interval.
+- Auto-refresh: each expanded folder is listed again every `explorer_refresh_seconds`, about `users × expanded folders ÷ refresh interval` listings a second, plus one source list per user per interval (every 60 seconds when the refresh is off).
 - Background checks: `sources ÷ (source_check_minutes × 60)` listings a second, and `sources ÷ (name_index_minutes × 60)` full recursive listings a second for the file-name index.
 
 ### Push agents
@@ -94,17 +94,17 @@ Each connected agent holds one WebSocket to the server; the agent pings every 25
 
 ## Settings that trade load for freshness
 
-All of these are under **Settings → System**.
+All of these are under **Settings → System**, named here as on screen.
 
 | Setting | Default | What it drives | Raising it |
 |---|---|---|---|
-| Follow interval (`tail_interval_seconds`) | 2 s | Follow polls, per followed tab | Fewer requests to the server and sources; new lines appear later. |
-| Explorer auto-refresh (`explorer_refresh_seconds`) | 30 s | Re-listing every expanded folder, per open page | Fewer listings on every source; new files show up later. 0 turns it off. |
-| Background source check (`source_check_minutes`) | 10 min | One listing per source per interval | Less base load per source; a broken source is noticed later. 0 turns it off. |
-| File-name index (`name_index_enabled`, `name_index_minutes`) | on, 15 min | A full recursive listing of each indexed source per interval, and its rows in the database | Less load on sources and fewer database writes; search results are staler. Can be turned off per source. |
-| Live alerts (`alerts_interval_seconds`) | 60 s | Reading the files that alerts watch | Less load; alerts fire later. |
-| Connector limits (`concurrency_global`, `concurrency_per_source`, `concurrency_user_transfers`) | 16, 4, 2 | How many listings and fetches run at once, in all, per source and per user | More parallel work, more CPU and source load; past the limit requests get HTTP 503 with `Retry-After`. |
-| Listing cap (`listing_max_entries`) | 5000 | The largest folder listing returned | Bigger answers and more time per listing in huge folders. |
+| **Tail interval** (`tail_interval_seconds`) | 2 s | Follow polls, per followed tab | Fewer requests to the server and sources; new lines appear later. |
+| **Refresh open folders** (`explorer_refresh_seconds`) | 30 s | Re-listing every expanded folder, per open page | Fewer listings on every source; new files show up later. 0 turns it off. |
+| **Check sources in the background** (`source_check_minutes`) | 10 min | One listing per source per interval | Less base load per source; a broken source is noticed later. 0 turns it off. |
+| **Index file names** and **List each source's files every** (`name_index_enabled`, `name_index_minutes`) | on, 15 min | A full recursive listing of each indexed source per interval, and its rows in the database | Less load on sources and fewer database writes; search results are staler. Can be turned off per source. |
+| **Check alerts every** (`alerts_interval_seconds`) | 60 s | Reading the files that alerts watch | Less load; alerts fire later. |
+| **Listings and downloads at once**, **At once on one source**, **Downloads per user** (`concurrency_global`, `concurrency_per_source`, `concurrency_user_transfers`) | 16, 4, 2 | How many listings, opens, Tail polls and fetches run at once, in all and per source, and how many downloads and folder ZIPs each user may have in progress | More parallel work, more CPU and source load; past the limit requests get HTTP 503 with `Retry-After`. |
+| **Entries per listing** (`listing_max_entries`) | 5000 | The largest folder listing returned | Bigger answers and more time per listing in huge folders. |
 
 The measured effect of the file-name index is the difference between the `mixed` and `mixed-index-off` phases of each profile.
 
@@ -114,7 +114,7 @@ PerchTail is one process with one SQLite database, and that sets ceilings that m
 
 - **One writer at a time.** SQLite in WAL mode lets reads run during a write, but writes queue; a write waits up to 30 seconds for the lock before failing. Sign-ins, audited opens and downloads, and file-name index passes all compete for it. To be measured: the write rate where waiting for the lock starts to show in p95 latency.
 - **A bounded pool of request threads.** The API's endpoints are synchronous and run in the server's thread pool, and database access goes through a bounded connection pool; slow source calls hold a thread and a connection for as long as they take. To be measured: where the ramp's breaking point comes from (thread pool, connection pool, connector limits or CPU).
-- **The connector limits** above are deliberate back-pressure: with the defaults, at most 16 source operations run at once, so the 17th concurrent open waits for a slot or gets a 503.
+- **The connector limits** above are deliberate back-pressure: with the defaults, at most 16 source operations run at once, so the 17th concurrent open gets a 503 with `Retry-After` instead of waiting for a slot.
 - **No horizontal scaling.** One instance per data directory (a second one refuses to start), and the scheduler and agent connections live in that process. Past the large profile, split users and sources over separate instances.
 
 ## Repeating the measurements

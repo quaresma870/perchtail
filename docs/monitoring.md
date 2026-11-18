@@ -17,7 +17,8 @@ None of the four answers the world. The bearer token is the monitoring token gen
 
 - **The probes** (`/healthz`, `/readyz`) answer a caller on the same machine (loopback) whose request carries no proxy header (`X-Forwarded-For`, `Forwarded`, `X-Real-IP`): that's the Docker `HEALTHCHECK`, which runs inside the container. A request from a reverse proxy on the same host carries those headers, so it's not treated as local. Anyone else needs the token, or an address in `PROBE_ALLOWED_NETWORKS` (comma-separated addresses or CIDR blocks, empty by default) for a load balancer or kubelet that can't send a header. A refused probe gets a bare `401` that says nothing about the instance's health.
 - **`/monitoring/health` and `/metrics`** always need the token. When `MONITORING_ALLOWED_NETWORKS` is set, the caller's address must be in it too; a valid token from anywhere else gets `403`.
-- **The caller's address** is the TCP peer. When the peer is in `TRUSTED_PROXIES` (loopback only by default), it is replaced by the first address in `X-Forwarded-For`, read from the right, that isn't a trusted proxy, so a client can't pick it. Behind a reverse proxy on another machine or container, set `TRUSTED_PROXIES` to the proxy's address so the allowed networks see the real caller; never a range that holds clients. The audit log records the same address (see [audit-events.md](audit-events.md#client-address)).- **A reverse proxy on the same host** must send `X-Forwarded-For` (nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). One that sends no forwarding header connects from loopback like the Docker healthcheck, so everyone behind it would pass the probes.
+- **The caller's address** is the TCP peer. When the peer is in `TRUSTED_PROXIES` (loopback only by default), it is replaced by the first address in `X-Forwarded-For`, read from the right, that isn't a trusted proxy, so a client can't pick it. Behind a reverse proxy on another machine or container, set `TRUSTED_PROXIES` to the proxy's address so the allowed networks see the real caller; never a range that holds clients. The audit log records the same address (see [audit-events.md](audit-events.md#client-address)).
+- **A reverse proxy on the same host** must send `X-Forwarded-For` (nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). One that sends no forwarding header connects from loopback like the Docker healthcheck, so everyone behind it would pass the probes.
 - **Allowed networks hold the callers, not the path:** don't list a range that includes a load balancer, ingress controller or proxy that forwards outside traffic, or everyone behind it passes too.
 - A malformed entry in either list stops PerchTail at startup, naming the entry.
 
@@ -29,7 +30,7 @@ Answers `200 {"status": "ready"}` when all three checks pass, and `503 {"status"
 - `data_dir`: a small temporary file is created, written and removed in `DATA_DIR`. A full disk or a read-only mount fails it.
 - `scheduler`: the background job scheduler runs.
 
-It needs no token and returns nothing else, so it can be reachable by the orchestrator only.
+It returns nothing else. Callers need the same authorization as `/healthz` (see [Who may call them](#who-may-call-them)): an orchestrator that can't send the token belongs in `PROBE_ALLOWED_NETWORKS`.
 
 ## Generating a monitoring token
 
@@ -138,7 +139,7 @@ Timestamps are UTC, without a time zone (`next_run_at` has one). Fields that can
 | `database.size_bytes`, `database.wal_bytes` | Size of the SQLite file and of its write-ahead log (`perchtail.db-wal`; 0 when there is none). `null` for another database. The WAL is checkpointed and cut back every hour and limited to 64 MiB after each checkpoint. |
 | `scratch.used_bytes`, `scratch.max_bytes`, `scratch.used_fraction` | What's on disk under `SCRATCH_DIR`, against `SCRATCH_MAX_GB`. |
 | `scratch.min_free_bytes` | Free space kept on the scratch filesystem: the larger of `SCRATCH_MIN_FREE_GB` and `SCRATCH_MIN_FREE_PERCENT` of its size. Below it, and when scratch is at `SCRATCH_MAX_GB`, new fetches are refused with HTTP 507. |
-| `limits.global_in_use`, `limits.global_max` | Folder listings, file opens, downloads, folder ZIPs and archive listings talking to sources right now, and how many may at once (Settings → System). |
+| `limits.global_in_use`, `limits.global_max` | Folder listings, file opens, Tail polls, downloads, folder ZIPs and archive listings talking to sources right now, and how many may at once (Settings → System). |
 | `limits.per_source_max`, `limits.busiest_source_in_use`, `limits.sources_in_use` | The limit on one source, the most in use on any one source, and the slots in use per source id. |
 | `limits.per_user_transfers_max`, `limits.transfers_in_use`, `limits.busiest_user_transfers` | Downloads and folder ZIPs one user may have in progress, how many are in progress in all, and the most any one user has. |
 | `limits.rejected` | Requests answered 503 (busy, with `Retry-After`) since this process started, by the limit that was full: `global`, `source` or `user`. A count that keeps growing means the limits are too low for the load, or something is hammering the server. |
@@ -192,9 +193,12 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `startup.credential_salt_missing` | critical | The credential salt file is missing while encrypted data exists, so PerchTail refuses to start. Restore the salt from a backup. |
 | `startup.credential_salt_regenerated` | critical | The salt was missing and `CREDENTIAL_SALT_ALLOW_REGENERATE` let PerchTail start with a new one: everything encrypted with the old salt can't be read. |
 | `startup.insecure_credential_encryption_key` | critical | `CREDENTIAL_ENCRYPTION_KEY` is still the default; PerchTail refuses to start. |
+| `startup.weak_credential_encryption_key` | warning, critical with `CREDENTIAL_KEY_REFUSE_WEAK=true` | `CREDENTIAL_ENCRYPTION_KEY` is weaker than recommended (see [configuration.md](configuration.md#keys-security-and-sessions)); with `CREDENTIAL_KEY_REFUSE_WEAK=true`, PerchTail refuses to start. |
 | `startup.instance_lock_held` | critical | Another PerchTail process is using the same `DATA_DIR`, so this one refuses to start, or `alembic upgrade` refuses to migrate, without touching the database. `holder_host`, `holder_pid`, `holder_version` and `holder_started_at` name the one running. Only one instance may run per `DATA_DIR`; the lock is released by the operating system when that process ends, however it ends. |
 | `startup.database_newer_than_app` | critical | The database is at a migration (`database_revision`) this version (`app_version`) doesn't know: a newer PerchTail already migrated it. Startup and `alembic upgrade` refuse. Run the newer version again, or restore a backup taken before the upgrade. |
 | `audit_integrity.chain_broken` | error | The audit log hash chain is broken: a row was changed or deleted outside PerchTail. |
+| `audit_hash_chain.chain_reset` | error | At startup: the audit log's signatures were taken away or its first entries deleted, while `DATA_DIR/.audit-chain-started` says the chain had started ([audit-events.md](audit-events.md#integrity)). |
+| `audit_outbox.rejected` | error | At startup: an event left in the audit outbox that isn't one PerchTail's migrations write; it is refused and recorded as `audit.outbox_rejected`. |
 | `audit_integrity.race_breaks_unrecorded` | warning | Breaks from the 0.5.x race wait to be recorded on the Audit Log page. |
 | `job.failed` | error | A background job raised an error (`job_id` names it); also in `scheduler.jobs[]`. |
 | `job.record_not_saved` | warning | A job's run couldn't be recorded (usually a locked or full database). |
@@ -217,7 +221,9 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `backup.restore` | info, warning when `result` is `refused` | A backup was restored (`file`, `previous` names where the data before it went), or a restore was refused and changed nothing (`error` says why). |
 | `readyz.database_not_writable`, `readyz.data_dir_not_writable` | warning | A readiness check failed. |
 | `update_check.failed` | warning | The update check couldn't reach GitHub. |
-| `sso.login.discovery_failed`, `sso.callback.no_access_role_missing` | error | SSO sign-in can't work: the provider can't be reached, or the no-access role is missing. |
+| `sso.login.discovery_failed`, `sso.login.insecure_idp_url`, `sso.login.issuer_mismatch`, `sso.callback.no_access_role_missing` | error | SSO sign-in can't work: the provider can't be reached or is on an address the policy refuses, its issuer or an endpoint isn't `https://`, its discovery document names another issuer, or the no-access role is missing. |
+| `client_address.untrusted_forwarded_header` | warning | The first request since startup that carried `X-Forwarded-For` or `Forwarded` from a peer outside `TRUSTED_PROXIES` (`peer`); `trusted_proxies_suspect` turns `true`. |
+| `agent.redaction_fallback` | warning | Redaction applies to a push-agent source whose agent doesn't announce `redaction/1`. Logged once per connection. An agent older than 0.7 also lacks `links/1`, so its content requests are refused anyway (`agent_update_required`); upgrade the agent. |
 
 ## Zabbix
 
@@ -269,7 +275,7 @@ To pick fields yourself instead, make one HTTP agent item on `/monitoring/health
 | `perchtail_database_reachable`, `perchtail_database_latency_seconds` | | The database check. |
 | `perchtail_database_size_bytes`, `perchtail_database_wal_size_bytes` | | SQLite file and WAL sizes. |
 | `perchtail_scratch_used_bytes`, `perchtail_scratch_max_bytes`, `perchtail_scratch_min_free_bytes` | | Scratch use and limit, and the free space kept on its filesystem. |
-| `perchtail_connector_slots_in_use`, `perchtail_connector_slots_max`, `perchtail_connector_slots_per_source_max`, `perchtail_connector_slots_busiest_source` | | Listings, opens, downloads and ZIPs talking to sources, against the limits. |
+| `perchtail_connector_slots_in_use`, `perchtail_connector_slots_max`, `perchtail_connector_slots_per_source_max`, `perchtail_connector_slots_busiest_source` | | Listings, opens, Tail polls, downloads and ZIPs talking to sources, against the limits. |
 | `perchtail_transfers_in_use`, `perchtail_transfers_per_user_max` | | Downloads and folder ZIPs in progress, and the per-user limit. |
 | `perchtail_limit_rejections_total` (counter) | `limit` (`global`, `source`, `user`) | Requests answered 503 because a limit was full. |
 | `perchtail_log_used_bytes`, `perchtail_log_max_bytes`, `perchtail_log_size_limit_deleted_early` | | PerchTail's own logs. |

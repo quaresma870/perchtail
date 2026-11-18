@@ -10,17 +10,33 @@ The agent reads five environment variables, and has no configuration file. The f
 |---|---|---|
 | `PERCHTAIL_SERVER_URL` | `wss://perchtail.example.com/agent/connect` | The server's agent endpoint |
 | `PERCHTAIL_AGENT_TOKEN` | (from the source's page) | Enrollment token: **Generate token** under **Agent enrollment** on the source's page; shown once |
-| `PERCHTAIL_BASE_PATH` | `/var/log/myapp` | Local root the agent is allowed to read from |
-| `PERCHTAIL_ALLOW_INSECURE` | unset | Set to `true` to allow a plain `ws://` URL. Without it the agent refuses to start unless the URL is `wss://`, because the token and every fetched file travel over this connection. Only for testing or a fully trusted network. |
+| `PERCHTAIL_BASE_PATH` | `/var/log/myapp` | Local root the agent is allowed to read from. Checked at startup: the agent stops with a message naming the problem if it doesn't exist, isn't a folder or can't be read by the agent's account. |
+| `PERCHTAIL_ALLOW_INSECURE` | unset | Set to `true` (or `1`, `yes`, `on`) to allow a plain `ws://` URL. Without it the agent refuses to start unless the URL is `wss://`, because the token and every fetched file travel over this connection. Only for testing or a fully trusted network. |
 | `PERCHTAIL_REMOTE_UPGRADE` | unset (allowed) | Set to `false` to refuse every upgrade from the portal, whatever the server asks (see below). Anything but `true`/`false` (or `1`/`0`, `yes`/`no`, `on`/`off`) stops the agent at startup, so a typo can't leave upgrades on. |
+
+A configuration error stops the agent at startup with exit code 1 and the reason in its log. [docs/agent-service.md](../docs/agent-service.md#2-configuration) lists the messages.
 
 ## Connection
 
 The agent pings the server every 25 seconds and reconnects when it has heard nothing from it for 75 seconds, so a connection a NAT or firewall dropped without a word is replaced instead of hanging. The server does the same the other way (a ping every 30 seconds, the agent dropped after 90 silent seconds). Reconnects back off exponentially from 1 to 30 seconds, start again from 1 second after a connection that stayed up for a minute, and each delay is random between half and one and a half times the backoff, so agents don't all come back at the same moment after a server restart.
 
+## What it tells the server
+
+On each connection the agent sends, besides its token, its operating system, its version and the features it supports, comma-separated. The server decides from the features, not from the version, what it asks:
+
+- `links/1` (agents from 0.7): a listing says where each entry really is when a symbolic link (or, on Windows, a junction) leads elsewhere inside the base path, and a command that reads content is answered only when the path really is where the server expects, after the server has checked its rules on that target; otherwise it is refused before anything is read. The check and the read use the same open file, so a link swapped in between isn't followed. **The server reads no file content from an agent without it**: such an agent stays connected and can be browsed, but opening, Tail, downloads, folder ZIPs and archives are refused, and alerts skip its files, until it is upgraded, and Settings → Agents says "Update required".
+- `redaction/1` (agents from 0.7): when redaction applies to the source, the server sends the rules with each request and the agent redacts what it sends on its host, with a Go port of the server's engine (checked against the same test vectors), and lists and reads archives and decompresses `.gz` files there, so the original content never leaves the host. An agent older than 0.7 has neither feature, so the server reads none of its files until it is upgraded (see `links/1` above).
+
+## Limits
+
+- A listing (a folder, or an archive's members) stops at 50,000 entries, or earlier once the answer nears 8 MiB, and says it was cut short; a server from 0.7 asks for its own cap, never above that.
+- At most 8 commands run at once, of which at most 2 redact.
+- Content is sent in pieces of at most 1 MiB, and a ranged read (Tail) reads at most 1 MiB. The largest file and the most decompression may produce are set by the server in each request (its `MAX_FETCH_MB` and `MAX_DECOMPRESSED_MB`).
+- Upgrade downloads are capped (256 MiB for the binary) and each may take at most 10 minutes; the agent must accept or refuse an upgrade within 15 seconds.
+
 ## Upgrades from the portal
 
-From 0.7, agents are upgraded from **Settings → Agents** in PerchTail. The page lists the agents of the sources a user can manage (the **Create new sources** global capability and `manage_source` on the source), and those users can upgrade them; changing **Remote upgrades**, the window and the failure limit needs **Manage system settings**. Agents older than 0.7 don't know the command: upgrade them by hand once.
+From 0.7, agents are upgraded from **Settings → Agents** in PerchTail. The page lists the agents of the sources a user can manage (the **Create new sources** global capability and `manage_source` on the source), and those users can upgrade them; changing **Remote upgrades**, the window and the failure limit needs **Manage system settings**. Agents older than 0.7 don't know the command: upgrade them by hand once ([docs/agent-service.md](../docs/agent-service.md#upgrading-by-hand)); until then, the server reads none of their files.
 
 - **Remote upgrades** applies to every agent: **Off** (the default), **Manual** (the page's **Upgrade** button on an agent, or **Upgrade all outdated agents**) or **Automatic** (also upgraded by the server inside a window). Each agent can **Follow the system** (the default) or have its own policy, either way: an agent can be upgraded with the system Off, or stay Off with the system Automatic.
 - **The automatic window** is a set of days of the week, a start time and a length in hours (1 to 24), in the server's time zone (shown on the page); a window may run past midnight. Inside it the server upgrades connected outdated agents whose policy is Automatic, a few at a time (5 by default, 1 to 50), and doesn't ask an agent again in the same window once its upgrade didn't work.

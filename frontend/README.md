@@ -23,13 +23,13 @@ The development server needs a backend running on `127.0.0.1:8000`. Set the back
 
 ```bash
 cd backend
-export CREDENTIAL_ENCRYPTION_KEY=dev-only-not-a-secret   # anything but the default "changeme"
+export CREDENTIAL_ENCRYPTION_KEY=dev-only-not-a-secret   # anything but "changeme"; a key this weak only logs a warning
 export SESSION_COOKIE_SECURE=false                       # the dev server is plain HTTP
 python -m alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
-The backend also reads these settings from a `.env` file in the folder it starts in. By default it keeps its data under `backend/data/`. On the first start it creates the `admin` account and logs its temporary password once, in the `temporary_password` field of the `initial_super_admin.seeded` event.
+The backend also reads these settings from a `.env` file in the folder it starts in. By default it keeps its data under `backend/data/`. On the first start it creates the `admin` account and writes its temporary password to `initial-admin-password` in `DATA_DIR` (`backend/data/db/` by default); the `initial_super_admin.seeded` log line names the file, which is deleted once the password is changed. At the first sign-in, `admin` sets a new password and then two-factor authentication, which super admins must use, so keep an authenticator app at hand.
 
 Then, in another terminal, from `frontend/`:
 
@@ -46,7 +46,7 @@ npm run check      # svelte-check on the app, and tsc on the Node and e2e config
 npm test           # vitest unit tests (src/**/*.test.ts), in jsdom
 ```
 
-CI runs both, then `npm run build` and `npm audit --audit-level=high`.
+CI runs both, then `npm run build` and `npm audit` at the high level through `.github/scripts/npm_audit.py`, which accepts an advisory only when it is listed, with a reason and an expiry date, in `.github/npm-audit-exceptions.json` (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 ### End-to-end tests (Playwright)
 
