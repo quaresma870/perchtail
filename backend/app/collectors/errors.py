@@ -12,6 +12,7 @@ from contextlib import ExitStack, contextmanager
 from types import ModuleType
 
 from app import source_roots
+from app.archives import SKIP_ENCRYPTED
 from app.collectors.base import (
     FetchTooLargeError,
     LinkTargetHiddenError,
@@ -21,6 +22,7 @@ from app.collectors.base import (
     SourceError,
     SourceHostKeyError,
     SourceLockedError,
+    SourceMemberUnreadableError,
     SourceNotFoundError,
     SourcePermissionError,
     SourceTLSError,
@@ -252,6 +254,9 @@ def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | 
             # (damaged, or not that kind of file): said by its code since
             # the 0.7.0 agent, never guessed from the text.
             return SourceArchiveUnreadableError(text, gzip=exc.code == "gzip_unreadable")
+        if exc.code == "member_encrypted":
+            # A zip member stored encrypted, which the agent can't read.
+            return SourceMemberUnreadableError(text, reason=SKIP_ENCRYPTED)
         lowered = text.lower()
         # Go's os.Root refuses a path through a symlink that leaves the base
         # ("openat x: path escapes from parent"), and the agent refuses

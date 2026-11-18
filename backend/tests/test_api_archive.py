@@ -1219,6 +1219,138 @@ def test_a_corrupt_archive_is_refused_alike_when_browsed_and_when_a_member_is_op
     assert event.event_metadata["reason"] == "archive_unreadable"
 
 
+def _long_name_tar(tar_format: int) -> bytes:
+    """A tar whose only member's name is too long for a ustar header: it
+    starts with a pax or GNU long-name header and its data (1024 bytes)."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tar_format) as tf:
+        info = tarfile.TarInfo("n" * 150 + ".log")
+        info.size = 4
+        tf.addfile(info, io.BytesIO(b"line"))
+    return buffer.getvalue()
+
+
+def _global_header_tar() -> bytes:
+    """A tar that starts with a global pax header and its data (1024
+    bytes), as git archive writes, then app.log."""
+    buffer = io.BytesIO()
+    with tarfile.open(
+        fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT, pax_headers={"comment": "c" * 40}
+    ) as tf:
+        info = tarfile.TarInfo("app.log")
+        info.size = 4
+        tf.addfile(info, io.BytesIO(b"line"))
+    data = buffer.getvalue()
+    assert data[156:157] == tarfile.XGLTYPE and data[1024 + 156 : 1024 + 157] == tarfile.REGTYPE
+    return data
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        gzip.compress(b"just some text\n"),
+        gzip.compress(b""),
+        gzip.compress(_long_name_tar(tarfile.PAX_FORMAT)[:1024]),
+        gzip.compress(_long_name_tar(tarfile.PAX_FORMAT)[:1124]),
+        gzip.compress(_long_name_tar(tarfile.GNU_FORMAT)[:1024]),
+        gzip.compress(_global_header_tar()[:1024]),
+        gzip.compress(_global_header_tar()[:1124]),
+        gzip.compress(_global_header_tar(), compresslevel=0)[:1100],
+    ],
+    ids=[
+        "short",
+        "nothing",
+        "pax-header-then-nothing",
+        "pax-cut-in-the-header",
+        "gnu-name",
+        "global-header-then-nothing",
+        "global-cut-in-the-header",
+        "global-gzip-cut",
+    ],
+)
+def test_a_tar_gz_that_ends_before_its_first_header_is_refused(
+    app_client, session, fake_sftp, scratch_store, content
+):
+    """Less than one tar block once decompressed, nothing at all, or a long
+    name or global header followed by nothing or part of the entry's header:
+    not a tar, refused alike when browsed and when a member is opened, as the
+    agent refuses it (TestAnArchiveCutBeforeItsFirstHeader...)."""
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/logs.tar.gz"] = content
+
+    browsed = client.get(f"/sources/{source.id}/browse", params={"path": "logs.tar.gz"})
+    opened = client.get(
+        f"/sources/{source.id}/open", params={"path": "logs.tar.gz", "member": "app.log"}
+    )
+
+    assert opened.status_code == 409, opened.text
+    assert opened.json()["detail"]["error_code"] == "archive_unreadable"
+    assert (browsed.status_code, browsed.json()) == (opened.status_code, opened.json())
+    event = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).one()
+    assert event.event_metadata["reason"] == "archive_unreadable"
+    assert list(scratch_store.root.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [_tar_gz_bytes({}), gzip.compress(bytes(512))],
+    ids=["end-of-archive-blocks", "one-zero-block"],
+)
+def test_a_tar_gz_with_no_members_lists_empty(
+    app_client, session, fake_sftp, scratch_store, content
+):
+    """A tar whose first block is all zeros (its end-of-archive blocks) is
+    an empty archive, not an unreadable one."""
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/logs.tar.gz"] = content
+
+    response = client.get(f"/sources/{source.id}/browse", params={"path": "logs.tar.gz"})
+
+    assert (response.status_code, response.json()) == (200, [])
+
+
+def _zip_with_a_damaged_local_header() -> bytes:
+    """A zip whose index lists app.log, whose own (local) header is damaged."""
+    content = _zip_bytes({"app.log": "a line\n"})
+    assert content.startswith(b"PK\x03\x04")
+    return b"PK\x00\x00" + content[4:]
+
+
+@pytest.mark.parametrize(
+    "endpoint, action", [("open", "file.open_denied"), ("download", "file.download_denied")]
+)
+def test_a_zip_member_with_a_damaged_header_is_an_audited_refusal(
+    app_client, session, fake_sftp, scratch_store, endpoint, action
+):
+    """The zip's index lists the member, so the archive browses; the member
+    itself can't be read: 409 archive_unreadable, audited, as on an agent."""
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/logs.zip"] = _zip_with_a_damaged_local_header()
+
+    browsed = client.get(f"/sources/{source.id}/browse", params={"path": "logs.zip"})
+    response = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "logs.zip", "member": "app.log"}
+    )
+
+    assert browsed.status_code == 200, browsed.text
+    assert [entry["name"] for entry in browsed.json()] == ["app.log"]
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error_code"] == "archive_unreadable"
+    event = session.exec(select(AuditLog).where(AuditLog.action == action)).one()
+    assert event.event_metadata["path"] == "logs.zip/app.log"
+    assert event.event_metadata["reason"] == "archive_unreadable"
+    assert list(scratch_store.root.iterdir()) == []
+
+
 @pytest.mark.parametrize("endpoint", ["open", "download"])
 def test_a_gz_file_that_isnt_gzip_is_refused_not_a_500(
     app_client, session, fake_sftp, scratch_store, endpoint
