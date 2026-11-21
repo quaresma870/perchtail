@@ -31,8 +31,10 @@ RUN groupadd --system --gid 10001 perchtail \
 COPY backend/requirements.txt .
 # Every package is pinned with its hashes, so a package that changed on the
 # index (or a dependency missing from the pins) fails the build instead of
-# ending up in the image.
-RUN pip install --no-cache-dir --require-hashes -r requirements.txt
+# ending up in the image. pip itself is removed afterwards: nothing runs it
+# once the image is built, and it would only add its own advisories.
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt \
+    && pip uninstall --yes pip
 
 COPY backend/app ./app
 COPY backend/migrations ./migrations

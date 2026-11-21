@@ -144,6 +144,7 @@ The version must be `X.Y.Z`, `X.Y.Z-rc.N` or `X.Y.Z-beta.N` (`internal/agent/ver
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`), with a scope where it helps (`feat(rbac): ...`).
 - Markdown: one paragraph or list item per line, no hard wraps.
 - Frontend dependency advisories: CI fails on any high or critical `npm audit` advisory, and the daily security scan on any at all, through `.github/scripts/npm_audit.py`. An advisory can be accepted in `.github/npm-audit-exceptions.json` only when it has no fixed version and doesn't reach what PerchTail ships, with the reason and an expiry date at most about a month away. CI fails again once the date passes, and once the advisory is gone, so the exception is removed when Dependabot brings the fix.
+- Image advisories: the daily security scan runs Grype on the published image and fails on any advisory with a fix, except those listed in `.grype.yaml`, each with its reason and a "Review by" date; `.github/scripts/grype_exceptions.py` fails the scan once a date passes. List only an advisory with no fix for the Python line the image uses, or in a part of the image PerchTail never runs.
 
 ## Pull requests
 

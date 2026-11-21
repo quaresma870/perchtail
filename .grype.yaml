@@ -1,0 +1,81 @@
+# Grype exceptions for the daily scan of the published image (.github/workflows/security-scan.yml).
+# Each one is an advisory with no fix in the Python line the image uses, or in a part of the image
+# PerchTail never runs, with the reason and a "Review by" date; .github/scripts/grype_exceptions.py
+# fails the scan once a date passes. Keep the list short: an advisory that can reach PerchTail is fixed, not listed.
+ignore:
+  - vulnerability: CVE-2025-12781
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; base64 altchars; PerchTail decodes base64 only from agents and WinRM sources it already authenticates. Review by 2027-01-31."
+  - vulnerability: CVE-2026-3446
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; base64 stops at the first padded quad; same inputs as above, from authenticated sources. Review by 2027-01-31."
+  - vulnerability: CVE-2025-15366
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; imaplib command injection; imaplib is never imported. Review by 2027-01-31."
+  - vulnerability: CVE-2025-15367
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; poplib command injection; poplib is never imported. Review by 2027-01-31."
+  - vulnerability: CVE-2026-115559
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; imaplib STARTTLS; imaplib is never imported. Review by 2027-01-31."
+  - vulnerability: CVE-2026-124249
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; http.cookiejar; never used (the HTTP clients keep no cookies across requests). Review by 2027-01-31."
+  - vulnerability: CVE-2026-116566
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; null bytes in socket.getaddrinfo(); hosts come from validated source, webhook and SSO settings. Review by 2027-01-31."
+  - vulnerability: CVE-2026-6019
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; http.cookies BaseCookie.js_output(); never called. Review by 2027-01-31."
+  - vulnerability: CVE-2026-115791
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; gzip, tarfile and zipfile command-line tools; never run. Review by 2027-01-31."
+  - vulnerability: CVE-2026-103995
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; http.client integer parsing; only used by the container health check, which talks to PerchTail itself. Review by 2027-01-31."
+  - vulnerability: CVE-2026-16052
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; http.cookies Morsel attributes; the only cookies set carry values PerchTail generates. Review by 2027-01-31."
+  - vulnerability: CVE-2026-19552
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; ssl.get_server_certificate(); never called. Review by 2027-01-31."
+  - vulnerability: CVE-2026-3479
+    package:
+      name: python
+    reason: "Python 3.12 has no fix yet; pkgutil.get_data(); never called. Review by 2027-01-31."
+  - vulnerability: GHSA-4xh5-x5gv-qwph
+    package:
+      name: pip
+    reason: "pip runs only while the image is built, with hashed requirements, and is removed from the image from 0.7.0 on. Review by 2026-12-31."
+  - vulnerability: GHSA-wf93-45jw-7689
+    package:
+      name: pip
+    reason: "pip runs only while the image is built, with hashed requirements, and is removed from the image from 0.7.0 on. Review by 2026-12-31."
+  - vulnerability: GHSA-qwm4-qh6w-59xr
+    package:
+      name: pip
+    reason: "pip runs only while the image is built, with hashed requirements, and is removed from the image from 0.7.0 on. Review by 2026-12-31."
+  - vulnerability: GHSA-jp4c-xjxw-mgf9
+    package:
+      name: pip
+    reason: "pip runs only while the image is built, with hashed requirements, and is removed from the image from 0.7.0 on. Review by 2026-12-31."
+  - vulnerability: GHSA-58qw-9mgm-455v
+    package:
+      name: pip
+    reason: "pip runs only while the image is built, with hashed requirements, and is removed from the image from 0.7.0 on. Review by 2026-12-31."
+  - vulnerability: GHSA-6vgw-5pg2-w6jp
+    package:
+      name: pip
+    reason: "pip runs only while the image is built, with hashed requirements, and is removed from the image from 0.7.0 on. Review by 2026-12-31."
