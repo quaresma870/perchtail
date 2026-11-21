@@ -1,7 +1,9 @@
 """App-wide handlers for connector errors: a SourceError becomes its own
 status with a message that's safe for anyone who can view the source, and
 the underlying detail goes to the log with the request id (#170). Also the
-one place every refused permission is audited (access_denied below)."""
+one place every refused permission is audited (access_denied below), and
+the safety net that turns a read over MAX_FETCH_MB or MAX_DECOMPRESSED_MB
+into its 413 rather than a 500."""
 
 import inspect
 
@@ -12,9 +14,15 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import request_context
+from app.archives import DecompressionLimitError
 from app.audit import record_audit_event
 from app.auth.rbac import ConcealedDenial, PermissionDenied
-from app.collectors.base import LINK_TARGET_HIDDEN, PathOutsideBaseError, SourceError
+from app.collectors.base import (
+    LINK_TARGET_HIDDEN,
+    FetchTooLargeError,
+    PathOutsideBaseError,
+    SourceError,
+)
 from app.db import get_session
 from app.logging_config import get_logger
 from app.scratch import ScratchFullError
@@ -173,6 +181,24 @@ async def _audit_refused_path(request: Request, reason: str) -> None:
             logger.exception("access.denied.audit_failed")
 
 
+async def fetch_too_large(request: Request, exc: FetchTooLargeError):
+    """A safety net: a read over MAX_FETCH_MB that an endpoint didn't turn
+    into its 413 gets the same 413 (app/api/archive.py, _fetch_too_large),
+    never a 500."""
+    from app.api.archive import _fetch_too_large
+
+    return await http_exception_handler(request, _fetch_too_large(exc))
+
+
+async def decompression_too_large(request: Request, exc: DecompressionLimitError):
+    """A safety net: content over MAX_DECOMPRESSED_MB once decompressed that
+    an endpoint didn't turn into its 413 gets the same 413
+    (app/api/archive.py, _too_large), never a 500."""
+    from app.api.archive import _too_large
+
+    return await http_exception_handler(request, _too_large(exc))
+
+
 async def scratch_full(request: Request, exc: ScratchFullError) -> JSONResponse:
     # 507 Insufficient Storage (#345): refused before anything was fetched.
     return JSONResponse(
@@ -206,5 +232,7 @@ def install(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, access_denied)
     app.add_exception_handler(SourceError, source_error_handler)
     app.add_exception_handler(PathOutsideBaseError, path_outside_base)
+    app.add_exception_handler(FetchTooLargeError, fetch_too_large)
+    app.add_exception_handler(DecompressionLimitError, decompression_too_large)
     app.add_exception_handler(ScratchFullError, scratch_full)
     app.add_exception_handler(OverflowError, integer_out_of_range)

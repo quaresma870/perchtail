@@ -8,6 +8,9 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Fixed
+- Expanding a `.zip`, `.tar.gz` or `.tgz` in the explorer that is over `MAX_FETCH_MB` (or, listed on a push agent, over `MAX_DECOMPRESSED_MB` once read) answered HTTP 500; it now gets the same HTTP 413 and message as opening or downloading it, with and without the flat listing of all members. Any read over these limits that an endpoint doesn't refuse itself also gets that 413 rather than a 500.
+
 ## [0.7.0-rc.3] - 2026-11-21
 
 The code of 0.7.0-rc.2 with a smaller image. Upgrade notes are the same as for rc.2.

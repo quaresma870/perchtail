@@ -88,7 +88,7 @@ One in-process APScheduler `BackgroundScheduler` (`app/scheduler.py`; coalesce, 
 - `local.py`: files on the PerchTail host. Used by the system log source and by admin-created local sources, which must sit under `LOCAL_SOURCE_ROOTS` (empty by default, which disables them). Local plain files are served in place, without scratch; a local `.gz` file, an archive member and anything redacted go through scratch like remote files (`app/api/archive.py`, `_resolve_content`).
 - `agent.py`: relays commands to a connected push agent through `app/agent_registry.py`.
 
-A source can read several folders (`Source.roots`, `app/source_roots.py`). Remote reads are bounded by `MAX_FETCH_MB`, `MAX_DECOMPRESSED_MB` and `REMOTE_READ_TIMEOUT_SECONDS`, and concurrent connector work is limited globally and per source, and downloads and folder ZIPs per user (`app/limits.py`); a request over a limit gets 503 with `Retry-After`.
+A source can read several folders (`Source.roots`, `app/source_roots.py`). Remote reads are bounded by `MAX_FETCH_MB`, `MAX_DECOMPRESSED_MB` and `REMOTE_READ_TIMEOUT_SECONDS`; a read over either size limit answers 413 (`app/api/archive.py`, `_fetch_too_large` and `_too_large`), when an archive is browsed as when it is opened or downloaded, and `app/api/errors.py` gives the same 413 for one an endpoint doesn't refuse itself. Concurrent connector work is limited globally and per source, and downloads and folder ZIPs per user (`app/limits.py`); a request over a limit gets 503 with `Retry-After`.
 
 ## Rule matching semantics
 

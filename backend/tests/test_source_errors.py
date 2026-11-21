@@ -329,3 +329,39 @@ def test_a_source_without_a_credential_says_so(protocol):
     with pytest.raises(SourceNoCredentialError) as raised:
         CONNECTORS[protocol].list_directory(source, [], "")
     assert "no credential" in raised.value.public_message
+
+
+def test_a_read_limit_no_endpoint_caught_is_its_413_not_a_500():
+    """F1 of the 0.7.0-rc.3 retest: a read over MAX_FETCH_MB or
+    MAX_DECOMPRESSED_MB that an endpoint lets through gets the 413 the
+    endpoints give (app/api/archive.py), never a 500."""
+    from app.archives import DecompressionLimitError
+    from app.collectors.base import FetchTooLargeError
+
+    app = FastAPI()
+    install_error_handlers(app)
+
+    @app.get("/fetch")
+    def fetch():
+        raise FetchTooLargeError("over", size=3 * 1024**2, limit=1024**2)
+
+    @app.get("/decompress")
+    def decompress():
+        raise DecompressionLimitError("over")
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    fetch_answer = client.get("/fetch")
+    decompress_answer = client.get("/decompress")
+
+    assert fetch_answer.status_code == 413
+    assert fetch_answer.json()["detail"] == {
+        "message": "This file is 3.0 MB, over this server's 1 MB limit (MAX_FETCH_MB).",
+        "error_code": "fetch_too_large",
+        "size_bytes": 3 * 1024**2,
+        "limit_bytes": 1024**2,
+    }
+    assert decompress_answer.status_code == 413
+    assert decompress_answer.json()["detail"] == (
+        "File is too large once decompressed (MAX_DECOMPRESSED_MB)"
+    )

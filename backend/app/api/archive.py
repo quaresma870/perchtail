@@ -824,21 +824,28 @@ def _browse(
         if member_dir and not _dir_visible(source, path, rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         listing_cut = False
-        if _lists_on_agent(session, source):
-            # Redaction applies and the agent redacts on its host: it lists
-            # the archive itself, so the archive never leaves the host only
-            # to be listed (#382, #249).
-            with _agent_unreadable(source, archive_path, None):
-                members, listing_cut = connector.call(
-                    "list_archive", source, archive_path, rules=rules
-                )
-        else:
-            try:
-                with connector.local_copy(source, archive_path, rules=rules) as archive_local:
-                    members, listing_cut = scan_members(archive_local, archive_name)
-            except _UNREADABLE_ERRORS as exc:
-                # As when one of its members is opened (_materialize).
-                raise _archive_unreadable(source, archive_path, exc) from exc
+        try:
+            if _lists_on_agent(session, source):
+                # Redaction applies and the agent redacts on its host: it
+                # lists the archive itself, so the archive never leaves the
+                # host only to be listed (#382, #249).
+                with _agent_unreadable(source, archive_path, None):
+                    members, listing_cut = connector.call(
+                        "list_archive", source, archive_path, rules=rules
+                    )
+            else:
+                try:
+                    with connector.local_copy(source, archive_path, rules=rules) as archive_local:
+                        members, listing_cut = scan_members(archive_local, archive_name)
+                except _UNREADABLE_ERRORS as exc:
+                    # As when one of its members is opened (_materialize).
+                    raise _archive_unreadable(source, archive_path, exc) from exc
+        except FetchTooLargeError as exc:
+            # An archive over MAX_FETCH_MB, or over MAX_DECOMPRESSED_MB once
+            # read: the 413 opening or downloading it gives, not a 500.
+            raise _fetch_too_large(exc) from exc
+        except DecompressionLimitError as exc:
+            raise _too_large(exc) from exc
         if all_members:
             if member_dir:
                 raise HTTPException(
