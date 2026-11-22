@@ -58,6 +58,9 @@ class AgentCommandError(AgentError):
     """The agent itself reported a failure (e.g. path not found) via a
     `*_error` message. `code` is "too_large" (with `size`) when a streamed
     fetch is over the limit (#205); None otherwise, and from older agents.
+    With "too_large", `limit` is which limit the agent says was passed:
+    "fetch" (max_bytes) or "decompressed" (max_decompressed); None from an
+    agent that doesn't say.
     `message_type` is the message's own type: "unknown_error" means the
     agent doesn't know the command (#319: an agent older than 0.7 asked to
     upgrade); "redaction_error" that it refused to redact (#382, #249), with
@@ -76,10 +79,12 @@ class AgentCommandError(AgentError):
         rule: int | None = None,
         real: str | None = None,
         outside: bool = False,
+        limit: str | None = None,
     ):
         super().__init__(message)
         self.code = code
         self.size = size
+        self.limit = limit
         self.message_type = message_type
         self.rule = rule
         self.real = real
@@ -96,6 +101,16 @@ FEATURE_REDACTION = "redaction/1"
 # "link_target" error otherwise (collectors/agent.py). Content is never read
 # from an agent without it.
 FEATURE_LINKS = "links/1"
+# The agent says a content command is still running: asked with `progress`
+# (only of a connection that announced it, since an older agent ignores the
+# field and an older server would take the message for the answer), it sends
+# a `progress` message every 10 seconds during which it sent nothing else,
+# and each one counts as activity for that command's wait, as a chunk does.
+# A member at the end of a large archive, redacted on the host, can take
+# much longer than the wait to reach.
+FEATURE_PROGRESS = "progress/1"
+# The commands that are asked for progress.
+PROGRESS_COMMANDS = frozenset({"fetch", "read_range", "fetch_archive"})
 
 
 class ArchiveSink(Protocol):
@@ -138,6 +153,9 @@ class _AgentConnection:
     fallback_logged: bool = False
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
     streams: dict[str, _Stream] = field(default_factory=dict)
+    # When the agent last said a command asked for progress that isn't
+    # streamed (a read_range) is still running (FEATURE_PROGRESS).
+    progress: dict[str, float] = field(default_factory=dict)
     # When the agent last sent anything (#333), for the keepalive.
     last_message_at: float = field(default_factory=time.monotonic)
 
@@ -379,6 +397,7 @@ class AgentRegistry:
         if isinstance(message_type, str) and message_type.endswith("_error"):
             code = message.get("code")
             real = message.get("real")
+            limit = message.get("limit")
             future.set_exception(
                 AgentCommandError(
                     str(message.get("error", "agent command failed")),
@@ -388,6 +407,7 @@ class AgentRegistry:
                     rule=as_int(message.get("rule")),
                     real=real if isinstance(real, str) else None,
                     outside=message.get("outside") is True,
+                    limit=limit if isinstance(limit, str) else None,
                 )
             )
             return
@@ -486,6 +506,31 @@ class AgentRegistry:
         stream.next_seq += 1
         stream.last_activity = time.monotonic()
 
+    def receive_progress(
+        self, source_id: int, message: dict, websocket: WebSocket | None = None
+    ) -> None:
+        """Called from the WS endpoint's receive loop for each `progress`
+        message (FEATURE_PROGRESS): the command it names is still running,
+        which counts as activity for its wait, as a chunk does. Ignored from
+        a connection that didn't announce the feature or has since been
+        replaced, and for a command nobody waits on any more."""
+        with self._lock:
+            connection = self._connections.get(source_id)
+        if connection is None or FEATURE_PROGRESS not in connection.features:
+            return
+        if websocket is not None and connection.websocket is not websocket:
+            return
+        request_id = message.get("id", "")
+        future = connection.pending.get(request_id)
+        if future is None or future.done():
+            return
+        now = time.monotonic()
+        stream = connection.streams.get(request_id)
+        if stream is not None:
+            stream.last_activity = now
+        elif request_id in connection.progress:
+            connection.progress[request_id] = now
+
     async def _send_command(
         self,
         source_id: int,
@@ -495,6 +540,7 @@ class AgentRegistry:
         limit: int | None = None,
         archive: bool = False,
         require_feature: str | tuple[str, ...] | None = None,
+        progress: bool = False,
     ) -> dict:
         with self._lock:
             connection = self._connections.get(source_id)
@@ -514,6 +560,11 @@ class AgentRegistry:
                 message_type="feature_error",
             )
 
+        # Asked for progress only when this connection announced it: an
+        # older agent would ignore the field and never send any.
+        progress = progress and FEATURE_PROGRESS in connection.features
+        if progress:
+            command = {**command, "progress": True}
         request_id = command["id"]
         future: asyncio.Future = self._loop.create_future()
         connection.pending[request_id] = future
@@ -522,18 +573,33 @@ class AgentRegistry:
         if sink is not None:
             stream = _Stream(sink=sink, limit=limit, archive=archive)
             connection.streams[request_id] = stream
+        elif progress:
+            connection.progress[request_id] = time.monotonic()
         try:
             await connection.websocket.send_json(command)
-            if stream is None:
+            if stream is None and not progress:
                 try:
                     return await asyncio.wait_for(future, timeout)
                 except TimeoutError as exc:
                     raise AgentTimeoutError(
                         f"agent for source {source_id} did not respond in time"
                     ) from exc
+            if stream is None:
+                # Asked for progress: it times out only when neither the
+                # answer nor a progress message has come for `timeout`.
+                while True:
+                    last = connection.progress.get(request_id, 0.0)
+                    remaining = last + timeout - time.monotonic()
+                    if remaining <= 0:
+                        raise AgentTimeoutError(
+                            f"agent for source {source_id} did not respond in time"
+                        )
+                    done, _ = await asyncio.wait({future}, timeout=remaining)
+                    if done:
+                        return future.result()
             # A streamed fetch of a large file can take much longer than
-            # `timeout` in all; it only times out when no chunk has arrived
-            # for that long.
+            # `timeout` in all; it only times out when no chunk (nor, with
+            # FEATURE_PROGRESS, progress message) has arrived for that long.
             while True:
                 remaining = stream.last_activity + timeout - time.monotonic()
                 if remaining <= 0:
@@ -548,6 +614,7 @@ class AgentRegistry:
         finally:
             connection.pending.pop(request_id, None)
             connection.streams.pop(request_id, None)
+            connection.progress.pop(request_id, None)
             if stream is not None and not completed:
                 # Gave up (timeout, size limit, bad chunk): tell the agent
                 # to stop reading the file. Best effort; an agent older
@@ -585,10 +652,19 @@ class AgentRegistry:
         them (AgentCommandError coded "feature_missing" otherwise, or
         "links_missing" for FEATURE_LINKS). `command_id`
         sets the command's id, for a caller that tracks later messages about
-        it (an upgrade's progress, #319)."""
+        it (an upgrade's progress, #319).
+
+        A content command (PROGRESS_COMMANDS) sent to an agent that
+        announced FEATURE_PROGRESS asks it for progress: each progress
+        message counts as activity, so the timeout applies to the wait for
+        the answer, a chunk or a progress message, not to the whole
+        command."""
         if self._loop is None:
             raise AgentNotConnectedError("agent registry has no event loop bound yet")
 
+        progress = command_type in PROGRESS_COMMANDS and FEATURE_PROGRESS in self.features(
+            source_id
+        )
         command = {**fields, "type": command_type, "id": command_id or str(uuid.uuid4())}
         future = asyncio.run_coroutine_threadsafe(
             self._send_command(
@@ -599,11 +675,13 @@ class AgentRegistry:
                 limit=limit,
                 archive=archive,
                 require_feature=require_feature,
+                progress=progress,
             ),
             self._loop,
         )
-        if sink is not None:
-            # No overall deadline: the in-loop wait times out when chunks stop.
+        if sink is not None or progress:
+            # No overall deadline: the in-loop wait times out when chunks
+            # (or progress messages) stop.
             return future.result()
         # A few seconds of slack beyond the in-loop timeout so a slow
         # scheduler doesn't race a TimeoutError against this call's own —

@@ -23,6 +23,13 @@ const FeaturesHeader = "X-PerchTail-Agent-Features"
 // decompress, fetch_archive), so the original never leaves the host.
 const FeatureRedaction = "redaction/1"
 
+// FeatureProgress: the agent sends Progress messages for a content command
+// the server asked them for (Command.Progress), so a command that reads for
+// a long time before its first chunk (a member at the end of a large
+// archive, redacted on the host) or between two chunks isn't given up as
+// unanswered. Only while its read moves: a read that hangs sends none.
+const FeatureProgress = "progress/1"
+
 // Version is set at build time by the Release workflow
 // (-ldflags "-X github.com/quaresma870/perchtail/agent/internal/agent.Version=X.Y.Z").
 // A local or CI build reports "dev", which the server doesn't compare.
@@ -84,6 +91,13 @@ type Command struct {
 	// the server checked its rules on it; empty means Path itself. Read only
 	// when it is there, refused with a "link_target" error otherwise.
 	ExpectReal string `json:"expect_real,omitempty"`
+	// Set on "fetch", "read_range" and "fetch_archive" by a server that
+	// takes Progress messages (FeatureProgress): while the command runs, the
+	// agent says every progressInterval that it is still working when it
+	// read more of the file and sent nothing else meanwhile. Never sent
+	// without it, since an older server would take the message for the
+	// command's answer.
+	Progress bool `json:"progress,omitempty"`
 }
 
 // DirEntryWire mirrors what collectors/agent.py's list_directory expects
@@ -285,16 +299,28 @@ type RedactedReadRangeResult struct {
 // can't run, when one can't. Code "link_target" (FeatureLinks) refuses a
 // path that isn't where ExpectReal said, before anything is read: Real is
 // where it is, relative to the base path, or Outside says it leads out of
-// the base path.
+// the base path. With code "too_large", Limit says which limit was passed:
+// "fetch" (max_bytes, the file as stored) or "decompressed"
+// (max_decompressed, what extracting or decompressing produced); servers
+// before it guess it from the number in Error.
 type ErrorResult struct {
 	Type    string  `json:"type"`
 	ID      string  `json:"id"`
 	Error   string  `json:"error"`
 	Code    string  `json:"code,omitempty"`
 	Size    int64   `json:"size,omitempty"`
+	Limit   string  `json:"limit,omitempty"`
 	Rule    any     `json:"rule,omitempty"`
 	Real    *string `json:"real,omitempty"`
 	Outside bool    `json:"outside,omitempty"`
+}
+
+// Progress says a content command asked with Progress is still running
+// (FeatureProgress): the server counts it as activity for that command's
+// wait, as it counts a fetch_chunk.
+type Progress struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
 }
 
 // Pong answers the server's application-level "ping" (#333), which it

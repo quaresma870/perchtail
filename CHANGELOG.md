@@ -10,6 +10,8 @@ release ships (0.x releases may include breaking changes between minors).
 
 ### Fixed
 - Expanding a `.zip`, `.tar.gz` or `.tgz` in the explorer that is over `MAX_FETCH_MB` (or, listed on a push agent, over `MAX_DECOMPRESSED_MB` once read) answered HTTP 500; it now gets the same HTTP 413 and message as opening or downloading it, with and without the flat listing of all members. Any read over these limits that an endpoint doesn't refuse itself also gets that 413 rather than a 500.
+- On a push-agent source with redaction, an archive or `.gz` file over `MAX_FETCH_MB` was refused with the `MAX_DECOMPRESSED_MB` message when both limits had the same value (the default). The agent now says which limit was passed, and the server names that one; with an agent older than 0.7.0 the server still tells them apart by their size. Upgrade the agents for the right message.
+- On a push-agent source with redaction, opening or downloading a file near the end of a large `.tar.gz` failed after 30 seconds with "The agent didn't answer in time", because the agent must read the archive up to that file before it sends anything. An agent from 0.7.0 tells the server every 10 seconds that it is still reading for a request that returns content (`progress/1`), only while its read moves forward, and the server keeps waiting while it does; a read that hangs still fails after 30 seconds, and the size limits still bound what it reads. Older agents and servers behave as before. Upgrade the agents to get it.
 
 ## [0.7.0-rc.3] - 2026-11-21
 

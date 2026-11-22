@@ -207,12 +207,17 @@ func linkTarget(root *os.Root, reals *realPaths, name string) (string, bool) {
 // byte-reading function to unit test. The file must really be at
 // expectReal (openFile).
 func HandleFetch(basePath, relPath, expectReal string) ([]byte, error) {
+	return handleFetch(nil, basePath, relPath, expectReal)
+}
+
+// handleFetch is HandleFetch with its reads counted by meter (withProgress).
+func handleFetch(meter *readMeter, basePath, relPath, expectReal string) ([]byte, error) {
 	f, closeFile, err := openFile(basePath, relPath, expectReal)
 	if err != nil {
 		return nil, err
 	}
 	defer closeFile()
-	return io.ReadAll(f)
+	return io.ReadAll(meter.meter(f))
 }
 
 // Chunk sizes the agent accepts from the backend: small enough to keep
@@ -224,10 +229,22 @@ const (
 	maxChunkSize = 1 << 20
 )
 
-// TooLargeError refuses a streamed fetch over the backend's limit.
+// Which of the backend's limits a TooLargeError passed, sent to it as the
+// error's `limit` so it names the right one even when both are the same
+// number: the file as stored (MaxBytes, the server's MAX_FETCH_MB) or what
+// extracting or decompressing it produced (MaxDecompressed, its
+// MAX_DECOMPRESSED_MB).
+const (
+	limitFetch        = "fetch"
+	limitDecompressed = "decompressed"
+)
+
+// TooLargeError refuses a streamed fetch over the backend's limit. Kind is
+// limitFetch or limitDecompressed.
 type TooLargeError struct {
 	Size  int64
 	Limit int64
+	Kind  string
 }
 
 func (e *TooLargeError) Error() string {
@@ -244,18 +261,26 @@ func (e *TooLargeError) Error() string {
 func StreamFetch(
 	basePath, relPath, expectReal string, chunkSize, maxBytes int64, send func([]byte) error,
 ) (chunks int, size int64, err error) {
+	return streamFetch(nil, basePath, relPath, expectReal, chunkSize, maxBytes, send)
+}
+
+// streamFetch is StreamFetch with its reads counted by meter (withProgress).
+func streamFetch(
+	meter *readMeter, basePath, relPath, expectReal string, chunkSize, maxBytes int64, send func([]byte) error,
+) (chunks int, size int64, err error) {
 	chunkSize = min(max(chunkSize, minChunkSize), maxChunkSize)
-	f, closeFile, err := openFile(basePath, relPath, expectReal)
+	opened, closeFile, err := openFile(basePath, relPath, expectReal)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer closeFile()
+	f := meter.meter(opened)
 	st, err := f.Stat()
 	if err != nil {
 		return 0, 0, err
 	}
 	if maxBytes > 0 && st.Size() > maxBytes {
-		return 0, 0, &TooLargeError{Size: st.Size(), Limit: maxBytes}
+		return 0, 0, &TooLargeError{Size: st.Size(), Limit: maxBytes, Kind: limitFetch}
 	}
 
 	// A fixed-size allocation: chunkSize comes from the backend's message
@@ -267,7 +292,7 @@ func StreamFetch(
 		if n > 0 {
 			size += int64(n)
 			if maxBytes > 0 && size > maxBytes {
-				return chunks, size, &TooLargeError{Size: size, Limit: maxBytes}
+				return chunks, size, &TooLargeError{Size: size, Limit: maxBytes, Kind: limitFetch}
 			}
 			if err := send(buf[:n]); err != nil {
 				return chunks, size, err
@@ -309,14 +334,21 @@ const (
 // that was rotated or truncated. Reading at or past the end returns no
 // bytes. The file must really be at expectReal (openFile).
 func HandleReadRange(basePath, relPath, expectReal string, offset, length, headLength int64) (int64, []byte, []byte, error) {
+	return meteredReadRange(nil, basePath, relPath, expectReal, offset, length, headLength)
+}
+
+// meteredReadRange is HandleReadRange with its reads counted by meter
+// (withProgress).
+func meteredReadRange(meter *readMeter, basePath, relPath, expectReal string, offset, length, headLength int64) (int64, []byte, []byte, error) {
 	if offset < 0 || length < 0 || headLength < 0 {
 		return 0, nil, nil, fmt.Errorf("invalid range: offset %d, length %d, head %d", offset, length, headLength)
 	}
-	f, closeFile, err := openFile(basePath, relPath, expectReal)
+	opened, closeFile, err := openFile(basePath, relPath, expectReal)
 	if err != nil {
 		return 0, nil, nil, err
 	}
 	defer closeFile()
+	f := meter.meter(opened)
 	st, err := f.Stat()
 	if err != nil {
 		return 0, nil, nil, err
@@ -339,7 +371,7 @@ func HandleReadRange(basePath, relPath, expectReal string, offset, length, headL
 }
 
 // readAt fills as much of buf as the file has from offset.
-func readAt(f *os.File, offset int64, buf []byte) ([]byte, error) {
+func readAt(f io.ReaderAt, offset int64, buf []byte) ([]byte, error) {
 	if len(buf) == 0 {
 		return []byte{}, nil
 	}
