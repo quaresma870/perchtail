@@ -170,7 +170,15 @@ def backoff_delay(failures: int, interval: timedelta) -> timedelta:
     threshold, capped, minus up to a quarter as jitter so sources that
     failed together don't come back together."""
     steps = max(failures - FAILURES_BEFORE_BACKOFF, 0)
-    delay = min(interval * 2 ** (steps + 1), BACKOFF_CAP)
+    # Doubles only while under the cap: after many failures a plain
+    # interval * 2 ** steps overflows timedelta, and the backoff would never
+    # be saved.
+    delay = interval * 2
+    for _ in range(steps):
+        if delay >= BACKOFF_CAP:
+            break
+        delay *= 2
+    delay = min(delay, BACKOFF_CAP)
     # Spreading retries out, not a secret: the plain generator is fine.
     return delay * random.uniform(0.75, 1.0)  # nosec B311
 

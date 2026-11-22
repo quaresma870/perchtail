@@ -138,6 +138,24 @@ def test_the_backoff_grows_with_jitter_and_is_capped():
     assert capped >= source_status.BACKOFF_CAP * 0.75
 
 
+@pytest.mark.parametrize("interval", [timedelta(minutes=10), timedelta(days=1)])
+def test_the_backoff_stays_capped_after_very_many_failures(interval):
+    """The power of two used to be taken before the cap and overflowed
+    timedelta after a few dozen failures."""
+    delay = source_status.backoff_delay(1000, interval)
+    assert source_status.BACKOFF_CAP * 0.75 <= delay <= source_status.BACKOFF_CAP
+
+
+def test_a_source_with_very_many_failures_still_backs_off(db):
+    source_id = _source(db, "long-down", check_failures=1000)
+    failure = [({"label": None}, SourceUnreachableError("timed out"))]
+    source_status.record_background_check(source_id, failure, timedelta(minutes=10))
+    row = _row(db, source_id)
+    assert row.check_failures == 1001
+    assert row.check_backoff_until is not None
+    assert row.check_backoff_until > utcnow() + source_status.BACKOFF_CAP * 0.7
+
+
 def test_a_backoff_that_ran_out_is_checked_again(db, monkeypatch):
     source_id = _source(db, "back", check_failures=3)
     with Session(db) as session:
