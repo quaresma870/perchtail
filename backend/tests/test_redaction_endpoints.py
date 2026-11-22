@@ -198,6 +198,38 @@ def test_open_redacts_every_detector_for_a_local_plain_file(viewer, scratch_stor
         assert_no_secret(path.read_bytes())
 
 
+def test_a_redaction_slower_than_the_idle_time_keeps_its_scratch_file(
+    viewer, scratch_store, monkeypatch
+):
+    # The idle sweep runs while the file is being redacted into scratch,
+    # after SCRATCH_IDLE_SECONDS: the entry is busy, so it stays, and the
+    # close leaves nothing behind.
+    import time
+
+    import app.api.archive as archive_module
+
+    _, client, source, folder = viewer
+    (folder / "app.log").write_text(SAMPLE)
+    idle = 0.2
+    monkeypatch.setattr(get_settings(), "scratch_idle_seconds", idle)
+    redact_file = archive_module._redact_file
+
+    def slow_redact(original, destination, *args, **kwargs):
+        destination.write_bytes(b"partial")
+        time.sleep(idle * 3)
+        scratch_store.sweep_idle(get_settings().scratch_idle_seconds)
+        return redact_file(original, destination, *args, **kwargs)
+
+    monkeypatch.setattr(archive_module, "_redact_file", slow_redact)
+
+    response = _open(client, source, "app.log")
+    assert response.status_code == 200
+    expected, _ = redact_bytes(SAMPLE.encode(), all_rules(), final=False)
+    assert response.content == expected
+    assert client.post(f"/sources/{source.id}/close", json={"path": "app.log"}).status_code == 204
+    assert list(scratch_store.root.rglob("*")) == []
+
+
 def test_open_over_a_remote_source_keeps_only_the_redacted_copy(
     session, viewer, scratch_store, monkeypatch
 ):

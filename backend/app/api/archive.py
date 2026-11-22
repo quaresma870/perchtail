@@ -1101,7 +1101,7 @@ def _resolve_redacted(
     with get_limiter().connector(limits, source.id):
         store.ensure_room()
         key = _scratch_key(owner, source.id, path, member)
-        destination = store.acquire(key)
+        destination = store.acquire(key, busy=True)
         fetched = destination.with_name(f"{destination.name}.source")
         plain = destination.with_name(f"{destination.name}.plain")
         try:
@@ -1120,10 +1120,10 @@ def _resolve_redacted(
                     served_filename = served_filename[: -len(".gz")]
             redacted = _redact_file(original, destination, redaction, final=complete)
         except FetchTooLargeError as exc:
-            store.release(key)
+            _drop_scratch(key)
             raise _fetch_too_large(exc) from exc
         except BaseException:
-            store.release(key)
+            _drop_scratch(key)
             raise
         finally:
             fetched.unlink(missing_ok=True)
@@ -1159,7 +1159,7 @@ def _resolve_on_agent(
     with get_limiter().connector(limits, source.id):
         store.ensure_room()
         key = _scratch_key(owner, source.id, path, member)
-        destination = store.acquire(key)
+        destination = store.acquire(key, busy=True)
         try:
             with _agent_refusals(agent_rules), _agent_unreadable(source, path, member):
                 fetched = connector.call(
@@ -1175,13 +1175,13 @@ def _resolve_on_agent(
                 if followable and fetched.head_digest is None:
                     raise AgentRedactionError("the agent sent no head digest", code="unverified")
         except FetchTooLargeError as exc:
-            store.release(key)
+            _drop_scratch(key)
             raise _fetch_too_large(exc) from exc
         except DecompressionLimitError as exc:
-            store.release(key)
+            _drop_scratch(key)
             raise _too_large(exc) from exc
         except BaseException:
-            store.release(key)
+            _drop_scratch(key)
             raise
     redacted = RedactedRead(
         fetched.counts,
@@ -1241,7 +1241,10 @@ def _resolve_content(
 
     A fetch takes a connector slot while it runs (#344, 503 when none is
     free) and is refused up front (507) when scratch or its disk is full
-    (#345)."""
+    (#345). A returned scratch entry is busy (ScratchStore.acquire), so
+    neither the idle sweep nor the size guard deletes it while it is being
+    fetched and served: the caller calls end_busy once the response is over
+    or fails."""
     if not path:
         # Browsing the root is "", but opening or downloading needs a file.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
@@ -1265,16 +1268,25 @@ def _resolve_content(
     with get_limiter().connector(limits, source.id):
         store.ensure_room()
         key = _scratch_key(owner, source.id, path, member)
-        destination = store.acquire(key)
+        destination = store.acquire(key, busy=True)
         try:
             served_filename = _materialize(source, path, member, rules, destination)
         except FetchTooLargeError as exc:
-            store.release(key)
+            _drop_scratch(key)
             raise _fetch_too_large(exc) from exc
         except BaseException:
-            store.release(key)
+            _drop_scratch(key)
             raise
     return _Resolved(destination, served_filename, key)
+
+
+def _drop_scratch(key: str) -> None:
+    """Gives up a scratch entry _resolve_content (or _resolve_redacted,
+    _resolve_on_agent) acquired busy, when the fetch fails: its reference
+    and the operation, so its file is deleted."""
+    store = get_scratch_store()
+    store.release(key)
+    store.end_busy(key)
 
 
 # Reads refused before any content was served, audited by the endpoints that
@@ -1487,45 +1499,57 @@ def open_file(
         redaction,
         agent_rules,
     )
-    metadata: dict = {"path": path, "member": member} if member else {"path": path}
-    record_audit_event(
-        session,
-        user_id=user.id,
-        action="file.open",
-        target_type="source",
-        target_id=source.id,
-        metadata={**metadata, **_redaction_metadata(redacted)},
-    )
-    session.commit()
-    headers = {"X-Scratch-Key": key} if key else {}
-    followable = member is None and not is_transparent_gzip(path.rsplit("/", 1)[-1])
-    if redacted is not None:
-        headers.update(_redaction_headers(redacted))
-        if followable:
-            # Over the original's start, up to where the Tail goes on from;
-            # redacted on the agent, the agent's digest of it.
-            headers["X-Follow-Head"] = (
-                redacted.head_hash
-                if redacted.head_hash is not None
-                else _head_hash(source.id, redacted.head, redacted.source_offset)
-            )
-    elif followable:
-        # What the first Follow poll compares against (#254), so a file
-        # rotated between this open and that poll is caught too.
-        size = served_path.stat().st_size
-        with served_path.open("rb") as served:
-            headers["X-Follow-Head"] = _head_hash(source.id, served.read(FOLLOW_HEAD_BYTES), size)
-    # Inline, not an attachment: this is what the viewer reads to display a
-    # file, not a download endpoint (downloads go through /download, gated
-    # by the `download` capability -- #174). nosniff (set app-wide) keeps
-    # a browser from rendering it as HTML.
-    return _SnapshotFileResponse(
-        served_path,
-        filename=filename,
-        headers=headers,
-        media_type="text/plain; charset=utf-8",
-        content_disposition_type="inline",
-    )
+    try:
+        metadata: dict = {"path": path, "member": member} if member else {"path": path}
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="file.open",
+            target_type="source",
+            target_id=source.id,
+            metadata={**metadata, **_redaction_metadata(redacted)},
+        )
+        session.commit()
+        headers = {"X-Scratch-Key": key} if key else {}
+        followable = member is None and not is_transparent_gzip(path.rsplit("/", 1)[-1])
+        if redacted is not None:
+            headers.update(_redaction_headers(redacted))
+            if followable:
+                # Over the original's start, up to where the Tail goes on from;
+                # redacted on the agent, the agent's digest of it.
+                headers["X-Follow-Head"] = (
+                    redacted.head_hash
+                    if redacted.head_hash is not None
+                    else _head_hash(source.id, redacted.head, redacted.source_offset)
+                )
+        elif followable:
+            # What the first Follow poll compares against (#254), so a file
+            # rotated between this open and that poll is caught too.
+            size = served_path.stat().st_size
+            with served_path.open("rb") as served:
+                headers["X-Follow-Head"] = _head_hash(
+                    source.id, served.read(FOLLOW_HEAD_BYTES), size
+                )
+        # Inline, not an attachment: this is what the viewer reads to display a
+        # file, not a download endpoint (downloads go through /download, gated
+        # by the `download` capability -- #174). nosniff (set app-wide) keeps
+        # a browser from rendering it as HTML.
+        options: dict = {
+            "filename": filename,
+            "headers": headers,
+            "media_type": "text/plain; charset=utf-8",
+            "content_disposition_type": "inline",
+        }
+        if key is None:
+            return _SnapshotFileResponse(served_path, **options)
+        # A scratch file stays busy until it has been sent (or the client
+        # went away), so the idle sweep can't delete it half way through.
+        store = get_scratch_store()
+        return _FinishingFileResponse(served_path, on_finish=lambda: store.end_busy(key), **options)
+    except BaseException:
+        if key is not None:
+            get_scratch_store().end_busy(key)
+        raise
 
 
 # Incremental follow (#254). The start of the file identifies it: a rotated
@@ -2664,9 +2688,12 @@ def download_file(
     store = get_scratch_store()
 
     def finish() -> None:
+        # The scratch file stays busy until the client has it (or went
+        # away), then goes with its only reference.
         transfer.release()
         if key:
             store.release(key)
+            store.end_busy(key)
 
     try:
         # CLAUDE.md's Application logging section names file download as
@@ -2680,10 +2707,10 @@ def download_file(
             metadata={"path": path, "member": member} if member else {"path": path},
         )
         session.commit()
+        return _FinishingFileResponse(served_path, filename=filename, on_finish=finish)
     except BaseException:
         finish()
         raise
-    return _FinishingFileResponse(served_path, filename=filename, on_finish=finish)
 
 
 ZIP_LISTING_TRUNCATED_DETAIL = (

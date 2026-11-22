@@ -68,7 +68,7 @@ The defaults below are the code's defaults. Relative paths are relative to the w
 | Variable | Default | Accepted values | Effect |
 |---|---|---|---|
 | `SCRATCH_MAX_GB` | `5.0` | A number of GiB | The most scratch may hold. Over it, the files nobody has open are evicted (`scratch.size_guard_eviction`); when that isn't enough, a new open, download, folder ZIP or archive listing is refused (HTTP 507, `scratch.full`). |
-| `SCRATCH_IDLE_SECONDS` | `300` | A whole number of seconds | A file in scratch untouched for this long is deleted, even if a client never closed it. |
+| `SCRATCH_IDLE_SECONDS` | `300` | A whole number of seconds | A file in scratch untouched for this long is deleted, even if a client never closed it. A file still being fetched, redacted or sent isn't; its time counts from when that ends. |
 | `SCRATCH_SWEEP_INTERVAL_SECONDS` | `60` | A whole number of seconds | How often the idle sweep and the size guard run. |
 | `SCRATCH_MIN_FREE_GB` | `1.0` | A number of GiB; `0` with `SCRATCH_MIN_FREE_PERCENT=0` turns the check off | Free space to keep on the filesystem that holds `SCRATCH_DIR`. A new fetch is refused (HTTP 507, `scratch.disk_low`) when free space would drop below the larger of this and `SCRATCH_MIN_FREE_PERCENT`. |
 | `SCRATCH_MIN_FREE_PERCENT` | `5.0` | A percentage of the filesystem | The same floor, as a share of the filesystem's size. |
