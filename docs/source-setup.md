@@ -207,6 +207,12 @@ Adding the account to **Remote Management Users** alone is not enough for option
 
 Allow TCP 5986 (HTTPS), or 5985 only if HTTPS genuinely isn't an option, inbound from the PerchTail connector's IP only.
 
+### 4. Large files
+
+WinRM has no file transfer of its own: PerchTail reads a file through PowerShell, which sends it as base64 text inside WS-Management responses, one response at a time. Opening or downloading a large file is therefore much slower than over SMB or the agent: minutes rather than seconds for a file of a few hundred MB. Use an SMB source or the agent for hosts with large logs; **Tail the end** in the viewer opens only the last part of a file.
+
+Each response carries up to 500 KB (PerchTail asks for envelopes of 512000 bytes). A server whose `MaxEnvelopeSizekb` is below 500 refuses that size; PerchTail then asks again with 150 KB envelopes, which works but takes about three times as many responses, so reads are slower, and logs `winrm.envelope_fallback` each time. `MaxEnvelopeSizekb` is 500 by default since Windows Server 2012; to check it, run `winrm get winrm/config` as an administrator, and to restore it, `winrm set winrm/config '@{MaxEnvelopeSizekb="500"}'`.
+
 ## Agent (push-agent, for hosts not reachable inbound)
 
 Unlike SSH, SMB and WinRM sources, the agent doesn't need a dedicated login account, an open inbound port, or any credential PerchTail stores and uses to connect *to* the host — the host connects *to* PerchTail instead, over a single outbound WebSocket connection, and PerchTail relays live `list`/`fetch` commands down it exactly as it would call any other connector directly. Nothing is synced or pushed ahead of time; the always-fresh, nothing-persisted rule applies to agent-mode sources the same as any other. See [`agent/README.md`](../agent/README.md) for the full build and configuration reference.

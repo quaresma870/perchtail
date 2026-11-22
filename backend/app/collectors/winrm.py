@@ -3,10 +3,13 @@ import hashlib
 import json
 import os
 import re
-from contextlib import contextmanager
+import time
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import winrm
+from winrm import exceptions as winrm_exc
+from winrm.protocol import Protocol as WinRMProtocol
 
 from app.collectors import base as collector_base
 from app.collectors import winrm_jea
@@ -72,32 +75,115 @@ def session_target(source: Source) -> tuple[str, dict]:
     return f"{scheme}://{source.host}:{port}/wsman", kwargs
 
 
-def _session(source: Source) -> winrm.Session:
+# The WS-Man envelope size every request asks for. pywinrm and pypsrp both
+# default to 150 KiB, the limit of Windows Server 2008; WinRM 3.0 (Server 2012
+# and later) accepts 500 KiB unless an administrator lowered MaxEnvelopeSizekb.
+# A larger envelope carries more output per Receive, and the number of
+# Receive round trips is what makes a large read slow (T-0074).
+ENVELOPE_SIZE = 512000
+FALLBACK_ENVELOPE_SIZE = 153600
+
+
+class _Protocol(WinRMProtocol):
+    """pywinrm's Protocol with the envelope size it asks for set per
+    session: pywinrm 0.5.0 writes a fixed 153600 into every header and
+    ignores its own max_env_sz."""
+
+    def __init__(self, *args, envelope_size: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.max_env_sz = envelope_size
+
+    def build_wsman_header(self, *args, **kwargs):
+        header = super().build_wsman_header(*args, **kwargs)
+        header["env:Header"]["w:MaxEnvelopeSize"]["#text"] = str(self.max_env_sz)
+        return header
+
+
+class _Session(winrm.Session):
+    def __init__(self, target: str, auth: tuple[str, str], envelope_size: int, **kwargs):
+        username, password = auth
+        self.url = self._build_url(target, kwargs.get("transport", "plaintext"))
+        self.protocol = _Protocol(
+            self.url, username=username, password=password, envelope_size=envelope_size, **kwargs
+        )
+
+
+def _session(source: Source, envelope_size: int) -> winrm.Session:
     """A fresh session per call — nothing kept open across requests, same
     fetch-on-open model as the other connectors."""
     collector_base.require_credential(source)
     creds = decrypt_credential(source.credential_ref)
     target, kwargs = session_target(source)
-    return winrm.Session(target, auth=(creds["username"], creds["password"]), **kwargs)
+    return _Session(
+        target, auth=(creds["username"], creds["password"]), envelope_size=envelope_size, **kwargs
+    )
+
+
+def is_envelope_refusal(exc: BaseException) -> bool:
+    """Whether a WS-Man fault (pywinrm's or pypsrp's) refuses the envelope
+    size asked for: the wsman:EncodingLimit fault, or a fault whose text
+    names the envelope size. Any other fault is not an envelope refusal."""
+    from pypsrp import exceptions as psrp_exc
+
+    if isinstance(exc, winrm_exc.WSManFaultError):
+        parts = (exc.fault_subcode, exc.reason, exc.response)
+    elif isinstance(exc, psrp_exc.WSManFaultError):
+        parts = (exc.code, exc.reason, exc.provider_fault)
+    else:
+        return False
+    text = " ".join(str(part) for part in parts if part).lower()
+    return "encodinglimit" in text or "maxenvelopesize" in text or "envelope size" in text
+
+
+def with_envelope_fallback(source: Source, attempt, envelope_size: int = ENVELOPE_SIZE):
+    """Runs `attempt(envelope_size)`; when the server refuses that envelope
+    size, runs it once more with FALLBACK_ENVELOPE_SIZE. Returns the result
+    and the envelope size that worked, so later requests of the same
+    operation can start from it."""
+    if envelope_size != FALLBACK_ENVELOPE_SIZE:
+        try:
+            return attempt(envelope_size), envelope_size
+        except Exception as exc:
+            if not is_envelope_refusal(exc):
+                raise
+        logger.warning("winrm.envelope_fallback", source_id=source.id)
+    return attempt(FALLBACK_ENVELOPE_SIZE), FALLBACK_ENVELOPE_SIZE
 
 
 _OUTSIDE_BASE = "PERCHTAIL_OUTSIDE_BASE"
 _NOT_A_DIRECTORY = "PERCHTAIL_NOT_A_DIRECTORY"
 _NOT_FOUND = "PERCHTAIL_NOT_FOUND"
+_END = "PERCHTAIL_END"
+
+
+def _raise_for_marker(out: str) -> None:
+    if _OUTSIDE_BASE in out:
+        raise PathOutsideBaseError("path outside the base path")
+    if _NOT_A_DIRECTORY in out:
+        raise NotADirectoryError("not a directory")
+    if _NOT_FOUND in out:
+        raise FileNotFoundError("not found")
+
+
+def _run_ps_once(source: Source, script: str, envelope_size: int) -> str:
+    result = _session(source, envelope_size).run_ps(script)
+    out = result.std_out.decode("utf-8", errors="replace")
+    if result.status_code != 0:
+        _raise_for_marker(out)
+        raise RuntimeError(result.std_err.decode("utf-8", errors="replace"))
+    return out
+
+
+def _run_ps_envelope(
+    source: Source, script: str, envelope_size: int = ENVELOPE_SIZE
+) -> tuple[str, int]:
+    return with_envelope_fallback(
+        source, lambda size: _run_ps_once(source, script, size), envelope_size
+    )
 
 
 def _run_ps(source: Source, script: str) -> str:
-    result = _session(source).run_ps(script)
-    out = result.std_out.decode("utf-8", errors="replace")
-    if result.status_code != 0:
-        if _OUTSIDE_BASE in out:
-            raise PathOutsideBaseError("path outside the base path")
-        if _NOT_A_DIRECTORY in out:
-            raise NotADirectoryError("not a directory")
-        if _NOT_FOUND in out:
-            raise FileNotFoundError("not found")
-        raise RuntimeError(result.std_err.decode("utf-8", errors="replace"))
-    return out
+    return _run_ps_envelope(source, script)[0]
 
 
 def _require_file(path: str) -> str:
@@ -229,63 +315,201 @@ def list_drives(source: Source) -> list[str]:
     return sorted([raw] if isinstance(raw, str) else raw)
 
 
-# Each WinRM round trip returns one base64-encoded block, so a large file is
-# read in ranges instead of loaded whole into memory on either end.
-_CHUNK_BYTES = 4 * 1024 * 1024
+# The streaming read writes one base64 line per sub-block. 3 MiB is a
+# multiple of 3, so no line but the last carries base64 padding, and a line
+# (4 MiB of text) stays well below the shell's memory quota.
+_SUB_BLOCK_BYTES = 3 * 1024 * 1024
+# The longest line the read script can write, with room for the line end:
+# anything longer is not its output.
+_MAX_LINE_CHARS = (_SUB_BLOCK_BYTES + 2) // 3 * 4 + 2
+# What stderr is kept of a failed read, for the error message.
+_MAX_STDERR_BYTES = 64 * 1024
+
+
+class _UnexpectedOutput(collector_base.SourceError):
+    public_message = "The source sent an unexpected answer"
+
+
+def _read_script(source: Source, relative_path: str, size: int) -> str:
+    """PowerShell that checks the path, opens the file once and writes it
+    as base64 lines of up to _SUB_BLOCK_BYTES bytes each, up to `size` bytes,
+    then `PERCHTAIL_END <bytes read>`. The containment guard runs before the
+    file is opened and the whole read goes through that one handle, so a
+    link swapped in afterwards can't divert it. Read() may return less than
+    asked, so each sub-block is read until it is full or the file ends; a
+    file that shrank (rotated) ends the read early, and one that grew isn't
+    read past `size`."""
+    path = _ps_quote(_remote_path(source, relative_path))
+    return (
+        _containment_guard(source, relative_path)
+        + _require_file(path)
+        + (
+            f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
+            f"try {{ $left = [long]{int(size)}; $t = [long]0; "
+            f"$b = New-Object byte[] {_SUB_BLOCK_BYTES}; "
+            "while ($left -gt 0) { $want = [int][Math]::Min($left, [long]$b.Length); $n = 0; "
+            "while ($n -lt $want) { $r = $f.Read($b, $n, $want - $n); "
+            "if ($r -le 0) { break }; $n += $r }; "
+            "if ($n -le 0) { break }; "
+            "[Convert]::ToBase64String($b, 0, $n); $t += $n; $left -= $n; "
+            "if ($n -lt $want) { break } }; "
+            f'"{_END} $t" }} finally {{ $f.Close() }}'
+        )
+    )
+
+
+def _encoded_command(script: str) -> str:
+    """The command line Session.run_ps sends for a script."""
+    return "powershell -encodedcommand " + base64.b64encode(script.encode("utf_16_le")).decode(
+        "ascii"
+    )
+
+
+class _ReadStream:
+    """Turns the read script's stdout, as it arrives, into bytes written to
+    `dst`: only whole lines are decoded, so what is held in memory is at most
+    one unfinished line plus the response being handled."""
+
+    def __init__(self, dst, size: int):
+        self.dst = dst
+        self.size = size
+        self.pending = b""
+        self.written = 0
+        self.end: int | None = None
+
+    def feed(self, data: bytes) -> None:
+        self.pending += data
+        *lines, self.pending = self.pending.split(b"\n")
+        if len(self.pending) > _MAX_LINE_CHARS:
+            raise _UnexpectedOutput("a line longer than a read block")
+        for line in lines:
+            self._line(line.strip())
+
+    def finish(self) -> None:
+        self._line(self.pending.strip())
+        self.pending = b""
+
+    def _line(self, line: bytes) -> None:
+        if not line:
+            return
+        text = line.decode("ascii", errors="replace")
+        # A marker written before any data stops the read like it stops _run_ps.
+        _raise_for_marker(text)
+        if self.end is not None:
+            raise _UnexpectedOutput("output after the end marker")
+        if text.startswith(_END + " "):
+            try:
+                self.end = int(text[len(_END) + 1 :])
+            except ValueError as exc:
+                raise _UnexpectedOutput("an unreadable end marker") from exc
+            return
+        try:
+            block = base64.b64decode(line, validate=True)
+        except ValueError as exc:
+            raise _UnexpectedOutput("a line that isn't base64") from exc
+        if self.written + len(block) > self.size:
+            raise _UnexpectedOutput("more bytes than the file's size")
+        self.dst.write(block)
+        self.written += len(block)
+
+
+def _close_quietly(call, *args, **kwargs) -> None:
+    """Best-effort cleanup: a failure to end the command or close the shell
+    must not hide the read's own result or error."""
+    with suppress(Exception):
+        call(*args, **kwargs)
+
+
+def _stream_read(
+    source: Source, relative_path: str, size: int, destination: Path, envelope_size: int
+) -> None:
+    """One shell and one PowerShell process for the whole content, read
+    with one Receive at a time (Protocol.get_command_output_raw) and written
+    to `destination` as it arrives."""
+    session = _session(source, envelope_size)
+    protocol = session.protocol
+    started = time.monotonic()
+    responses = 0
+    stderr = b""
+    try:
+        shell_id = protocol.open_shell()
+        try:
+            command_id = protocol.run_command(
+                shell_id, _encoded_command(_read_script(source, relative_path, size))
+            )
+            try:
+                with open(destination, "wb") as dst:
+                    stream = _ReadStream(dst, size)
+                    done, code = False, -1
+                    while not done:
+                        try:
+                            out, err, code, done = protocol.get_command_output_raw(
+                                shell_id, command_id
+                            )
+                        except winrm_exc.WinRMOperationTimeoutError:
+                            continue  # no output yet: ask again, as pywinrm does
+                        responses += 1
+                        if err and len(stderr) < _MAX_STDERR_BYTES:
+                            stderr = (stderr + err)[:_MAX_STDERR_BYTES]
+                        stream.feed(out)
+                    stream.finish()
+            finally:
+                _close_quietly(protocol.cleanup_command, shell_id, command_id)
+        finally:
+            _close_quietly(protocol.close_shell, shell_id, close_session=False)
+    finally:
+        _close_quietly(protocol.transport.close_session)
+    if code != 0:
+        raise RuntimeError(session._clean_error_msg(stderr).decode("utf-8", errors="replace"))
+    if stream.end is None:
+        raise _UnexpectedOutput("the read ended without its end marker")
+    if stream.end != stream.written:
+        raise _UnexpectedOutput(
+            f"the read reported {stream.end} bytes but {stream.written} arrived"
+        )
+    logger.debug(
+        "winrm.fetch_done",
+        source_id=source.id,
+        bytes=stream.written,
+        responses=responses,
+        seconds=round(time.monotonic() - started, 3),
+        envelope_size=envelope_size,
+    )
 
 
 def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     """WinRM has no native bulk file-transfer primitive, so content is read
-    through PowerShell in byte ranges, base64-encoded, and reassembled here.
-    The file is opened with FileShare.ReadWrite so a log another process is
-    still writing can be read. Refuses anything over MAX_FETCH_MB before
-    transferring a single block."""
+    through PowerShell as base64 and reassembled here: one request for the
+    size, then one shell and one PowerShell process that streams the whole
+    file (_stream_read). The file is opened with FileShare.ReadWrite so a log
+    another process is still writing can be read. Refuses anything over
+    MAX_FETCH_MB before transferring a single block."""
     if source.winrm_configuration:
         return winrm_jea.fetch_file(source, relative_path, destination)
     path = _ps_quote(_remote_path(source, relative_path))
     guard = _containment_guard(source, relative_path)
     limit = collector_base.max_fetch_bytes()
     try:
-        size = int(
-            _run_ps(
-                source, guard + _require_file(path) + f"(Get-Item -LiteralPath {path}).Length"
-            ).strip()
-            or 0
+        size_text, envelope_size = _run_ps_envelope(
+            source, guard + _require_file(path) + f"(Get-Item -LiteralPath {path}).Length"
         )
     except PathOutsideBaseError:
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
+    size = int(size_text.strip() or 0)
     if size > limit:
         raise collector_base.too_large(size, limit)
 
-    written = 0
     try:
-        with open(destination, "wb") as dst:
-            while written < size:
-                # The guard runs again with every block, so a link swapped in
-                # after the first check is refused too.
-                script = guard + (
-                    f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
-                    f"try {{ $f.Seek({written}, 'Begin') | Out-Null; "
-                    f"$b = New-Object byte[] {_CHUNK_BYTES}; "
-                    "$n = $f.Read($b, 0, $b.Length); "
-                    "[Convert]::ToBase64String($b, 0, $n) } finally { $f.Close() }"
-                )
-                try:
-                    block = base64.b64decode(_run_ps(source, script).strip())
-                except PathOutsideBaseError:
-                    # A link swapped in mid-read: logged like the first check (#206).
-                    logger.warning(
-                        "winrm.path_outside_base",
-                        source_id=source.id,
-                        path=relative_path,
-                        offset=written,
-                    )
-                    raise
-                if not block:
-                    break  # the file shrank (rotated) while being read
-                dst.write(block)
-                written += len(block)
+        with_envelope_fallback(
+            source,
+            lambda envelope: _stream_read(source, relative_path, size, destination, envelope),
+            envelope_size,
+        )
+    except PathOutsideBaseError:
+        destination.unlink(missing_ok=True)
+        logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
+        raise
     except BaseException:
         destination.unlink(missing_ok=True)
         raise

@@ -20,6 +20,7 @@ formats the WinRS connector already parses (collectors/winrm.py)."""
 
 import base64
 import json
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -37,7 +38,7 @@ logger = get_logger(__name__)
 _CHUNK_BYTES = 4 * 1024 * 1024
 
 
-def _wsman(source: Source) -> WSMan:
+def _wsman(source: Source, envelope_size: int) -> WSMan:
     from app.collectors import winrm  # shares the endpoint and CA handling
 
     collector_base.require_credential(source)
@@ -55,16 +56,32 @@ def _wsman(source: Source) -> WSMan:
         auth="ntlm",
         cert_validation=cert_validation,
         path="wsman",
+        max_envelope_size=envelope_size,
     )
 
 
 @contextmanager
-def _pool(source: Source):
+def _pool(source: Source, envelope_size: int):
     """One runspace on the source's JEA endpoint, for one operation (a fetch
     reads all its blocks through the same one). Nothing is kept open across
     requests."""
-    with RunspacePool(_wsman(source), configuration_name=source.winrm_configuration) as pool:
+    with RunspacePool(
+        _wsman(source, envelope_size), configuration_name=source.winrm_configuration
+    ) as pool:
         yield pool
+
+
+def _run[T](source: Source, operation: Callable[[RunspacePool], T]) -> T:
+    """Runs `operation` on a runspace asking for the larger envelope size,
+    and once more on a new runspace with the smaller one when the server
+    refuses it (winrm.with_envelope_fallback)."""
+    from app.collectors import winrm
+
+    def attempt(envelope_size: int) -> T:
+        with _pool(source, envelope_size) as pool:
+            return operation(pool)
+
+    return winrm.with_envelope_fallback(source, attempt)[0]
 
 
 def _call(pool: RunspacePool, command: str, **parameters) -> str:
@@ -93,8 +110,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
 
     path = winrm._remote_path(source, relative_path)
     try:
-        with _pool(source) as pool:
-            output = _call(pool, "Get-PerchTailListing", Path=path)
+        output = _run(source, lambda pool: _call(pool, "Get-PerchTailListing", Path=path))
     except PathOutsideBaseError:
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
@@ -104,8 +120,7 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
 def list_drives(source: Source) -> list[str]:
     """For the Base path picker: the folders the role allows, which is all
     a JEA source can ever read."""
-    with _pool(source) as pool:
-        output = _call(pool, "Get-PerchTailRoots")
+    output = _run(source, lambda pool: _call(pool, "Get-PerchTailRoots"))
     if not output:
         return []
     raw = json.loads(base64.b64decode(output).decode("utf-8"))
@@ -117,27 +132,30 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
 
     path = winrm._remote_path(source, relative_path)
     limit = collector_base.max_fetch_bytes()
-    written = 0
-    try:
-        with _pool(source) as pool:
-            size = int(_call(pool, "Get-PerchTailSize", Path=path) or 0)
-            if size > limit:
-                raise collector_base.too_large(size, limit)
-            with open(destination, "wb") as dst:
-                while written < size:
-                    block = base64.b64decode(
-                        _call(
-                            pool,
-                            "Read-PerchTailBlock",
-                            Path=path,
-                            Offset=written,
-                            Length=_CHUNK_BYTES,
-                        )
+
+    def read(pool: RunspacePool) -> None:
+        size = int(_call(pool, "Get-PerchTailSize", Path=path) or 0)
+        if size > limit:
+            raise collector_base.too_large(size, limit)
+        written = 0
+        with open(destination, "wb") as dst:
+            while written < size:
+                block = base64.b64decode(
+                    _call(
+                        pool,
+                        "Read-PerchTailBlock",
+                        Path=path,
+                        Offset=written,
+                        Length=_CHUNK_BYTES,
                     )
-                    if not block:
-                        break  # the file shrank (rotated) while being read
-                    dst.write(block)
-                    written += len(block)
+                )
+                if not block:
+                    break  # the file shrank (rotated) while being read
+                dst.write(block)
+                written += len(block)
+
+    try:
+        _run(source, read)
     except PathOutsideBaseError:
         destination.unlink(missing_ok=True)
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
@@ -154,15 +172,17 @@ def read_range(
 
     path = winrm._remote_path(source, relative_path)
     try:
-        with _pool(source) as pool:
-            output = _call(
+        output = _run(
+            source,
+            lambda pool: _call(
                 pool,
                 "Read-PerchTailRange",
                 Path=path,
                 Offset=max(int(offset), 0),
                 Length=max(min(int(length), collector_base.RANGE_MAX_BYTES), 0),
                 HeadLength=max(min(int(head), collector_base.RANGE_MAX_HEAD_BYTES), 0),
-            )
+            ),
+        )
     except PathOutsideBaseError:
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
