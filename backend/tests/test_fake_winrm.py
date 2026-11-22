@@ -32,7 +32,7 @@ def test_list_matches_the_real_list_directory_script_shape(fake_winrm_module, mo
     from app.models import PatternKind, Protocol, Rule, RuleType, Source
 
     session = fake_winrm_module._FakeWinRMSession()
-    monkeypatch.setattr(winrm_module, "_session", lambda source: session)
+    monkeypatch.setattr(winrm_module, "_session", lambda source, envelope_size: session)
     source = Source(
         name="win",
         protocol=Protocol.winrm,
@@ -67,13 +67,15 @@ def test_list_fails_for_an_unknown_path(fake_winrm_module):
 
 
 def test_fake_serves_the_real_fetch_file_scripts(fake_winrm_module, monkeypatch, tmp_path):
-    # Drives winrm.fetch_file() itself (size query + byte-range reads) through
+    # Drives winrm.fetch_file() itself (size query + streamed read) through
     # the fake, so the fake can't drift from the scripts the collector sends.
     from app.models import Protocol, Source
 
-    monkeypatch.setattr(winrm_module, "_CHUNK_BYTES", 16)
+    monkeypatch.setattr(winrm_module, "_SUB_BLOCK_BYTES", 16)
     monkeypatch.setattr(
-        winrm_module, "_session", lambda source: fake_winrm_module._FakeWinRMSession()
+        winrm_module,
+        "_session",
+        lambda source, envelope_size: fake_winrm_module._FakeWinRMSession(),
     )
     source = Source(
         name="w",
@@ -94,6 +96,23 @@ def test_read_fails_for_an_unknown_file(fake_winrm_module):
     path = f"{fake_winrm_module.FIXTURE_ROOT}\\does-not-exist.log"
     result = session.run_ps(f"(Get-Item -LiteralPath {winrm_module._ps_quote(path)}).Length")
     assert result.status_code != 0
+
+
+def test_the_streamed_read_of_an_unknown_file_is_not_found(fake_winrm_module, tmp_path):
+    from app.models import Protocol, Source
+
+    source = Source(
+        name="w",
+        protocol=Protocol.winrm,
+        host="h",
+        base_path=fake_winrm_module.FIXTURE_ROOT,
+        credential_ref="x",
+    )
+    protocol = fake_winrm_module._FakeWinRMSession().protocol
+    script = winrm_module._read_script(source, "does-not-exist.log", 10)
+    command = protocol.run_command("shell", winrm_module._encoded_command(script))
+    out, _, code, done = protocol.get_command_output_raw("shell", command)
+    assert (out.strip(), code, done) == (b"PERCHTAIL_NOT_FOUND", 5, True)
 
 
 def test_unrecognized_script_fails_loudly_instead_of_returning_nothing(fake_winrm_module):

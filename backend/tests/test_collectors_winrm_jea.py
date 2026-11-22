@@ -43,6 +43,8 @@ class FakeEndpoint:
         self.pools: list[dict] = []
         self.calls: list[tuple[str, dict]] = []
         self.errors: dict[str, str] = {}
+        # wsman -> exception raised when the runspace opens, or None.
+        self.pool_fault = None
 
     def answer(self, command: str, params: dict) -> str:
         if command in self.errors:
@@ -74,6 +76,10 @@ class FakeEndpoint:
                 endpoint.pools.append({"wsman": wsman, "configuration_name": configuration_name})
 
             def __enter__(self):
+                if endpoint.pool_fault is not None:
+                    fault = endpoint.pool_fault(endpoint.pools[-1]["wsman"])
+                    if fault is not None:
+                        raise fault
                 return self
 
             def __exit__(self, *exc):
@@ -167,6 +173,78 @@ def test_fetch_reads_blocks_through_one_runspace(endpoint, tmp_path, monkeypatch
     assert len(endpoint.pools) == 1
     assert [c for c, _ in endpoint.calls][:2] == ["Get-PerchTailSize", "Read-PerchTailBlock"]
     assert [p["Offset"] for c, p in endpoint.calls if c == "Read-PerchTailBlock"] == [0, 5, 10, 15]
+
+
+def _envelope_fault(code="w:EncodingLimit", reason="The envelope size is too large"):
+    from pypsrp import exceptions as psrp_exc
+
+    return psrp_exc.WSManFaultError(code, "win01", reason, None, None, None)
+
+
+def test_every_runspace_asks_for_a_512000_byte_envelope(endpoint, tmp_path):
+    """T-0075."""
+    winrm_module.list_directory(_source(), SHOW_ALL)
+    winrm_module.list_drives(_source())
+    winrm_module.read_range(_source(), "app.log", 0, 10)
+    winrm_module.fetch_file(_source(), "app.log", tmp_path / "out")
+    assert [p["wsman"]["max_envelope_size"] for p in endpoint.pools] == [512000] * 4
+
+
+def test_the_real_wsman_carries_the_envelope_size(monkeypatch):
+    from pypsrp.wsman import WSMan
+
+    monkeypatch.setattr(jea, "WSMan", WSMan)
+    monkeypatch.setattr(
+        jea, "decrypt_credential", lambda ref: {"username": "svc", "password": "s3cret"}
+    )
+    wsman = jea._wsman(_source(), 512000)
+    _, header = wsman._create_header("a", "r")
+    (size,) = [n for n in header.iter() if n.tag.endswith("}MaxEnvelopeSize")]
+    assert size.text == "512000"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        _envelope_fault(),
+        _envelope_fault(2150858817, "The MaxEnvelopeSize requested is too large"),
+    ],
+)
+def test_a_refused_envelope_size_opens_a_smaller_runspace_once(endpoint, monkeypatch, fault):
+    events = []
+    monkeypatch.setattr(
+        winrm_module.logger, "warning", lambda event, **kw: events.append((event, kw))
+    )
+    endpoint.pool_fault = lambda wsman: fault if wsman["max_envelope_size"] == 512000 else None
+    entries = winrm_module.list_directory(_source(id=9), SHOW_ALL)
+    assert [e.name for e in entries] == ["app.log", "old"]
+    assert [p["wsman"]["max_envelope_size"] for p in endpoint.pools] == [512000, 153600]
+    assert events == [("winrm.envelope_fallback", {"source_id": 9})]
+
+
+def test_a_fetch_refused_its_envelope_is_read_again_whole(endpoint, tmp_path, monkeypatch):
+    endpoint.pool_fault = lambda wsman: (
+        _envelope_fault() if wsman["max_envelope_size"] == 512000 else None
+    )
+    destination = tmp_path / "out"
+    winrm_module.fetch_file(_source(), "app.log", destination)
+    assert destination.read_bytes() == FILE
+    assert [p["wsman"]["max_envelope_size"] for p in endpoint.pools] == [512000, 153600]
+
+
+def test_another_fault_opens_no_second_runspace(endpoint, monkeypatch):
+    from pypsrp import exceptions as psrp_exc
+
+    events = []
+    monkeypatch.setattr(
+        winrm_module.logger, "warning", lambda event, **kw: events.append((event, kw))
+    )
+    denied = psrp_exc.WSManFaultError(5, "win01", "Access is denied.", None, None, None)
+    endpoint.pool_fault = lambda wsman: denied
+    with pytest.raises(psrp_exc.WSManFaultError):
+        winrm_module.list_directory(_source(), SHOW_ALL)
+    assert len(endpoint.pools) == 1
+    assert events == []
 
 
 def test_fetch_refuses_a_file_over_the_limit(endpoint, tmp_path, monkeypatch):
