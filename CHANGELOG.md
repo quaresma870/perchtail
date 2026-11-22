@@ -8,6 +8,10 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Fixed
+- On a push-agent source with redaction, an archive or `.gz` file over `MAX_FETCH_MB` was refused with the `MAX_DECOMPRESSED_MB` message when both limits had the same value (the default). The agent now says which limit was passed, and the server names that one; with an agent older than 0.7.0 the server still tells them apart by their size. Upgrade the agents for the right message.
+- On a push-agent source with redaction, opening or downloading a file near the end of a large `.tar.gz` failed after 30 seconds with "The agent didn't answer in time", because the agent must read the archive up to that file before it sends anything. An agent from 0.7.0 tells the server every 10 seconds that it is still reading for a request that returns content (`progress/1`), only while its read moves forward, and the server keeps waiting while it does; a read that hangs still fails after 30 seconds, and the size limits still bound what it reads. Older agents and servers behave as before. Upgrade the agents to get it.
+
 ## [0.7.0-rc.3] - 2026-11-21
 
 The code of 0.7.0-rc.2 with a smaller image. Upgrade notes are the same as for rc.2.

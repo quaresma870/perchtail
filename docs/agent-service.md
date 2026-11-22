@@ -16,19 +16,21 @@ One agent serves one source. A second agent that connects with the same token re
 
 ### What the agent tells the server
 
-Each time it connects, the agent sends its operating system (shown as **Agent OS** on the source's page), its version (**Agent version**) and the features it supports. PerchTail keeps them with the source and decides from the features, not from the version, what it can ask of the agent. Agents from 0.7 on announce two:
+Each time it connects, the agent sends its operating system (shown as **Agent OS** on the source's page), its version (**Agent version**) and the features it supports. PerchTail keeps them with the source and decides from the features, not from the version, what it can ask of the agent. Agents from 0.7 on announce these:
 
 - `links/1`: the agent says where each path really is when a symbolic link (or, on Windows, a junction) leads elsewhere, and reads a file only once the server has checked its rules on that target (see [Permissions](#6-permissions-of-the-agents-account)). PerchTail reads no file content from an agent without it: see [Upgrading](#7-upgrading).
 - `redaction/1`: when redaction applies to the source, the agent redacts on its host what it sends (files, archive members, decompressed `.gz` files, Tail and alert reads), with the rules the server sends with each request, and lists and reads archives there, so the original content never leaves the host. Without it, the server redacts what the agent sends ([redaction.md](redaction.md#where-content-is-redacted)).
+- `progress/1` (from 0.7.0): while the agent reads for a request that returns content and has nothing to send yet (for example, a file near the end of a large `.tar.gz`, which it must read up to first, always when it redacts), it tells the server every 10 seconds that it is still working, so the request isn't given up after 30 seconds (see [Limits](#limits)). It does so only while its read moves forward: a read that hangs (a stuck disk or network share) sends nothing and fails after 30 seconds, as before.
 
-Agents older than 0.7 announce neither.
+Agents older than 0.7 announce none of them.
 
 ### Limits
 
 - A folder listing holds at most 50,000 entries, or fewer once the answer nears 8 MiB; the agent says when it stopped there, and the rules are applied afterwards on the server, so a huge folder may show fewer matches than it holds. An archive's listing has the same caps.
 - The agent works on at most 8 commands at once, of which at most 2 redact; the others wait.
 - File content travels in pieces of at most 1 MiB. The server sets the largest file it accepts (`MAX_FETCH_MB`) and the most decompression may produce (`MAX_DECOMPRESSED_MB`) in each request, and the agent refuses past them ([configuration.md](configuration.md#sources-and-connectors)).
-- A command fails when the agent hasn't answered within 30 seconds or, while it sends a file, when 30 seconds pass without a new piece.
+- A command fails when the agent hasn't answered within 30 seconds or, while it sends a file, when 30 seconds pass without a new piece. With an agent that announces `progress/1`, a request that returns content fails only when 30 seconds pass without an answer, a piece or a message that the agent is still working, which it sends only while it reads more of the file; the size limits above still bound how much it reads.
+- A file refused as too large names the limit it passed, `MAX_FETCH_MB` (the file as stored) or `MAX_DECOMPRESSED_MB` (once decompressed or extracted). An agent older than 0.7.0 doesn't say which, and the server tells them apart by their size, so with both limits at the same value (the default) an archive or `.gz` file over `MAX_FETCH_MB` that such an agent was asked to redact is reported as over `MAX_DECOMPRESSED_MB`.
 
 ## Before you start
 

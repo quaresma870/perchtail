@@ -115,7 +115,7 @@ func connectAndServe(ctx context.Context, cfg Config, upgrades *upgrader) (time.
 	// NTFS does (#189); it can only know which OS this is if told.
 	header.Set(OSHeader, runtime.GOOS)
 	header.Set(VersionHeader, Version)
-	header.Set(FeaturesHeader, FeatureRedaction+","+FeatureLinks)
+	header.Set(FeaturesHeader, FeatureRedaction+","+FeatureLinks+","+FeatureProgress)
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.ServerURL, header)
 	if err != nil {
@@ -217,7 +217,13 @@ func connectAndServe(ctx context.Context, cfg Config, upgrades *upgrader) (time.
 		go func(cmd Command) {
 			defer running.finish(cmd.ID)
 			defer slots.acquire(cmd)()
-			if err := serveCommand(cmdCtx, cfg, cmd, send); err != nil {
+			// A content command the server asked progress for says every
+			// progressInterval in which it read more that it is still
+			// reading (FeatureProgress).
+			err := withProgress(cmdCtx, cmd, send, func(ctx context.Context, send func(any) error) error {
+				return serveCommand(ctx, cfg, cmd, send)
+			})
+			if err != nil {
 				// The connection is broken: closing it ends the read loop,
 				// and Run reconnects.
 				log.Printf("agent: write failed (%v), dropping the connection", err)
@@ -313,12 +319,12 @@ func serveCommand(ctx context.Context, cfg Config, cmd Command, send func(any) e
 	case cmd.Type == "fetch" && (hasRedact(cmd.Redact) || cmd.Member != "" || cmd.Decompress != ""):
 		return serveContentFetch(ctx, cfg, cmd, send)
 	case cmd.Type != "fetch" || cmd.ChunkSize <= 0:
-		return send(handleCommand(cfg, cmd))
+		return send(handleMeteredCommand(readMeterFrom(ctx), cfg, cmd))
 	}
 
 	var sendErr error
 	seq := 0
-	chunks, size, err := StreamFetch(cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.ChunkSize, cmd.MaxBytes,
+	chunks, size, err := streamFetch(readMeterFrom(ctx), cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.ChunkSize, cmd.MaxBytes,
 		func(data []byte) error {
 			if ctx.Err() != nil {
 				return errCancelled
@@ -349,6 +355,12 @@ func serveCommand(ctx context.Context, cfg Config, cmd Command, send func(any) e
 // connectAndServe's I/O loop so it's directly unit-testable without a real
 // (or even fake) WebSocket connection.
 func handleCommand(cfg Config, cmd Command) any {
+	return handleMeteredCommand(nil, cfg, cmd)
+}
+
+// handleMeteredCommand is handleCommand with the content commands' reads
+// counted by meter (withProgress), when it isn't nil.
+func handleMeteredCommand(meter *readMeter, cfg Config, cmd Command) any {
 	switch cmd.Type {
 	case "list":
 		listing, err := ListDirectory(cfg.BasePath, cmd.Path, cmd.MaxEntries)
@@ -370,7 +382,7 @@ func handleCommand(cfg Config, cmd Command) any {
 			// Only ever streamed (serveCommand); never the content as it is.
 			return ErrorResult{Type: "fetch_error", ID: cmd.ID, Error: "this fetch can only be streamed"}
 		}
-		content, err := HandleFetch(cfg.BasePath, cmd.Path, cmd.ExpectReal)
+		content, err := handleFetch(meter, cfg.BasePath, cmd.Path, cmd.ExpectReal)
 		if err != nil {
 			return errorResult(cmd, "fetch_error", err)
 		}
@@ -385,14 +397,14 @@ func handleCommand(cfg Config, cmd Command) any {
 			if err != nil {
 				return errorResult(cmd, "read_range_error", err)
 			}
-			result, err := HandleReadRangeRedacted(cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.Offset, cmd.Length, red, cmd.WithLineOffsets)
+			result, err := readRangeRedacted(meter, cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.Offset, cmd.Length, red, cmd.WithLineOffsets)
 			if err != nil {
 				return errorResult(cmd, "read_range_error", err)
 			}
 			result.Type, result.ID = "read_range_result", cmd.ID
 			return result
 		}
-		size, head, data, err := HandleReadRange(cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.Offset, cmd.Length, cmd.HeadLength)
+		size, head, data, err := meteredReadRange(meter, cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.Offset, cmd.Length, cmd.HeadLength)
 		if err != nil {
 			return errorResult(cmd, "read_range_error", err)
 		}

@@ -359,6 +359,9 @@ SKIPPED_REASONS = frozenset(
 _WITHDRAWN_REASONS = frozenset({"too_large", "unreadable", "unsupported_encoding"})
 _HEAD_DIGEST_RE = re.compile(r"^[0-9a-f]{32}$")
 _LIMIT_RE = re.compile(r"over the (\d+)-byte limit")
+# The `limit` of an agent's too_large error: which limit was passed.
+_LIMIT_FETCH = "fetch"
+_LIMIT_DECOMPRESSED = "decompressed"
 
 
 class AgentRedactionError(SourceError):
@@ -412,8 +415,16 @@ def _raise_command_error(exc: AgentCommandError, *, expanding: bool) -> NoReturn
     if exc.message_type == "feature_error":
         raise AgentRedactionError(str(exc), code="feature_missing") from exc
     if exc.code == "too_large":
-        # The agent says which limit: the file as stored (max_bytes) or what
-        # extracting or decompressing it produced (max_decompressed).
+        # Which limit was passed: the file as stored (max_bytes) or what
+        # extracting or decompressing it produced (max_decompressed). The
+        # agent says so in `limit`; for an older agent, which doesn't, it is
+        # guessed from the number in its message, which can't tell the two
+        # apart when they are the same.
+        if exc.limit == _LIMIT_DECOMPRESSED:
+            raise DecompressionLimitError(str(exc)) from exc
+        if exc.limit == _LIMIT_FETCH:
+            limit = collector_base.max_fetch_bytes()
+            raise collector_base.too_large(exc.size or limit + 1, limit) from exc
         match = _LIMIT_RE.search(str(exc))
         limit = int(match.group(1)) if match else collector_base.max_fetch_bytes()
         if expanding and limit == _max_decompressed_bytes():

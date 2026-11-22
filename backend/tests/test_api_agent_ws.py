@@ -263,6 +263,56 @@ def test_a_streamed_fetch_through_the_endpoint_lands_in_the_destination(session,
     assert destination.read_bytes() == content
 
 
+def test_progress_messages_keep_a_slow_command_waiting_and_are_never_its_answer(session):
+    """F5 (rc.3): an agent with progress/1 is asked for progress on a content
+    command, and its progress messages keep the command waiting past the
+    wait (scaled down here) without being taken for the answer."""
+    import asyncio
+    import threading
+
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    previous_loop = registry._loop
+    results: list = []
+
+    def read():
+        try:
+            results.append(
+                registry.send_command_sync(source.id, "read_range", timeout=0.4, path="app.log")
+            )
+        except Exception as exc:  # noqa: BLE001 - reported by the assert below
+            results.append(exc)
+
+    try:
+        with _client(session) as client:
+            registry.bind_loop(client.portal.call(asyncio.get_running_loop))
+            with client.websocket_connect(
+                "/agent/connect",
+                headers={
+                    "authorization": "Bearer s3cret",
+                    "x-perchtail-agent-features": "links/1,progress/1",
+                },
+            ) as ws:
+                assert _wait_until(lambda: registry.is_connected(source.id))
+                thread = threading.Thread(target=read)
+                thread.start()
+                command = ws.receive_json()
+                assert command["type"] == "read_range" and command["progress"] is True
+                until = time.monotonic() + 1.0
+                while time.monotonic() < until:
+                    ws.send_json({"type": "progress", "id": command["id"]})
+                    time.sleep(0.1)
+                ws.send_json(
+                    {"type": "read_range_result", "id": command["id"], "size": 0, "data_b64": ""}
+                )
+                thread.join(timeout=5)
+    finally:
+        registry.bind_loop(previous_loop)
+
+    assert len(results) == 1 and isinstance(results[0], dict), results
+    assert results[0]["type"] == "read_range_result"
+
+
 def test_nothing_is_read_from_a_connected_agent_without_links(session, tmp_path):
     """An agent that doesn't say where links lead is never sent a content
     command: it must be updated first. Listing still works."""
