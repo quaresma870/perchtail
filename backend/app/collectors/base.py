@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO, NamedTuple
+from typing import BinaryIO, NamedTuple, NoReturn
 
 from app.config import get_settings
 
@@ -76,6 +76,22 @@ class SourceNotFoundError(SourceError):
     # (#272). Only reached once the rules allow the path: a hidden one
     # answers a plain "not found".
     error_code = "not_found_on_source"
+
+
+class SourceNotAFileError(SourceError):
+    """A path to read (open, follow, download, an archive's member) is a
+    folder, or a link to one. Answered exactly as a path that isn't there
+    (SourceNotFoundError's status, message and code), so nothing tells a
+    folder from a missing file; the endpoints that serve content audit it
+    with the reason `not_a_file`."""
+
+    status_code = 404
+    public_message = SourceNotFoundError.public_message
+    error_code = SourceNotFoundError.error_code
+
+
+# The audit reason of a read refused as SourceNotAFileError.
+NOT_A_FILE = "not_a_file"
 
 
 class SourceLockedError(SourceError):
@@ -171,9 +187,10 @@ class LinkTargetHiddenError(PathOutsideBaseError):
 
 
 # Called with where a path really is, relative to the base path, when a link
-# leads there: whether the rules let it be read. None means no link may be
-# followed at all (fail closed).
-TargetCheck = Callable[[str], bool] | None
+# leads there: whether the rules let it be read. Called with `is_dir=True`
+# (refuse_directory) when that target is a folder, so the rules are checked
+# on it as a folder. None means no link may be followed at all (fail closed).
+TargetCheck = Callable[..., bool] | None
 
 
 def require_target(requested: str, real: str, check: TargetCheck) -> None:
@@ -184,6 +201,16 @@ def require_target(requested: str, real: str, check: TargetCheck) -> None:
         return
     if check is None or not check(real):
         raise LinkTargetHiddenError(requested)
+
+
+def refuse_directory(requested: str, real: str, check: TargetCheck) -> NoReturn:
+    """Refuses a read of `requested`, which is a folder at `real`: through a
+    link (`real` differs), the rules are checked on the target as a folder
+    first, and one they hide (or no check: no link is followed) is a
+    LinkTargetHiddenError, as for a file; otherwise SourceNotAFileError."""
+    if real != requested and (check is None or not check(real, is_dir=True)):
+        raise LinkTargetHiddenError(requested)
+    raise SourceNotAFileError(f"{requested}: is a directory")
 
 
 class FetchTooLargeError(ValueError):

@@ -926,7 +926,7 @@ def test_a_download_cut_short_after_the_refusal_still_says_so(session, downloads
     original = tmp_path / "midstream.log"
     original.write_bytes(MIDSTREAM)
     stream = archive_module._redacted_chunks(
-        original,
+        original.open("rb"),
         compile_rules(all_rules()),
         None,
         archive_module._late_refusal_recorder(session, user, source, {"path": "app.log"}),
@@ -948,7 +948,7 @@ def test_a_download_cut_short_before_any_refusal_has_no_second_entry(session, do
     original = tmp_path / "plain.log"
     original.write_bytes(MIDSTREAM_START * 4096)
     stream = archive_module._redacted_chunks(
-        original,
+        original.open("rb"),
         compile_rules(all_rules()),
         None,
         archive_module._late_refusal_recorder(session, user, source, {"path": "app.log"}),

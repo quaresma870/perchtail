@@ -20,6 +20,7 @@ from app.collectors.base import (
     SourceError,
     TargetCheck,
 )
+from app.collectors.errors import is_directory_answer
 from app.config import get_settings
 from app.crypto import follow_head_key
 from app.json_values import as_int
@@ -124,7 +125,13 @@ def _following_links(source: Source, relative_path: str, target_check: TargetChe
     see where the link leads, not only its name; a link out of the base
     path, to something the rules hide, or that changed between the two
     commands is refused (LinkTargetHiddenError). The agent reads nothing
-    before it is asked for where the path really is."""
+    before it is asked for where the path really is.
+
+    A folder, or a link to one, is refused as not a file
+    (collectors.base.refuse_directory), with the rules checked on a link's
+    target as a folder: the agent says where it really is (is_directory,
+    `real`); an agent older than that code only says so once it was asked
+    for where the path really is, so that is `attempt`."""
     require_links(source)
     attempt = relative_path
     for _ in range(2):
@@ -133,6 +140,8 @@ def _following_links(source: Source, relative_path: str, target_check: TargetChe
         except AgentCommandError as exc:
             if exc.code == "links_missing":
                 raise AgentUpdateRequiredError(str(exc)) from exc
+            if is_directory_answer(exc):
+                _refuse_directory(relative_path, attempt, exc, target_check)
             if exc.code != "link_target":
                 raise
             real = None if exc.outside else _real_path(exc.real)
@@ -145,6 +154,20 @@ def _following_links(source: Source, relative_path: str, target_check: TargetChe
                 raise LinkTargetHiddenError(relative_path) from exc
             attempt = real
     raise LinkTargetHiddenError(relative_path)  # pragma: no cover - the loop returns or raises
+
+
+def _refuse_directory(
+    relative_path: str, attempt: str, exc: AgentCommandError, target_check: TargetCheck
+) -> NoReturn:
+    """The agent answered that the path to read is a folder: at `real` when
+    it says (is_directory), at `attempt` otherwise (an older agent). One
+    whose real path isn't one the rules can be checked on (the base path
+    itself, or not a canonical path) is refused as a hidden link target, as
+    a listing leaves such a link out."""
+    real = exc.real if exc.code == "is_directory" and exc.real is not None else attempt
+    if real != relative_path and _real_path(real) is None:
+        raise LinkTargetHiddenError(relative_path) from exc
+    collector_base.refuse_directory(relative_path, real, target_check)
 
 
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:

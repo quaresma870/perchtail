@@ -5,7 +5,7 @@ from pathlib import Path
 import smbclient
 
 from app.collectors import base as collector_base
-from app.collectors.base import DirEntry, PathOutsideBaseError
+from app.collectors.base import DirEntry, PathOutsideBaseError, SourceNotAFileError
 from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
@@ -83,6 +83,8 @@ def _unc_path(source: Source, relative_path: str = "") -> str:
 # so one inside the share leads anywhere the account can read; they are
 # never listed or followed.
 _REPARSE_POINT = 0x400
+# FILE_ATTRIBUTE_DIRECTORY (MS-FSCC 2.6).
+_DIRECTORY = 0x10
 
 
 @contextmanager
@@ -120,6 +122,16 @@ def _require_no_reparse_points(source: Source, relative_path: str, kwargs: dict)
         if _is_reparse_point(attributes):
             logger.warning("smb.path_outside_base", source_id=source.id, path=prefix)
             raise PathOutsideBaseError(relative_path)
+
+
+def _file_stat(remote_path: str, relative_path: str, kwargs: dict):
+    """The stat of a path to read, refusing a folder before it is opened
+    (SourceNotAFileError). SMB refuses every link, so there is no target
+    to check the rules on."""
+    info = smbclient.stat(remote_path, **kwargs)
+    if getattr(info, "st_file_attributes", 0) & _DIRECTORY:
+        raise SourceNotAFileError(f"{relative_path}: is a directory")
+    return info
 
 
 def _mtime(smb_info) -> float | None:
@@ -179,7 +191,7 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
         # Refuse before transferring anything when the size is already over
         # the cap (#167) -- copy_with_limit stays as the backstop for a file
         # that grows while it's being read.
-        size = smbclient.stat(remote_path, **kwargs).st_size
+        size = _file_stat(remote_path, relative_path, kwargs).st_size
         if size > limit:
             raise collector_base.too_large(size, limit)
         # share_access="rwd": a read-only open that tolerates other readers,
@@ -206,6 +218,7 @@ def read_range(
     with _connection(source) as kwargs:
         _require_no_reparse_points(source, relative_path, kwargs)
         remote_path = _unc_path(source, relative_path)
+        _file_stat(remote_path, relative_path, kwargs)
         with smbclient.open_file(remote_path, mode="rb", share_access="rwd", **kwargs) as f:
             size = smbclient.stat(remote_path, **kwargs).st_size
             return collector_base.read_range_from(f, size, offset, length, head)
