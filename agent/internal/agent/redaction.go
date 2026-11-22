@@ -235,7 +235,7 @@ func errorResult(cmd Command, errType string, err error) ErrorResult {
 	var gzipErr *gzipUnreadableError
 	switch {
 	case errors.As(err, &tooLarge):
-		result.Code, result.Size = "too_large", tooLarge.Size
+		result.Code, result.Size, result.Limit = "too_large", tooLarge.Size, tooLarge.Kind
 	case errors.Is(err, ErrMemberNotFound):
 		result.Code = "not_found"
 	case errors.Is(err, errMemberEncrypted):
@@ -399,24 +399,27 @@ func redactStream(src io.Reader, red *redaction, final bool, blockSize int, star
 // archive (whole or as a member, whatever cmd.Decompress says), or a .gz
 // file not decompressed, is refused: it would carry the original,
 // compressed.
-func withContent(basePath string, cmd Command, redacting bool, fn func(io.Reader) error) error {
+func withContent(meter *readMeter, basePath string, cmd Command, redacting bool, fn func(io.Reader) error) error {
 	switch cmd.Decompress {
 	case "", "gzip":
 	default:
 		return fmt.Errorf("unsupported decompression %q", cmd.Decompress)
 	}
-	f, closeFile, err := openFile(basePath, cmd.Path, cmd.ExpectReal)
+	opened, closeFile, err := openFile(basePath, cmd.Path, cmd.ExpectReal)
 	if err != nil {
 		return err
 	}
 	defer closeFile()
+	// Every read of the file, through to the member asked for, counts as
+	// progress (withProgress).
+	f := meter.meter(opened)
 	if cmd.MaxBytes > 0 {
 		st, err := f.Stat()
 		if err != nil {
 			return err
 		}
 		if st.Size() > cmd.MaxBytes {
-			return &TooLargeError{Size: st.Size(), Limit: cmd.MaxBytes}
+			return &TooLargeError{Size: st.Size(), Limit: cmd.MaxBytes, Kind: limitFetch}
 		}
 	}
 	name := lastSegment(cmd.Path)
@@ -431,7 +434,7 @@ func withContent(basePath string, cmd Command, redacting bool, fn func(io.Reader
 		defer gz.Close()
 		// Strict, as the server's decompress_gzip: a .gz cut short is
 		// refused, not passed on up to the cut.
-		return fn(&limitedReader{r: &strictGzipReader{r: gz}, limit: cmd.MaxDecompressed})
+		return fn(&limitedReader{r: &strictGzipReader{r: gz}, limit: cmd.MaxDecompressed, kind: limitDecompressed})
 	}
 	if cmd.Member != "" {
 		if !isArchiveName(name) {
@@ -447,13 +450,13 @@ func withContent(basePath string, cmd Command, redacting bool, fn func(io.Reader
 			return &redactionError{code: codeNotRedactable, message: "a compressed member can't be redacted unless it is asked for decompressed"}
 		}
 		return withMember(f, name, cmd.Member, func(_ archiveEntry, r io.Reader) error {
-			return content(&limitedReader{r: r, limit: cmd.MaxDecompressed})
+			return content(&limitedReader{r: r, limit: cmd.MaxDecompressed, kind: limitDecompressed})
 		})
 	}
 	if redacting && (isArchiveName(name) || (cmd.Decompress == "" && isTransparentGzipName(name))) {
 		return &redactionError{code: codeNotRedactable, message: "a whole archive or compressed file can't be redacted"}
 	}
-	return content(&limitedReader{r: f, limit: cmd.MaxBytes})
+	return content(&limitedReader{r: f, limit: cmd.MaxBytes, kind: limitFetch})
 }
 
 // serveContentFetch answers a streamed fetch with a `redact` block, a
@@ -466,7 +469,7 @@ func serveContentFetch(ctx context.Context, cfg Config, cmd Command, send func(a
 	}
 	out := &chunkSender{ctx: ctx, id: cmd.ID, size: clampChunkSize(cmd.ChunkSize), send: send}
 	var info RedactionInfo
-	err = withContent(cfg.BasePath, cmd, red != nil, func(src io.Reader) error {
+	err = withContent(readMeterFrom(ctx), cfg.BasePath, cmd, red != nil, func(src io.Reader) error {
 		if red == nil {
 			return out.copy(src)
 		}
@@ -505,7 +508,7 @@ func serveFetchArchive(ctx context.Context, cfg Config, cmd Command, send func(a
 	}
 	out := &chunkSender{ctx: ctx, id: cmd.ID, size: clampChunkSize(cmd.ChunkSize), send: send}
 	total := RedactionInfo{Counts: map[string]int{}}
-	err = fetchArchive(cfg.BasePath, cmd, red, out, &total)
+	err = fetchArchive(readMeterFrom(ctx), cfg.BasePath, cmd, red, out, &total)
 	if out.sendErr != nil {
 		return out.sendErr
 	}
@@ -523,12 +526,13 @@ func serveFetchArchive(ctx context.Context, cfg Config, cmd Command, send func(a
 	return send(RedactedFetchEnd{FetchEnd: end, RedactionInfo: total})
 }
 
-func fetchArchive(basePath string, cmd Command, red *redaction, out *chunkSender, total *RedactionInfo) error {
-	f, closeFile, err := openFile(basePath, cmd.Path, cmd.ExpectReal)
+func fetchArchive(meter *readMeter, basePath string, cmd Command, red *redaction, out *chunkSender, total *RedactionInfo) error {
+	opened, closeFile, err := openFile(basePath, cmd.Path, cmd.ExpectReal)
 	if err != nil {
 		return err
 	}
 	defer closeFile()
+	f := meter.meter(opened) // every read of the archive counts as progress (withProgress)
 	name := lastSegment(cmd.Path)
 	if !isArchiveName(name) {
 		return fmt.Errorf("%s: not an archive", name)
@@ -539,7 +543,7 @@ func fetchArchive(basePath string, cmd Command, red *redaction, out *chunkSender
 			return err
 		}
 		if st.Size() > cmd.MaxBytes {
-			return &TooLargeError{Size: st.Size(), Limit: cmd.MaxBytes}
+			return &TooLargeError{Size: st.Size(), Limit: cmd.MaxBytes, Kind: limitFetch}
 		}
 	}
 	entries, err := archiveHeads(f, name)
@@ -637,7 +641,7 @@ func sendArchiveMember(
 		}
 		return err
 	}
-	var src io.Reader = &limitedReader{r: r, limit: maxDecompressed}
+	var src io.Reader = &limitedReader{r: r, limit: maxDecompressed, kind: limitDecompressed}
 	gunzipped := false
 	if red != nil && isTransparentGzipName(lastSegment(e.name)) {
 		gz, err := gunzip(src)
@@ -645,7 +649,7 @@ func sendArchiveMember(
 			return announce(e, false, memberSkip(err))
 		}
 		defer gz.Close()
-		src, gunzipped = &limitedReader{r: &strictGzipReader{r: gz}, limit: maxDecompressed}, true
+		src, gunzipped = &limitedReader{r: &strictGzipReader{r: gz}, limit: maxDecompressed, kind: limitDecompressed}, true
 	}
 	if red == nil {
 		if err := announce(e, false, ""); err != nil {
@@ -702,14 +706,21 @@ func sendArchiveMember(
 //
 // The file must really be at expectReal (openFile).
 func HandleReadRangeRedacted(basePath, relPath, expectReal string, offset, length int64, red *redaction, withLineOffsets bool) (RedactedReadRangeResult, error) {
+	return readRangeRedacted(nil, basePath, relPath, expectReal, offset, length, red, withLineOffsets)
+}
+
+// readRangeRedacted is HandleReadRangeRedacted with its reads counted by
+// meter (withProgress).
+func readRangeRedacted(meter *readMeter, basePath, relPath, expectReal string, offset, length int64, red *redaction, withLineOffsets bool) (RedactedReadRangeResult, error) {
 	if offset < 0 || length < 0 {
 		return RedactedReadRangeResult{}, fmt.Errorf("invalid range: offset %d, length %d", offset, length)
 	}
-	f, closeFile, err := openFile(basePath, relPath, expectReal)
+	opened, closeFile, err := openFile(basePath, relPath, expectReal)
 	if err != nil {
 		return RedactedReadRangeResult{}, err
 	}
 	defer closeFile()
+	f := meter.meter(opened)
 	st, err := f.Stat()
 	if err != nil {
 		return RedactedReadRangeResult{}, err

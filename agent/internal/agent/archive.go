@@ -10,7 +10,6 @@ import (
 	"io"
 	"io/fs"
 	"math"
-	"os"
 	"strings"
 	"time"
 )
@@ -157,7 +156,7 @@ func (e archiveEntry) listed() bool { return e.regular || e.isDir }
 
 // walkArchive calls fn for each entry of the archive f (named name), in
 // order, until fn returns false or an error.
-func walkArchive(f *os.File, name string, fn func(archiveEntry) (bool, error)) error {
+func walkArchive(f contentFile, name string, fn func(archiveEntry) (bool, error)) error {
 	switch {
 	case isZipName(name):
 		st, err := f.Stat()
@@ -414,7 +413,7 @@ func resolveMemberName(entries []archiveEntry, requested string) string {
 }
 
 // archiveHeads reads every entry of the archive without its content.
-func archiveHeads(f *os.File, name string) ([]archiveEntry, error) {
+func archiveHeads(f contentFile, name string) ([]archiveEntry, error) {
 	var entries []archiveEntry
 	err := walkArchive(f, name, func(e archiveEntry) (bool, error) {
 		e.open = nil
@@ -437,7 +436,7 @@ func lastIndexes(entries []archiveEntry) map[string]int {
 
 // withMember calls fn with a reader of the member requested of the archive
 // f (named name), as the server's extract_member opens it.
-func withMember(f *os.File, name, requested string, fn func(archiveEntry, io.Reader) error) error {
+func withMember(f contentFile, name, requested string, fn func(archiveEntry, io.Reader) error) error {
 	entries, err := archiveHeads(f, name)
 	if err != nil {
 		return err
@@ -472,10 +471,11 @@ func withMember(f *os.File, name, requested string, fn func(archiveEntry, io.Rea
 
 // limitedReader fails with a TooLargeError once more than limit bytes were
 // read (no limit when limit <= 0): the size a header claims can lie, so
-// what is produced is counted.
+// what is produced is counted. kind is the limit's (TooLargeError.Kind).
 type limitedReader struct {
 	r     io.Reader
 	limit int64
+	kind  string
 	n     int64
 }
 
@@ -483,7 +483,7 @@ func (l *limitedReader) Read(p []byte) (int, error) {
 	n, err := l.r.Read(p)
 	l.n += int64(n)
 	if l.limit > 0 && l.n > l.limit {
-		return 0, &TooLargeError{Size: l.n, Limit: l.limit}
+		return 0, &TooLargeError{Size: l.n, Limit: l.limit, Kind: l.kind}
 	}
 	return n, err
 }

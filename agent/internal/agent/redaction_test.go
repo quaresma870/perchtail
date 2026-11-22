@@ -136,7 +136,7 @@ func refusal(t *testing.T, sent []any, code string) ErrorResult {
 	return result
 }
 
-func TestConnectAnnouncesRedactionAndLinks(t *testing.T) {
+func TestConnectAnnouncesRedactionLinksAndProgress(t *testing.T) {
 	got := make(chan string, 1)
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -148,8 +148,8 @@ func TestConnectAnnouncesRedactionAndLinks(t *testing.T) {
 	defer server.Close()
 	cfg := Config{ServerURL: "ws" + strings.TrimPrefix(server.URL, "http"), Token: "t"}
 	_, _ = connectAndServe(context.Background(), cfg, newUpgrader(cfg))
-	if features := <-got; features != "redaction/1,links/1" {
-		t.Fatalf("features header = %q, want redaction/1,links/1", features)
+	if features := <-got; features != "redaction/1,links/1,progress/1" {
+		t.Fatalf("features header = %q, want redaction/1,links/1,progress/1", features)
 	}
 }
 

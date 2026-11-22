@@ -254,6 +254,10 @@ async def _receive(websocket: WebSocket, registry: AgentRegistry, bind, source_i
                     await asyncio.to_thread(on_agent_message, bind, source_id, message)
             elif kind == "pong":
                 pass  # the keepalive only needs to know something arrived
+            elif kind == "progress":
+                # A content command asked for progress is still running
+                # (FEATURE_PROGRESS); never a command's answer.
+                registry.receive_progress(source_id, message, websocket)
             else:
                 registry.resolve_response(source_id, message, websocket)
     except WebSocketDisconnect:
