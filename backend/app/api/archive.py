@@ -2095,6 +2095,32 @@ class _ArchiveUnreadable(Exception):
     """An archive a redacted download can't read, so it can't be rebuilt."""
 
 
+def _log_rebuild_done(
+    source: Source,
+    virtual_path: str,
+    destination: Path,
+    redacted: int,
+    skipped: list[tuple[str, str]],
+    started: float,
+) -> None:
+    """INFO archive.rebuild_done at the end of a redacted rebuild: how large
+    the result is, how many members went in redacted and how many were left
+    out, and how long it took."""
+    try:
+        size: int | None = destination.stat().st_size
+    except OSError:
+        size = None
+    logger.info(
+        "archive.rebuild_done",
+        source_id=source.id,
+        path=virtual_path,
+        result_bytes=size,
+        redacted_members=redacted,
+        skipped_members=len(skipped),
+        seconds=round(time.monotonic() - started, 3),
+    )
+
+
 def _rebuild_redacted(
     source: Source,
     virtual_path: str,
@@ -2120,11 +2146,18 @@ def _rebuild_redacted(
             f"{virtual_path}/{name}", rules, case_insensitive=case_insensitive
         )
 
+    redacted = 0
+    started = time.monotonic()
+
     def transform(name: str, src: BinaryIO, out: Path) -> str | None:
-        return _redact_content(name, src, out, redaction, work_dir)
+        nonlocal redacted
+        reason = _redact_content(name, src, out, redaction, work_dir)
+        if reason is None:
+            redacted += 1
+        return reason
 
     try:
-        return rebuild_archive(
+        skipped = rebuild_archive(
             local_archive,
             filename,
             destination,
@@ -2133,6 +2166,8 @@ def _rebuild_redacted(
             transform=transform,
             skipped_list=_redaction_skipped_list,
         )
+        _log_rebuild_done(source, virtual_path, destination, redacted, skipped, started)
+        return skipped
     except (*_UNREADABLE_ERRORS, NotImplementedError) as exc:
         # NotImplementedError: a zip feature zipfile can't read, met
         # outside a single member (a member's own is listed instead).
@@ -2214,6 +2249,7 @@ def _rebuild_on_agent(
     agent left out is listed in REDACTION-SKIPPED.txt. The original never
     reaches the server. Raises _ArchiveUnreadable when the listing was cut,
     so the archive would be missing members without saying so."""
+    started = time.monotonic()
     members, cut = connector.call("list_archive", source, virtual_path, rules=rules)
     if cut:
         logger.warning(
@@ -2267,6 +2303,7 @@ def _rebuild_on_agent(
         write_archive(filename, destination, entries, skipped, _redaction_skipped_list)
     finally:
         shutil.rmtree(member_dir, ignore_errors=True)
+    _log_rebuild_done(source, virtual_path, destination, len(entries), skipped, started)
     return skipped
 
 
