@@ -224,7 +224,7 @@ Free space on that disk, raise `SCRATCH_MAX_GB`, or move `SCRATCH_DIR` to a disk
 
 ### 413: file too large
 
-- "This file is N MB, over this server's M MB limit (MAX_FETCH_MB)." (or "This folder is ..." for a folder ZIP): the file, or the folder's total, is over `MAX_FETCH_MB` (2048 by default).
+- "This file is N MB, over this server's M MB limit (MAX_FETCH_MB)." (or "This folder is ..." for a folder ZIP): the file, or the folder's total, is over `MAX_FETCH_MB` (2048 by default). Expanding a `.zip` or `.tar.gz` in the explorer reads it to list it, so an archive over the limit gets this answer when it is expanded as well as when it is opened or downloaded (a single file on a local source is read in place and has no such limit).
 - "File is too large once decompressed (MAX_DECOMPRESSED_MB)": a `.gz` file, or a member of a `.zip` or `.tar.gz`, decompresses to more than `MAX_DECOMPRESSED_MB` (2048 by default).
 
 Raise the limit only if scratch space (and memory, for WinRM and agent sources) can take it. For a big log, **Tail the end** in the viewer opens only its last part.

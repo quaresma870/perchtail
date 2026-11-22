@@ -918,6 +918,109 @@ def test_413_reports_file_size_and_limit(
     assert detail["limit_bytes"] == 8
 
 
+@pytest.mark.parametrize("archive", ["big.zip", "big.tar.gz", "big.tgz"])
+@pytest.mark.parametrize("all_members", [False, True])
+def test_browsing_an_archive_over_max_fetch_mb_is_the_413_opening_it_gives(
+    app_client, session, fake_sftp, scratch_store, monkeypatch, archive, all_members
+):
+    """F1 of the 0.7.0-rc.3 retest: expanding an archive over MAX_FETCH_MB
+    answered 500; it answers the 413 opening one of its members gives, with
+    the same body, and the audit log holds the same for both: nothing."""
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 8)
+    monkeypatch.setattr("app.api.archive.max_fetch_bytes", lambda: 8)
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    content = (
+        _zip_bytes({"app.log": "x" * 100})
+        if archive.endswith(".zip")
+        else _tar_gz_bytes({"app.log": "x" * 100})
+    )
+    fake_sftp.files[f"/var/log/appname/{archive}"] = content
+    params = {"path": archive, **({"all": "true"} if all_members else {})}
+
+    browsed = client.get(f"/sources/{source.id}/browse", params=params)
+    opened = client.get(f"/sources/{source.id}/open", params={"path": archive, "member": "app.log"})
+
+    assert browsed.status_code == 413
+    assert opened.status_code == 413
+    assert browsed.json() == opened.json()
+    assert browsed.json()["detail"]["error_code"] == "fetch_too_large"
+    assert browsed.json()["detail"]["size_bytes"] == len(content)
+    assert session.exec(select(AuditLog)).all() == []
+
+
+def test_browsing_a_local_archive_over_max_fetch_mb_lists_it_as_opening_reads_it(
+    app_client, session, scratch_store, tmp_path, monkeypatch
+):
+    """A local source reads its files in place, without MAX_FETCH_MB: an
+    archive over it is listed, as one of its members opens, rather than a
+    500."""
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 8)
+    monkeypatch.setattr("app.api.archive.max_fetch_bytes", lambda: 8)
+    app, client = app_client
+    (tmp_path / "big.zip").write_bytes(_zip_bytes({"app.log": "x" * 100}))
+    source = _make_local_source(session, tmp_path)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+
+    browsed = client.get(f"/sources/{source.id}/browse", params={"path": "big.zip"})
+    flat = client.get(f"/sources/{source.id}/browse", params={"path": "big.zip", "all": "true"})
+    opened = client.get(
+        f"/sources/{source.id}/open", params={"path": "big.zip", "member": "app.log"}
+    )
+
+    assert browsed.status_code == 200
+    assert [e["path"] for e in browsed.json()] == ["big.zip/app.log"]
+    assert [e["path"] for e in flat.json()] == ["big.zip/app.log"]
+    assert opened.status_code == 200
+
+
+@pytest.mark.parametrize("all_members", [False, True])
+def test_browsing_an_archive_the_agent_finds_over_a_limit_is_a_413(
+    app_client, session, scratch_store, monkeypatch, all_members
+):
+    """An archive listed on the agent's host (list_archive) that the agent
+    finds over MAX_FETCH_MB, or over MAX_DECOMPRESSED_MB once read: the
+    413s opening it gives, not a 500. The agent's command doesn't change."""
+    from app.archives import DecompressionLimitError
+    from app.collectors.base import FetchTooLargeError
+
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    raised: list[Exception] = [
+        FetchTooLargeError("over", size=100, limit=8),
+        DecompressionLimitError("over"),
+    ]
+
+    class _Connector:
+        def call(self, name, *args, **kwargs):
+            assert name == "list_archive"
+            raise raised.pop(0)
+
+    monkeypatch.setattr("app.api.archive._lists_on_agent", lambda session, source: True)
+    monkeypatch.setattr("app.api.archive._connector", lambda source: _Connector())
+    params = {"path": "big.zip", **({"all": "true"} if all_members else {})}
+
+    fetch = client.get(f"/sources/{source.id}/browse", params=params)
+    decompressed = client.get(f"/sources/{source.id}/browse", params=params)
+
+    assert fetch.status_code == 413
+    assert fetch.json()["detail"] == {
+        "message": "This file is 0.0 MB, over this server's 0 MB limit (MAX_FETCH_MB).",
+        "error_code": "fetch_too_large",
+        "size_bytes": 100,
+        "limit_bytes": 8,
+    }
+    assert decompressed.status_code == 413
+    assert decompressed.json()["detail"] == (
+        "File is too large once decompressed (MAX_DECOMPRESSED_MB)"
+    )
+
+
 def test_source_open_names_the_source_and_its_customer(app_client, session, fake_sftp):
     """#239: opening a source recorded only `source` and an id."""
     app, client = app_client
