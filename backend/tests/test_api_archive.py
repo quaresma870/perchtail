@@ -504,6 +504,116 @@ def test_open_local_gz_file_still_uses_scratch(app_client, session, scratch_stor
     assert "x-scratch-key" in response.headers
 
 
+# --- a read slower than SCRATCH_IDLE_SECONDS keeps its scratch file ----------
+
+IDLE_SECONDS = 0.2
+SLOW_CONTENT = b"first part of the file\n" + b"x" * 300_000 + b"\nlast line\n"
+
+
+@pytest.fixture()
+def slow_reads(fake_sftp, scratch_store, monkeypatch):
+    """SCRATCH_IDLE_SECONDS made short, and `slow_down(phase)`: the fetch
+    ("fetch", the connector half way through the file) or the response
+    ("send", before the scratch file is sent) stalls longer than that, and
+    the idle sweep runs then, as the scheduled job would."""
+    import time
+
+    import app.api.archive as archive_module
+
+    monkeypatch.setattr(get_settings(), "scratch_idle_seconds", IDLE_SECONDS)
+
+    def stall_and_sweep() -> None:
+        time.sleep(IDLE_SECONDS * 3)
+        scratch_store.sweep_idle(get_settings().scratch_idle_seconds)
+
+    class Controls:
+        sweeps_while_fetching = 0
+        sweeps_while_sending = 0
+
+        def sweep_while_fetching(self) -> None:
+            class SlowRemoteFile(_RemoteFile):
+                stalled = False
+
+                def read(self, size=-1):
+                    chunk = super().read(size)
+                    if chunk and not self.stalled:
+                        self.stalled = True
+                        stall_and_sweep()
+                        Controls.sweeps_while_fetching += 1
+                    return chunk
+
+            monkeypatch.setattr(
+                fake_sftp, "open", lambda path, mode="r": SlowRemoteFile(fake_sftp.files[path])
+            )
+
+        def sweep_while_sending(self) -> None:
+            original = archive_module._SnapshotFileResponse._handle_simple
+
+            async def handle(response, *args, **kwargs):
+                stall_and_sweep()
+                Controls.sweeps_while_sending += 1
+                await original(response, *args, **kwargs)
+
+            monkeypatch.setattr(archive_module._SnapshotFileResponse, "_handle_simple", handle)
+
+        def slow_down(self, phase: str) -> None:
+            {"fetch": self.sweep_while_fetching, "send": self.sweep_while_sending}[phase]()
+
+        def swept(self, phase: str) -> int:
+            return {"fetch": self.sweeps_while_fetching, "send": self.sweeps_while_sending}[phase]
+
+    fake_sftp.files["/var/log/appname/app.log"] = SLOW_CONTENT
+    return Controls()
+
+
+def _scratch_files_left(store) -> list[Path]:
+    return [p for p in store.root.rglob("*")]
+
+
+@pytest.mark.parametrize("phase", ["fetch", "send"])
+def test_an_open_slower_than_the_idle_time_keeps_its_scratch_file(
+    app_client, session, scratch_store, slow_reads, phase
+):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+    slow_reads.slow_down(phase)
+
+    response = client.get(f"/sources/{source.id}/open", params={"path": "app.log"})
+    assert response.status_code == 200
+    assert response.content == SLOW_CONTENT
+    assert slow_reads.swept(phase) == 1
+    key = response.headers["x-scratch-key"]
+    assert key in scratch_store._entries
+
+    assert client.post(f"/sources/{source.id}/close", json={"path": "app.log"}).status_code == 204
+    assert _scratch_files_left(scratch_store) == []
+    assert scratch_store._entries == {}
+
+
+@pytest.mark.parametrize("phase", ["fetch", "send"])
+def test_a_download_slower_than_the_idle_time_keeps_its_scratch_file(
+    app_client, session, scratch_store, slow_reads, phase
+):
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    _grant_view_and_download(session, user, source)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+    slow_reads.slow_down(phase)
+
+    with client.stream(
+        "GET", f"/sources/{source.id}/download", params={"path": "app.log"}
+    ) as response:
+        assert response.status_code == 200
+        body = b"".join(response.iter_bytes())
+    assert body == SLOW_CONTENT
+    assert slow_reads.swept(phase) == 1
+    assert _scratch_files_left(scratch_store) == []
+    assert scratch_store._entries == {}
+
+
 def test_download_zip_bundles_only_rule_visible_files(app_client, session, tmp_path):
     app, client = app_client
     (tmp_path / "app.log").write_text("hello")

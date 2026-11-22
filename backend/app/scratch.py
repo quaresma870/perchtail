@@ -1,4 +1,6 @@
+import glob
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -23,6 +25,11 @@ class ScratchEntry:
     # must not truncate a file an earlier response is still streaming.
     paths: list[Path] = field(default_factory=list)
     refcount: int = 0
+    # Operations under way on the entry's files (a fetch, redaction,
+    # extraction, or a response still being sent): apart from refcount,
+    # which a viewer that never closes keeps up. A busy entry is never
+    # deleted, by the idle sweep, the size guard or a release.
+    busy: int = 0
     last_accessed: float = field(default_factory=time.monotonic)
 
     def size(self) -> int:
@@ -55,12 +62,16 @@ class ScratchStore:
                 hint="couldn't make it readable by PerchTail's user only; check its owner",
             )
 
-    def acquire(self, key: str) -> Path:
+    def acquire(self, key: str, *, busy: bool = False) -> Path:
         """Marks key as in-use (refcount += 1) and returns a new, unique
         scratch path for this fetch. Every open is a fresh fetch — the
         caller writes the file's content into this path itself. Concurrent
         opens of the same file get separate paths, so one fetch never
-        rewrites bytes another response is still serving."""
+        rewrites bytes another response is still serving.
+
+        With `busy`, the entry is also marked busy from this moment, so
+        nothing deletes it while the caller writes and serves the file; the
+        caller ends that with end_busy, however the operation ends."""
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -72,18 +83,37 @@ class ScratchStore:
             os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
             entry.paths.append(path)
             entry.refcount += 1
+            if busy:
+                entry.busy += 1
             entry.last_accessed = time.monotonic()
             return path
 
-    def release(self, key: str) -> None:
-        """Reference-counted purge — delete only when the last viewer closes
-        it."""
+    def end_busy(self, key: str) -> None:
+        """Ends one operation acquire(busy=True) started. Idleness counts
+        from now, and an entry every reference has already released is
+        deleted."""
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
+                self._delete_strays(key)
+                return
+            entry.busy = max(0, entry.busy - 1)
+            entry.last_accessed = time.monotonic()
+            if entry.refcount == 0 and entry.busy == 0:
+                self._delete(entry)
+
+    def release(self, key: str) -> None:
+        """Reference-counted purge — delete only when the last viewer closes
+        it, or, while an operation on it is under way, when that ends
+        (end_busy). A key the store no longer knows leaves no file of its
+        own behind either."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                self._delete_strays(key)
                 return
             entry.refcount = max(0, entry.refcount - 1)
-            if entry.refcount == 0:
+            if entry.refcount == 0 and entry.busy == 0:
                 self._delete(entry)
 
     def touch(self, key: str) -> None:
@@ -96,15 +126,41 @@ class ScratchStore:
         for path in entry.paths:
             path.unlink(missing_ok=True)
         del self._entries[entry.key]
+        self._delete_strays(entry.key)
         logger.info("scratch.purge", key=entry.key)
+
+    def _delete_strays(self, key: str) -> None:
+        """Deletes the files of `key` (acquire's `<key>-<hex>` and the
+        working copies named after them) that no entry tracks any more, so
+        an operation that outlived its entry leaves no orphan in scratch.
+        Called with the lock held, for a key with no entry."""
+        pattern = re.compile(re.escape(key) + r"-[0-9a-f]{32}(\..*)?")
+        try:
+            candidates = list(self.root.glob(glob.escape(key) + "-*"))
+        except OSError:
+            return
+        for path in candidates:
+            if pattern.fullmatch(path.name) and not path.is_dir():
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("scratch.stray_not_deleted", key=key, error=str(exc))
+                    continue
+                logger.warning("scratch.stray_deleted", key=key)
 
     def sweep_idle(self, idle_seconds: float) -> int:
         """Backstop for crashed/disconnected clients that never send a close
         signal — deletes anything untouched past idle_seconds, regardless of
-        refcount, since a vanished client isn't coming back to release it."""
+        refcount, since a vanished client isn't coming back to release it.
+        Never an entry an operation is still using (busy): idleness counts
+        from the end of its last operation."""
         now = time.monotonic()
         with self._lock:
-            stale = [e for e in self._entries.values() if now - e.last_accessed > idle_seconds]
+            stale = [
+                e
+                for e in self._entries.values()
+                if e.busy == 0 and now - e.last_accessed > idle_seconds
+            ]
             for entry in stale:
                 self._delete(entry)
         if stale:
@@ -149,8 +205,9 @@ class ScratchStore:
         """A safety valve for load, not a caching strategy: evicts the
         oldest zero-reference entries first once total scratch usage passes
         max_bytes (less `reserve`, room wanted for a fetch about to start).
-        Never touches an entry with refcount > 0, so a file a viewer
-        currently has open is never pulled out from under them."""
+        Never touches an entry with refcount > 0 or one an operation is
+        still using (busy), so a file a viewer currently has open is never
+        pulled out from under them."""
         target = self.max_bytes - max(reserve, 0)
         with self._lock:
             # Disk usage counts what isn't tracked here (a folder ZIP's
@@ -161,7 +218,7 @@ class ScratchStore:
                 return 0
 
             candidates = sorted(
-                (e for e in self._entries.values() if e.refcount == 0),
+                (e for e in self._entries.values() if e.refcount == 0 and e.busy == 0),
                 key=lambda e: e.last_accessed,
             )
             evicted = 0

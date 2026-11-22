@@ -40,7 +40,7 @@ The database is `DATA_DIR/perchtail.db` (SQLite) unless `DATABASE_URL` points el
 
 `SCRATCH_DIR` holds the content of the files users open, follow or download, while they do. Its folder is readable by PerchTail's user only, and each file in it is created readable by that user only. When redaction applies, only the redacted copy stays there: the fetched original is deleted before the answer is sent, and a push agent of 0.7.0 or later sends only redacted content.
 
-A scratch file is deleted when the viewer closes it and no one else holds it open, when it has gone unused for `SCRATCH_IDLE_SECONDS` (5 minutes), when scratch is over `SCRATCH_MAX_GB` (oldest unused first), and at every start. Plain files of local sources are read in place and not copied to scratch, except their redacted copy when redaction applies; their `.gz` files and archive members are extracted there like any other source's. Scratch isn't encrypted: keep `SCRATCH_DIR` on a disk only the host can read, or in memory.
+A scratch file is deleted when the viewer closes it and no one else holds it open, when it has gone unused for `SCRATCH_IDLE_SECONDS` (5 minutes), when scratch is over `SCRATCH_MAX_GB` (oldest unused first), and at every start. A file still being fetched, redacted or sent is never deleted by the idle time or the size limit: its idle time counts from when that ends. Plain files of local sources are read in place and not copied to scratch, except their redacted copy when redaction applies; their `.gz` files and archive members are extracted there like any other source's. Scratch isn't encrypted: keep `SCRATCH_DIR` on a disk only the host can read, or in memory.
 
 ## Application logs
 

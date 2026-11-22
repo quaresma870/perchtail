@@ -141,6 +141,89 @@ def test_size_accounting_counts_every_fetch_of_a_key(tmp_path):
     assert store.total_bytes() == 30
 
 
+# --- busy entries: an operation under way is never swept ---------------------
+
+
+def test_the_idle_sweep_never_deletes_a_busy_entry(tmp_path):
+    store = _store(tmp_path)
+    path = store.acquire("key1", busy=True)
+    path.write_text("being fetched")
+    store._entries["key1"].last_accessed = time.monotonic() - 1000
+
+    assert store.sweep_idle(idle_seconds=0) == 0
+    assert path.exists()
+
+    # Idleness counts from the end of the operation; past that, it goes.
+    store.end_busy("key1")
+    assert store._entries["key1"].last_accessed > time.monotonic() - 1000
+    assert store.sweep_idle(idle_seconds=0) == 1
+    assert not path.exists()
+    assert list(store.root.iterdir()) == []
+
+
+def test_a_write_after_the_entry_was_swept_leaves_no_orphan(tmp_path):
+    # An operation that outlived its entry (swept half way) and wrote its
+    # file again: releasing the key the store no longer knows still deletes it.
+    store = _store(tmp_path)
+    path = store.acquire("key1")
+    path.write_text("first part")
+    store.sweep_idle(idle_seconds=0)
+    assert not path.exists()
+    path.write_text("first part, then the rest")
+
+    store.release("key1")
+    assert list(store.root.iterdir()) == []
+
+
+def test_ending_an_operation_on_a_swept_entry_leaves_no_orphan(tmp_path):
+    store = _store(tmp_path)
+    path = store.acquire("key1")
+    store.sweep_idle(idle_seconds=0)
+    path.write_text("written after the sweep")
+    path.with_name(f"{path.name}.source").write_text("working copy")
+
+    store.end_busy("key1")
+    assert list(store.root.iterdir()) == []
+
+
+def test_releasing_a_busy_entry_deletes_it_when_the_operation_ends(tmp_path):
+    store = _store(tmp_path)
+    path = store.acquire("key1", busy=True)
+    path.write_text("still being sent")
+
+    store.release("key1")  # the viewer closed it while it was being sent
+    assert path.exists()
+    store.end_busy("key1")
+    assert not path.exists()
+    assert "key1" not in store._entries
+
+
+def test_the_size_guard_never_evicts_a_busy_entry(tmp_path):
+    store = _store(tmp_path, max_bytes=5)
+    path = store.acquire("a", busy=True)
+    path.write_bytes(b"x" * 100)
+    store._entries["a"].refcount = 0  # released while still being sent
+    store._entries["a"].last_accessed = time.monotonic() - 1000
+
+    assert store.enforce_size_guard() == 0
+    assert path.exists()
+
+
+def test_strays_of_a_key_dont_reach_other_files(tmp_path):
+    store = _store(tmp_path)
+    other = store.acquire("key12")
+    other.write_text("another key")
+    unrelated = store.root / "perchtail-zip-1"
+    unrelated.mkdir()
+    named_alike = store.root / "key1-not-a-scratch-file"
+    named_alike.write_text("x")
+
+    store.release("key1")  # unknown key
+    assert other.exists()
+    assert unrelated.exists()
+    assert named_alike.exists()
+
+
 # --- #329: leftovers and usage on disk ----------------------------------------
 
 
