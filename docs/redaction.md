@@ -105,7 +105,8 @@ While **Redact downloads too** is on:
 - a whole `.zip` or `.tar.gz` is rebuilt in the same format, without the files the visibility rules hide and with every other file redacted; a `.gz` file inside is decompressed, redacted and compressed again under the same name; an archive that can't be read is refused (403);
 - a folder ZIP holds every file redacted, its `.gz` files and archives treated the same way;
 - what can't be redacted is left out and listed, with the reason, in `REDACTION-SKIPPED.txt` inside the archive or ZIP, including a file whose content turns UTF-32 part way;
-- every redacted download carries the `X-PerchTail-Redacted: 1` header and, with **Say so in the file name**, `.redacted` in its name.
+- every redacted download carries the `X-PerchTail-Redacted: 1` header and, with **Say so in the file name**, `.redacted` in its name;
+- each archive rebuilt redacted, downloaded whole or inside a folder ZIP, on the server or from what a push agent redacted, logs `archive.rebuild_done` (INFO) with the source (`source_id`), the archive's `path`, the size of the rebuilt archive (`result_bytes`), how many files went in redacted (`redacted_members`) and how many were left out (`skipped_members`), and how long it took (`seconds`).
 
 [configuration.md](configuration.md#redaction) has the details of each case.
 

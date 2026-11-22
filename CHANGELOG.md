@@ -8,6 +8,9 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Changed
+- Each archive rebuilt for a redacted download (downloaded whole or inside a folder ZIP, on the server or from what a push agent redacted) now logs `archive.rebuild_done` (INFO) with the source, the archive's path, the size of the rebuilt archive, how many files went in redacted and how many were left out, and how long it took.
+
 ### Fixed
 - Expanding a `.zip`, `.tar.gz` or `.tgz` in the explorer that is over `MAX_FETCH_MB` (or, listed on a push agent, over `MAX_DECOMPRESSED_MB` once read) answered HTTP 500; it now gets the same HTTP 413 and message as opening or downloading it, with and without the flat listing of all members. Any read over these limits that an endpoint doesn't refuse itself also gets that 413 rather than a 500.
 - On a push-agent source with redaction, an archive or `.gz` file over `MAX_FETCH_MB` was refused with the `MAX_DECOMPRESSED_MB` message when both limits had the same value (the default). The agent now says which limit was passed, and the server names that one; with an agent older than 0.7.0 the server still tells them apart by their size. Upgrade the agents for the right message.

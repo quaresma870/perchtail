@@ -1009,3 +1009,127 @@ def test_a_gz_member_that_turns_utf32_part_way_is_refused(session, downloads, st
     assert denied.event_metadata["reason"] == "redaction_unsupported_encoding"
     assert _audits(session, "file.download") == []
     assert _scratch_files(store) == []
+
+
+# -- a member over MAX_DECOMPRESSED_MB (F2 of the 0.7.0-rc.3 retest) -------------
+
+# Over 1 MB once decompressed, a few KB compressed.
+_OVER_THE_LIMIT = SAMPLE_BYTES * (2 * 1024**2 // len(SAMPLE_BYTES) + 1)
+
+
+def _archive_members(response, name: str) -> dict[str, bytes]:
+    """The members of the archive a download sent, read with zipfile or
+    tarfile, after checking its body is as long as its Content-Length."""
+    assert response.content
+    assert int(response.headers["content-length"]) == len(response.content)
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+            assert zf.testzip() is None
+            return {n: zf.read(n) for n in zf.namelist()}
+    with tarfile.open(fileobj=io.BytesIO(response.content), mode="r:gz") as tf:
+        return {m.name: tf.extractfile(m).read() for m in tf.getmembers()}
+
+
+def _ssh_source(session, monkeypatch, files: dict[str, bytes]) -> Source:
+    """An SSH source over /var/log showing everything, its SFTP faked with
+    `files` (name under /var/log -> content)."""
+    remote = Source(
+        name="ssh",
+        protocol=Protocol.ssh,
+        host="app01.example.com",
+        base_path="/var/log",
+        credential_ref="encrypted",
+    )
+    session.add(remote)
+    session.commit()
+    session.add(
+        Rule(
+            source_id=remote.id,
+            order=0,
+            type=RuleType.include,
+            pattern="**/*",
+            pattern_kind=PatternKind.glob,
+        )
+    )
+    session.commit()
+    fake = _FakeSSH({})
+    fake._sftp.files = {f"/var/log/{name}": content for name, content in files.items()}
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: fake)
+    return remote
+
+
+@pytest.mark.parametrize("name, build", [("bundle.zip", _zip_bytes), ("logs.tgz", _tar_gz_bytes)])
+@pytest.mark.parametrize("with_small_member", [False, True])
+@pytest.mark.parametrize("over", ["local", "ssh"])
+def test_a_member_over_the_decompressed_limit_is_left_out_and_listed(
+    session, downloads, store, monkeypatch, name, build, with_small_member, over
+):
+    """A whole archive whose member is over MAX_DECOMPRESSED_MB once
+    decompressed comes back rebuilt without it, listed in
+    REDACTION-SKIPPED.txt, whether it is the only member or not."""
+    _, client, source, folder = downloads
+    monkeypatch.setattr(get_settings(), "max_decompressed_mb", 1)
+    members = {"big.log": _OVER_THE_LIMIT}
+    if with_small_member:
+        members["app.log"] = SAMPLE_BYTES
+    if over == "ssh":
+        source = _ssh_source(session, monkeypatch, {name: build(members)})
+    else:
+        (folder / name).write_bytes(build(members))
+
+    response = _download(client, source, name)
+
+    assert response.status_code == 200, response.text
+    assert response.headers["x-perchtail-redacted"] == "1"
+    received = _archive_members(response, name)
+    expected = {"REDACTION-SKIPPED.txt"} | ({"app.log"} if with_small_member else set())
+    assert set(received) == expected
+    assert "big.log: too large once decompressed (MAX_DECOMPRESSED_MB)" in (
+        received["REDACTION-SKIPPED.txt"].decode()
+    )
+    if with_small_member:
+        assert received["app.log"] == _redacted(SAMPLE_BYTES)
+    assert _audit(session, "file.download").event_metadata["skipped_count"] == 1
+    assert _scratch_files(store) == []
+
+
+# -- archive.rebuild_done --------------------------------------------------------
+
+
+def record_archive_logs(monkeypatch) -> list[dict]:
+    """What app.api.archive logs from now on, each as its event, level and
+    fields (structlog caches its loggers, so capture_logs can miss them)."""
+    logged: list[dict] = []
+    real_logger = archive_module.logger
+
+    class Recorder:
+        def __getattr__(self, level):
+            def log(event, **fields):
+                logged.append({"event": event, "log_level": level, **fields})
+                getattr(real_logger, level)(event, **fields)
+
+            return log
+
+    monkeypatch.setattr(archive_module, "logger", Recorder())
+    return logged
+
+
+@pytest.mark.parametrize("name, build", [("bundle.zip", _zip_bytes), ("logs.tgz", _tar_gz_bytes)])
+def test_a_redacted_rebuild_logs_what_it_made(session, downloads, monkeypatch, name, build):
+    """archive.rebuild_done (INFO) at the end of each redacted rebuild, with
+    the result's size, the members redacted and left out, and how long it
+    took."""
+    _, client, source, folder = downloads
+    monkeypatch.setattr(get_settings(), "max_decompressed_mb", 1)
+    (folder / name).write_bytes(build({"app.log": SAMPLE_BYTES, "big.log": _OVER_THE_LIMIT}))
+
+    logs = record_archive_logs(monkeypatch)
+    response = _download(client, source, name)
+
+    assert response.status_code == 200, response.text
+    (entry,) = [e for e in logs if e["event"] == "archive.rebuild_done"]
+    assert entry["log_level"] == "info"
+    assert (entry["source_id"], entry["path"]) == (source.id, name)
+    assert entry["result_bytes"] == len(response.content)
+    assert (entry["redacted_members"], entry["skipped_members"]) == (1, 1)
+    assert entry["seconds"] >= 0

@@ -1111,6 +1111,63 @@ def test_a_member_the_agent_cant_read_is_left_out_and_listed(
     assert _scratch_files(scratch_store) == []
 
 
+@pytest.mark.parametrize("name, build", [("logs.zip", _zip_bytes), ("logs.tar.gz", _tar_gz_bytes)])
+@pytest.mark.parametrize("with_small_member", [False, True])
+def test_a_member_over_the_decompressed_limit_is_listed_even_alone(
+    session, agent_source, scratch_store, monkeypatch, name, build, with_small_member
+):
+    """F2 of the 0.7.0-rc.3 retest: a whole archive whose only member (or
+    one of two) is over MAX_DECOMPRESSED_MB comes back as a valid archive
+    holding REDACTION-SKIPPED.txt (and the small member, redacted), as long
+    as its Content-Length."""
+    client, source, agent = agent_source
+    monkeypatch.setattr(agent_collector, "_max_decompressed_bytes", lambda: 4096)
+    members = {"big.log": b"a line of the log\n" * 1000}
+    if with_small_member:
+        members["app.log"] = SAMPLE_BYTES
+    agent.files[name] = build(members)
+
+    response = client.get(f"/sources/{source.id}/download", params={"path": name})
+
+    assert response.status_code == 200, response.text
+    assert response.content
+    assert int(response.headers["content-length"]) == len(response.content)
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+            received = {n: zf.read(n) for n in zf.namelist()}
+    else:
+        with tarfile.open(fileobj=io.BytesIO(response.content), mode="r:gz") as tf:
+            received = {m.name: tf.extractfile(m).read() for m in tf.getmembers()}
+    expected = {"REDACTION-SKIPPED.txt"} | ({"app.log"} if with_small_member else set())
+    assert set(received) == expected
+    assert "big.log: too large once decompressed" in received["REDACTION-SKIPPED.txt"].decode()
+    if with_small_member:
+        assert received["app.log"] == _server_redacted(SAMPLE_BYTES, output_encoding="source")
+    assert _audit(session, "file.download").event_metadata["skipped_count"] == 1
+    assert _scratch_files(scratch_store) == []
+
+
+def test_a_rebuild_on_the_agent_logs_what_it_made(session, agent_source, monkeypatch):
+    """archive.rebuild_done after an archive is rebuilt from what the agent
+    sent redacted."""
+    from tests.test_redaction_downloads import record_archive_logs
+
+    client, source, agent = agent_source
+    monkeypatch.setattr(agent_collector, "_max_decompressed_bytes", lambda: 4096)
+    agent.files["logs.zip"] = _zip_bytes(
+        {"app.log": SAMPLE_BYTES, "big.log": b"a line of the log\n" * 1000}
+    )
+
+    logs = record_archive_logs(monkeypatch)
+    response = client.get(f"/sources/{source.id}/download", params={"path": "logs.zip"})
+
+    assert response.status_code == 200, response.text
+    (entry,) = [e for e in logs if e["event"] == "archive.rebuild_done"]
+    assert (entry["source_id"], entry["path"]) == (source.id, "logs.zip")
+    assert entry["result_bytes"] == len(response.content)
+    assert (entry["redacted_members"], entry["skipped_members"]) == (1, 1)
+
+
 def test_a_download_with_redaction_downloads_off_is_the_original(session, agent_source):
     """redaction_downloads off: the download is the original, as for any
     source, while the viewer stays redacted."""
