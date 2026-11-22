@@ -23,13 +23,14 @@ from app.collectors.base import (
     SourceHostKeyError,
     SourceLockedError,
     SourceMemberUnreadableError,
+    SourceNotAFileError,
     SourceNotFoundError,
     SourcePermissionError,
     SourceTLSError,
     SourceUnreachableError,
     TargetCheck,
 )
-from app.rules import is_visible, rules_case_insensitive
+from app.rules import is_dir_visible, is_visible, rules_case_insensitive
 from app.scratch import ScratchFullError
 
 Translator = Callable[[BaseException], SourceError | None]
@@ -41,6 +42,7 @@ _NT_BAD_NETWORK_NAME = 0xC00000CC
 _NT_ACCESS_DENIED = 0xC0000022
 _NT_SHARING_VIOLATION = 0xC0000043
 _NT_LOGON_FAILURE = 0xC000006D
+_NT_FILE_IS_A_DIRECTORY = 0xC00000BA
 
 
 # OpenSSL's X509_V_ERR_* codes, as ssl.SSLCertVerificationError.verify_code.
@@ -104,6 +106,13 @@ def _common(exc: BaseException) -> SourceError | None:
         return _tls_error(exc)
     if isinstance(exc, PermissionError):
         return SourcePermissionError(text)
+    # A folder opened as a file: the connectors check first, so a link to a
+    # folder has its rules checked on the folder (base.refuse_directory);
+    # this only catches one that turned into a folder since.
+    if isinstance(exc, IsADirectoryError) or (
+        isinstance(exc, OSError) and exc.errno == errno.EISDIR
+    ):
+        return SourceNotAFileError(text)
     if isinstance(exc, FileNotFoundError | NotADirectoryError):
         return SourceNotFoundError(text)
     if isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR):
@@ -159,6 +168,8 @@ def translate_smb(exc: BaseException) -> SourceError | None:
             public_message="That share doesn't exist on the server. For SMB, Base path is a "
             "share name (e.g. AppLogs), not a drive path.",
         )
+    if status == _NT_FILE_IS_A_DIRECTORY:
+        return SourceNotAFileError(text)
     if status == _NT_ACCESS_DENIED:
         return SourcePermissionError(text)
     if status == _NT_SHARING_VIOLATION:
@@ -230,6 +241,20 @@ def translate_winrm(exc: BaseException) -> SourceError | None:
     return _common(exc)
 
 
+# What an agent before the is_directory code (0.7.0-rc.3 and earlier) ends
+# its error with when the path to read is a folder.
+_OLD_AGENT_IS_A_DIRECTORY = ": is a directory"
+
+
+def is_directory_answer(exc) -> bool:
+    """Whether an agent's AgentCommandError says the path to read is a
+    folder: the code is_directory, or, from an older agent that sends no
+    code, a message ending in ": is a directory"."""
+    if exc.code == "is_directory":
+        return True
+    return exc.code is None and str(exc).endswith(_OLD_AGENT_IS_A_DIRECTORY)
+
+
 def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | None:
     from app.agent_registry import (
         AgentCommandError,
@@ -257,6 +282,11 @@ def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | 
         if exc.code == "member_encrypted":
             # A zip member stored encrypted, which the agent can't read.
             return SourceMemberUnreadableError(text, reason=SKIP_ENCRYPTED)
+        if is_directory_answer(exc):
+            # A folder read as a file. Content commands go through
+            # agent._following_links, which checks the rules on a link's
+            # target as a folder first.
+            return SourceNotAFileError(text)
         lowered = text.lower()
         # Go's os.Root refuses a path through a symlink that leaves the base
         # ("openat x: path escapes from parent"), and the agent refuses
@@ -328,13 +358,18 @@ def target_check_for(source, rules, label: str = "") -> TargetCheck:
     """The target_check (collectors.base.require_target) for a read on
     `source` with its visibility `rules`: where a link leads must be a file
     the rules show, on its virtual path (`label/...` inside a root of a
-    source with several). None, so no link is followed, without rules."""
+    source with several), or with `is_dir`, a folder they show (the read is
+    then refused as not a file, collectors.base.refuse_directory). None, so
+    no link is followed, without rules."""
     if rules is None:
         return None
     case_insensitive = rules_case_insensitive(source)
     prefix = f"{label}/" if label else ""
 
-    def check(real: str) -> bool:
+    def check(real: str, is_dir: bool = False) -> bool:
+        if is_dir:
+            virtual = f"{label}/{real}" if label and real else (label or real)
+            return is_dir_visible(virtual, rules, case_insensitive=case_insensitive)
         return is_visible(prefix + real, rules, case_insensitive=case_insensitive)
 
     return check

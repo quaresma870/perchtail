@@ -13,7 +13,7 @@ from winrm.protocol import Protocol as WinRMProtocol
 
 from app.collectors import base as collector_base
 from app.collectors import winrm_jea
-from app.collectors.base import DirEntry, PathOutsideBaseError
+from app.collectors.base import DirEntry, PathOutsideBaseError, SourceNotAFileError
 from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
@@ -153,6 +153,7 @@ def with_envelope_fallback(source: Source, attempt, envelope_size: int = ENVELOP
 _OUTSIDE_BASE = "PERCHTAIL_OUTSIDE_BASE"
 _NOT_A_DIRECTORY = "PERCHTAIL_NOT_A_DIRECTORY"
 _NOT_FOUND = "PERCHTAIL_NOT_FOUND"
+_IS_A_DIRECTORY = "PERCHTAIL_IS_A_DIRECTORY"
 _END = "PERCHTAIL_END"
 
 
@@ -161,6 +162,10 @@ def _raise_for_marker(out: str) -> None:
         raise PathOutsideBaseError("path outside the base path")
     if _NOT_A_DIRECTORY in out:
         raise NotADirectoryError("not a directory")
+    if _IS_A_DIRECTORY in out:
+        # A folder to read as a file. WinRM refuses every link, so there is
+        # no target to check the rules on.
+        raise SourceNotAFileError("is a directory")
     if _NOT_FOUND in out:
         raise FileNotFoundError("not found")
 
@@ -190,8 +195,13 @@ def _require_file(path: str) -> str:
     """PowerShell that stops the script when `path` (already quoted) isn't
     a file. Without it a missing file failed only with non-terminating
     errors, the script still exited 0 with no output, and the file read as
-    empty instead of "not found" (#272, found in the 0.6.0-rc.1 lab)."""
-    return f"if (-not [IO.File]::Exists({path})) {{ Write-Output '{_NOT_FOUND}'; exit 5 }}; "
+    empty instead of "not found" (#272, found in the 0.6.0-rc.1 lab). A
+    folder is said apart (SourceNotAFileError), so its refusal is audited
+    as one, though answered the same way."""
+    return (
+        f"if ([IO.Directory]::Exists({path})) {{ Write-Output '{_IS_A_DIRECTORY}'; exit 6 }}; "
+        f"if (-not [IO.File]::Exists({path})) {{ Write-Output '{_NOT_FOUND}'; exit 5 }}; "
+    )
 
 
 def _containment_guard(source: Source, relative_path: str) -> str:

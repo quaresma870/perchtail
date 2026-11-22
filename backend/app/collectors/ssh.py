@@ -17,6 +17,7 @@ from app.collectors.base import (
     LinkTargetHiddenError,
     PathOutsideBaseError,
     TargetCheck,
+    refuse_directory,
     require_target,
 )
 from app.config import get_settings
@@ -275,6 +276,15 @@ def _resolve_contained(
     rules hide either. The caller must then use the returned real path, not
     the joined one, so the link can't be swapped between this check and
     the read."""
+    real, real_relative = _resolve_real(sftp, source, relative_path)
+    require_target(relative_path, real_relative, target_check)
+    return real
+
+
+def _resolve_real(sftp: paramiko.SFTPClient, source: Source, relative_path: str) -> tuple[str, str]:
+    """The real path of `relative_path` on the server and where it is
+    relative to the base path, refusing one outside the base path
+    (_resolve_contained)."""
     root = sftp.normalize(source.base_path)
     joined = posixpath.join(source.base_path, relative_path) if relative_path else source.base_path
     try:
@@ -288,8 +298,32 @@ def _resolve_contained(
             path=relative_path,
         )
         raise LinkTargetHiddenError(relative_path)
-    require_target(relative_path, _relative_to_root(real, root), target_check)
-    return real
+    return real, _relative_to_root(real, root)
+
+
+def _resolve_file(
+    sftp: paramiko.SFTPClient,
+    source: Source,
+    relative_path: str,
+    target_check: TargetCheck = None,
+) -> tuple[str, paramiko.SFTPAttributes]:
+    """_resolve_contained for a read, with the real path's attributes: a
+    folder, or a link to one, is refused before it is opened
+    (collectors.base.refuse_directory), with the rules checked on a link's
+    target as a folder. SFTP opens a folder without complaint and only
+    fails reading it. When the target can't be stat'ed (a dangling link),
+    the rules are checked on it before the error goes out, so a link to a
+    hidden path is still refused as one."""
+    real, real_relative = _resolve_real(sftp, source, relative_path)
+    try:
+        attributes = sftp.stat(real)
+    except OSError:
+        require_target(relative_path, real_relative, target_check)
+        raise
+    if stat_module.S_ISDIR(attributes.st_mode or 0):
+        refuse_directory(relative_path, real_relative, target_check)
+    require_target(relative_path, real_relative, target_check)
+    return real, attributes
 
 
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:
@@ -373,8 +407,8 @@ def fetch_file(
     try:
         sftp = _open_sftp(client)
         try:
-            remote_path = _resolve_contained(sftp, source, relative_path, target_check)
-            size = sftp.stat(remote_path).st_size or 0
+            remote_path, attributes = _resolve_file(sftp, source, relative_path, target_check)
+            size = attributes.st_size or 0
             if size > limit:
                 raise collector_base.too_large(size, limit)
             with sftp.open(remote_path, "rb") as remote:
@@ -415,7 +449,7 @@ def read_range(
     try:
         sftp = _open_sftp(client)
         try:
-            remote_path = _resolve_contained(sftp, source, relative_path, target_check)
+            remote_path, _ = _resolve_file(sftp, source, relative_path, target_check)
             with sftp.open(remote_path, "rb") as f:
                 size = f.stat().st_size or 0
                 return collector_base.read_range_from(f, size, offset, length, head)

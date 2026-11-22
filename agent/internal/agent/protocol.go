@@ -89,7 +89,8 @@ type Command struct {
 	// Set on "fetch", "read_range", "list_archive" and "fetch_archive"
 	// (FeatureLinks): where Path really is, relative to the base path, as
 	// the server checked its rules on it; empty means Path itself. Read only
-	// when it is there, refused with a "link_target" error otherwise.
+	// when it is there, refused with a "link_target" error otherwise; a
+	// folder is refused with an "is_directory" error either way.
 	ExpectReal string `json:"expect_real,omitempty"`
 	// Set on "fetch", "read_range" and "fetch_archive" by a server that
 	// takes Progress messages (FeatureProgress): while the command runs, the
@@ -299,7 +300,12 @@ type RedactedReadRangeResult struct {
 // can't run, when one can't. Code "link_target" (FeatureLinks) refuses a
 // path that isn't where ExpectReal said, before anything is read: Real is
 // where it is, relative to the base path, or Outside says it leads out of
-// the base path. With code "too_large", Limit says which limit was passed:
+// the base path. Code "is_directory" refuses a path that is a folder, or a
+// link to one, before anything is read, whatever ExpectReal said: Real is
+// where it is, relative to the base path ("" for the base itself), so the
+// server checks its rules on it as a folder; agents before it answered
+// with no code and an Error ending in ": is a directory", once the path
+// was where ExpectReal said. With code "too_large", Limit says which limit was passed:
 // "fetch" (max_bytes, the file as stored) or "decompressed"
 // (max_decompressed, what extracting or decompressing produced); servers
 // before it guess it from the number in Error.

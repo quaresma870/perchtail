@@ -10,8 +10,8 @@ import time
 import zipfile
 import zlib
 from collections import OrderedDict
-from collections.abc import Callable, Coroutine, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
@@ -59,6 +59,7 @@ from app.collectors.agent import (
 )
 from app.collectors.base import (
     LINK_TARGET_HIDDEN,
+    NOT_A_FILE,
     RANGE_MAX_BYTES,
     DirEntry,
     FetchTooLargeError,
@@ -66,6 +67,7 @@ from app.collectors.base import (
     SourceArchiveUnreadableError,
     SourceError,
     SourceMemberUnreadableError,
+    SourceNotAFileError,
     SourceNotFoundError,
     SourcePermissionError,
     SourceUnreachableError,
@@ -1104,8 +1106,9 @@ def _resolve_redacted(
         destination = store.acquire(key, busy=True)
         fetched = destination.with_name(f"{destination.name}.source")
         plain = destination.with_name(f"{destination.name}.plain")
+        in_place = source.protocol == Protocol.local and not complete
         try:
-            if source.protocol == Protocol.local and not complete:
+            if in_place:
                 original = _local_plain_path(source, path, rules)
                 served_filename = filename
             else:
@@ -1118,7 +1121,8 @@ def _resolve_redacted(
                     fetched.unlink()
                     original = plain
                     served_filename = served_filename[: -len(".gz")]
-            redacted = _redact_file(original, destination, redaction, final=complete)
+            with _local_file_gone(path, in_place):
+                redacted = _redact_file(original, destination, redaction, final=complete)
         except FetchTooLargeError as exc:
             _drop_scratch(key)
             raise _fetch_too_large(exc) from exc
@@ -1209,13 +1213,37 @@ def _decompress_gzip_member(compressed: Path, destination: Path) -> None:
 
 def _local_plain_path(source: Source, path: str, rules: list[Rule]) -> Path:
     """A local file served in place, followed through a link only when the
-    rules show where it leads (collectors.base.require_target)."""
+    rules show where it leads (collectors.base.require_target). A folder, or
+    a link to one, is refused (collectors.base.refuse_directory). A file
+    that isn't there answers as on every other connector
+    (SourceNotFoundError, 404), once the rules allowed the path and where
+    it leads; one gone before it is read, through _local_file_gone."""
     _require_local_source_allowed(source)
     if source_roots.is_multi_root(source):
         rooted, inner = source_roots.split(source, path)
         label = path.partition("/")[0]
-        return local_collector.resolve_path(rooted, inner, target_check_for(source, rules, label))
-    return local_collector.resolve_path(source, path, target_check_for(source, rules))
+        resolved = local_collector.resolve_file(
+            rooted, inner, target_check_for(source, rules, label)
+        )
+    else:
+        resolved = local_collector.resolve_file(source, path, target_check_for(source, rules))
+    if not resolved.exists():
+        raise SourceNotFoundError(path)
+    return resolved
+
+
+@contextmanager
+def _local_file_gone(path: str, in_place: bool = True) -> Iterator[None]:
+    """A local file served in place (_local_plain_path) that is gone by the
+    time it is read answers as one that isn't there (SourceNotFoundError,
+    404), never 500. With `in_place` false (the content is in scratch), the
+    error goes out as it is."""
+    try:
+        yield
+    except FileNotFoundError as exc:
+        if not in_place:
+            raise
+        raise SourceNotFoundError(path) from exc
 
 
 def _resolve_content(
@@ -1261,7 +1289,8 @@ def _resolve_content(
     if not needs_scratch:
         resolved = _local_plain_path(source, path, rules)
         if is_archive(filename):
-            _require_whole_archive_allowed(source, path, resolved, rules)
+            with _local_file_gone(path):
+                _require_whole_archive_allowed(source, path, resolved, rules)
         return _Resolved(resolved, filename, None)
 
     store = get_scratch_store()
@@ -1291,12 +1320,14 @@ def _drop_scratch(key: str) -> None:
 
 # Reads refused before any content was served, audited by the endpoints that
 # serve content with the reason _refused_read_reason gives.
-_REFUSED_READS = (PathOutsideBaseError, AgentUpdateRequiredError)
+_REFUSED_READS = (PathOutsideBaseError, AgentUpdateRequiredError, SourceNotAFileError)
 
 
 def _refused_read_reason(exc: BaseException) -> str:
     if isinstance(exc, AgentUpdateRequiredError):
         return AGENT_UPDATE_REQUIRED
+    if isinstance(exc, SourceNotAFileError):
+        return NOT_A_FILE
     return LINK_TARGET_HIDDEN
 
 
@@ -1419,12 +1450,35 @@ class _SnapshotFileResponse(FileResponse):
     stat'ed, which is what its Content-Length says. A local file is served
     in place (the system log source, a local source), and a log that grows
     while it's being sent would otherwise be read to its new end, more than
-    the Content-Length, and the server aborts the response half way."""
+    the Content-Length, and the server aborts the response half way.
+
+    The file is opened when the response is made and sent from that open
+    file: one deleted afterwards (a log rotated away) is still sent whole,
+    and one already gone raises FileNotFoundError there, where the endpoint
+    can still answer 404 (_local_file_gone) instead of failing half way."""
 
     def __init__(self, path: Path, **kwargs):
-        stat_result = os.stat(path)
-        super().__init__(path, stat_result=stat_result, **kwargs)
+        file = open(path, "rb")  # noqa: SIM115 - closed once the response is over
+        try:
+            stat_result = os.fstat(file.fileno())
+            super().__init__(path, stat_result=stat_result, **kwargs)
+        except BaseException:
+            file.close()
+            raise
+        self._file = file
         self._snapshot_size = stat_result.st_size
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._file.close()
+
+    @asynccontextmanager
+    async def _open_file(self) -> AsyncIterator[anyio.AsyncFile[bytes]]:
+        # The file opened when the response was made (closed by __call__),
+        # for every way FileResponse sends it, ranges included.
+        yield anyio.wrap_file(self._file)
 
     async def _handle_simple(self, send: Send, send_header_only: bool, send_pathsend: bool) -> None:
         # pathsend would hand the server the whole path, growth included.
@@ -1435,8 +1489,7 @@ class _SnapshotFileResponse(FileResponse):
             await send({"type": "http.response.body", "body": b"", "more_body": False})
             return
         remaining = self._snapshot_size
-        file = await anyio.open_file(self.path, mode="rb")
-        try:
+        async with self._open_file() as file:
             more_body = remaining > 0
             if not more_body:
                 await send({"type": "http.response.body", "body": b"", "more_body": False})
@@ -1445,9 +1498,6 @@ class _SnapshotFileResponse(FileResponse):
                 remaining -= len(chunk)
                 more_body = remaining > 0 and bool(chunk)
                 await send({"type": "http.response.body", "body": chunk, "more_body": more_body})
-        finally:
-            with anyio.CancelScope(shield=True):
-                await file.aclose()
 
 
 class _FinishingFileResponse(_FinishingMixin, _SnapshotFileResponse):
@@ -1525,11 +1575,12 @@ def open_file(
         elif followable:
             # What the first Follow poll compares against (#254), so a file
             # rotated between this open and that poll is caught too.
-            size = served_path.stat().st_size
-            with served_path.open("rb") as served:
-                headers["X-Follow-Head"] = _head_hash(
-                    source.id, served.read(FOLLOW_HEAD_BYTES), size
-                )
+            with _local_file_gone(path, key is None):
+                size = served_path.stat().st_size
+                with served_path.open("rb") as served:
+                    headers["X-Follow-Head"] = _head_hash(
+                        source.id, served.read(FOLLOW_HEAD_BYTES), size
+                    )
         # Inline, not an attachment: this is what the viewer reads to display a
         # file, not a download endpoint (downloads go through /download, gated
         # by the `download` capability -- #174). nosniff (set app-wide) keeps
@@ -1541,7 +1592,8 @@ def open_file(
             "content_disposition_type": "inline",
         }
         if key is None:
-            return _SnapshotFileResponse(served_path, **options)
+            with _local_file_gone(path):
+                return _SnapshotFileResponse(served_path, **options)
         # A scratch file stays busy until it has been sent (or the client
         # went away), so the idle sweep can't delete it half way through.
         store = get_scratch_store()
@@ -2219,6 +2271,9 @@ class _RedactedDownload(NamedTuple):
     # Redacted on the agent: where it refused the rest of the content (UTF-32
     # part way), or None.
     refused_at: int | None = None
+    # Content redacted while it is sent: the file, already open, it is read
+    # from (_redacted_chunks), closed when the download is over.
+    file: BinaryIO | None = None
 
 
 # Why the agent left a member of an archive out (fetch_archive), as the
@@ -2246,6 +2301,7 @@ _AGENT_ARCHIVE_ERRORS_KEPT = (
     SourceUnreachableError,
     SourcePermissionError,
     SourceNotFoundError,
+    SourceNotAFileError,
 )
 
 
@@ -2512,15 +2568,26 @@ def _prepare_redacted_download(
                 if reason is not None:
                     raise RedactionUnreadableRefused()
                 return _RedactedDownload(rebuilt, served_filename, None, True, None, work_dir)
-            with original.open("rb") as src:
-                head = _read_head(src)
-            if unsupported_compressed_format(head):
-                raise RedactionFormatRefused()
+            # Opened here and sent from this open file (_redacted_chunks), so a
+            # local file gone before the download starts answers 404
+            # (_local_file_gone) and one deleted while it is sent still is.
+            with _local_file_gone(path, in_place):
+                src = original.open("rb")
             try:
-                encoding = detect_encoding(head)
-            except UnsupportedEncodingError as exc:
-                raise RedactionEncodingRefused() from exc
-            return _RedactedDownload(original, served_filename, encoding, False, None, work_dir)
+                head = _read_head(src)
+                src.seek(0)
+                if unsupported_compressed_format(head):
+                    raise RedactionFormatRefused()
+                try:
+                    encoding = detect_encoding(head)
+                except UnsupportedEncodingError as exc:
+                    raise RedactionEncodingRefused() from exc
+            except BaseException:
+                src.close()
+                raise
+            return _RedactedDownload(
+                original, served_filename, encoding, False, None, work_dir, file=src
+            )
         except FetchTooLargeError as exc:
             shutil.rmtree(work_dir, ignore_errors=True)
             raise _fetch_too_large(exc) from exc
@@ -2530,18 +2597,19 @@ def _prepare_redacted_download(
 
 
 def _redacted_chunks(
-    original: Path,
+    original: BinaryIO,
     rules: CompiledRules,
     encoding: str | None,
     record_refusal: Callable[[int], None],
 ) -> Iterator[bytes]:
-    """`original` redacted a block at a time as it is sent: the last line
+    """`original` (an open file, closed here once started) redacted a block
+    at a time as it is sent: the last line
     as it is, UTF-16 back to UTF-16. Content that turns UTF-32 part way
     ends with `[redacted: unsupported encoding]`, and `record_refusal` gets
     where the refused rest started, however the download ends."""
     redactor = Redactor(rules, source_encoding=encoding, output_encoding="source")
     try:
-        with original.open("rb") as src:
+        with original as src:
             while block := src.read(CHUNK_BYTES):
                 out = redactor.feed(block)
                 if out:
@@ -2592,6 +2660,10 @@ def _download_redacted(
         transfer.release()
         shutil.rmtree(prepared.work_dir, ignore_errors=True)
 
+    def close_file() -> None:
+        if prepared.file is not None:
+            prepared.file.close()
+
     try:
         metadata: dict = {"path": path, "member": member} if member else {"path": path}
         metadata.update(_redaction_applied(prepared.at))
@@ -2608,6 +2680,7 @@ def _download_redacted(
         )
         session.commit()
     except BaseException:
+        close_file()
         finish()
         raise
     name = _download_name(session, prepared.filename)
@@ -2616,8 +2689,9 @@ def _download_redacted(
         return _FinishingFileResponse(
             prepared.path, filename=name, headers=headers, on_finish=finish
         )
+    # Set whenever the content isn't ready (_prepare_redacted_download).
     stream = _redacted_chunks(
-        prepared.path,
+        prepared.file,
         redaction,
         prepared.encoding,
         _late_refusal_recorder(session, user, source, metadata),
@@ -2631,6 +2705,9 @@ def _download_redacted(
             stream.close()
         except ValueError:
             pass
+        else:
+            # A generator that never started never closes its file itself.
+            close_file()
         finish()
 
     headers["Content-Disposition"] = _attachment(name)
@@ -2707,7 +2784,8 @@ def download_file(
             metadata={"path": path, "member": member} if member else {"path": path},
         )
         session.commit()
-        return _FinishingFileResponse(served_path, filename=filename, on_finish=finish)
+        with _local_file_gone(path, key is None):
+            return _FinishingFileResponse(served_path, filename=filename, on_finish=finish)
     except BaseException:
         finish()
         raise

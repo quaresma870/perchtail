@@ -40,6 +40,19 @@ func (e *LinkTargetError) Error() string {
 	return fmt.Sprintf("%s: really is %s", e.Path, e.Real)
 }
 
+// IsDirectoryError refuses a read of Path that is a folder, or a link to
+// one, before anything is read: answered with the code "is_directory" and
+// Real, where it really is relative to the base path, so the server checks
+// its rules on a link's target as a folder.
+type IsDirectoryError struct {
+	Path string
+	Real string
+}
+
+func (e *IsDirectoryError) Error() string {
+	return fmt.Sprintf("%s: is a directory", e.Path)
+}
+
 // errNoFinalPath: this system can't say from an open file where it really
 // is (finalPath); realPaths then falls back to resolving the path itself.
 var errNoFinalPath = errors.New("the real path of an open file is not available")
@@ -170,7 +183,9 @@ func isEscape(err error) bool {
 // path nor a link on it can lead out of basePath (a LinkTargetError with
 // Outside if one does), and checks it really is at expectReal (relPath
 // when empty), as FeatureLinks says: a LinkTargetError with where it is
-// otherwise, before anything is read. It must be a file.
+// otherwise, before anything is read. It must be a file: a folder, or a link
+// to one, is an IsDirectoryError with where it really is, whatever
+// expectReal says, so the server checks its rules on it as a folder.
 func openFile(basePath, relPath, expectReal string) (*os.File, func(), error) {
 	if !IsSafeRelativePath(relPath) {
 		return nil, nil, fmt.Errorf("unsafe path: %q", relPath)
@@ -209,10 +224,6 @@ func openFile(basePath, relPath, expectReal string) (*os.File, func(), error) {
 		closeAll()
 		return nil, nil, &LinkTargetError{Path: relPath, Outside: true}
 	}
-	if !samePath(real, cleanRel(expectReal)) {
-		closeAll()
-		return nil, nil, &LinkTargetError{Path: relPath, Real: real}
-	}
 	st, err := f.Stat()
 	if err != nil {
 		closeAll()
@@ -220,7 +231,11 @@ func openFile(basePath, relPath, expectReal string) (*os.File, func(), error) {
 	}
 	if st.IsDir() {
 		closeAll()
-		return nil, nil, fmt.Errorf("%s: is a directory", relPath)
+		return nil, nil, &IsDirectoryError{Path: relPath, Real: real}
+	}
+	if !samePath(real, cleanRel(expectReal)) {
+		closeAll()
+		return nil, nil, &LinkTargetError{Path: relPath, Real: real}
 	}
 	return f, closeAll, nil
 }

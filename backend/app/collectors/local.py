@@ -9,6 +9,7 @@ from app.collectors.base import (
     DirListing,
     LinkTargetHiddenError,
     TargetCheck,
+    refuse_directory,
     require_target,
 )
 from app.config import get_settings
@@ -29,6 +30,7 @@ __all__ = [
     "fetch_file",
     "list_directory",
     "local_copy",
+    "resolve_file",
     "resolve_path",
 ]
 
@@ -69,6 +71,35 @@ def _real_relative(base: Path, real: Path) -> str:
     return "" if real == base else real.relative_to(base).as_posix()
 
 
+def _resolve(source: Source, relative_path: str) -> tuple[Path, str]:
+    """The resolved path inside the base path (LinkTargetHiddenError when it
+    is outside it or is the base itself) and where it is relative to it."""
+    base = str(base_dir(source))
+    # realpath + a prefix check on the separator-terminated base (rather
+    # than Path.is_relative_to) is the containment pattern static analysis
+    # recognizes; behaviour is the same.
+    target = os.path.realpath(os.path.join(base, relative_path))
+    if not target.startswith(os.path.join(base, "")):
+        raise LinkTargetHiddenError(relative_path)
+    return Path(target), _real_relative(Path(base), Path(target))
+
+
+def resolve_file(source: Source, relative_path: str, target_check: TargetCheck = None) -> Path:
+    """resolve_path for a read: a folder, or a link to one, is refused
+    (collectors.base.refuse_directory), with the rules checked on a link's
+    target as a folder."""
+    if not relative_path:
+        # The base itself (a root of a source with several): a folder, once
+        # the base path is known to be allowed.
+        base_dir(source)
+        refuse_directory(relative_path, relative_path, target_check)
+    target, real = _resolve(source, relative_path)
+    if target.is_dir():
+        refuse_directory(relative_path, real, target_check)
+    require_target(relative_path, real, target_check)
+    return target
+
+
 def resolve_path(source: Source, relative_path: str, target_check: TargetCheck = None) -> Path:
     """No ephemeral scratch needed for local sources — a file already on the
     same machine as the app is inherently zero-latency and always fresh
@@ -81,15 +112,9 @@ def resolve_path(source: Source, relative_path: str, target_check: TargetCheck =
     link leads somewhere else inside it, `target_check` must allow where it
     leads (collectors.base.require_target): the rules see the target, not
     only the link's name. Either refusal is a LinkTargetHiddenError."""
-    base = str(base_dir(source))
-    # realpath + a prefix check on the separator-terminated base (rather
-    # than Path.is_relative_to) is the containment pattern static analysis
-    # recognizes; behaviour is the same.
-    target = os.path.realpath(os.path.join(base, relative_path))
-    if not target.startswith(os.path.join(base, "")):
-        raise LinkTargetHiddenError(relative_path)
-    require_target(relative_path, _real_relative(Path(base), Path(target)), target_check)
-    return Path(target)
+    target, real = _resolve(source, relative_path)
+    require_target(relative_path, real, target_check)
+    return target
 
 
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:
@@ -143,16 +168,16 @@ def fetch_file(
     source: Source, relative_path: str, destination: Path, *, target_check: TargetCheck = None
 ) -> None:
     """Only used where a real copy is unavoidable (none, currently —
-    local_copy() below always yields resolve_path() directly instead).
+    local_copy() below always yields resolve_file() directly instead).
     Kept for interface parity with the other connectors."""
-    shutil.copyfile(resolve_path(source, relative_path, target_check), destination)
+    shutil.copyfile(resolve_file(source, relative_path, target_check), destination)
 
 
 @contextmanager
 def local_copy(source: Source, relative_path: str, *, target_check: TargetCheck = None):
     """No fetch needed — the file is already local, so this yields the real
     path directly rather than copying it anywhere first."""
-    yield resolve_path(source, relative_path, target_check)
+    yield resolve_file(source, relative_path, target_check)
 
 
 def read_range(
@@ -166,6 +191,6 @@ def read_range(
 ) -> collector_base.RangeRead:
     """Incremental follow (#254): the file's size, its first `head` bytes and
     up to `length` bytes from `offset`."""
-    with open(resolve_path(source, relative_path, target_check), "rb") as f:
+    with open(resolve_file(source, relative_path, target_check), "rb") as f:
         size = os.fstat(f.fileno()).st_size
         return collector_base.read_range_from(f, size, offset, length, head)

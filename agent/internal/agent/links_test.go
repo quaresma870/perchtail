@@ -79,6 +79,42 @@ func TestEveryContentCommandReadsOnceTheTargetIsExpected(t *testing.T) {
 	}
 }
 
+// A folder, or a link to one, is refused with the code is_directory and
+// where it really is, whatever ExpectReal says, before anything is sent: the
+// server checks its rules on that folder and answers as for a missing path.
+func TestEveryContentCommandRefusesAFolderWithItsRealPath(t *testing.T) {
+	base := linkedBase(t)
+	block := redactJSON(t, testRules, "")
+	for _, path := range []string{"real", "linked"} {
+		for _, expect := range []string{"", path, "real"} {
+			commands := []Command{
+				{Type: "fetch", Path: path},
+				{Type: "fetch", Path: path, ChunkSize: minChunkSize},
+				{Type: "fetch", Path: path, ChunkSize: minChunkSize, Redact: block},
+				{Type: "fetch", Path: path, ChunkSize: minChunkSize, Member: "a.log", Redact: block},
+				{Type: "fetch_archive", Path: path, ChunkSize: minChunkSize, Members: []string{"a.log"}, Redact: block},
+				{Type: "read_range", Path: path, Length: 100, HeadLength: 10},
+				{Type: "read_range", Path: path, Length: 100, Redact: block},
+				{Type: "list_archive", Path: path},
+			}
+			for i, cmd := range commands {
+				cmd.ID, cmd.ExpectReal = "c", expect
+				sent := collect(t, base, cmd)
+				if len(sent) != 1 {
+					t.Fatalf("%s expect %q, %d %s: sent %d messages, want only the refusal: %+v", path, expect, i, cmd.Type, len(sent), sent)
+				}
+				result, ok := sent[0].(ErrorResult)
+				if !ok || result.Code != "is_directory" || result.Outside || result.Real == nil || *result.Real != "real" {
+					t.Fatalf("%s expect %q, %d %s: answer = %+v", path, expect, i, cmd.Type, sent[0])
+				}
+				if !strings.HasSuffix(result.Error, ": is a directory") {
+					t.Fatalf("%s expect %q, %d %s: error = %q", path, expect, i, cmd.Type, result.Error)
+				}
+			}
+		}
+	}
+}
+
 func TestAContentCommandRefusesALinkOutOfTheBase(t *testing.T) {
 	base, outside := t.TempDir(), t.TempDir()
 	writeFile(t, outside, "secret.log", []byte(secretLog))

@@ -231,6 +231,7 @@ func errorResult(cmd Command, errType string, err error) ErrorResult {
 	result := ErrorResult{Type: errType, ID: cmd.ID, Error: err.Error()}
 	var tooLarge *TooLargeError
 	var link *LinkTargetError
+	var dir *IsDirectoryError
 	var archiveErr *archiveUnreadableError
 	var gzipErr *gzipUnreadableError
 	switch {
@@ -252,6 +253,11 @@ func errorResult(cmd Command, errType string, err error) ErrorResult {
 			real := link.Real
 			result.Real = &real
 		}
+	case errors.As(err, &dir):
+		// A folder, or a link to one: the server checks its rules on Real
+		// as a folder and answers as for a path that isn't there.
+		real := dir.Real
+		result.Code, result.Real = "is_directory", &real
 	}
 	return result
 }
