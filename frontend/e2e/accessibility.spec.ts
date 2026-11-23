@@ -155,10 +155,31 @@ test('accessibility: Settings -> Users', async ({ page }) => {
   await expectNoSeriousViolations(page)
 })
 
-test('accessibility: Settings -> System', async ({ page }) => {
-  await page.goto('/#/settings/system')
-  await settled(page, 'System settings')
-  await expect(page.getByLabel('Alert check interval in seconds')).toBeVisible()
+// The pages the System page was split into, each with one of its fields.
+const SYSTEM_SETTINGS_PAGES: [string, string, string][] = [
+  ['source-defaults', 'Source defaults', 'Background check interval in minutes'],
+  ['sign-in-security', 'Sign-in security', 'Require MFA for local accounts'],
+  ['explorer', 'Explorer and limits', 'Connections view'],
+  ['alerts', 'Alerts', 'Alert check interval in seconds'],
+  ['backups', 'Backups and updates', 'Backup interval in hours'],
+  ['monitoring', 'Monitoring', ''],
+]
+
+for (const [path, title, field] of SYSTEM_SETTINGS_PAGES) {
+  test(`accessibility: Settings -> ${title}`, async ({ page }) => {
+    await page.goto(`/#/settings/${path}`)
+    await settled(page, title)
+    if (field) await expect(page.getByLabel(field, { exact: true })).toBeVisible()
+    else await expect(page.getByRole('button', { name: /Generate token|Regenerate token/ })).toBeVisible()
+    await expectNoSeriousViolations(page)
+  })
+}
+
+test('accessibility: Settings sidebar at phone width', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 })
+  await page.goto('/#/settings/explorer')
+  await settled(page, 'Explorer and limits')
+  await expect(page.getByLabel('Settings page')).toBeVisible()
   await expectNoSeriousViolations(page)
 })
 
@@ -233,6 +254,8 @@ test('accessibility: Settings -> Email', async ({ page }) => {
 test('accessibility: Settings -> Audit log', async ({ page }) => {
   await page.goto('/#/settings/audit-log')
   await settled(page, 'Audit log')
+  // The viewer and, below it, the audit log's settings.
+  await expect(page.getByLabel('Audit log retention in days')).toBeVisible()
   await expectNoSeriousViolations(page)
 })
 

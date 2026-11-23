@@ -269,8 +269,8 @@ test("redaction settings are hidden from everyone but super admins", async ({ pa
   })
   try {
     const userPage = await signIn(browser, username)
-    await userPage.goto('/#/settings/system')
-    await expect(userPage.getByRole('heading', { level: 1, name: 'System settings' })).toBeVisible()
+    await userPage.goto('/#/settings/sources')
+    await expect(userPage.getByRole('heading', { level: 1, name: 'Sources' })).toBeVisible()
     await expect(userPage.locator('.settings-nav').getByRole('link', { name: 'Redaction' })).toHaveCount(0)
 
     // A typed address leads away, and the API refuses.

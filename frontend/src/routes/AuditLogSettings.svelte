@@ -2,12 +2,14 @@
   import FilterDropdown from '../lib/components/FilterDropdown.svelte'
   import SortableHeader from '../lib/components/SortableHeader.svelte'
   import { nextSort, type SortState } from '../lib/table-view'
-  import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
   import { detailPairs, formatAuditTime, targetHref, targetTypeLabel } from '../lib/audit-format'
   import { currentUser } from '../lib/auth'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import AuditLogSettingsBlock from '../lib/components/AuditLogSettingsBlock.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import { confirmAction } from '../lib/confirm'
+  import { systemSettings } from '../lib/settings'
+  import { canManageSystemSettings, canViewAuditLog } from '../lib/settings-nav'
   import type {
     AuditIntegrityStatus,
     AuditLogEntry,
@@ -210,20 +212,31 @@
   const formatTimestamp = (iso: string) => formatAuditTime(iso)
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 
-  onMount(async () => {
-    await Promise.all([loadFilterOptions(), loadIntegrityStatus(), load()])
-  })
+  // The page holds the viewer (view_audit_log, while the audit view is on)
+  // and, below it, the audit log's settings (manage_system_settings), which
+  // stay reachable with the viewer off so it can be turned on again.
+  $: showViewer = canViewAuditLog($currentUser, $systemSettings.audit_view_enabled)
+  $: showSettings = canManageSystemSettings($currentUser)
+
+  // Loaded when the viewer shows, and again if it's turned off and on.
+  let started = false
+  $: if (showViewer && !started) {
+    started = true
+    Promise.all([loadFilterOptions(), loadIntegrityStatus(), load()])
+  } else if (!showViewer) {
+    started = false
+  }
 </script>
 
-<SettingsNav />
-
+<SettingsLayout>
 <div class="page">
   <h1>Audit log</h1>
+  {#if showViewer}
   <p class="hint">
     Who did what, when and from where: sign-ins and sign-outs, every file opened or downloaded,
     searches, refused requests, and every source/rule/role/user/customer/folder/SSO/system-settings
-    change. Times are shown in your time zone ({browserZone}). See Settings → System for how long
-    entries are kept before being purged automatically.
+    change. Times are shown in your time zone ({browserZone}). Entries older than the audit log
+    retention are purged automatically.
   </p>
 
   <div
@@ -425,7 +438,13 @@
       </div>
     </div>
   {/if}
+  {/if}
+
+  {#if showSettings}
+    <AuditLogSettingsBlock />
+  {/if}
 </div>
+</SettingsLayout>
 
 <style>
   /* The page and its table use the whole width (#358). */

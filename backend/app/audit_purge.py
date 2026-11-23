@@ -16,7 +16,7 @@ CHUNK_SIZE = 5000
 
 def run_audit_purge_sweep() -> None:
     """The APScheduler job (see app/main.py's lifespan) enforcing the
-    admin-configurable audit-log retention window (Settings -> System). A
+    admin-configurable audit-log retention window (Settings -> Audit log). A
     retention of 0 means "keep forever" -- see
     system_settings.INT_DEFAULTS's docstring -- so this no-ops rather than
     deleting anything in that case, same "explicit opt-in, conservative

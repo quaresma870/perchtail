@@ -3,7 +3,7 @@
   import { api, ApiError } from '../lib/api'
   import { confirmAction } from '../lib/confirm'
   import RedactionRuleEditor from '../lib/components/RedactionRuleEditor.svelte'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import { builtinRules, detectorInfo } from '../lib/redaction-rules'
   import { systemSettings } from '../lib/settings'
   import type { RedactionRule, SystemSettings } from '../lib/types'
@@ -111,7 +111,7 @@
   }
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <h1>Redaction</h1>
@@ -234,6 +234,7 @@
     </section>
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .page {

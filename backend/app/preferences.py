@@ -1,6 +1,6 @@
 """Per-user preferences (#273): small display choices that follow a user
 across browsers and machines, each falling back to a deployment-wide
-default under Settings -> System when the user hasn't chosen.
+default under Settings -> Explorer and limits when the user hasn't chosen.
 
 Stored as a JSON object on the user (User.preferences); only the keys
 and values listed here are ever accepted or returned."""

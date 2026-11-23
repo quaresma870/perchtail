@@ -1,4 +1,4 @@
-"""The Updates card under Settings -> System (#215): the running version,
+"""The Updates card under Settings -> Backups and updates (#215): the running version,
 how it was installed, the latest release, and a "Check now". Super admins
 only: install details and upgrade steps are an operator concern."""
 
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/system/update", tags=["system"])
 
 class UpdateStatus(BaseModel):
     enabled: bool
-    # True when UPDATE_CHECK=false: the switch under System can't turn it on.
+    # True when UPDATE_CHECK=false: the switch under Backups and updates can't turn it on.
     disabled_by_env: bool
     running_version: str
     install_method: str

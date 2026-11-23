@@ -795,7 +795,7 @@ def test_create_verify_and_refused_restore_are_audited(env, monkeypatch):
         assert KEY not in json.dumps(metadata)
 
 
-# --- Settings -> System list -----------------------------------------------
+# --- Settings -> Backups and updates list ----------------------------------
 
 
 def _user(session, capabilities) -> User:

@@ -24,7 +24,7 @@
 - **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
 - **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks. One search box finds sources and file names across every source, from a file-name index that stores no content. Live alerts read only what was appended and call a webhook. Redaction hides secrets, card numbers and personal data in what users open, Tail and download, on the server or on the push agent's host.
 - **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults), TOTP, required for administrators and optionally for everyone, and optional password recovery by email; OIDC single sign-on with group-to-role mapping; an access report of who holds what, where, with flags for privileged, inactive and MFA-less accounts, on its own Settings page and as JSON or CSV, for access reviews.
-- **Operations:** settings in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained, verified daily and records where each action came from, including refused requests, bulk YAML import and export, server-side limits on listings and downloads running at once (Settings → System), and a system SMTP server for email, always over verified TLS (Settings → Email).
+- **Operations:** settings in a sidebar grouped in sections, edited in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained, verified daily and records where each action came from, including refused requests, bulk YAML import and export, server-side limits on listings and downloads running at once (Settings → Explorer and limits), and a system SMTP server for email, always over verified TLS (Settings → Email).
 - **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, encrypted online backups, push agents upgraded from the portal only to binaries signed with the release key, signed images and release files, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
 
 **What's next.** 0.7 is the last feature release before 1.0. 1.0 adds no features: load tests and a sizing guide, security controls in CI and releases, and an internal pentest. PostgreSQL, high availability, user groups, temporary access, notifications, API tokens and an external pentest come after 1.0. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
@@ -173,7 +173,7 @@ mode, which needs one. Upgrading from a release before 0.5.0 moves the database,
 `known_hosts` from `/data` into `/data/db` on first start; see the
 CHANGELOG's upgrade notes.
 
-Back up with `python -m app.backup` while PerchTail runs: it puts a consistent copy of the database, the salt and `known_hosts` into one file, always encrypted (with a key derived from `CREDENTIAL_ENCRYPTION_KEY`, or from an optional `BACKUP_ENCRYPTION_KEY`), checks it, and restores it with PerchTail stopped. Settings → System also makes one on a schedule: every 24 hours on a new install. The database and `credential_salt` are useless without each other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`: keep the keys somewhere you can reach without this host. Before an upgrade, make a `pre-upgrade` backup; restoring it, with the previous image, rolls the upgrade back:
+Back up with `python -m app.backup` while PerchTail runs: it puts a consistent copy of the database, the salt and `known_hosts` into one file, always encrypted (with a key derived from `CREDENTIAL_ENCRYPTION_KEY`, or from an optional `BACKUP_ENCRYPTION_KEY`), checks it, and restores it with PerchTail stopped. Settings → Backups and updates also makes one on a schedule: every 24 hours on a new install. The database and `credential_salt` are useless without each other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`: keep the keys somewhere you can reach without this host. Before an upgrade, make a `pre-upgrade` backup; restoring it, with the previous image, rolls the upgrade back:
 
 ```bash
 docker compose exec -u perchtail perchtail python -m app.backup create --reason pre-upgrade
@@ -191,7 +191,7 @@ Only one PerchTail may run per `DATA_DIR`: a second instance (or an `alembic upg
 **Update check.** Once a day, PerchTail asks the GitHub releases API which
 release is the latest (one unauthenticated request; nothing about your
 installation is sent, and pre-releases are never offered). Super admins see
-the result under **Settings → System → Updates**, with the upgrade steps for
+the result under **Settings → Backups and updates**, card **Updates**, with the upgrade steps for
 how this instance was installed. Turn it off there, or set
 `UPDATE_CHECK=false` to make sure PerchTail never makes that request (for
 example on a network without internet access). `HTTPS_PROXY` is honoured.
@@ -278,7 +278,7 @@ Installing and running PerchTail:
 - [docs/install-from-source.md](docs/install-from-source.md) — running PerchTail on a Linux host without Docker, with a systemd unit
 - [docs/upgrade.md](docs/upgrade.md) — upgrading PerchTail
 - [docs/verifying-releases.md](docs/verifying-releases.md) — checking a release before you run it: the image's cosign signature, the build provenance of the image and the agent binaries, the signed checksums and the SBOMs
-- [docs/configuration.md](docs/configuration.md) — configuration reference: environment variables and Settings → System
+- [docs/configuration.md](docs/configuration.md) — configuration reference: environment variables and the system settings in each Settings section
 - [docs/backup-and-restore.md](docs/backup-and-restore.md) — encrypted backups, scheduled backups, restoring, rolling back an upgrade and testing a restore
 - [docs/monitoring.md](docs/monitoring.md) — the liveness and readiness probes and who may call them, the detailed health endpoint and its token, Prometheus `/metrics`, the Zabbix 7.0 and 8.0 templates, and the log events worth alerting on
 - [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — rotating `CREDENTIAL_ENCRYPTION_KEY` without losing access to what's already encrypted

@@ -1,6 +1,6 @@
 // background: no users at all. The instance runs only its own background
 // work (source checks, file-name index, alerts, scratch sweeps) at the
-// intervals in Settings -> System; loadtest/collect measures its cost. This
+// intervals in Settings (Source defaults, Alerts); loadtest/collect measures its cost. This
 // scenario only keeps k6 running for the phase's duration.
 import { sleep } from 'k6'
 import { buildOptions, summary } from './lib/options.js'

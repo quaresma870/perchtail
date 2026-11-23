@@ -265,7 +265,7 @@ Why PerchTail is built the way it is. Each entry is a decision the code follows,
 
 - **Structured health endpoint.** `GET /monitoring/health` does a real database round trip and returns structured status (ok / degraded / error, documented in `docs/monitoring.md`), next to the liveness `/healthz`.
 - **Unauthenticated `/healthz`.** *Superseded:* `/healthz` was an unauthenticated liveness check. `/healthz` and `/readyz` now answer only a local caller without proxy headers, an address in `PROBE_ALLOWED_NETWORKS`, or a holder of the monitoring token, so a refused probe learns nothing about the instance (#366, #330).
-- **One deployment-wide monitoring token.** Not tied to a user. It is generated from Settings → System under `manage_system_settings`, stored hashed and shown once.
+- **One deployment-wide monitoring token.** Not tied to a user. It is generated from Settings → Monitoring under `manage_system_settings`, stored hashed and shown once.
 - **Zabbix reads the same endpoint.** Zabbix uses an HTTP agent item and JSONPath preprocessing on the one JSON endpoint, never Zabbix-specific endpoints. Since then, templates ship in `docs/examples/zabbix/` (#332).
 - **Prometheus as a thin wrapper.** The health response was shaped so a Prometheus exporter could be a thin wrapper over the same internals. That is now built: `/metrics` comes from the same computation as `/monitoring/health`, behind the monitoring token (#331).
 - **App version in one place.** `app/version.py` is the single source of the app version, also passed to `FastAPI(version=...)`.

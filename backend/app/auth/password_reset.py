@@ -1,7 +1,8 @@
 """Password recovery by email for local accounts (#244).
 
 Off by default. It works only while the system setting
-`password_reset_enabled` is on (a super admin's choice, Settings -> System),
+`password_reset_enabled` is on (a super admin's choice, Settings -> Sign-in
+security),
 email is set up and on (Settings -> Email, app/email_delivery.py) and
 PUBLIC_BASE_URL is https, since the link carries a secret.
 

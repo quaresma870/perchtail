@@ -1,14 +1,8 @@
 <script lang="ts">
-  import Router, { push } from 'svelte-spa-router'
+  import Router, { push, replace } from 'svelte-spa-router'
   import { onMount } from 'svelte'
-  import {
-    authChecked,
-    currentUser,
-    hasCapability,
-    logout,
-    mfaSetupRequired,
-    refreshCurrentUser,
-  } from './lib/auth'
+  import { authChecked, currentUser, logout, mfaSetupRequired, refreshCurrentUser } from './lib/auth'
+  import { canOpenAuditLogPage } from './lib/settings-nav'
   import { currentHash } from './lib/hash'
   import { serverReachable } from './lib/server-status'
   import { closeAllTabs } from './lib/viewer-tabs'
@@ -31,7 +25,12 @@
   import Users from './routes/Users.svelte'
   import SsoSettings from './routes/SsoSettings.svelte'
   import EmailSettings from './routes/EmailSettings.svelte'
-  import SystemSettings from './routes/SystemSettings.svelte'
+  import SourceDefaultsSettings from './routes/SourceDefaultsSettings.svelte'
+  import SignInSecuritySettings from './routes/SignInSecuritySettings.svelte'
+  import ExplorerSettings from './routes/ExplorerSettings.svelte'
+  import AlertsSettings from './routes/AlertsSettings.svelte'
+  import BackupsSettings from './routes/BackupsSettings.svelte'
+  import MonitoringSettings from './routes/MonitoringSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
   import RedactionSettings from './routes/RedactionSettings.svelte'
   import Profile from './routes/Profile.svelte'
@@ -65,7 +64,12 @@
     '/settings/users': Users,
     '/settings/sso': SsoSettings,
     '/settings/email': EmailSettings,
-    '/settings/system': SystemSettings,
+    '/settings/source-defaults': SourceDefaultsSettings,
+    '/settings/sign-in-security': SignInSecuritySettings,
+    '/settings/explorer': ExplorerSettings,
+    '/settings/alerts': AlertsSettings,
+    '/settings/backups': BackupsSettings,
+    '/settings/monitoring': MonitoringSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
     '/settings/redaction': RedactionSettings,
     '/settings/audit-log': AuditLogSettings,
@@ -123,14 +127,20 @@
   $: if ($currentHash === '/settings/security' || $currentHash === '/settings/sessions') {
     push('/profile')
   }
-  // The audit log can be turned off deployment-wide (Settings -> System);
-  // guard the route itself, not just the nav link, so it's actually off for
-  // a bookmarked/typed URL too. Also gated by view_audit_log (see
-  // auth/models.py's GlobalCapability).
+  // The System page was split into the pages of each Settings section; its
+  // old address opens the first of them.
+  $: if ($currentHash === '/settings/system') {
+    replace('/settings/explorer')
+  }
+  // The audit log's viewer can be turned off deployment-wide (Settings ->
+  // Audit log); guard the route itself, not just the nav link, so it's
+  // actually off for a bookmarked/typed URL too. Also gated by view_audit_log
+  // (see auth/models.py's GlobalCapability). Whoever manages system settings
+  // keeps the page for its settings, where the viewer is turned on again.
   $: if (
     $authChecked &&
     $currentUser &&
-    (!$systemSettings.audit_view_enabled || !hasCapability($currentUser, 'view_audit_log')) &&
+    !canOpenAuditLogPage($currentUser, $systemSettings.audit_view_enabled) &&
     $currentHash.startsWith('/settings/audit-log')
   ) {
     push('/settings')

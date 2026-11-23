@@ -1,6 +1,6 @@
 """CREDENTIAL_ENCRYPTION_KEY strength (app/key_strength.py): the documented
 generators pass, short or repetitive keys are reported, a weak key is a
-warning at startup and in Settings -> System, and a refusal only when
+warning at startup and on the system settings pages, and a refusal only when
 CREDENTIAL_KEY_REFUSE_WEAK is true."""
 
 import base64

@@ -117,7 +117,7 @@ Trusted proxies are set with `TRUSTED_PROXIES`, a comma-separated list of addres
 
 ## Retention
 
-Entries are kept for the number of days set under Settings → System → Audit log retention (365 by default) and deleted by a daily purge. The retention is at least 90 days, or `0` to keep every entry forever. Anyone with `manage_system_settings` can lengthen it; only a super admin can shorten it. Each purge is itself recorded (`audit.purge`), and shortening the retention is recorded as a `system_settings.update` with the old and new values. Upgrading to 0.7.0 raises a retention between 1 and 89 days to 90, recorded the same way with no user.
+Entries are kept for the number of days set under Settings → Audit log → Audit log retention (365 by default) and deleted by a daily purge. The retention is at least 90 days, or `0` to keep every entry forever. Anyone with `manage_system_settings` can lengthen it; only a super admin can shorten it. Each purge is itself recorded (`audit.purge`), and shortening the retention is recorded as a `system_settings.update` with the old and new values. Upgrading to 0.7.0 raises a retention between 1 and 89 days to 90, recorded the same way with no user.
 
 Entry ids are never reused: after a purge, new entries keep counting from the highest id ever written.
 

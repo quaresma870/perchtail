@@ -403,7 +403,7 @@ async def _started(app: FastAPI, settings):
         scheduler, "scratch_size_guard", "Scratch size guard", store.enforce_size_guard, sweep
     )
     # Live alerts (#305): ticks every 15 s and runs a pass once the interval
-    # set in Settings -> System has gone by.
+    # set in Settings -> Alerts has gone by.
     register_job(scheduler, "alert_pass", "Live alerts", run_alert_pass, timedelta(seconds=15))
     # File-name index (#304): every minute it lists whatever sources are due.
     register_job(
@@ -458,8 +458,8 @@ async def _started(app: FastAPI, settings):
         catch_up=True,
     )
     # Scheduled backup (#334): ticks every few minutes and backs up once the
-    # interval set in Settings -> System has gone by; 0 is off. 24 hours on a
-    # new install; an install upgraded from before 0.7.0 keeps 0
+    # interval set in Settings -> Backups and updates has gone by; 0 is off. 24
+    # hours on a new install; an install upgraded from before 0.7.0 keeps 0
     # (app/system_settings.py, backup_interval_hours).
     register_job(scheduler, "backup", "Scheduled backup", run_scheduled_backup, BACKUP_TICK)
     register_db_upkeep_jobs(scheduler)

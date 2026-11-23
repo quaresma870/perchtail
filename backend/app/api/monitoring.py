@@ -141,7 +141,7 @@ class ScratchHealth(BaseModel):
 
 class LimitsHealth(BaseModel):
     """Server-side limits on connector work (#344, app/limits.py): slots in
-    use now and the limits (Settings -> System). sources_in_use is keyed by
+    use now and the limits (Settings -> Explorer and limits). sources_in_use is keyed by
     source id; rejected counts requests answered 503 since this process
     started, by which limit was full (global, source, user)."""
 

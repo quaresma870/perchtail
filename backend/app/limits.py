@@ -12,7 +12,7 @@ while the rest of the app waits. Each such request takes a slot first:
 
 Slots never queue: when one isn't free the request is answered 503 with a
 Retry-After header, and the client tries again a few seconds later. The
-limits are System settings (Settings -> System); what's in use shows in
+limits are System settings (Settings -> Explorer and limits); what's in use shows in
 GET /monitoring/health and /metrics. In memory only, per process."""
 
 import threading

@@ -227,7 +227,7 @@
       <p class="hint">
         Get a webhook notification when a new line matching a query is written to the files an
         alert watches. Alerts read only the lines added since their last check, at the interval set
-        in Settings → System.
+        in Settings → Alerts.
       </p>
     </div>
     {#if canManage}

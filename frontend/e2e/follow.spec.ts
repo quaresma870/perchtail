@@ -36,7 +36,7 @@ test('follow appends only the new lines of a growing log', async ({ page }) => {
   )
 
   await page.getByRole('button', { name: 'Tail', exact: true }).click()
-  // The interval comes from Settings -> System (#283) and shows while Tail is on.
+  // The interval comes from Settings -> Explorer and limits (#283) and shows while Tail is on.
   await expect(page.getByText('every 2 s', { exact: true })).toBeVisible()
   await appended
 

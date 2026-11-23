@@ -10,7 +10,7 @@ zabbix_export:
       description: |
         Monitors PerchTail through GET /monitoring/health: one HTTP agent item reads the whole report, dependent items pick the fields with JSONPath, and low-level discovery creates items and a trigger for each background job.
 
-        Setup: generate a monitoring token in PerchTail (Settings -> System -> Monitoring), link this template to a host, and set {$PERCHTAIL.URL} (no trailing slash) and {$PERCHTAIL.TOKEN} on the host.
+        Setup: generate a monitoring token in PerchTail (Settings -> Monitoring), link this template to a host, and set {$PERCHTAIL.URL} (no trailing slash) and {$PERCHTAIL.TOKEN} on the host.
 
         See docs/monitoring.md in the PerchTail repository for every field and when the status degrades.
       groups:
@@ -630,7 +630,7 @@ zabbix_export:
               expression: 'last(/PerchTail by HTTP/perchtail.alerts.overdue)=1'
               name: 'PerchTail: Live alert pass is overdue'
               priority: WARNING
-              description: 'No live alert pass finished in twice the interval set in Settings -> System, plus 30 seconds.'
+              description: 'No live alert pass finished in twice the interval set in Settings -> Alerts, plus 30 seconds.'
               tags:
                 - tag: scope
                   value: performance
@@ -942,7 +942,7 @@ zabbix_export:
           description: 'PerchTail base URL, without a trailing slash.'
         - macro: '{$PERCHTAIL.TOKEN}'
           type: SECRET_TEXT
-          description: 'Monitoring token from Settings -> System -> Monitoring in PerchTail.'
+          description: 'Monitoring token from Settings -> Monitoring in PerchTail.'
         - macro: '{$PERCHTAIL.INTERVAL}'
           value: 1m
           description: 'How often the health report is read.'
@@ -960,7 +960,7 @@ zabbix_export:
           description: 'Scratch use, in % of SCRATCH_MAX_GB, above which it warns (PerchTail reports degraded from 90%).'
         - macro: '{$PERCHTAIL.NAME_INDEX.AGE.MAX}'
           value: '3600'
-          description: 'Seconds the oldest file-name index pass may reach. Keep it well above the index interval in Settings -> System (15 minutes by default).'
+          description: 'Seconds the oldest file-name index pass may reach. Keep it well above the index interval in Settings -> Source defaults (15 minutes by default).'
         - macro: '{$PERCHTAIL.SOURCES.FAILING.MAX}'
           value: '0'
           description: 'Sources allowed to fail their check before the trigger fires.'

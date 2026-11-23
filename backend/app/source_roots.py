@@ -31,7 +31,7 @@ from app.collectors.base import (
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 from app.rules import is_entry_visible, is_linked_entry_visible, rules_case_insensitive
 
-# The admin-configurable limit (Settings -> System, `source_max_roots`)
+# The admin-configurable limit (Settings -> Source defaults, `source_max_roots`)
 # can be set anywhere from 1 (several folders turned off) to this hard cap.
 DEFAULT_MAX_ROOTS = 20
 HARD_MAX_ROOTS = 100
@@ -55,8 +55,8 @@ def max_roots(session) -> int:
 
 def roots_limit_message(limit: int) -> str:
     if limit <= 1:
-        return "Several folders per source are turned off (Settings → System)"
-    return f"A source can read at most {limit} folders (Settings → System)"
+        return "Several folders per source are turned off (Settings → Source defaults)"
+    return f"A source can read at most {limit} folders (Settings → Source defaults)"
 
 
 def is_multi_root(source: Source) -> bool:

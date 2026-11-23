@@ -160,7 +160,7 @@
   </div>
   {#if !indexOn}
     <p class="hint">
-      The file-name index is turned off (Settings → System).
+      The file-name index is turned off (Settings → Source defaults).
       <button class="link" on:click={() => dispatch('select', null)}>Select</button> sources or folders to search
       their files live.
     </p>

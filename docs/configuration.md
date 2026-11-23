@@ -7,7 +7,7 @@ Related guides: [admin-guide.md](admin-guide.md) (day-to-day administration), [u
 PerchTail has two kinds of settings:
 
 - **Environment variables**, read once when the process starts. They cover what the operator of the host decides: paths, keys, limits that protect the host, network trust. Changing one needs a restart.
-- **System settings**, stored in the database and changed in the web interface under **Settings → System** and **Settings → Agents**. They take effect without a restart.
+- **System settings**, stored in the database and changed in the web interface on the pages of each Settings section (**Settings → Source defaults**, **Sign-in security**, **Redaction**, **Explorer and limits**, **Alerts**, **Backups and updates**, **Audit log** and **Agents**). They take effect without a restart.
 
 **Contents:** [How environment variables are read](#how-environment-variables-are-read) · [Storage and paths](#storage-and-paths) · [Keys, security and sessions](#keys-security-and-sessions) · [Sources and connectors](#sources-and-connectors) · [Scratch and limits](#scratch-and-limits) · [Logging](#logging) · [Audit log](#audit-log) · [Monitoring and reverse proxy](#monitoring-and-reverse-proxy) · [Backups](#backups) · [Updates and agent upgrades](#updates-and-agent-upgrades) · [Other variables](#other-variables) · [Push agent](#push-agent) · [System settings](#system-settings) · [Settings → Agents](#settings--agents)
 
@@ -41,7 +41,7 @@ The defaults below are the code's defaults. Relative paths are relative to the w
 
 | Variable | Default | Accepted values | Effect |
 |---|---|---|---|
-| `CREDENTIAL_ENCRYPTION_KEY` | `changeme` | Any string; generate one with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` | The root secret. With the salt, it encrypts source credentials, SSO provider settings, MFA secrets, alert webhook URLs and the SMTP password, keys the audit log's hash chain and the hash Tail and alerts use to recognise a file's start, and, unless `BACKUP_ENCRYPTION_KEY` is set, encrypts backups. PerchTail refuses to start while it is `changeme` (`startup.insecure_credential_encryption_key`). Changing it on an existing install needs a rotation, not just a new value: see [credential-key-rotation.md](credential-key-rotation.md). A key shorter than 32 bytes, or with less than 128 bits of estimated entropy, is a warning at startup (`startup.weak_credential_encryption_key`) and at the top of Settings → System; see `CREDENTIAL_KEY_REFUSE_WEAK`. |
+| `CREDENTIAL_ENCRYPTION_KEY` | `changeme` | Any string; generate one with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` | The root secret. With the salt, it encrypts source credentials, SSO provider settings, MFA secrets, alert webhook URLs and the SMTP password, keys the audit log's hash chain and the hash Tail and alerts use to recognise a file's start, and, unless `BACKUP_ENCRYPTION_KEY` is set, encrypts backups. PerchTail refuses to start while it is `changeme` (`startup.insecure_credential_encryption_key`). Changing it on an existing install needs a rotation, not just a new value: see [credential-key-rotation.md](credential-key-rotation.md). A key shorter than 32 bytes, or with less than 128 bits of estimated entropy, is a warning at startup (`startup.weak_credential_encryption_key`) and at the top of the system settings pages (for example Settings → Explorer and limits); see `CREDENTIAL_KEY_REFUSE_WEAK`. |
 | `CREDENTIAL_KEY_REFUSE_WEAK` | `false` | `true`, `false` | `true` refuses to start with a weak `CREDENTIAL_ENCRYPTION_KEY` instead of only warning. A key is weak when it is shorter than 32 bytes once decoded (a hex or base64 key counts the bytes it decodes to, any other key its UTF-8 bytes) or has less than 128 bits of estimated entropy (its length times the Shannon entropy of its characters, capped by its size compressed with zlib, so a repeated word or phrase doesn't pass). The keys the generator above makes always pass. Planned to become the default in 1.0; change a weak key with a rotation ([credential-key-rotation.md](credential-key-rotation.md)). |
 | `API_DOCS` | `false` | `true`, `false` | `true` serves the interactive API documentation at `/docs` and `/redoc` and the OpenAPI schema at `/openapi.json`. Off, they answer 404: the HTTP API is internal to the web UI and may change before 1.0, and the schema lists every endpoint for whoever can reach the server. |
 | `CREDENTIAL_SALT_ALLOW_REGENERATE` | `false` | `true`, `false` | Leave it `false`. When the salt file is missing and the database already holds encrypted data, PerchTail refuses to start (`startup.credential_salt_missing`) so that you can restore the salt. `true` lets it start with a new salt (`startup.credential_salt_regenerated`): every source credential, SSO secret, MFA secret, alert webhook URL and the SMTP password must then be entered again, and older audit rows fail the integrity check. Set it back to `false` afterwards. |
@@ -74,7 +74,7 @@ The defaults below are the code's defaults. Relative paths are relative to the w
 | `SCRATCH_MIN_FREE_PERCENT` | `5.0` | A percentage of the filesystem | The same floor, as a share of the filesystem's size. |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `20` | A whole number of seconds | How long a stop waits for running background jobs and the file-name index and source-check workers to finish. Keep the container's stop grace period above it: `docker-compose.yml` sets `stop_grace_period: 30s`. |
 
-How much work runs at once (listings, downloads, folder ZIPs) is a system setting, in the **Limits** card: see [System settings](#system-settings).
+How much work runs at once (listings, downloads, folder ZIPs) is a system setting, in the **Limits** card of **Settings → Explorer and limits**: see [System settings](#system-settings).
 
 ## Logging
 
@@ -90,7 +90,7 @@ PerchTail logs JSON lines to standard output and to `LOG_DIR/perchtail.log`. The
 
 ## Audit log
 
-What the audit log keeps, and whether its page is shown, are system settings (the **Audit log** card). These two variables set how often its background jobs run.
+What the audit log keeps, and whether its page is shown, are system settings (the **Audit log** card of **Settings → Audit log**). These two variables set how often its background jobs run.
 
 | Variable | Default | Accepted values | Effect |
 |---|---|---|---|
@@ -99,7 +99,7 @@ What the audit log keeps, and whether its page is shown, are system settings (th
 
 ## Monitoring and reverse proxy
 
-Who may call `/healthz`, `/readyz`, `/monitoring/health` and `/metrics` is explained in [monitoring.md](monitoring.md#who-may-call-them). The monitoring token is generated in **Settings → System**, card **Monitoring**.
+Who may call `/healthz`, `/readyz`, `/monitoring/health` and `/metrics` is explained in [monitoring.md](monitoring.md#who-may-call-them). The monitoring token is generated in **Settings → Monitoring**.
 
 | Variable | Default | Accepted values | Effect |
 |---|---|---|---|
@@ -114,7 +114,7 @@ See [backup-and-restore.md](backup-and-restore.md) for how backups are made, che
 
 | Variable | Default | Accepted values | Effect |
 |---|---|---|---|
-| `BACKUP_DIR` | `backups` next to `DATA_DIR` (`/data/backups` in the image) | A directory path | Where backups are written, readable by PerchTail's user only. Listed (not downloadable) in **Settings → System**, card **Backups**. Copy them off the host. |
+| `BACKUP_DIR` | `backups` next to `DATA_DIR` (`/data/backups` in the image) | A directory path | Where backups are written, readable by PerchTail's user only. Listed (not downloadable) in **Settings → Backups and updates**, card **Backups**. Copy them off the host. |
 | `BACKUP_KEEP` | `7` | A whole number; below 1 counts as 1 | How many manual and scheduled backups are kept; the oldest is deleted when a new one is made. The last 3 `pre-upgrade` backups are kept on their own, whatever this says. |
 | `BACKUP_ENCRYPTION_KEY` | empty | Any string; generate it like `CREDENTIAL_ENCRYPTION_KEY` | When set, new backups are encrypted with a key derived from it instead of from `CREDENTIAL_ENCRYPTION_KEY`. A backup made with it opens only with it. Keep it apart from the backups and from `CREDENTIAL_ENCRYPTION_KEY`. |
 
@@ -159,11 +159,13 @@ The agent uses Go's standard proxy variables (`HTTPS_PROXY`, `NO_PROXY`) for its
 
 ## System settings
 
-**Settings → System** is shown to super admins and to roles with the `manage_system_settings` global capability. The settings are grouped in cards, named below as on screen. A switch or a list is saved as soon as it changes, a number with the **Save** button next to it, and the **Limits** and **Password policy** cards with one button for the whole card. Each change is recorded in the audit log as `system_settings.update`, and applies without a restart. A setting nobody changed has its default from the code; the values are stored in the database (table `system_setting`), so they are part of every backup, but not of the YAML export.
+The system settings are on the pages of each Settings section, shown to super admins and to roles with the `manage_system_settings` global capability: **Source defaults** (section Sources), **Sign-in security** (Access), **Redaction** (Content, super admins only), **Explorer and limits** (Content), **Alerts**, **Backups and updates** and **Monitoring** (Operations), and the settings on the **Audit log** page (Audit). Each page groups its settings in cards, named below as on screen. The address of the former System page (`#/settings/system`) opens **Settings → Explorer and limits**. A switch or a list is saved as soon as it changes, a number with the **Save** button next to it, and the **Limits** and **Password policy** cards with one button for the whole card. Each change is recorded in the audit log as `system_settings.update`, and applies without a restart. A setting nobody changed has its default from the code; the values are stored in the database (table `system_setting`), so they are part of every backup, but not of the YAML export.
 
 The key is the setting's name in the code (`backend/app/system_settings.py`), as it appears in the `system_settings.update` audit entries.
 
-### Explorer card
+### Settings → Explorer and limits
+
+#### Explorer card
 
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
@@ -173,27 +175,7 @@ The key is the setting's name in the code (`backend/app/system_settings.py`), as
 | `explorer_refresh_seconds` | **Refresh open folders** | `30` | `0` (off), or 5 to 3600 seconds | How often the explorer lists the folders people have open again, so rotated files show up. Only the list of files, never their content, and not while the browser tab is hidden. |
 | `tail_interval_seconds` | **Tail interval** | `2` | `1`, `2`, `5`, `10` seconds | How often Tail checks an open file for new lines, for everyone. A shorter interval is more live and asks the source more often. |
 
-### Monitoring card
-
-No stored setting: **Generate token** (or **Regenerate token**) creates the bearer token for `/monitoring/health` and `/metrics`, shown once. Regenerating it invalidates the previous one. See [monitoring.md](monitoring.md#generating-a-monitoring-token).
-
-### Sources card
-
-| Key | On screen | Default | Accepted values | Effect |
-|---|---|---|---|---|
-| `source_check_minutes` | **Check sources in the background** | `10` | `0` (off), or up to 1440 minutes | How often PerchTail checks that each source answers, one connection per source, so the explorer shows which ones are down. Push-agent sources show their live connection instead. A source that fails three times in a row backs off for up to 30 minutes. |
-| `name_index_enabled` | **Index file names** | on | on, off | The file-name index: PerchTail lists every source's rule-visible files in the background and keeps their names, sizes and times, never their content. The explorer's search across sources and live alerts use it. Off stops the listings; what was indexed stays until a source is changed. Each source can also be left out in its own settings. |
-| `name_index_minutes` | **List each source's files every** | `15` | 5 to 1440 minutes | A source is listed again once its index is older than this, a few sources at a time. |
-| `credential_max_age_days` | **Warn when a credential is older than** | `90` | `0` (off), or up to 3650 days | **Settings → Sources** marks the sources whose credential was set longer ago than this. |
-| `source_max_roots` | **Folders per source** | `20` | 1 to 100 | How many folders one source may read. `1` turns several folders per source off. Sources that already have more keep them, but can't add more. |
-
-### Alerts card
-
-| Key | On screen | Default | Accepted values | Effect |
-|---|---|---|---|---|
-| `alerts_interval_seconds` | **Check alerts every** | `60` | 15 to 3600 seconds | How often a pass reads the lines appended to the files each alert watches. |
-
-### Limits card
+#### Limits card
 
 The limits are saved together with **Save limits**. A request over a limit is answered "busy" (HTTP 503 with `Retry-After: 5`) instead of waiting, and logged as `limits.busy`.
 
@@ -204,7 +186,35 @@ The limits are saved together with **Save limits**. A request over a limit is an
 | `concurrency_user_transfers` | **Downloads per user** | `2` | 1 to 32 | Downloads and folder ZIPs one person may have in progress. |
 | `listing_max_entries` | **Entries per listing** | `5000` | 100 to 20000 | The most entries a folder or archive listing shows. A bigger folder shows the first ones and says so; the search finds the rest. |
 
-### Updates card
+### Settings → Monitoring
+
+#### Monitoring card
+
+No stored setting: **Generate token** (or **Regenerate token**) creates the bearer token for `/monitoring/health` and `/metrics`, shown once. Regenerating it invalidates the previous one. See [monitoring.md](monitoring.md#generating-a-monitoring-token).
+
+### Settings → Source defaults
+
+#### Sources card
+
+| Key | On screen | Default | Accepted values | Effect |
+|---|---|---|---|---|
+| `source_check_minutes` | **Check sources in the background** | `10` | `0` (off), or up to 1440 minutes | How often PerchTail checks that each source answers, one connection per source, so the explorer shows which ones are down. Push-agent sources show their live connection instead. A source that fails three times in a row backs off for up to 30 minutes. |
+| `name_index_enabled` | **Index file names** | on | on, off | The file-name index: PerchTail lists every source's rule-visible files in the background and keeps their names, sizes and times, never their content. The explorer's search across sources and live alerts use it. Off stops the listings; what was indexed stays until a source is changed. Each source can also be left out in its own settings. |
+| `name_index_minutes` | **List each source's files every** | `15` | 5 to 1440 minutes | A source is listed again once its index is older than this, a few sources at a time. |
+| `credential_max_age_days` | **Warn when a credential is older than** | `90` | `0` (off), or up to 3650 days | **Settings → Sources** marks the sources whose credential was set longer ago than this. |
+| `source_max_roots` | **Folders per source** | `20` | 1 to 100 | How many folders one source may read. `1` turns several folders per source off. Sources that already have more keep them, but can't add more. |
+
+### Settings → Alerts
+
+#### Alerts card
+
+| Key | On screen | Default | Accepted values | Effect |
+|---|---|---|---|---|
+| `alerts_interval_seconds` | **Check alerts every** | `60` | 15 to 3600 seconds | How often a pass reads the lines appended to the files each alert watches. |
+
+### Settings → Backups and updates
+
+#### Updates card
 
 Shown to super admins only. See [upgrade.md](upgrade.md#the-updates-card) for what it shows.
 
@@ -212,17 +222,21 @@ Shown to super admins only. See [upgrade.md](upgrade.md#the-updates-card) for wh
 |---|---|---|---|---|
 | `update_check_enabled` | The switch next to **Updates** | on | on, off | Whether PerchTail asks GitHub once a day for the latest release. `UPDATE_CHECK=false` overrides it and disables the switch. |
 
-### Backups card
+#### Backups card
 
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
 | `backup_interval_hours` | **Back up every** | `24` on a new install; an install upgraded from before 0.7.0 keeps its value (`0`, off, unless it was set) | `0` (off), or 1 to 168 hours | Makes a `scheduled` encrypted backup in `BACKUP_DIR` once this long has passed since the last scheduled one. After a failed attempt, the next one waits an hour, or the interval if that's shorter. The card also lists the backups on the server (**Backups on the server**). |
 
-### Audit log card
+### Settings → Audit log
+
+The audit log's settings are on the **Settings → Audit log** page, below its viewer, for whoever manages system settings. They stay there while the viewer is off, so it can be turned on again.
+
+#### Audit log card
 
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
-| `audit_view_enabled` | **Audit log** | on | on, off | Shows the **Settings → Audit log** page to the roles allowed to see it. Off hides the page for everyone, and the audit log API answers 404 to everyone but a super admin; events are still recorded. |
+| `audit_view_enabled` | **Audit log** | on | on, off | Shows the **Settings → Audit log** page to the roles allowed to see it. Off hides the log for everyone except those who manage system settings, who keep the page with its settings, and the audit log API answers 404 to everyone but a super admin; events are still recorded. |
 | `audit_folder_listings` | **Audit folder listings** | on | on, off | Records every folder someone lists below a source's root (`source.browse`), not only the sources they open and the files they open or download. Turning it on needs `manage_system_settings`; only a super admin can turn it off. |
 | `audit_retention_days` | **Audit log retention** | `365` | `0` (keep forever), or at least 90 days | Entries older than this are deleted by the purge job (see `AUDIT_PURGE_INTERVAL_SECONDS`), and each purge is recorded as `audit.purge`. Only a super admin can shorten it. See [audit-events.md](audit-events.md). |
 
@@ -244,7 +258,9 @@ How content is read for redaction is decided by its first bytes (plain text, UTF
 | `redaction_downloads` | **Redact downloads too** | on | on, off | While redaction is on, whether downloads (single files, folder ZIPs, archives and their members) are redacted too. Off, they carry the original content; the viewer, Tail and alerts stay redacted. |
 | `redaction_download_suffix` | **Say so in the file name** | on | on, off | Whether a redacted download's file name says so (`app.redacted.log`). Only counts while downloads are redacted. |
 
-### Two-factor authentication card
+### Settings → Sign-in security
+
+#### Two-factor authentication card
 
 Local accounts of super admins and of roles with any global capability must always use two-factor authentication (TOTP); SSO accounts never, since their second factor belongs to the identity provider. An account that must use it and hasn't set it up can sign in, but can only set it up until it does (`user.mfa_required` in the audit log).
 
@@ -252,7 +268,7 @@ Local accounts of super admins and of roles with any global capability must alwa
 |---|---|---|---|---|
 | `require_mfa_local_accounts` | **Require MFA for local accounts** | off | on, off | Extends the requirement to every local account. Applied at once: anyone covered without MFA is asked to set it up on their next request. Only a super admin can change it, either way. |
 
-### Password recovery card
+#### Password recovery card
 
 Lets users of local accounts reset a forgotten password through a link sent to their email ([user-guide.md](user-guide.md#forgotten-password), [admin-guide.md](admin-guide.md#password-recovery)). Off by default. It can be turned on only while email is set up and on under **Settings → Email** and `PUBLIC_BASE_URL` starts with `https://`; otherwise the switch is unavailable and the card says why. Accounts of super admins and of roles with any global capability, SSO accounts, and accounts without an email can't use it. Only a super admin can change these settings.
 
@@ -261,7 +277,7 @@ Lets users of local accounts reset a forgotten password through a link sent to t
 | `password_reset_enabled` | **Password recovery by email** | off | on, off | Shows **Forgot password?** on the sign-in page and sends reset links. It stops working, without changing the setting, while email is off or removed or `PUBLIC_BASE_URL` isn't https. |
 | `password_reset_minutes` | **Links work for** | `30` | 5 to 60 minutes | How long a reset link works after it's sent. |
 
-### Password policy card
+#### Password policy card
 
 Applies to local accounts whenever a password is set: a user's own change, the change at first sign-in, a reset through an email link, and temporary passwords an admin sets. Existing passwords are checked at their next change. Saved together with **Save policy**.
 
@@ -290,4 +306,4 @@ Applies to local accounts whenever a password is set: a user's own change, the c
 
 Two more rows of the `system_setting` table aren't settings: `agent_upgrade_last_window` keeps the bounds of the last automatic window for the page's summary, and `agent_remote_upgrade_enabled`, the on/off switch from before the policy existed, is read as **Manual** when it is on and no policy was saved, and is removed when the policy is next saved.
 
-Other settings pages hold configuration that isn't a system setting: **Settings → SSO** ([sso-setup.md](sso-setup.md)), **Settings → Email** (the SMTP server, super admins only, [admin-guide.md](admin-guide.md#email)), **Settings → Severity indicators** and **Settings → Import / export** ([bulk-import.md](bulk-import.md)).
+Other settings pages hold configuration that isn't a system setting: **Settings → Single sign-on** ([sso-setup.md](sso-setup.md)), **Settings → Email** (the SMTP server, super admins only, [admin-guide.md](admin-guide.md#email)), **Settings → Severity indicators** and **Settings → Import / export** ([bulk-import.md](bulk-import.md)).

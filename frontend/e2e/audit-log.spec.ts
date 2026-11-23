@@ -39,15 +39,18 @@ async function pickAction(page: Page, action: string) {
 test('audit log: retention control writes a system_settings.update entry, filter by type finds it', async ({
   page,
 }) => {
-  await page.goto('/#/settings/system')
+  // The retention is set on the Audit log page itself, below the viewer.
+  await page.goto('/#/settings/audit-log')
 
   const retentionInput = page.locator('.retention-input')
   const originalValue = await retentionInput.inputValue()
   await retentionInput.fill(String(marker))
   await page.locator('.retention-row').getByRole('button', { name: 'Save' }).click()
   await expect(retentionInput).toHaveValue(String(marker))
+  await expect(page.locator('.retention-row').getByRole('button', { name: 'Save' })).toBeDisabled()
 
-  await page.goto('/#/settings/audit-log')
+  // Reloaded, so the viewer lists the entry the save just wrote.
+  await page.reload()
 
   // One dropdown per target type in the table (see backend/app/api/audit.py's
   // GET /audit/filters) -- "System settings" is guaranteed present since the
@@ -61,7 +64,6 @@ test('audit log: retention control writes a system_settings.update entry, filter
 
   // Restore the setting so other specs (and a re-run of this one) see the
   // documented default rather than this test's leftover value.
-  await page.goto('/#/settings/system')
   await page.locator('.retention-input').fill(originalValue)
   await page.locator('.retention-row').getByRole('button', { name: 'Save' }).click()
   await expect(page.locator('.retention-input')).toHaveValue(originalValue)

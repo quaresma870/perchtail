@@ -1,4 +1,4 @@
-// Settings → SSO, group → role mappings. A delegated admin sees every
+// Settings → Single sign-on, group → role mappings. A delegated admin sees every
 // mapping, but not the name of a role beyond their own authority
 // (role_outside_authority, role_name null), and the server refuses them
 // changing or removing such a mapping or any mapping after it (the last

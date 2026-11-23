@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import { GLOBAL_CAPABILITY_SHORT_LABELS } from '../lib/capabilities'
   import { confirmAction } from '../lib/confirm'
   import type { Role } from '../lib/types'
@@ -51,7 +51,7 @@
   onMount(load)
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <div class="header">
@@ -103,6 +103,7 @@
     </div>
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .page {

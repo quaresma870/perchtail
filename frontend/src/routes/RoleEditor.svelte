@@ -3,7 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser } from '../lib/auth'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import {
     ALL_CAPABILITIES,
     CAPABILITY_HINTS,
@@ -186,9 +186,7 @@
   }
 </script>
 
-{#if !embedded}
-  <SettingsNav />
-{/if}
+<SettingsLayout nav={!embedded}>
 
 <div class="page" class:embedded>
   {#if !embedded}
@@ -341,6 +339,7 @@
     {/if}
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .page {

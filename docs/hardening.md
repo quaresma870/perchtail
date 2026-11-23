@@ -4,7 +4,7 @@ A checklist for running PerchTail in production. Each item says what to do and w
 
 ## Before the first start
 
-- [ ] **Generate `CREDENTIAL_ENCRYPTION_KEY` at random**, for example `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`. It encrypts every stored credential and keys the audit chain. PerchTail refuses the shipped `changeme` and warns about a weak key at startup and in Settings → System; set `CREDENTIAL_KEY_REFUSE_WEAK=true` to make a weak key stop it from starting.
+- [ ] **Generate `CREDENTIAL_ENCRYPTION_KEY` at random**, for example `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`. It encrypts every stored credential and keys the audit chain. PerchTail refuses the shipped `changeme` and warns about a weak key at startup and at the top of the system settings pages (for example Settings → Explorer and limits); set `CREDENTIAL_KEY_REFUSE_WEAK=true` to make a weak key stop it from starting.
 - [ ] **Keep the key outside the host**, in your organisation's secret store, where you can reach it if the host is lost. The database, the salt in `DATA_DIR` and the key are useless without each other.
 - [ ] **Set `BACKUP_ENCRYPTION_KEY`** to a second random key, kept apart from the first, so a stolen backup and a leaked `CREDENTIAL_ENCRYPTION_KEY` aren't enough together ([backup-and-restore.md](backup-and-restore.md#the-key)).
 - [ ] **Set `PUBLIC_BASE_URL`** to the `https://` address users will use. The SSO redirect address and password-reset links are built from it, and password recovery by email can only be turned on while it is `https://`. Push agents don't use it: each has its own `PERCHTAIL_SERVER_URL`.
@@ -40,16 +40,16 @@ A checklist for running PerchTail in production. Each item says what to do and w
 - [ ] **SMB: leave Require signing on**, and turn **Encrypt** on where the servers support SMB 3.
 - [ ] **WinRM: use HTTPS** (the default, port 5986) with the server's certificate checked, and a **JEA endpoint** with the read-only role in [examples/jea](examples/jea/README.md), so the account needs no remote shell or administrator rights.
 - [ ] **Push agents: keep `wss://`** (never `PERCHTAIL_ALLOW_INSECURE=true` outside a test), set each agent's base path to the log folders only, and set `PERCHTAIL_REMOTE_UPGRADE=false` on hosts that must only be upgraded by hand ([agent/README.md](../agent/README.md)). Run agents of 0.7.0 or later: the server reads no file from an older one, and from 0.7.0 an agent redacts on its own host. Give each agent its own source and token, and regenerate a source's token when its page warns that two agents may be sharing it ([agent-service.md](agent-service.md)).
-- [ ] **Rotate source credentials** regularly: Settings → Sources flags credentials older than the age set in Settings → System (90 days by default), and **Update credentials** changes them on many sources at once.
+- [ ] **Rotate source credentials** regularly: Settings → Sources flags credentials older than the age set in Settings → Source defaults (90 days by default), and **Update credentials** changes them on many sources at once.
 
 ## Accounts and access
 
 - [ ] **Keep two local super admins as emergency accounts**, each with MFA, their passwords and backup codes stored where your organisation keeps emergency credentials. Use them only when SSO or the other administrators are unavailable, and review their sign-ins (`user.login`) in the audit log.
-- [ ] **Use SSO for everyone else**, with MFA required by the identity provider, and map identity-provider groups to roles (Settings → SSO). An SSO user whose groups match no mapping gets "No Access". The provider's issuer must be `https://` and on a public address; leave `SSO_ALLOW_HTTP_LOCALHOST` off outside local development.
-- [ ] **Turn on Require MFA for local accounts** (Settings → System → Two-factor authentication) if you keep local accounts other than the emergency ones. Administrators must use MFA whatever this setting says.
+- [ ] **Use SSO for everyone else**, with MFA required by the identity provider, and map identity-provider groups to roles (Settings → Single sign-on). An SSO user whose groups match no mapping gets "No Access". The provider's issuer must be `https://` and on a public address; leave `SSO_ALLOW_HTTP_LOCALHOST` off outside local development.
+- [ ] **Turn on Require MFA for local accounts** (Settings → Sign-in security → Two-factor authentication) if you keep local accounts other than the emergency ones. Administrators must use MFA whatever this setting says.
 - [ ] **Give the least access that does the job**: grants on the customers, folders or sources a role needs, `download` only where downloads are needed, `manage_alerts` only to those who should send log lines to a webhook, and global capabilities to as few roles as possible. Separate who reads the audit log (`view_audit_log`) and who reviews access (`view_access_report`) from who administers.
 - [ ] **Review access periodically** with Settings → Access review: who holds what, accounts without MFA, and accounts that haven't signed in for a while. Deactivate accounts that are no longer needed: that ends their sessions at once.
-- [ ] **Tighten the password policy** (Settings → System) if your organisation asks for more than the defaults (12 characters, simple and personal passwords refused).
+- [ ] **Tighten the password policy** (Settings → Sign-in security) if your organisation asks for more than the defaults (12 characters, simple and personal passwords refused).
 - [ ] **Leave password recovery by email off** unless users need it; when on, it never serves administrators or SSO accounts.
 - [ ] **Use `https://` webhook URLs** for alerts. PerchTail also accepts `http://`, which sends the matching lines unencrypted.
 - [ ] **Turn redaction on** (Settings → Redaction) when logs hold secrets or personal data that not everyone who reads them should see, with the rules that fit them, and check it on real files: it is best effort ([redaction.md](redaction.md)).
@@ -64,7 +64,7 @@ A checklist for running PerchTail in production. Each item says what to do and w
 
 ## Backups and upgrades
 
-- [ ] **Keep the scheduled backup on** (every 24 hours on a new install; Settings → System → Backups) and **copy backups off the host** ([backup-and-restore.md](backup-and-restore.md)).
+- [ ] **Keep the scheduled backup on** (every 24 hours on a new install; Settings → Backups and updates → Backups) and **copy backups off the host** ([backup-and-restore.md](backup-and-restore.md)).
 - [ ] **Test a restore** now and then on another host.
 - [ ] **Back up before every upgrade** (`python -m app.backup create --reason pre-upgrade`), and apply security releases promptly: [SECURITY.md](../SECURITY.md) says which releases get fixes and how fast.
 - [ ] **Verify a release before running it**: the image's signature and provenance, and the agent binaries' signed checksums ([verifying-releases.md](verifying-releases.md)).

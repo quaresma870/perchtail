@@ -3,7 +3,7 @@
 MFA is always required of a local account whose role is a super admin or
 holds any global capability: those accounts administer the deployment, and
 a password alone isn't enough for them. With the system setting
-`require_mfa_local_accounts` (Settings -> System, off by default), every
+`require_mfa_local_accounts` (Settings -> Sign-in security, off by default), every
 other local account needs it too. SSO accounts are never covered: their
 second factor belongs to the identity provider.
 

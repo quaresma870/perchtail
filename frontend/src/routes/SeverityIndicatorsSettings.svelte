@@ -1,9 +1,9 @@
 <script lang="ts">
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import SeverityPatternEditor from '../lib/components/SeverityPatternEditor.svelte'
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <h1>Severity indicators</h1>
@@ -15,6 +15,7 @@
 
   <SeverityPatternEditor baseUrl="/severity-patterns" />
 </div>
+</SettingsLayout>
 
 <style>
   .page {

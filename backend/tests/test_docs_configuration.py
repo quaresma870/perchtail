@@ -1,5 +1,5 @@
 """docs/configuration.md must name every setting there is: each field of
-app.config.Settings as its environment variable, and each Settings -> System
+app.config.Settings as its environment variable, and each system setting
 key from app/system_settings.py. A setting added to the code without a line
 in the guide fails here, with the names that are missing."""
 
