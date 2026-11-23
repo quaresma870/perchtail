@@ -213,6 +213,7 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `scratch.full`, `scratch.disk_low` | warning | A fetch was refused (507): scratch was at `SCRATCH_MAX_GB` with files people have open, or its filesystem was down to the free space it keeps. |
 | `limits.busy` | warning | A request was answered 503 because a limit in Settings → Explorer and limits was full (`scope` says which). |
 | `archive.zip_stream_failed` | warning | A folder ZIP failed after it had started streaming, so the client got an incomplete download. |
+| `archive.late_audit_failed` | error | The audit entries written once a download ended (what a folder ZIP left out, or where a redacted download refused UTF-32 content; `action` says which) couldn't be saved. |
 | `scratch.leftovers_not_cleared` | error | `SCRATCH_DIR` is a filesystem root or holds the database or the logs, so leftovers weren't cleared at startup. Fix `SCRATCH_DIR`. |
 | `shutdown.jobs_still_running` | warning | A stop didn't wait for a running job within `SHUTDOWN_TIMEOUT_SECONDS`. |
 | `shutdown.pool_still_running` | warning | Same for the file-name index or source-check workers. |

@@ -2833,7 +2833,7 @@ def _zip_entries(
     .zip/.tar.gz files are included as raw files rather than expanded --
     expanding archives-within-a-bulk-zip isn't worth the complexity for
     what CLAUDE.md asks for here (download a folder). An archive holding a
-    file the rules hide is left out once fetched (see _check_archives).
+    file the rules hide is left out once fetched (see _stream_zip).
 
     Like the file-name index, the walk stops MAX_DEPTH folders down and
     lists a folder only once, by its identity on the source when the
@@ -2900,37 +2900,6 @@ def _arcname(path: str, request_root: str) -> str:
     return path[len(request_root) + 1 :] if request_root else path
 
 
-def _check_archives(
-    connector,
-    source: Source,
-    rules: list[Rule],
-    entries: list[DirEntry],
-    request_root: str,
-    tmp_dir: Path,
-) -> tuple[list[tuple[DirEntry, Path | None]], list[str]]:
-    """Before a folder's ZIP starts: fetches each archive among `entries`
-    into `tmp_dir` and leaves out any that holds a file the rules hide
-    (_archive_has_hidden_members), so the audit entry can name them. The
-    copy checked is the copy zipped -- each archive is read from the source
-    once. Returns the entries to zip, each with its already fetched copy
-    (None for a file fetched while streaming), and the arcnames of the
-    archives left out."""
-    planned: list[tuple[DirEntry, Path | None]] = []
-    skipped: list[str] = []
-    for index, entry in enumerate(entries):
-        if not is_archive(entry.name):
-            planned.append((entry, None))
-            continue
-        destination = tmp_dir / f"archive-{index}"
-        connector.fetch_file(source, entry.path, destination, rules=rules)
-        if _archive_has_hidden_members(source, entry.path, destination, rules):
-            destination.unlink()
-            skipped.append(_arcname(entry.path, request_root))
-            continue
-        planned.append((entry, destination))
-    return planned, skipped
-
-
 def _skipped_list_name(entries: list[DirEntry], request_root: str) -> str:
     """SKIPPED.txt, unless the folder already has a file by that name at its
     root (compared ignoring case, so extracting on Windows can't collide)."""
@@ -2938,53 +2907,102 @@ def _skipped_list_name(entries: list[DirEntry], request_root: str) -> str:
     return "SKIPPED (PerchTail).txt" if "skipped.txt" in root_names else "SKIPPED.txt"
 
 
+class _FetchBudget:
+    """What is left of a folder ZIP's MAX_FETCH_MB budget, counted in bytes
+    fetched from the source as each file is fetched: a file may have grown
+    since it was listed, and one that takes the ZIP over it ends it."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.fetched = 0
+
+    def charge(self, size: int) -> None:
+        self.fetched += size
+        if self.fetched > self.limit:
+            raise FetchTooLargeError(
+                "folder is over the MAX_FETCH_MB limit", size=self.fetched, limit=self.limit
+            )
+
+
+class _LateSkip(NamedTuple):
+    """Something a folder ZIP left out, found while it was sent: the file on
+    the source (`path`), the member of it when only a member was left out,
+    and why (a _SKIP_* or archives.SKIP_* reason, or _AUDIT_REFUSAL_REASON)."""
+
+    path: str
+    member: str | None
+    reason: str
+
+
+def _write_zip_member(
+    zf: zipfile.ZipFile, sink: _ZipSink, content: Path, arcname: str, compress: int
+) -> Iterator[bytes]:
+    """Writes `content` into the streamed ZIP as `arcname`, handing the
+    compressed output on as it fills."""
+    info = zipfile.ZipInfo.from_file(content, arcname=arcname)
+    info.compress_type = compress
+    with content.open("rb") as src, zf.open(info, "w") as dst:
+        while chunk := src.read(_ZIP_READ_BYTES):
+            dst.write(chunk)
+            if sink.pending >= _ZIP_FLUSH_BYTES:
+                yield sink.take()
+    if sink.pending:
+        yield sink.take()
+
+
 def _stream_zip(
     connector,
     source: Source,
     rules: list[Rule],
-    planned: list[tuple[DirEntry, Path | None]],
+    entries: list[DirEntry],
     request_root: str,
     tmp_dir: Path,
     limit: int,
-    skipped: list[str],
     skipped_name: str,
+    record_skipped: Callable[[list[_LateSkip]], None],
 ) -> Iterator[bytes]:
-    """Fetches each of `planned` fresh, one at a time, into scratch, and
-    streams it into the ZIP the client is receiving -- same always-fresh
-    rule as every other read in this project, just batched into one
-    archive. An archive was already fetched and checked (_check_archives):
-    its copy is the one zipped. Arcnames are relative to `request_root`.
-    The fetched size is what counts against the MAX_FETCH_MB budget: a file
-    may have grown since it was listed, and one that takes the ZIP over it
-    ends the download. The archives left out (`skipped`) are listed last,
-    in `skipped_name`.
+    """Fetches each of `entries` fresh, one at a time and in order, into
+    scratch, and streams it into the ZIP the client is receiving -- same
+    always-fresh rule as every other read in this project, just batched into
+    one archive. Nothing is fetched before its turn, so the first file goes
+    out without waiting for the others. An archive is checked when its turn
+    comes, on the copy that is zipped (_archive_has_hidden_members): one
+    that holds a file the rules hide is left out, listed last in
+    `skipped_name` and, once the ZIP ends however it ends, handed to
+    `record_skipped`. Each file is deleted from scratch once it is in the
+    ZIP. Arcnames are relative to `request_root`; the bytes fetched of what
+    goes into the ZIP count against `limit` (MAX_FETCH_MB, _FetchBudget).
 
     Once the response has started, a failure can only cut the download
     short (the client sees an incomplete download); it's logged."""
     sink = _ZipSink()
-    remaining = limit
+    budget = _FetchBudget(limit)
+    skipped: list[str] = []
+    late: list[_LateSkip] = []
     try:
         with zipfile.ZipFile(sink, "w", zipfile.ZIP_DEFLATED) as zf:
-            for index, (entry, fetched) in enumerate(planned):
+            for index, entry in enumerate(entries):
                 arcname = _arcname(entry.path, request_root)
-                destination = fetched if fetched is not None else tmp_dir / f"member-{index}"
+                destination = tmp_dir / f"member-{index}"
                 try:
-                    if fetched is None:
-                        connector.fetch_file(source, entry.path, destination, rules=rules)
-                    remaining -= destination.stat().st_size
-                    if remaining < 0:
-                        raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
-                    info = zipfile.ZipInfo.from_file(destination, arcname=arcname)
-                    info.compress_type = zipfile.ZIP_DEFLATED
-                    with destination.open("rb") as src, zf.open(info, "w") as dst:
-                        while chunk := src.read(_ZIP_READ_BYTES):
-                            dst.write(chunk)
-                            if sink.pending >= _ZIP_FLUSH_BYTES:
-                                yield sink.take()
+                    connector.fetch_file(source, entry.path, destination, rules=rules)
+                    if is_archive(entry.name) and _archive_has_hidden_members(
+                        source, entry.path, destination, rules
+                    ):
+                        logger.warning(
+                            "archive.whole_archive_refused", source_id=source.id, path=entry.path
+                        )
+                        skipped.append(arcname)
+                        late.append(_LateSkip(entry.path, None, _AUDIT_REFUSAL_REASON))
+                        continue
+                    # What goes into the ZIP counts; an archive left out
+                    # doesn't use the budget up.
+                    budget.charge(destination.stat().st_size)
+                    yield from _write_zip_member(
+                        zf, sink, destination, arcname, zipfile.ZIP_DEFLATED
+                    )
                 finally:
                     destination.unlink(missing_ok=True)
-                if sink.pending:
-                    yield sink.take()
             if skipped:
                 zf.writestr(
                     skipped_name, "".join(f"{arcname}: {_SKIPPED_REASON}\n" for arcname in skipped)
@@ -3002,99 +3020,53 @@ def _stream_zip(
         raise
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        if late:
+            record_skipped(late)
 
 
-class _RedactedEntry(NamedTuple):
-    entry: DirEntry
-    # Already redacted (an archive rebuilt, a .gz file redacted and
-    # compressed again), stored as it is; None for a file fetched and
-    # redacted while the ZIP is sent.
-    prepared: Path | None
-
-
-def _prepare_redacted_folder(
+def _prepare_redacted_entry(
     connector,
     source: Source,
     rules: list[Rule],
-    entries: list[DirEntry],
-    request_root: str,
+    entry: DirEntry,
+    original: Path,
+    prepared: Path,
     tmp_dir: Path,
     redaction: CompiledRules,
-    limit: int,
+    budget: _FetchBudget,
     agent_rules: list[dict] | None = None,
-) -> tuple[list[_RedactedEntry], list[tuple[str, str]], int]:
-    """Before a redacted folder ZIP starts: fetches each archive and .gz
-    file among `entries` into `tmp_dir` and redacts it there: an archive is
+) -> list[tuple[str, str]] | str:
+    """An archive or .gz file of a redacted folder ZIP, when its turn comes:
+    fetched into `original` and redacted into `prepared`. An archive is
     rebuilt with only the members the rules don't hide, each redacted
     (_rebuild_redacted); a .gz file is decompressed, redacted and compressed
-    again under the same name. What can't be redacted is left out and
-    returned as (arcname, reason), a member of an archive as
-    `<archive>/<member>`. Returns the entries to zip, those left out and the
-    bytes fetched, which count against `limit` (MAX_FETCH_MB) as fetched
-    from the source, not as redacted. With `agent_rules`, the agent redacts
-    on its host (_prepare_folder_entry_on_agent)."""
-    planned: list[_RedactedEntry] = []
-    skipped: list[tuple[str, str]] = []
-    fetched_total = 0
-    for index, entry in enumerate(entries):
-        archive = is_archive(entry.name)
-        if not archive and not is_transparent_gzip(entry.name):
-            planned.append(_RedactedEntry(entry, None))
-            continue
-        arcname = _arcname(entry.path, request_root)
-        if agent_rules is not None:
-            # As stored on the source (the agent refuses more than the
-            # limit), as the server counts what it fetched.
-            fetched_total += entry.size
-            if fetched_total > limit:
-                raise FetchTooLargeError(
-                    "folder is over the MAX_FETCH_MB limit", size=fetched_total, limit=limit
+    again under the same name. Returns the (member, reason) of each member
+    an archive left out, or why the whole file is left out. The bytes
+    fetched count against `budget` as fetched from the source, not as
+    redacted. With `agent_rules`, the agent redacts on its host
+    (_prepare_folder_entry_on_agent)."""
+    if agent_rules is not None:
+        # As stored on the source (the agent refuses more than the limit),
+        # as the server counts what it fetched.
+        budget.charge(entry.size)
+        return _prepare_folder_entry_on_agent(
+            connector, source, entry, prepared, rules, agent_rules, tmp_dir
+        )
+    try:
+        connector.fetch_file(source, entry.path, original, rules=rules)
+        budget.charge(original.stat().st_size)
+        if is_archive(entry.name):
+            try:
+                return _rebuild_redacted(
+                    source, entry.path, original, entry.name, prepared, rules, redaction, tmp_dir
                 )
-            prepared = tmp_dir / f"prepared-{index}"
-            inner = _prepare_folder_entry_on_agent(
-                connector, source, entry, prepared, rules, agent_rules, tmp_dir
-            )
-            if isinstance(inner, str):
-                skipped.append((arcname, inner))
-                continue
-            skipped.extend((f"{arcname}/{name}", reason) for name, reason in inner)
-            planned.append(_RedactedEntry(entry, prepared))
-            continue
-        original = tmp_dir / f"source-{index}"
-        prepared = tmp_dir / f"prepared-{index}"
-        try:
-            connector.fetch_file(source, entry.path, original, rules=rules)
-            fetched_total += original.stat().st_size
-            if fetched_total > limit:
-                raise FetchTooLargeError(
-                    "folder is over the MAX_FETCH_MB limit", size=fetched_total, limit=limit
-                )
-            if archive:
-                try:
-                    inner = _rebuild_redacted(
-                        source,
-                        entry.path,
-                        original,
-                        entry.name,
-                        prepared,
-                        rules,
-                        redaction,
-                        tmp_dir,
-                    )
-                except _ArchiveUnreadable:
-                    skipped.append((arcname, _SKIP_UNREADABLE))
-                    continue
-                skipped.extend((f"{arcname}/{name}", reason) for name, reason in inner)
-            else:
-                with original.open("rb") as src:
-                    reason = _redact_content(entry.name, src, prepared, redaction, tmp_dir)
-                if reason is not None:
-                    skipped.append((arcname, reason))
-                    continue
-        finally:
-            original.unlink(missing_ok=True)
-        planned.append(_RedactedEntry(entry, prepared))
-    return planned, skipped, fetched_total
+            except _ArchiveUnreadable:
+                return _SKIP_UNREADABLE
+        with original.open("rb") as src:
+            reason = _redact_content(entry.name, src, prepared, redaction, tmp_dir)
+        return [] if reason is None else reason
+    finally:
+        original.unlink(missing_ok=True)
 
 
 def _prepare_folder_entry_on_agent(
@@ -3167,77 +3139,86 @@ def _stream_redacted_zip(
     connector,
     source: Source,
     rules: list[Rule],
-    planned: list[_RedactedEntry],
+    entries: list[DirEntry],
     request_root: str,
     tmp_dir: Path,
-    remaining: int,
+    limit: int,
     redaction: CompiledRules,
-    skipped: list[tuple[str, str]],
     skipped_name: str,
-    record_late_skips: Callable[[list[tuple[str, str]]], None],
+    record_skipped: Callable[[list[_LateSkip]], None],
     agent_rules: list[dict] | None = None,
 ) -> Iterator[bytes]:
-    """_stream_zip for a redacted folder ZIP. Each plain file is fetched
-    fresh, one at a time, redacted into scratch (with `agent_rules`, on the
-    agent, which sends it redacted, counted by the bytes of the original it
-    read) and written into the ZIP;
-    one redaction can't read (UTF-32, or compressed in a format it doesn't
-    support) is left out. The archives and .gz files prepared beforehand
-    (_prepare_redacted_folder) are stored as they are, without compressing
-    them again. `remaining` is what is left of the MAX_FETCH_MB budget,
-    counted in bytes fetched from the source. Everything left out is listed
-    last, in `skipped_name`. The files only found to be left out while the
-    ZIP is sent (UTF-32 from the start or part way, or compressed in a
-    format redaction doesn't support) go to `record_late_skips` (their
-    paths on the source, with why) once it ends, however it ends."""
+    """_stream_zip for a redacted folder ZIP, one file at a time and in
+    order, each prepared only when its turn comes. A plain file is fetched
+    fresh, redacted into scratch (with `agent_rules`, on the agent, which
+    sends it redacted, counted by the bytes of the original it read) and
+    written into the ZIP; one redaction can't read (UTF-32, or compressed
+    in a format it doesn't support) is left out. An archive or .gz file is
+    fetched and redacted or rebuilt (_prepare_redacted_entry) and stored as
+    it is, without compressing it again; what it leaves out, or the whole
+    file when it can't be redacted, is left out. Each file is deleted from
+    scratch once it is in the ZIP. The bytes fetched from the source count
+    against `limit` (MAX_FETCH_MB, _FetchBudget). Everything left out is
+    listed last, in `skipped_name`, and goes to `record_skipped` (the file
+    on the source, the member, and why) once the ZIP ends, however it
+    ends."""
     sink = _ZipSink()
-    late: list[tuple[str, str]] = []
+    budget = _FetchBudget(limit)
+    skipped: list[tuple[str, str]] = []
+    late: list[_LateSkip] = []
+
+    def leave_out(arcname: str, path: str, reason: str) -> None:
+        logger.warning("archive.redaction_skipped", source_id=source.id, path=path, reason=reason)
+        skipped.append((arcname, reason))
+        late.append(_LateSkip(path, None, reason))
+
     try:
         with zipfile.ZipFile(sink, "w", zipfile.ZIP_DEFLATED) as zf:
-            for index, (entry, prepared) in enumerate(planned):
+            for index, entry in enumerate(entries):
                 arcname = _arcname(entry.path, request_root)
                 original = tmp_dir / f"member-{index}"
-                redacted = prepared if prepared is not None else tmp_dir / f"redacted-{index}"
+                redacted = tmp_dir / f"redacted-{index}"
                 try:
-                    compress = zipfile.ZIP_STORED
-                    if prepared is None:
-                        compress = zipfile.ZIP_DEFLATED
+                    if is_archive(entry.name) or is_transparent_gzip(entry.name):
+                        outcome = _prepare_redacted_entry(
+                            connector,
+                            source,
+                            rules,
+                            entry,
+                            original,
+                            redacted,
+                            tmp_dir,
+                            redaction,
+                            budget,
+                            agent_rules,
+                        )
+                        if isinstance(outcome, str):
+                            leave_out(arcname, entry.path, outcome)
+                            continue
+                        for name, reason in outcome:
+                            skipped.append((f"{arcname}/{name}", reason))
+                            late.append(_LateSkip(entry.path, name, reason))
+                        compress = zipfile.ZIP_STORED
+                    else:
                         if agent_rules is not None:
                             fetched, reason = _fetch_redacted_file_on_agent(
                                 connector, source, entry.path, redacted, agent_rules, rules
                             )
-                            remaining -= fetched
+                            budget.charge(fetched)
                         else:
                             connector.fetch_file(source, entry.path, original, rules=rules)
-                            remaining -= original.stat().st_size
-                        if remaining < 0:
-                            raise FetchTooLargeError("folder is over the MAX_FETCH_MB limit")
-                        if agent_rules is None:
+                            budget.charge(original.stat().st_size)
                             with original.open("rb") as src:
                                 reason = _redact_into(src, redacted, redaction, None)
                             original.unlink()
                         if reason is not None:
-                            logger.warning(
-                                "archive.redaction_skipped",
-                                source_id=source.id,
-                                path=entry.path,
-                                reason=reason,
-                            )
-                            skipped.append((arcname, reason))
-                            late.append((entry.path, reason))
+                            leave_out(arcname, entry.path, reason)
                             continue
-                    info = zipfile.ZipInfo.from_file(redacted, arcname=arcname)
-                    info.compress_type = compress
-                    with redacted.open("rb") as src, zf.open(info, "w") as dst:
-                        while chunk := src.read(_ZIP_READ_BYTES):
-                            dst.write(chunk)
-                            if sink.pending >= _ZIP_FLUSH_BYTES:
-                                yield sink.take()
+                        compress = zipfile.ZIP_DEFLATED
+                    yield from _write_zip_member(zf, sink, redacted, arcname, compress)
                 finally:
                     original.unlink(missing_ok=True)
                     redacted.unlink(missing_ok=True)
-                if sink.pending:
-                    yield sink.take()
             if skipped:
                 zf.writestr(skipped_name, _redaction_skipped_text(skipped))
         yield sink.take()
@@ -3253,7 +3234,7 @@ def _stream_redacted_zip(
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         if late:
-            record_late_skips(late)
+            record_skipped(late)
 
 
 def _fetch_redacted_file_on_agent(
@@ -3287,27 +3268,32 @@ def _fetch_redacted_file_on_agent(
     return fetched.source_size, None
 
 
-# The audit reason of a file a redacted folder ZIP only found it had to leave
-# out while it was sent, by why it was left out.
+# The audit reason of a file, or a member of an archive, a folder ZIP left
+# out, by why it was left out; any other reason is recorded as it is
+# (archive_hidden_members, and an archive member's encrypted, link and
+# unsupported_compression).
 _LATE_SKIP_AUDIT_REASONS = {
     _SKIP_ENCODING: _AUDIT_REDACTION_ENCODING_REASON,
     _SKIP_FORMAT: _AUDIT_REDACTION_FORMAT_REASON,
+    _SKIP_UNREADABLE: _AUDIT_ARCHIVE_UNREADABLE_REASON,
+    _SKIP_TOO_LARGE: "too_large",
+    SKIP_NESTED_ARCHIVE: "nested_archive",
 }
 
 
 def _record_late_entries(
-    bind, user_id: int, source_id: int, path: str, entries: list[dict]
+    bind, user_id: int, source_id: int, path: str, entries: list[dict], action: str
 ) -> None:
-    """Writes file.download_redaction_skipped entries after the response
-    started, in their own session, since the request's may be gone by then;
-    a failure is logged, never raised into the response."""
+    """Writes `action` entries after the response started, in their own
+    session, since the request's may be gone by then; a failure is logged,
+    never raised into the response."""
     try:
         with Session(bind) as late_session:
             for metadata in entries:
                 record_audit_event(
                     late_session,
                     user_id=user_id,
-                    action="file.download_redaction_skipped",
+                    action=action,
                     target_type="source",
                     target_id=source_id,
                     metadata=metadata,
@@ -3315,45 +3301,39 @@ def _record_late_entries(
             late_session.commit()
     except Exception as exc:
         logger.error(
-            "archive.redaction_skipped_audit_failed",
+            "archive.late_audit_failed",
             source_id=source_id,
             path=path,
+            action=action,
             error_type=type(exc).__name__,
         )
 
 
 def _late_skips_recorder(
-    session: Session, user: User, source: Source, path: str
-) -> Callable[[list[tuple[str, str]]], None]:
-    """What records the files a redacted folder ZIP only found it had to
-    leave out while it was sent, after its folder.download entry was
-    written: a second audit entry, file.download_redaction_skipped, per
-    reason, with the folder, the reason, the count and their paths."""
+    session: Session, user: User, source: Source, folder: str, action: str
+) -> Callable[[list[_LateSkip]], None]:
+    """What records what a folder ZIP left out, once it ends, after its
+    folder.download entry was written: one `action` entry
+    (file.download_denied without redaction,
+    file.download_redaction_skipped with it) per file or archive member,
+    with its path on the source, the member, the folder of the ZIP and the
+    reason."""
     bind = session.get_bind()
     user_id = user.id
     source_id = source.id
 
-    def record(late: list[tuple[str, str]]) -> None:
-        by_reason: dict[str, list[str]] = {}
-        for skipped_path, reason in late:
-            by_reason.setdefault(reason, []).append(skipped_path)
-        _record_late_entries(
-            bind,
-            user_id,
-            source_id,
-            path,
-            [
-                {
-                    "path": path,
-                    "reason": _LATE_SKIP_AUDIT_REASONS.get(reason, reason),
-                    "skipped_count": len(paths),
-                    "skipped": paths,
-                }
-                for reason, paths in by_reason.items()
-            ],
-        )
+    def record_skipped(late: list[_LateSkip]) -> None:
+        entries = []
+        for item in late:
+            metadata: dict = {"path": item.path}
+            if item.member is not None:
+                metadata["member"] = item.member
+            metadata["folder"] = folder
+            metadata["reason"] = _LATE_SKIP_AUDIT_REASONS.get(item.reason, item.reason)
+            entries.append(metadata)
+        _record_late_entries(bind, user_id, source_id, folder, entries, action)
 
-    return record
+    return record_skipped
 
 
 def _late_refusal_recorder(
@@ -3376,6 +3356,7 @@ def _late_refusal_recorder(
             source_id,
             target["path"],
             [{**target, "reason": _AUDIT_REDACTION_ENCODING_REASON, "offset": offset}],
+            "file.download_redaction_skipped",
         )
 
     return record
@@ -3393,9 +3374,10 @@ def _download_folder_zip_redacted(
     agent_rules: list[dict] | None = None,
 ) -> StreamingResponse:
     """download_folder_zip when the download is redacted (#382, #249): every
-    file in the ZIP is redacted (_prepare_redacted_folder,
-    _stream_redacted_zip), on the agent with `agent_rules`, what can't be is
-    listed in REDACTION-SKIPPED.txt, and the ZIP says so in
+    file in the ZIP is redacted when its turn comes (_stream_redacted_zip),
+    on the agent with `agent_rules`, what can't be is listed in
+    REDACTION-SKIPPED.txt and audited once the ZIP ends
+    (file.download_redaction_skipped), and the ZIP says so in
     X-PerchTail-Redacted and, with redaction_download_suffix on, in its
     name."""
     slots: list[Slot] = [get_limiter().transfer(limits, user.id)]
@@ -3421,37 +3403,18 @@ def _download_folder_zip_redacted(
                 ),
                 folder=True,
             )
-        # The archives and .gz files are prepared before the ZIP starts and
-        # wait in scratch, redacted, for their turn; a plain file sits there
-        # one at a time, fetched and redacted.
-        prepared_size = sum(
-            entry.size
-            for entry in entries
-            if is_archive(entry.name) or is_transparent_gzip(entry.name)
-        )
-        largest_other = max(
-            (
-                entry.size
-                for entry in entries
-                if not is_archive(entry.name) and not is_transparent_gzip(entry.name)
-            ),
-            default=0,
-        )
-        get_scratch_store().ensure_room(prepared_size + 2 * largest_other)
+        # One file sits in scratch at a time, fetched and redacted (or
+        # rebuilt) when its turn comes: the original and what it becomes.
+        get_scratch_store().ensure_room(2 * max((entry.size for entry in entries), default=0))
         tmp_dir = make_scratch_dir("perchtail-zip-")
-        try:
-            planned, skipped, fetched = _prepare_redacted_folder(
-                connector, source, rules, entries, path, tmp_dir, redaction, limit, agent_rules
-            )
-        except FetchTooLargeError as exc:
-            raise _fetch_too_large(exc, folder=True) from exc
+        # Written before the ZIP starts: what it leaves out is only known as
+        # it is sent, and is audited once it ends (_late_skips_recorder).
         metadata: dict = {
             "path": path,
-            "file_count": len(planned),
+            "file_count": len(entries),
             **_redaction_applied(
                 REDACTED_ON_AGENT if agent_rules is not None else REDACTED_ON_SERVER
             ),
-            "skipped_count": len(skipped),
         }
         record_audit_event(
             session,
@@ -3473,14 +3436,13 @@ def _download_folder_zip_redacted(
         connector,
         source,
         rules,
-        planned,
+        entries,
         path,
         tmp_dir,
-        limit - fetched,
+        limit,
         redaction,
-        skipped,
         _redaction_skipped_name(root_names),
-        _late_skips_recorder(session, user, source, path),
+        _late_skips_recorder(session, user, source, path, "file.download_redaction_skipped"),
         agent_rules,
     )
 
@@ -3524,12 +3486,14 @@ def download_folder_zip(
     download "single file or a zipped folder"), fetching each contained
     file fresh — no different from any other read here, just batched.
 
-    The ZIP is streamed as it's built (#345): each file is fetched into
-    scratch, written to the response and deleted before the next; the
-    archives among them are fetched and checked first (_check_archives),
-    and one that holds a file the rules hide is left out and listed in
-    SKIPPED.txt. The folder's listed total is checked against MAX_FETCH_MB before anything
-    is fetched (413). Holds one of the user's transfers and a connector
+    The ZIP is streamed as it's built (#345), in order: each file is fetched
+    into scratch when its turn comes, written to the response and deleted
+    before the next. An archive is checked on the copy that is zipped
+    (_stream_zip), and one that holds a file the rules hide is left out,
+    listed in SKIPPED.txt and audited once the ZIP ends
+    (file.download_denied). The folder's listed total is checked against
+    MAX_FETCH_MB before anything is fetched (413). Holds one of the user's
+    transfers and a connector
     slot until the client has it all or goes away (#344, 503 with
     Retry-After when none is free).
 
@@ -3582,29 +3546,14 @@ def download_folder_zip(
                 ),
                 folder=True,
             )
-        # The archives are fetched and checked before the ZIP starts and wait
-        # in scratch for their turn; the other files sit there one at a time.
-        archives = sum(entry.size for entry in entries if is_archive(entry.name))
-        largest_other = max(
-            (entry.size for entry in entries if not is_archive(entry.name)), default=0
-        )
-        get_scratch_store().ensure_room(archives + largest_other)
+        # One file sits in scratch at a time, fetched (and, for an archive,
+        # checked) when its turn comes.
+        get_scratch_store().ensure_room(max((entry.size for entry in entries), default=0))
         tmp_dir = make_scratch_dir("perchtail-zip-")
-        try:
-            planned, skipped = _check_archives(connector, source, rules, entries, path, tmp_dir)
-        except FetchTooLargeError as exc:
-            raise _fetch_too_large(exc, folder=True) from exc
-        fetched = sum(copy.stat().st_size for _, copy in planned if copy is not None)
-        if fetched > limit:
-            raise _fetch_too_large(
-                FetchTooLargeError(
-                    "folder is over the MAX_FETCH_MB limit", size=fetched, limit=limit
-                ),
-                folder=True,
-            )
-        metadata: dict = {"path": path, "file_count": len(planned)}
-        if skipped:
-            metadata["skipped_archives"] = skipped
+        # Written before the ZIP starts: the archives it leaves out are only
+        # known as it is sent, and are audited once it ends
+        # (_late_skips_recorder).
+        metadata: dict = {"path": path, "file_count": len(entries)}
         record_audit_event(
             session,
             user_id=user.id,
@@ -3624,12 +3573,12 @@ def download_folder_zip(
         connector,
         source,
         rules,
-        planned,
+        entries,
         path,
         tmp_dir,
         limit,
-        skipped,
         _skipped_list_name(entries, path),
+        _late_skips_recorder(session, user, source, path, "file.download_denied"),
     )
 
     def finish_stream() -> None:
