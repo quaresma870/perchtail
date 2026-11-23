@@ -6,6 +6,7 @@ import smbclient
 
 from app.collectors import base as collector_base
 from app.collectors.base import DirEntry, PathOutsideBaseError, SourceNotAFileError
+from app.collectors.ranged import check_length, check_size
 from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
@@ -13,7 +14,10 @@ from app.models import Rule, Source
 from app.rules import is_entry_visible
 from app.scratch import scratch_temp_dir
 
-__all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
+__all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy", "open_ranged"]
+
+# open_ranged reads a .zip in place (collectors/ranged.py).
+RANGED_READS = True
 
 logger = get_logger(__name__)
 
@@ -222,3 +226,52 @@ def read_range(
         with smbclient.open_file(remote_path, mode="rb", share_access="rwd", **kwargs) as f:
             size = smbclient.stat(remote_path, **kwargs).st_size
             return collector_base.read_range_from(f, size, offset, length, head)
+
+
+class _SMBRemote:
+    """A RangedRemote over one open SMB handle (unbuffered, so a read asks
+    for what it needs and no more). After each read the path is stat'ed
+    again: a file that changed size, or was replaced by another under its
+    name (rotated), since it was opened is refused."""
+
+    def __init__(self, remote, size: int, current_size):
+        self._remote = remote
+        self._current_size = current_size
+        self.size = size
+
+    def _read(self, offset: int, length: int, write) -> int:
+        self._remote.seek(offset)
+        done = 0
+        while done < length:
+            data = self._remote.read(length - done)
+            if not data:
+                break
+            write(data)
+            done += len(data)
+        check_size(self.size, self._current_size())
+        check_length(length, done)
+        return done
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        parts: list[bytes] = []
+        self._read(offset, length, parts.append)
+        return b"".join(parts)
+
+    def copy_range(self, offset: int, length: int, dst) -> int:
+        return self._read(offset, length, dst.write)
+
+
+@contextmanager
+def open_ranged(source: Source, relative_path: str):
+    """The file opened for ranged reads (collectors/ranged.py) for the
+    length of the `with` block, on one connection: checked as fetch_file
+    checks it (no junction or symlink below the base path, a folder
+    refused) and opened like it, tolerating the writer (#166)."""
+    with _connection(source) as kwargs:
+        _require_no_reparse_points(source, relative_path, kwargs)
+        remote_path = _unc_path(source, relative_path)
+        size = _file_stat(remote_path, relative_path, kwargs).st_size
+        with smbclient.open_file(
+            remote_path, mode="rb", buffering=0, share_access="rwd", **kwargs
+        ) as remote:
+            yield _SMBRemote(remote, size, lambda: smbclient.stat(remote_path, **kwargs).st_size)

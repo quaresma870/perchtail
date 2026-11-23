@@ -21,7 +21,7 @@ formats the WinRS connector already parses (collectors/winrm.py)."""
 import base64
 import json
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from pypsrp.powershell import PowerShell, RunspacePool
@@ -29,6 +29,7 @@ from pypsrp.wsman import WSMan
 
 from app.collectors import base as collector_base
 from app.collectors.base import DirEntry, PathOutsideBaseError
+from app.collectors.ranged import check_length, check_size
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
 from app.models import Rule, Source
@@ -187,3 +188,92 @@ def read_range(
         logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
         raise
     return winrm.parse_range(output)
+
+
+class _JEARemote:
+    """A RangedRemote over one runspace on the JEA endpoint, for the length
+    of an operation. A read of up to RANGE_MAX_BYTES is one
+    Read-PerchTailRange call, which says the file's size with the data; a
+    longer one is read in Read-PerchTailBlock calls of _CHUNK_BYTES, each
+    followed by Get-PerchTailSize. A size other than the one the file had
+    when it was opened is refused."""
+
+    def __init__(self, pool: RunspacePool, path: str, size: int):
+        self._pool = pool
+        self._path = path
+        self.size = size
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        from app.collectors import winrm
+
+        parts: list[bytes] = []
+        done = 0
+        while done < length:
+            want = min(length - done, collector_base.RANGE_MAX_BYTES)
+            read = winrm.parse_range(
+                _call(
+                    self._pool,
+                    "Read-PerchTailRange",
+                    Path=self._path,
+                    Offset=offset + done,
+                    Length=want,
+                    HeadLength=0,
+                )
+            )
+            check_size(self.size, read.size)
+            check_length(want, len(read.data))
+            parts.append(read.data)
+            done += want
+        return b"".join(parts)
+
+    def copy_range(self, offset: int, length: int, dst) -> int:
+        done = 0
+        while done < length:
+            want = min(length - done, _CHUNK_BYTES)
+            block = base64.b64decode(
+                _call(
+                    self._pool,
+                    "Read-PerchTailBlock",
+                    Path=self._path,
+                    Offset=offset + done,
+                    Length=want,
+                )
+            )
+            check_size(self.size, int(_call(self._pool, "Get-PerchTailSize", Path=self._path) or 0))
+            check_length(want, len(block))
+            dst.write(block)
+            done += want
+        return done
+
+
+@contextmanager
+def open_ranged(source: Source, relative_path: str):
+    """The file opened for ranged reads (collectors/ranged.py) for the
+    length of the `with` block: one runspace, asking for the larger envelope
+    size and once more with the smaller one when the server refuses it
+    (winrm.with_envelope_fallback). The role checks the path on every call
+    (its roots, no junction or link below them)."""
+    from app.collectors import winrm
+
+    path = winrm._remote_path(source, relative_path)
+
+    def attempt(envelope_size: int):
+        stack = ExitStack()
+        try:
+            pool = stack.enter_context(_pool(source, envelope_size))
+            return stack, pool, int(_call(pool, "Get-PerchTailSize", Path=path) or 0)
+        except BaseException:
+            stack.close()
+            raise
+
+    try:
+        (stack, pool, size), _ = winrm.with_envelope_fallback(source, attempt)
+    except PathOutsideBaseError:
+        logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
+        raise
+    with stack:
+        try:
+            yield _JEARemote(pool, path, size)
+        except PathOutsideBaseError:
+            logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
+            raise

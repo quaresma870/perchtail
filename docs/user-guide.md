@@ -218,7 +218,7 @@ When redaction is on and your administrator has left downloads redacted too, the
 
 Limits set by the server:
 
-- A file, or a folder's total, larger than the server's limit is refused with a message naming the size and the limit (`MAX_FETCH_MB`, 2048 MB by default). A `.gz` file or a file inside an archive that would decompress to more than `MAX_DECOMPRESSED_MB` is refused too.
+- A file, or a folder's total, larger than the server's limit is refused with a message naming the size and the limit (`MAX_FETCH_MB`, 2048 MB by default). A `.zip` on an SSH, SMB or WinRM source is read in place, so it can be expanded and its files opened even when it is larger than the limit, as long as what each of them needs is under it. A `.gz` file or a file inside an archive that would decompress to more than `MAX_DECOMPRESSED_MB` is refused too.
 - Each user can have 2 downloads or folder ZIPs in progress at once by default. When PerchTail is busy, it answers "try again in a few seconds" instead of waiting.
 - When the server is out of space for temporary files, the download is refused until space is freed.
 

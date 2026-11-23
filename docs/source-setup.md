@@ -211,6 +211,8 @@ Allow TCP 5986 (HTTPS), or 5985 only if HTTPS genuinely isn't an option, inbound
 
 WinRM has no file transfer of its own: PerchTail reads a file through PowerShell, which sends it as base64 text inside WS-Management responses, one response at a time. Opening or downloading a large file is therefore much slower than over SMB or the agent: minutes rather than seconds for a file of a few hundred MB. Use an SMB source or the agent for hosts with large logs; **Tail the end** in the viewer opens only the last part of a file.
 
+A `.zip` is read in place: expanding it reads only its index at its end, and opening one of its files only that file's compressed bytes, a few PowerShell requests rather than the whole archive. A large `.zip` is therefore quick to expand and its small files quick to open; a large file inside it still takes as long as its compressed size. A `.tar.gz` is still read whole.
+
 Each response carries up to 500 KB (PerchTail asks for envelopes of 512000 bytes). A server whose `MaxEnvelopeSizekb` is below 500 refuses that size; PerchTail then asks again with 150 KB envelopes, which works but takes about three times as many responses, so reads are slower, and logs `winrm.envelope_fallback` each time. `MaxEnvelopeSizekb` is 500 by default since Windows Server 2012; to check it, run `winrm get winrm/config` as an administrator, and to restore it, `winrm set winrm/config '@{MaxEnvelopeSizekb="500"}'`.
 
 ## Agent (push-agent, for hosts not reachable inbound)

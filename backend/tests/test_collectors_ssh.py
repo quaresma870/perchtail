@@ -95,6 +95,14 @@ class _RemoteFile(io.BytesIO):
         self._sftp.bytes_sent += len(chunk)
         return chunk
 
+    def stat(self):
+        return FakeAttr("", False, len(self.getvalue()))
+
+    def readv(self, chunks):
+        for offset, length in chunks:
+            self.seek(offset)
+            yield self.read(length)
+
 
 class FakeChannel:
     timeout = None

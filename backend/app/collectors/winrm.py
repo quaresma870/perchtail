@@ -14,6 +14,7 @@ from winrm.protocol import Protocol as WinRMProtocol
 from app.collectors import base as collector_base
 from app.collectors import winrm_jea
 from app.collectors.base import DirEntry, PathOutsideBaseError, SourceNotAFileError
+from app.collectors.ranged import RemoteFileChangedError, check_length, check_size
 from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
@@ -21,7 +22,11 @@ from app.models import Rule, Source
 from app.rules import is_entry_visible
 from app.scratch import scratch_temp_dir
 
-__all__ = ["DirEntry", "fetch_file", "list_directory", "list_drives", "local_copy"]
+__all__ = ["DirEntry", "fetch_file", "list_directory", "list_drives", "local_copy", "open_ranged"]
+
+# open_ranged reads a .zip in place (collectors/ranged.py), over WinRS and
+# behind a JEA endpoint alike.
+RANGED_READS = True
 
 logger = get_logger(__name__)
 
@@ -154,6 +159,7 @@ _OUTSIDE_BASE = "PERCHTAIL_OUTSIDE_BASE"
 _NOT_A_DIRECTORY = "PERCHTAIL_NOT_A_DIRECTORY"
 _NOT_FOUND = "PERCHTAIL_NOT_FOUND"
 _IS_A_DIRECTORY = "PERCHTAIL_IS_A_DIRECTORY"
+_CHANGED = "PERCHTAIL_CHANGED"
 _END = "PERCHTAIL_END"
 
 
@@ -168,6 +174,8 @@ def _raise_for_marker(out: str) -> None:
         raise SourceNotAFileError("is a directory")
     if _NOT_FOUND in out:
         raise FileNotFoundError("not found")
+    if _CHANGED in out:
+        raise RemoteFileChangedError("the file's size changed while it was read")
 
 
 def _run_ps_once(source: Source, script: str, envelope_size: int) -> str:
@@ -430,57 +438,77 @@ def _close_quietly(call, *args, **kwargs) -> None:
         call(*args, **kwargs)
 
 
-def _stream_read(
-    source: Source, relative_path: str, size: int, destination: Path, envelope_size: int
-) -> None:
-    """One shell and one PowerShell process for the whole content, read
-    with one Receive at a time (Protocol.get_command_output_raw) and written
-    to `destination` as it arrives."""
-    session = _session(source, envelope_size)
+def _command_output(session, shell_id: str, script: str, feed) -> tuple[int, int, bytes]:
+    """Runs `script` in the open shell `shell_id`, handing its stdout to
+    `feed` one Receive at a time (Protocol.get_command_output_raw). Returns
+    how many Receives it took, the exit code and (the start of) stderr,
+    for _raise_for_exit once the output's markers were looked at."""
     protocol = session.protocol
-    started = time.monotonic()
     responses = 0
     stderr = b""
+    command_id = protocol.run_command(shell_id, _encoded_command(script))
     try:
-        shell_id = protocol.open_shell()
-        try:
-            command_id = protocol.run_command(
-                shell_id, _encoded_command(_read_script(source, relative_path, size))
-            )
+        done, code = False, -1
+        while not done:
             try:
-                with open(destination, "wb") as dst:
-                    stream = _ReadStream(dst, size)
-                    done, code = False, -1
-                    while not done:
-                        try:
-                            out, err, code, done = protocol.get_command_output_raw(
-                                shell_id, command_id
-                            )
-                        except winrm_exc.WinRMOperationTimeoutError:
-                            continue  # no output yet: ask again, as pywinrm does
-                        responses += 1
-                        if err and len(stderr) < _MAX_STDERR_BYTES:
-                            stderr = (stderr + err)[:_MAX_STDERR_BYTES]
-                        stream.feed(out)
-                    stream.finish()
-            finally:
-                _close_quietly(protocol.cleanup_command, shell_id, command_id)
-        finally:
-            _close_quietly(protocol.close_shell, shell_id, close_session=False)
+                out, err, code, done = protocol.get_command_output_raw(shell_id, command_id)
+            except winrm_exc.WinRMOperationTimeoutError:
+                continue  # no output yet: ask again, as pywinrm does
+            responses += 1
+            if err and len(stderr) < _MAX_STDERR_BYTES:
+                stderr = (stderr + err)[:_MAX_STDERR_BYTES]
+            feed(out)
     finally:
-        _close_quietly(protocol.transport.close_session)
+        _close_quietly(protocol.cleanup_command, shell_id, command_id)
+    return responses, code, stderr
+
+
+def _raise_for_exit(session, code: int, stderr: bytes) -> None:
     if code != 0:
         raise RuntimeError(session._clean_error_msg(stderr).decode("utf-8", errors="replace"))
+
+
+def _stream_command(session, shell_id: str, script: str, dst, size: int) -> tuple[int, int]:
+    """A read script (_read_script, _ranged_read_script) run in the open
+    shell, its base64 lines written to `dst` as they arrive (_ReadStream),
+    at most `size` bytes. Returns (bytes written, Receives)."""
+    stream = _ReadStream(dst, size)
+    responses, code, stderr = _command_output(session, shell_id, script, stream.feed)
+    stream.finish()
+    _raise_for_exit(session, code, stderr)
     if stream.end is None:
         raise _UnexpectedOutput("the read ended without its end marker")
     if stream.end != stream.written:
         raise _UnexpectedOutput(
             f"the read reported {stream.end} bytes but {stream.written} arrived"
         )
+    return stream.written, responses
+
+
+def _stream_read(
+    source: Source, relative_path: str, size: int, destination: Path, envelope_size: int
+) -> None:
+    """One shell and one PowerShell process for the whole content, read
+    with one Receive at a time and written to `destination` as it
+    arrives."""
+    session = _session(source, envelope_size)
+    protocol = session.protocol
+    started = time.monotonic()
+    try:
+        shell_id = protocol.open_shell()
+        try:
+            with open(destination, "wb") as dst:
+                written, responses = _stream_command(
+                    session, shell_id, _read_script(source, relative_path, size), dst, size
+                )
+        finally:
+            _close_quietly(protocol.close_shell, shell_id, close_session=False)
+    finally:
+        _close_quietly(protocol.transport.close_session)
     logger.debug(
         "winrm.fetch_done",
         source_id=source.id,
-        bytes=stream.written,
+        bytes=written,
         responses=responses,
         seconds=round(time.monotonic() - started, 3),
         envelope_size=envelope_size,
@@ -531,6 +559,156 @@ def local_copy(source: Source, relative_path: str):
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path
+
+
+def _ranged_read_script(
+    source: Source, relative_path: str, offset: int, length: int, size: int
+) -> str:
+    """_read_script for a ranged read: up to `length` bytes from `offset`,
+    streamed as base64 lines, and refused with PERCHTAIL_CHANGED when the
+    file's length isn't `size` when it is opened, before each sub-block or
+    at the end."""
+    path = _ps_quote(_remote_path(source, relative_path))
+    changed = f"if ($f.Length -ne $size) {{ Write-Output '{_CHANGED}'; exit 7 }}; "
+    return (
+        _containment_guard(source, relative_path)
+        + _require_file(path)
+        + (
+            f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
+            f"try {{ $size = [long]{int(size)}; "
+            + changed
+            + f"$f.Seek([long]{int(offset)}, 'Begin') | Out-Null; "
+            f"$left = [long]{int(length)}; $t = [long]0; "
+            f"$b = New-Object byte[] {_SUB_BLOCK_BYTES}; "
+            "while ($left -gt 0) { "
+            + changed
+            + "$want = [int][Math]::Min($left, [long]$b.Length); $n = 0; "
+            "while ($n -lt $want) { $r = $f.Read($b, $n, $want - $n); "
+            "if ($r -le 0) { break }; $n += $r }; "
+            "if ($n -le 0) { break }; "
+            "[Convert]::ToBase64String($b, 0, $n); $t += $n; $left -= $n; "
+            "if ($n -lt $want) { break } }; " + changed + f'"{_END} $t" }} finally {{ $f.Close() }}'
+        )
+    )
+
+
+def _read_at_script(source: Source, relative_path: str, offset: int, length: int) -> str:
+    """PowerShell that writes "size before|size after|data" (data as
+    base64): up to `length` bytes from `offset`, read until full or the end
+    of the file, like read_range's script."""
+    path = _ps_quote(_remote_path(source, relative_path))
+    return (
+        _containment_guard(source, relative_path)
+        + _require_file(path)
+        + (
+            f"$f = [IO.File]::Open({path}, 'Open', 'Read', 'ReadWrite'); "
+            "try { $len = $f.Length; "
+            f"$b = New-Object byte[] {int(length)}; $n = 0; "
+            f"if ({int(offset)} -lt $len) {{ $f.Seek([long]{int(offset)}, 'Begin') | Out-Null; "
+            "while ($n -lt $b.Length) { $r = $f.Read($b, $n, $b.Length - $n); "
+            "if ($r -le 0) { break }; $n += $r } }; "
+            '"$len|" + $f.Length + "|" + [Convert]::ToBase64String($b, 0, $n) '
+            "} finally { $f.Close() }"
+        )
+    )
+
+
+class _WinRSRemote:
+    """A RangedRemote over one WinRM connection and one shell, for the
+    length of an operation: each read is one PowerShell process in that
+    shell that checks the path again (containment, a file), opens it and
+    reads at the offset. A small read answers in one Receive
+    (_read_at_script); a long one is streamed (_ranged_read_script). Both
+    refuse a file whose size isn't the one it had when it was opened."""
+
+    def __init__(self, source: Source, relative_path: str, size: int, session, shell_id: str):
+        self._source = source
+        self._relative_path = relative_path
+        self._session = session
+        self._shell_id = shell_id
+        self.size = size
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        parts: list[bytes] = []
+        _, code, stderr = _command_output(
+            self._session,
+            self._shell_id,
+            _read_at_script(self._source, self._relative_path, offset, length),
+            parts.append,
+        )
+        output = b"".join(parts).decode("ascii", errors="replace").strip()
+        _raise_for_marker(output)
+        _raise_for_exit(self._session, code, stderr)
+        try:
+            before, after, data_b64 = output.splitlines()[-1].split("|", 2)
+            sizes = (int(before), int(after))
+            data = base64.b64decode(data_b64, validate=True)
+        except (ValueError, IndexError) as exc:
+            raise _UnexpectedOutput("an unreadable ranged read") from exc
+        for current in sizes:
+            check_size(self.size, current)
+        check_length(length, len(data))
+        return data
+
+    def copy_range(self, offset: int, length: int, dst) -> int:
+        script = _ranged_read_script(self._source, self._relative_path, offset, length, self.size)
+        written, _ = _stream_command(self._session, self._shell_id, script, dst, length)
+        check_length(length, written)
+        return written
+
+
+@contextmanager
+def open_ranged(source: Source, relative_path: str):
+    """The file opened for ranged reads (collectors/ranged.py) for the
+    length of the `with` block: one WinRM connection and one shell, asking
+    for the larger envelope size and once more with the smaller one when
+    the server refuses it. Checked as fetch_file checks it (no junction or
+    symlink below the base path, a folder refused), on every read. Behind a
+    JEA endpoint, the role's functions do the reading (winrm_jea)."""
+    if source.winrm_configuration:
+        with winrm_jea.open_ranged(source, relative_path) as remote:
+            yield remote
+        return
+    path = _ps_quote(_remote_path(source, relative_path))
+    size_script = (
+        _containment_guard(source, relative_path)
+        + _require_file(path)
+        + f"(Get-Item -LiteralPath {path}).Length"
+    )
+
+    def attempt(envelope_size: int):
+        session = _session(source, envelope_size)
+        protocol = session.protocol
+        try:
+            shell_id = protocol.open_shell()
+            try:
+                parts: list[bytes] = []
+                _, code, stderr = _command_output(session, shell_id, size_script, parts.append)
+                size_text = b"".join(parts).decode("ascii", errors="replace")
+                _raise_for_marker(size_text)
+                _raise_for_exit(session, code, stderr)
+                return session, shell_id, size_text
+            except BaseException:
+                _close_quietly(protocol.close_shell, shell_id, close_session=False)
+                raise
+        except BaseException:
+            _close_quietly(protocol.transport.close_session)
+            raise
+
+    try:
+        (session, shell_id, size_text), _ = with_envelope_fallback(source, attempt)
+    except PathOutsideBaseError:
+        logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
+        raise
+    protocol = session.protocol
+    try:
+        yield _WinRSRemote(source, relative_path, int(size_text.strip() or 0), session, shell_id)
+    except PathOutsideBaseError:
+        logger.warning("winrm.path_outside_base", source_id=source.id, path=relative_path)
+        raise
+    finally:
+        _close_quietly(protocol.close_shell, shell_id, close_session=False)
+        _close_quietly(protocol.transport.close_session)
 
 
 def read_range(

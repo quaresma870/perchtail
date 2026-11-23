@@ -20,6 +20,7 @@ from app.collectors.base import (
     refuse_directory,
     require_target,
 )
+from app.collectors.ranged import check_length, check_size
 from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
@@ -30,6 +31,8 @@ from app.scratch import scratch_temp_dir
 # Follows links inside the base path, checking the rules on their target
 # (collectors/errors.py passes it a target_check).
 FOLLOWS_LINKS = True
+# open_ranged reads a .zip in place (collectors/ranged.py).
+RANGED_READS = True
 
 __all__ = [
     "DirEntry",
@@ -41,6 +44,7 @@ __all__ = [
     "load_private_key",
     "list_directory",
     "local_copy",
+    "open_ranged",
 ]
 
 logger = get_logger(__name__)
@@ -453,6 +457,65 @@ def read_range(
             with sftp.open(remote_path, "rb") as f:
                 size = f.stat().st_size or 0
                 return collector_base.read_range_from(f, size, offset, length, head)
+        finally:
+            sftp.close()
+    finally:
+        client.close()
+
+
+# What one SFTP read request asks for in a ranged read: paramiko splits each
+# piece into requests of its own size and sends them all before waiting.
+_RANGED_PIECE = 1024 * 1024
+
+
+class _SFTPRemote:
+    """A RangedRemote over one open SFTP handle: reads go out as pipelined
+    requests (SFTPFile.readv), and each is followed by an fstat of the same
+    handle, so a file that changed size since it was opened is refused."""
+
+    def __init__(self, remote: paramiko.SFTPFile, size: int):
+        self._remote = remote
+        self.size = size
+
+    def _pieces(self, offset: int, length: int) -> list[tuple[int, int]]:
+        return [
+            (start, min(_RANGED_PIECE, offset + length - start))
+            for start in range(offset, offset + length, _RANGED_PIECE)
+        ]
+
+    def _check(self) -> None:
+        check_size(self.size, self._remote.stat().st_size or 0)
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        data = b"".join(self._remote.readv(self._pieces(offset, length))) if length > 0 else b""
+        self._check()
+        check_length(length, len(data))
+        return data
+
+    def copy_range(self, offset: int, length: int, dst) -> int:
+        written = 0
+        if length > 0:
+            for data in self._remote.readv(self._pieces(offset, length)):
+                dst.write(data)
+                written += len(data)
+        self._check()
+        check_length(length, written)
+        return written
+
+
+@contextmanager
+def open_ranged(source: Source, relative_path: str, *, target_check: TargetCheck = None):
+    """The file opened for ranged reads (collectors/ranged.py) for the
+    length of the `with` block, on one connection: resolved and checked as
+    fetch_file does (containment, links and their rules, a folder refused),
+    then read through the real path's handle, never the joined path."""
+    client = _connect(source)
+    try:
+        sftp = _open_sftp(client)
+        try:
+            remote_path, _ = _resolve_file(sftp, source, relative_path, target_check)
+            with sftp.open(remote_path, "rb") as remote:
+                yield _SFTPRemote(remote, remote.stat().st_size or 0)
         finally:
             sftp.close()
     finally:

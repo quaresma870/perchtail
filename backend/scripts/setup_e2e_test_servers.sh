@@ -67,6 +67,17 @@ printf 'ssh hello world log line 1\nssh hello world log line 2\n' > "$SSH_ROOT/h
 printf 'ssh other log\n' > "$SSH_ROOT/other.log"
 printf 'smb hello world log line 1\nsmb hello world log line 2\n' > "$SMB_ROOT/hello.log"
 printf 'smb other log\n' > "$SMB_ROOT/other.log"
+# A .zip in each root (frontend/e2e/archives.spec.ts): listed and opened by
+# reading only the bytes needed, over real SFTP and SMB.
+python3 - "$SSH_ROOT/logs.zip" ssh "$SMB_ROOT/logs.zip" smb <<'PY'
+import sys
+import zipfile
+
+args = sys.argv[1:]
+for path, protocol in zip(args[::2], args[1::2]):
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("app.log", f"{protocol} zipped log line 1\n{protocol} zipped log line 2\n")
+PY
 $SUDO chown -R "$E2E_SSH_USER:$E2E_SSH_USER" "$SSH_ROOT" "$SMB_ROOT"
 $SUDO chmod 755 "$SSH_ROOT" "$SMB_ROOT"
 

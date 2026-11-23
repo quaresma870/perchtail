@@ -30,6 +30,10 @@ class FakeSFTPClient:
     def __init__(self):
         self.listing: list[FakeAttr] = []
         self.files: dict[str, bytes] = {}
+        # Bytes read from the server, and the reads (offset, length) asked
+        # of an open file: what a ranged read transfers.
+        self.bytes_sent = 0
+        self.reads: list[tuple[int, int]] = []
 
     def normalize(self, path):
         return path
@@ -38,7 +42,7 @@ class FakeSFTPClient:
         return self.listing
 
     def open(self, remote_path, mode="r"):
-        return _RemoteFile(self.files[remote_path])
+        return _RemoteFile(self, self.files[remote_path])
 
     def stat(self, remote_path):
         return FakeAttr(remote_path.rsplit("/", 1)[-1], False, len(self.files[remote_path]))
@@ -48,8 +52,29 @@ class FakeSFTPClient:
 
 
 class _RemoteFile(io.BytesIO):
+    """An open remote file, as paramiko's SFTPFile offers it: read, seek,
+    stat of the handle and readv; counts what the server sends."""
+
+    def __init__(self, sftp: FakeSFTPClient, content: bytes):
+        super().__init__(content)
+        self._sftp = sftp
+
     def prefetch(self, file_size=None):
         pass
+
+    def read(self, size=-1):
+        chunk = super().read(size)
+        self._sftp.bytes_sent += len(chunk)
+        return chunk
+
+    def stat(self):
+        return FakeAttr("", False, len(self.getvalue()))
+
+    def readv(self, chunks):
+        for offset, length in chunks:
+            self._sftp.reads.append((offset, length))
+            self.seek(offset)
+            yield self.read(length)
 
 
 class FakeChannel:
@@ -543,7 +568,9 @@ def slow_reads(fake_sftp, scratch_store, monkeypatch):
                     return chunk
 
             monkeypatch.setattr(
-                fake_sftp, "open", lambda path, mode="r": SlowRemoteFile(fake_sftp.files[path])
+                fake_sftp,
+                "open",
+                lambda path, mode="r": SlowRemoteFile(fake_sftp, fake_sftp.files[path]),
             )
 
         def sweep_while_sending(self) -> None:
@@ -1028,25 +1055,23 @@ def test_413_reports_file_size_and_limit(
     assert detail["limit_bytes"] == 8
 
 
-@pytest.mark.parametrize("archive", ["big.zip", "big.tar.gz", "big.tgz"])
+@pytest.mark.parametrize("archive", ["big.tar.gz", "big.tgz"])
 @pytest.mark.parametrize("all_members", [False, True])
 def test_browsing_an_archive_over_max_fetch_mb_is_the_413_opening_it_gives(
     app_client, session, fake_sftp, scratch_store, monkeypatch, archive, all_members
 ):
     """F1 of the 0.7.0-rc.3 retest: expanding an archive over MAX_FETCH_MB
     answered 500; it answers the 413 opening one of its members gives, with
-    the same body, and the audit log holds the same for both: nothing."""
+    the same body, and the audit log holds the same for both: nothing. A
+    .zip is read in place over SSH, SMB and WinRM, and only what an
+    operation transfers counts (tests/test_zip_ranged.py)."""
     monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 8)
     monkeypatch.setattr("app.api.archive.max_fetch_bytes", lambda: 8)
     app, client = app_client
     source = _make_source(session)
     _make_user(session, app, is_super_admin=True)
     _add_rule(session, source, 0, RuleType.include, "**/*")
-    content = (
-        _zip_bytes({"app.log": "x" * 100})
-        if archive.endswith(".zip")
-        else _tar_gz_bytes({"app.log": "x" * 100})
-    )
+    content = _tar_gz_bytes({"app.log": "x" * 100})
     fake_sftp.files[f"/var/log/appname/{archive}"] = content
     params = {"path": archive, **({"all": "true"} if all_members else {})}
 
