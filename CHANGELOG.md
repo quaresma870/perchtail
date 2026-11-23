@@ -8,6 +8,10 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.7.0-rc.4] - 2026-11-23
+
+The code of 0.7.0-rc.3 with the fixes below: large files and archives read through push agents and WinRM, scratch files in use during long reads, folders and links to folders read as files, and missing files on local sources. Upgrade notes are the same as for rc.2; upgrade the push agents to get the agent fixes.
+
 ### Changed
 - Each archive rebuilt for a redacted download (downloaded whole or inside a folder ZIP, on the server or from what a push agent redacted) now logs `archive.rebuild_done` (INFO) with the source, the archive's path, the size of the rebuilt archive, how many files went in redacted and how many were left out, and how long it took.
 - Opening or downloading a file over WinRM takes far fewer round trips. Through a WinRS shell, a read used a new shell and a new PowerShell process for every 4 MiB; it now uses one shell and one PowerShell process for the whole file, which is opened once after the junction check and written to scratch as it arrives. Every WinRM request, through a WinRS shell or the JEA endpoint, asks for WS-Management envelopes of 512000 bytes instead of 153600, so each response carries over three times as much; a server whose `MaxEnvelopeSizekb` is below 500 is asked again with 153600 and logs `winrm.envelope_fallback`. WinRM is still much slower than SMB or the push agent for large files (docs/source-setup.md, WinRM, "Large files"). At `LOG_LEVEL=DEBUG`, each read through a WinRS shell logs `winrm.fetch_done`.
@@ -2093,7 +2097,8 @@ admin/viewer UI (Vite + Svelte), packaged as a single Docker image.
 
 What comes next is in [ROADMAP.md](ROADMAP.md).
 
-[Unreleased]: https://github.com/quaresma870/perchtail/compare/v0.7.0-rc.3...HEAD
+[Unreleased]: https://github.com/quaresma870/perchtail/compare/v0.7.0-rc.4...HEAD
+[0.7.0-rc.4]: https://github.com/quaresma870/perchtail/compare/v0.7.0-rc.3...v0.7.0-rc.4
 [0.7.0-rc.3]: https://github.com/quaresma870/perchtail/compare/v0.7.0-rc.2...v0.7.0-rc.3
 [0.7.0-rc.2]: https://github.com/quaresma870/perchtail/compare/v0.6.4...v0.7.0-rc.2
 [0.6.4]: https://github.com/quaresma870/perchtail/compare/v0.6.3...v0.6.4
