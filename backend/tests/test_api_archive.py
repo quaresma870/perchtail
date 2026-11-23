@@ -1111,7 +1111,7 @@ def test_browsing_an_archive_the_agent_finds_over_a_limit_is_a_413(
             assert name == "list_archive"
             raise raised.pop(0)
 
-    monkeypatch.setattr("app.api.archive._lists_on_agent", lambda session, source: True)
+    monkeypatch.setattr("app.api.archive._lists_on_agent", lambda source: True)
     monkeypatch.setattr("app.api.archive._connector", lambda source: _Connector())
     params = {"path": "big.zip", **({"all": "true"} if all_members else {})}
 
