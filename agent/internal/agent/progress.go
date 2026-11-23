@@ -37,14 +37,15 @@ func wantsProgress(cmd Command) bool {
 		return false
 	}
 	switch cmd.Type {
-	case "fetch", "read_range", "fetch_archive":
+	case "fetch", "read_range", "fetch_archive", "list_archive":
 		return true
 	}
 	return false
 }
 
 // readMeter counts the bytes a command read from the file it serves (the
-// file itself, or the archive, up to and through the member asked for).
+// file itself, or the archive, up to and through the member asked for, or
+// as far as it was listed).
 // Progress is only reported while it moves, so a read that hangs (a stuck
 // disk or network share) still runs into the server's wait, as without
 // progress. A nil readMeter counts nothing.

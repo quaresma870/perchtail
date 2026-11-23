@@ -225,7 +225,7 @@ func TestACommandThatReadsSendsProgressUntilItEnds(t *testing.T) {
 // progress; once the read moves again, so does progress (Decisões,
 // 2026-11-21, option b).
 func TestACommandWhoseReadStopsSendsNoProgress(t *testing.T) {
-	for _, kind := range []string{"fetch", "read_range", "fetch_archive"} {
+	for _, kind := range []string{"fetch", "read_range", "fetch_archive", "list_archive"} {
 		t.Run(kind, func(t *testing.T) {
 			ticks := useManualTicks(t)
 			rec := newRecorder()
@@ -301,6 +301,64 @@ func TestContentCommandsCountWhatTheyRead(t *testing.T) {
 	}
 }
 
+// Listing a large archive (list_archive, before a browse or a whole
+// download) reads it to its end before its one answer: with progress asked
+// for, every tick during which it read more says it is still working; a tick
+// without reading says nothing (P2 of the 58bce44 preview retest).
+func TestListArchiveSendsProgressWhileItReads(t *testing.T) {
+	ticks := useManualTicks(t)
+	rec := newRecorder()
+	s := runScripted(t, Command{Type: "list_archive", ID: "l", Path: "big.tgz", Progress: true}, rec.send)
+
+	s.step(t, "read")
+	ticks.tick(t)
+	s.step(t, "read")
+	ticks.tick(t)
+	// Stuck: nothing.
+	ticks.tick(t)
+	ticks.tick(t)
+	s.step(t, "end")
+	s.wait(t)
+	got := rec.messages()
+	if len(got) != 3 || !isProgress(got[0], "l") || !isProgress(got[1], "l") {
+		t.Fatalf("messages = %+v, want two progress messages then the answer", got)
+	}
+}
+
+// list_archive counts what it reads of the archive, a zip as a tar.gz, so
+// its progress follows the listing.
+func TestListArchiveCountsWhatItReads(t *testing.T) {
+	base := t.TempDir()
+	filler := make([]byte, 256<<10)
+	for i := range filler {
+		filler[i] = byte('a' + i%26)
+	}
+	archive := tarGzOf(t, []tarMember{{name: "first.log", content: string(filler)}, {name: "last.log", content: secretLog}})
+	writeFile(t, base, "big.tgz", archive)
+	writeFile(t, base, "big.zip", zipOf(t, []zipMember{{name: "first.log", content: string(filler)}, {name: "last.log", content: secretLog}}))
+	for _, tc := range []struct {
+		path    string
+		atLeast int64
+	}{{"big.tgz", int64(len(archive))}, {"big.zip", 1}} {
+		t.Run(tc.path, func(t *testing.T) {
+			meter := &readMeter{}
+			ctx := context.WithValue(context.Background(), readMeterKey{}, meter)
+			var last any
+			cmd := Command{Type: "list_archive", ID: "l", Path: tc.path, Progress: true}
+			if err := serveCommand(ctx, Config{BasePath: base}, cmd, func(msg any) error { last = msg; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			result, ok := last.(ListArchiveResult)
+			if !ok || len(result.Members) != 2 {
+				t.Fatalf("answer = %+v, want both members", last)
+			}
+			if got := meter.read(); got < tc.atLeast {
+				t.Fatalf("counted %d bytes read, want at least %d", got, tc.atLeast)
+			}
+		})
+	}
+}
+
 // Without the server asking (an older server, which would take a progress
 // message for the answer), or for a command that isn't a content command,
 // no progress is ever sent.
@@ -310,7 +368,7 @@ func TestNoProgressUnlessAskedForAContentCommand(t *testing.T) {
 		{Type: "read_range", ID: "c"},
 		{Type: "fetch_archive", ID: "c"},
 		{Type: "list", ID: "c", Progress: true},
-		{Type: "list_archive", ID: "c", Progress: true},
+		{Type: "list_archive", ID: "c"},
 	} {
 		ticks := useManualTicks(t)
 		rec := newRecorder()

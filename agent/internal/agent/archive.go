@@ -361,14 +361,21 @@ func zipMTimeMs(zf *zip.File) int64 {
 // them, truncated past either. The archive must really be at expectReal
 // (openFile).
 func ListArchive(basePath, relPath, expectReal string, maxEntries int) ([]ArchiveMemberWire, bool, error) {
+	return listArchive(nil, basePath, relPath, expectReal, maxEntries)
+}
+
+// listArchive is ListArchive with its reads of the archive counted by meter
+// (withProgress), so listing a large archive says it is still reading.
+func listArchive(meter *readMeter, basePath, relPath, expectReal string, maxEntries int) ([]ArchiveMemberWire, bool, error) {
 	if maxEntries <= 0 || maxEntries > MaxListEntries {
 		maxEntries = MaxListEntries
 	}
-	f, closeFile, err := openFile(basePath, relPath, expectReal)
+	opened, closeFile, err := openFile(basePath, relPath, expectReal)
 	if err != nil {
 		return nil, false, err
 	}
 	defer closeFile()
+	f := meter.meter(opened)
 	members := make([]ArchiveMemberWire, 0)
 	truncated := false
 	encoded := 0

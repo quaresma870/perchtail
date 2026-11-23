@@ -107,10 +107,12 @@ FEATURE_LINKS = "links/1"
 # a `progress` message every 10 seconds during which it sent nothing else,
 # and each one counts as activity for that command's wait, as a chunk does.
 # A member at the end of a large archive, redacted on the host, can take
-# much longer than the wait to reach.
+# much longer than the wait to reach, and so can listing a large archive.
+# An agent that announced it before list_archive sent progress ignores the
+# field there and answers within the wait or not at all, as before.
 FEATURE_PROGRESS = "progress/1"
 # The commands that are asked for progress.
-PROGRESS_COMMANDS = frozenset({"fetch", "read_range", "fetch_archive"})
+PROGRESS_COMMANDS = frozenset({"fetch", "read_range", "fetch_archive", "list_archive"})
 
 
 class ArchiveSink(Protocol):

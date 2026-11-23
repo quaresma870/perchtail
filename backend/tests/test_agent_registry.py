@@ -752,6 +752,13 @@ def _range_finish(request_id):
     return [{"type": "read_range_result", "id": request_id, "size": 4, "data_b64": ""}]
 
 
+def _list_archive_finish(request_id):
+    return [{"type": "list_archive_result", "id": request_id, "members": [], "truncated": False}]
+
+
+_UNSTREAMED_FINISH = {"read_range": _range_finish, "list_archive": _list_archive_finish}
+
+
 def _progress_registry(loop, features):
     registry = AgentRegistry()
     registry.bind_loop(loop)
@@ -763,8 +770,8 @@ def _progress_registry(loop, features):
 def _run_slow(loop, registry, ws, command_type, *, progress, from_ws=None):
     import io
 
-    streamed = command_type != "read_range"
-    finish = _streamed_finish if streamed else _range_finish
+    streamed = command_type not in _UNSTREAMED_FINISH
+    finish = _streamed_finish if streamed else _UNSTREAMED_FINISH[command_type]
     thread = _slow_agent(loop, registry, ws, finish, progress=progress, from_ws=from_ws)
     sink = io.BytesIO() if streamed else None
     try:
@@ -778,7 +785,7 @@ def _run_slow(loop, registry, ws, command_type, *, progress, from_ws=None):
         thread.join(timeout=5)
 
 
-@pytest.mark.parametrize("command_type", ["fetch", "fetch_archive", "read_range"])
+@pytest.mark.parametrize("command_type", ["fetch", "fetch_archive", "read_range", "list_archive"])
 def test_a_slow_content_command_with_progress_completes(loop_in_thread, command_type):
     registry, ws = _progress_registry(loop_in_thread, {FEATURE_LINKS, FEATURE_PROGRESS})
     try:
@@ -790,7 +797,7 @@ def test_a_slow_content_command_with_progress_completes(loop_in_thread, command_
             result, sink = _run_slow(loop_in_thread, registry, ws, command_type, progress=True)
             if sink is not None:
                 assert sink.getvalue() == b"abcd"
-        assert result["type"] in ("fetch_result", "read_range_result")
+        assert result["type"] in ("fetch_result", "read_range_result", "list_archive_result")
         # Asked for progress, since the agent announced it.
         assert ws.sent[0]["progress"] is True
         assert [message["type"] for message in ws.sent] == [command_type]
@@ -840,7 +847,7 @@ def _run_slow_archive(loop, registry, ws):
         thread.join(timeout=5)
 
 
-@pytest.mark.parametrize("command_type", ["fetch", "read_range"])
+@pytest.mark.parametrize("command_type", ["fetch", "read_range", "list_archive"])
 def test_a_slow_content_command_without_progress_times_out(loop_in_thread, command_type):
     """The agent says nothing for longer than the wait: it times out as
     before (502 "The agent didn't answer in time")."""
@@ -852,7 +859,7 @@ def test_a_slow_content_command_without_progress_times_out(loop_in_thread, comma
         registry.unregister(1)
 
 
-@pytest.mark.parametrize("command_type", ["fetch", "fetch_archive", "read_range"])
+@pytest.mark.parametrize("command_type", ["fetch", "fetch_archive", "read_range", "list_archive"])
 def test_a_content_command_whose_progress_stops_times_out(loop_in_thread, command_type):
     """The agent sends progress only while its read moves: once a read is
     stuck its progress stops, and the command times out after the wait, as
@@ -882,9 +889,12 @@ def test_a_content_command_whose_progress_stops_times_out(loop_in_thread, comman
                 1,
                 command_type,
                 timeout=_WAIT,
-                sink={"read_range": None, "fetch": io.BytesIO(), "fetch_archive": _Members()}[
-                    command_type
-                ],
+                sink={
+                    "read_range": None,
+                    "list_archive": None,
+                    "fetch": io.BytesIO(),
+                    "fetch_archive": _Members(),
+                }[command_type],
                 archive=command_type == "fetch_archive",
                 path="big.tar.gz",
             )
@@ -896,7 +906,7 @@ def test_a_content_command_whose_progress_stops_times_out(loop_in_thread, comman
         registry.unregister(1)
 
 
-@pytest.mark.parametrize("command_type", ["fetch", "read_range"])
+@pytest.mark.parametrize("command_type", ["fetch", "read_range", "list_archive"])
 def test_an_agent_without_progress_is_not_asked_and_times_out_as_before(
     loop_in_thread, command_type
 ):
