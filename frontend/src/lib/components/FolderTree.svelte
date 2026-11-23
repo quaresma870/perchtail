@@ -63,7 +63,7 @@
   const browseUrl = () => `/sources/${sourceId}/browse?path=${encodeURIComponent(entry.path)}`
 
   // Folders re-list themselves while open (#272); archives don't, since
-  // listing one fetches the whole archive.
+  // listing one reads the archive (a .tar.gz whole).
   const canRefresh = entry.is_dir && archiveRoot === null
   let newPaths = new Set<string>()
   let newTimer: ReturnType<typeof setTimeout> | null = null

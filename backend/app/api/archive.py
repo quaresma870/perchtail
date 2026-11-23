@@ -40,6 +40,7 @@ from app.archives import (
     extract_member,
     is_archive,
     is_transparent_gzip,
+    is_zip,
     normalize_member_name,
     rebuild_archive,
     scan_members,
@@ -75,6 +76,7 @@ from app.collectors.base import (
     max_fetch_bytes,
 )
 from app.collectors.errors import target_check_for
+from app.collectors.ranged import RemoteFileChangedError, ranged_file
 from app.collectors.registry import CONNECTORS
 from app.config import get_settings
 from app.crypto import follow_head_key
@@ -564,6 +566,30 @@ def _require_whole_archive_allowed(
         raise WholeArchiveRefused()
 
 
+def _reads_in_place(connector, filename: str) -> bool:
+    """Whether the archive `filename` is read in place, with ranged reads
+    (collectors/ranged.py), instead of being copied whole to scratch: a
+    .zip on a connector that can (RANGED_READS: SSH, SMB and WinRM). Its
+    listing reads the archive's end, a member its own header and data."""
+    return is_zip(filename) and bool(getattr(connector, "RANGED_READS", False))
+
+
+@contextmanager
+def _zip_in_place(
+    connector, source: Source, path: str, rules: list[Rule], operation: str
+) -> Iterator[BinaryIO]:
+    """The .zip at `path` as a seekable file read in place, for one
+    operation ("list" or "member"): opened and checked as a fetch is, and
+    allowed to transfer at most MAX_FETCH_MB."""
+    with (
+        connector.open_ranged(source, path, rules=rules) as remote,
+        ranged_file(
+            remote, limit=max_fetch_bytes(), source_id=source.id, operation=operation
+        ) as archive_file,
+    ):
+        yield archive_file
+
+
 def _materialize(
     source: Source,
     path: str,
@@ -608,6 +634,11 @@ def _materialize(
                 # member travels, never the whole archive.
                 with _agent_unreadable(source, path, None):
                     connector.call("fetch_member", source, path, member, destination, rules=rules)
+            elif _reads_in_place(connector, filename):
+                with _zip_in_place(connector, source, path, rules, "member") as archive_file:
+                    extract_member(
+                        archive_file, filename, member, destination, _max_decompressed_bytes()
+                    )
             else:
                 with connector.local_copy(source, path, rules=rules) as archive_local:
                     extract_member(
@@ -842,14 +873,24 @@ def _browse(
                     )
             else:
                 try:
-                    with connector.local_copy(source, archive_path, rules=rules) as archive_local:
-                        members, listing_cut = scan_members(archive_local, archive_name)
+                    if _reads_in_place(connector, archive_name):
+                        with _zip_in_place(
+                            connector, source, archive_path, rules, "list"
+                        ) as archive_file:
+                            members, listing_cut = scan_members(archive_file, archive_name)
+                    else:
+                        with connector.local_copy(
+                            source, archive_path, rules=rules
+                        ) as archive_local:
+                            members, listing_cut = scan_members(archive_local, archive_name)
                 except _UNREADABLE_ERRORS as exc:
                     # As when one of its members is opened (_materialize).
                     raise _archive_unreadable(source, archive_path, exc) from exc
         except FetchTooLargeError as exc:
-            # An archive over MAX_FETCH_MB, or over MAX_DECOMPRESSED_MB once
-            # read: the 413 opening or downloading it gives, not a 500.
+            # An archive over MAX_FETCH_MB (a .zip read in place: a listing
+            # that would transfer more than that), or over
+            # MAX_DECOMPRESSED_MB once read: the 413 opening or downloading
+            # it gives, not a 500.
             raise _fetch_too_large(exc) from exc
         except DecompressionLimitError as exc:
             raise _too_large(exc) from exc
@@ -2022,13 +2063,15 @@ _REDACTION_SKIP_TEXT = {
     _SKIP_TOO_LARGE: "too large once decompressed (MAX_DECOMPRESSED_MB)",
     _SKIP_UNREADABLE: "can't be read as an archive or a compressed file",
 }
-# What a corrupt archive or compressed file raises while it is read.
+# What a corrupt archive or compressed file raises while it is read, and
+# a .zip read in place that changed while it was read.
 _UNREADABLE_ERRORS = (
     zipfile.BadZipFile,
     tarfile.TarError,
     gzip.BadGzipFile,
     EOFError,
     zlib.error,
+    RemoteFileChangedError,
 )
 
 

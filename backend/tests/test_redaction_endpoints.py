@@ -785,6 +785,23 @@ def test_follow_refuses_the_rest_part_way_and_audits_every_such_poll(session, vi
     assert len(session.exec(select(AuditLog).where(AuditLog.action == "file.follow")).all()) == 2
 
 
+class _FakeRemoteFile(io.BytesIO):
+    """An open remote file, as paramiko's SFTPFile offers it."""
+
+    def prefetch(self, file_size=None):
+        pass
+
+    def stat(self):
+        attr = type("Attr", (), {})()
+        attr.st_size = len(self.getvalue())
+        return attr
+
+    def readv(self, chunks):
+        for offset, length in chunks:
+            self.seek(offset)
+            yield self.read(length)
+
+
 class _FakeSFTP:
     def __init__(self, files: dict[str, str]):
         self.files = {path: content.encode() for path, content in files.items()}
@@ -793,9 +810,7 @@ class _FakeSFTP:
         return path
 
     def open(self, remote_path, mode="r"):
-        remote = io.BytesIO(self.files[remote_path])
-        remote.prefetch = lambda file_size=None: None
-        return remote
+        return _FakeRemoteFile(self.files[remote_path])
 
     def stat(self, remote_path):
         attr = type("Attr", (), {})()

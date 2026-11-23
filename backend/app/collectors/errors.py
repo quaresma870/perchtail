@@ -30,6 +30,7 @@ from app.collectors.base import (
     SourceUnreachableError,
     TargetCheck,
 )
+from app.collectors.ranged import RemoteFileChangedError
 from app.rules import is_dir_visible, is_visible, rules_case_insensitive
 from app.scratch import ScratchFullError
 
@@ -316,11 +317,14 @@ def translate_local(exc: BaseException) -> SourceError | None:
 
 
 # ScratchFullError (#345): refused before anything reached the source.
+# RemoteFileChangedError: a ranged read found the file changed under it
+# (collectors/ranged.py), answered by the archive routes.
 _PASS_THROUGH = (
     SourceError,
     FetchTooLargeError,
     PathOutsideBaseError,
     ScratchFullError,
+    RemoteFileChangedError,
 )
 
 
@@ -445,6 +449,19 @@ class TranslatingConnector:
             return getattr(self._module, name)(source, *args, **kwargs, **link)
 
     @contextmanager
+    def open_ranged(self, source, relative_path: str, *, rules=None):
+        """For a connector with RANGED_READS: the file opened for ranged
+        reads (collectors/ranged.py), checked as fetch_file checks it, for
+        the length of the `with` block. Its reads are translated like the
+        open; what the caller's own code raises propagates unchanged."""
+        with ExitStack() as stack:
+            with tracked(source), translated(self._translate):
+                target, path, label = self._split(source, relative_path)
+                link = self._link_kwargs(source, rules, label)
+                remote = stack.enter_context(self._module.open_ranged(target, path, **link))
+            yield _TranslatedRemote(remote, self._translate)
+
+    @contextmanager
     def local_copy(self, source, relative_path: str, *, rules=None):
         # Only the fetch is translated; exceptions from the caller's `with`
         # body propagate unchanged.
@@ -454,3 +471,20 @@ class TranslatingConnector:
                 link = self._link_kwargs(source, rules, label)
                 local = stack.enter_context(self._module.local_copy(target, path, **link))
             yield local
+
+
+class _TranslatedRemote:
+    """A connector's RangedRemote whose reads raise SourceError types."""
+
+    def __init__(self, remote, translate: Translator):
+        self._remote = remote
+        self._translate = translate
+        self.size = remote.size
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        with translated(self._translate):
+            return self._remote.read_at(offset, length)
+
+    def copy_range(self, offset: int, length: int, dst) -> int:
+        with translated(self._translate):
+            return self._remote.copy_range(offset, length, dst)

@@ -81,7 +81,9 @@ def _zip_mtime(date_time: tuple) -> float | None:
         return None
 
 
-def _is_zip(filename: str) -> bool:
+def is_zip(filename: str) -> bool:
+    """A `.zip`, matched whatever the case: one that can be listed and read
+    in place from a seekable file (api/archive.py's ranged reads)."""
     return filename.lower().endswith(".zip")
 
 
@@ -94,7 +96,7 @@ def is_archive(filename: str) -> bool:
     browsing & ephemeral fetch behavior") — expanding one lists its members
     rather than opening it directly. The extension is matched whatever its
     case (`OLD.ZIP`)."""
-    return _is_zip(filename) or _is_tar_gz(filename)
+    return is_zip(filename) or _is_tar_gz(filename)
 
 
 def is_transparent_gzip(filename: str) -> bool:
@@ -136,6 +138,19 @@ def tree_children(members: list[ArchiveMember], member_dir: str) -> list[Archive
                 name=child, size=member.size, is_dir=False, mtime=member.mtime
             )
     return sorted(children.values(), key=lambda m: (not m.is_dir, m.name.lower()))
+
+
+def _zip_member_stretch(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[int, int]:
+    """Where a member's local header and data lie in the archive: from its
+    header to the next member's header, or to the central directory after
+    the last one. Only bounds what is read ahead; zipfile reads what it
+    needs either way."""
+    start = info.header_offset
+    end = zf.start_dir
+    for other in zf.infolist():
+        if start < other.header_offset < end:
+            end = other.header_offset
+    return start, max(end, start)
 
 
 def _zip_member_name(zf: zipfile.ZipFile, requested: str) -> str:
@@ -261,14 +276,16 @@ class _TarScan:
 
 
 def scan_members(
-    local_path: Path, filename: str, *, include_special: bool = False
+    local_path: Path | BinaryIO, filename: str, *, include_special: bool = False
 ) -> tuple[list[ArchiveMember], bool]:
     """The archive's members, and whether the list was cut short (a tar.gz
     past MAX_TAR_ENTRIES entries or MAX_TAR_NAME_BYTES of names, read in one
     pass, see _TarScan). A tar's links, devices and FIFOs are left out (see
     _is_plain_tar_member) unless `include_special` is set, for checks that
-    must see every entry's name; they then list as files."""
-    if _is_zip(filename):
+    must see every entry's name; they then list as files. A zip can be
+    given as a seekable file instead of a path (a ranged read of a remote
+    one, collectors/ranged.py); a tar.gz only as a path."""
+    if is_zip(filename):
         with zipfile.ZipFile(local_path) as zf:
             members = [
                 ArchiveMember(
@@ -312,7 +329,7 @@ def _is_plain_tar_member(member: tarfile.TarInfo) -> bool:
 
 
 def extract_member(
-    local_path: Path,
+    local_path: Path | BinaryIO,
     filename: str,
     member_name: str,
     destination: Path,
@@ -329,12 +346,17 @@ def extract_member(
     encrypted zip member, or one compressed with a method zipfile can't
     read, raises MemberUnreadableError. Zip members are always read as
     stored -- zipfile never follows a link. A tar.gz is read in one pass
-    (_extract_tar_member)."""
-    if _is_zip(filename):
+    (_extract_tar_member). A zip can be given as a seekable file (see
+    scan_members); one that can read ahead (collectors/ranged.py) is told
+    the member's stretch first."""
+    if is_zip(filename):
         with zipfile.ZipFile(local_path) as zf:
             info = zf.getinfo(_zip_member_name(zf, member_name))
             if info.flag_bits & _ZIP_ENCRYPTED:
                 raise MemberUnreadableError(SKIP_ENCRYPTED)
+            read_sequentially = getattr(local_path, "read_sequentially", None)
+            if read_sequentially is not None:
+                read_sequentially(*_zip_member_stretch(zf, info))
             try:
                 src = zf.open(info)
             except NotImplementedError as exc:
@@ -447,7 +469,7 @@ def rebuild_archive(
     the file `skipped_list` gives. Each member passes through `work_dir` one
     at a time. Returns the (name, reason) of each member listed. A tar.gz is
     read in one pass (_TarScan); one past its caps raises tarfile.ReadError."""
-    if _is_zip(filename):
+    if is_zip(filename):
         rebuild = _rebuild_zip
     elif _is_tar_gz(filename):
         rebuild = _rebuild_tar_gz
@@ -492,7 +514,7 @@ def write_archive(
     archive whose members were read and redacted elsewhere (an agent's
     fetch_archive), as rebuild_archive writes one read here."""
     try:
-        if _is_zip(filename):
+        if is_zip(filename):
             with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as rebuilt:
                 written: set[str] = set()
                 for name, path, mtime in members:

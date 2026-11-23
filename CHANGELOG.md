@@ -16,6 +16,7 @@ release ships (0.x releases may include breaking changes between minors).
 
 ### Security
 - The push agent uses a `gorilla/websocket` commit that fixes GO-2026-6278: the mask key of each WebSocket frame the agent sent came from a weak random generator. Over `wss://`, which the agent requires unless `PERCHTAIL_ALLOW_INSECURE=true`, TLS already protects the frames. The agent now also depends on `golang.org/x/net`, through `gorilla/websocket`.
+- Expanding a `.zip` on an SSH, SMB or WinRM source, and opening, following or downloading a file inside it, now read only the bytes they need instead of copying the whole archive to scratch first, every time: listing reads the archive's end (its index), and a file inside it only its own header and compressed data. A large `.zip` over WinRM took as long to list, and as long again to open each file, as copying it whole; it now takes a few requests. `MAX_FETCH_MB` counts what such an operation transfers, so a `.zip` larger than it can be expanded and its files opened, and an operation that would transfer more than it is refused with the same 413. A `.zip` that changes size while it is read, or whose file fails its CRC check, is refused as unreadable (409 `archive_unreadable`, audited). `.tar.gz` files, whole-archive downloads, folder ZIPs and local sources read archives as before, and push agents on their host (above). Each such read logs `archive.ranged_read` (DEBUG) with its requests, bytes and seconds.
 
 ## [0.7.0] - 2026-11-23
 
