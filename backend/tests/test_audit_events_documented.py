@@ -36,6 +36,9 @@ PASSTHROUGH_CALLS = {
     # Records what a migration left in the outbox: only the actions in
     # ACCEPTED, which the test adds itself.
     ("audit_outbox.py", "drain_audit_outbox"),
+    # The closure _late_skips_recorder returns: it records the `action` of
+    # _late_skips_recorder, whose callers' actions are read from them.
+    ("api/archive.py", "record_skipped"),
 }
 
 ACTION_PATTERN = re.compile(r"^[a-z][a-z_]*(\.[a-z_]+)+$")

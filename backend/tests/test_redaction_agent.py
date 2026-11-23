@@ -54,7 +54,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from tests.test_redaction_downloads import _mark_encrypted
+from tests.test_redaction_downloads import _mark_encrypted, late_skips
 from tests.test_redaction_endpoints import (
     MIDSTREAM,
     MIDSTREAM_REFUSED_AT,
@@ -1328,9 +1328,16 @@ def test_downloads_on_the_agent_that_turn_utf32_part_way(session, agent_source, 
             assert_no_midstream_secret(zf.read(name))
     for name in ("mixed.log", "mixed.log.gz", "bundle.zip/mixed.log"):
         assert f"{name}: in an encoding redaction doesn't support (UTF-32)" in listed
-    late = _audit(session, "file.download_redaction_skipped")
-    assert late.event_metadata["reason"] == "redaction_unsupported_encoding"
-    assert late.event_metadata["skipped"] == ["dir/mixed.log"]
+    assert late_skips(session) == [
+        {
+            "path": "dir/bundle.zip",
+            "member": "mixed.log",
+            "folder": "dir",
+            "reason": "redaction_unsupported_encoding",
+        },
+        {"path": "dir/mixed.log", "folder": "dir", "reason": "redaction_unsupported_encoding"},
+        {"path": "dir/mixed.log.gz", "folder": "dir", "reason": "redaction_unsupported_encoding"},
+    ]
     assert _scratch_files(scratch_store) == []
 
 

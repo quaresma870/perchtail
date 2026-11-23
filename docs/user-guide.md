@@ -222,7 +222,7 @@ Limits set by the server:
 - Each user can have 2 downloads or folder ZIPs in progress at once by default. When PerchTail is busy, it answers "try again in a few seconds" instead of waiting.
 - When the server is out of space for temporary files, the download is refused until space is freed.
 
-A folder ZIP is streamed while it is built, so the browser doesn't know its total size in advance. If something fails once it has started (a source error, a file that grew past the limit), the download stops short and the ZIP is incomplete. `.gz` files go into it as they are.
+A folder ZIP is streamed while it is built, so the browser doesn't know its total size in advance. It starts at once and is sent one file at a time, in order: each file, archives included, is read from the source only when its turn comes. If something fails once it has started (a source error, a file that grew past the limit), the download stops short and the ZIP is incomplete. `.gz` files go into it as they are.
 
 A folder ZIP holds every visible file below the folder or nothing, so some folders are refused before anything is downloaded:
 

@@ -1639,8 +1639,20 @@ def test_folder_zip_leaves_out_archives_with_hidden_members(
         assert zf.read("clean.zip") == clean
         assert zf.read("SKIPPED.txt") == b"nested/hiding.tar.gz" + _SKIPPED_LINE
     event = session.exec(select(AuditLog).where(AuditLog.action == "folder.download")).one()
-    assert event.event_metadata["file_count"] == 2
-    assert event.event_metadata["skipped_archives"] == ["nested/hiding.tar.gz"]
+    # Written before the ZIP starts: every file listed for it.
+    assert event.event_metadata["file_count"] == 3
+    assert "skipped_archives" not in event.event_metadata
+    # The archive left out is only known while the ZIP is sent: its own
+    # entry, once it ended.
+    denied = session.exec(select(AuditLog).where(AuditLog.action == "file.download_denied")).one()
+    assert denied.id > event.id
+    assert denied.target_type == "source" and denied.target_id == source.id
+    assert {
+        "path": "nested/hiding.tar.gz",
+        "folder": "",
+        "reason": "archive_hidden_members",
+    }.items() <= denied.event_metadata.items()
+    assert "member" not in denied.event_metadata
     # Nothing is left behind in scratch, the archive left out included.
     assert list(scratch_store.root.iterdir()) == []
 
@@ -1648,7 +1660,7 @@ def test_folder_zip_leaves_out_archives_with_hidden_members(
 def test_folder_zip_reads_each_archive_from_the_source_once(
     app_client, session, scratch_store, tmp_path, monkeypatch
 ):
-    """The archive checked before the ZIP starts is the copy zipped."""
+    """The archive checked when its turn comes is the copy zipped."""
     import app.collectors.local as local_connector
 
     fetched = []
@@ -1770,10 +1782,14 @@ def test_archive_inside_an_archive_counts_as_hidden_when_the_source_has_an_exclu
     denied_downloads = session.exec(
         select(AuditLog).where(AuditLog.action == "file.download_denied")
     ).all()
+    # The whole download, the member, and the folder ZIP that left it out.
     assert [entry.event_metadata["path"] for entry in denied_downloads] == [
         "logs/outer.zip",
         "logs/outer.zip/inner.zip",
+        "logs/outer.zip",
     ]
+    assert denied_downloads[2].event_metadata["folder"] == "logs"
+    assert denied_downloads[2].event_metadata["reason"] == "archive_hidden_members"
     opened = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).one()
     assert opened.user_id == user.id and opened.target_id == source.id
     assert opened.event_metadata["path"] == "logs/outer.zip/inner.zip"
@@ -1868,7 +1884,10 @@ def test_folder_zip_without_skipped_archives_has_no_skipped_list(app_client, ses
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
         assert set(zf.namelist()) == {"app.log", "clean.zip"}
     event = session.exec(select(AuditLog).where(AuditLog.action == "folder.download")).one()
+    assert event.event_metadata["file_count"] == 2
     assert "skipped_archives" not in event.event_metadata
+    denied = session.exec(select(AuditLog).where(AuditLog.action == "file.download_denied"))
+    assert denied.all() == []
 
 
 def test_folder_zip_skipped_list_avoids_an_existing_skipped_txt(app_client, session, tmp_path):
@@ -1886,6 +1905,194 @@ def test_folder_zip_skipped_list_avoids_an_existing_skipped_txt(app_client, sess
         assert set(zf.namelist()) == {"SKIPPED.txt", "SKIPPED (PerchTail).txt"}
         assert zf.read("SKIPPED.txt") == b"the folder's own file"
         assert zf.read("SKIPPED (PerchTail).txt") == b"hiding.zip" + _SKIPPED_LINE
+
+
+def recording_app(app, sent: list[bytes]):
+    """`app`, with each piece of response body it sends appended to `sent`
+    as it is sent, so a test can see what the client already had."""
+
+    async def wrapped(scope, receive, send):
+        async def record(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                sent.append(message["body"])
+            await send(message)
+
+        await app(scope, receive, record)
+
+    return wrapped
+
+
+def watch_fetches(monkeypatch, on_fetch) -> None:
+    """Calls `on_fetch(path, destination)` before each fetch of the local
+    connector."""
+    import app.collectors.local as local_connector
+
+    real_fetch = local_connector.fetch_file
+
+    def fetch(source_, relative_path, destination, **kwargs):
+        on_fetch(relative_path, Path(destination))
+        return real_fetch(source_, relative_path, destination, **kwargs)
+
+    monkeypatch.setattr(local_connector, "fetch_file", fetch)
+
+
+def test_folder_zip_sends_earlier_files_before_an_archive_is_read(
+    app_client, session, scratch_store, tmp_path, monkeypatch
+):
+    """The ZIP starts at once: each archive is fetched and checked only when
+    its turn comes, once the files before it were sent to the client; a
+    slow archive no longer holds back the first byte."""
+    app, _ = app_client
+    sent: list[bytes] = []
+    client = TestClient(recording_app(app, sent))
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "1-first.log").write_text("first")
+    (files / "2-bundle.zip").write_bytes(_zip_bytes({"a.log": "a"}))
+    (files / "3-logs.tar.gz").write_bytes(_tar_gz_bytes({"b.log": "b"}))
+    (files / "4-last.log.gz").write_bytes(gzip.compress(b"last"))
+    source = _make_local_source(session, files)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    _add_rule(session, source, 1, RuleType.exclude, "**/secret.txt")
+    sent_before: dict[str, bytes] = {}
+    watch_fetches(monkeypatch, lambda path, _: sent_before.setdefault(path, b"".join(sent)))
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+
+    assert response.status_code == 200
+    # Each file's ZIP entry (its name is in its local header) had gone out
+    # before the next one was read from the source.
+    assert sent_before["1-first.log"] == b""
+    assert b"1-first.log" in sent_before["2-bundle.zip"]
+    assert b"2-bundle.zip" not in sent_before["2-bundle.zip"]
+    assert b"2-bundle.zip" in sent_before["3-logs.tar.gz"]
+    assert b"3-logs.tar.gz" in sent_before["4-last.log.gz"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert zf.namelist() == ["1-first.log", "2-bundle.zip", "3-logs.tar.gz", "4-last.log.gz"]
+        assert zf.read("2-bundle.zip") == (files / "2-bundle.zip").read_bytes()
+        assert zf.read("3-logs.tar.gz") == (files / "3-logs.tar.gz").read_bytes()
+        assert zf.read("4-last.log.gz") == (files / "4-last.log.gz").read_bytes()
+    assert list(scratch_store.root.iterdir()) == []
+
+
+def test_folder_zip_keeps_one_file_in_scratch_at_a_time(
+    app_client, session, scratch_store, tmp_path, monkeypatch
+):
+    """Scratch holds the file being zipped, not every archive of the folder:
+    room is asked for the largest file only, and an archive is gone from
+    scratch before the next one is fetched."""
+    app, client = app_client
+    files = tmp_path / "files"
+    files.mkdir()
+    first = _zip_bytes({"a.log": "a" * 3000})
+    (files / "a.zip").write_bytes(first)
+    (files / "b.zip").write_bytes(_zip_bytes({"b.log": "b"}))
+    (files / "c.log").write_text("c" * 100)
+    source = _make_local_source(session, files)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    asked: list[int] = []
+    real_ensure_room = scratch_store.ensure_room
+    monkeypatch.setattr(
+        scratch_store,
+        "ensure_room",
+        lambda expected_bytes=0: (asked.append(expected_bytes), real_ensure_room(expected_bytes)),
+    )
+    in_scratch: dict[str, list[str]] = {}
+    watch_fetches(
+        monkeypatch,
+        lambda path, destination: in_scratch.setdefault(
+            path, sorted(p.name for p in destination.parent.iterdir())
+        ),
+    )
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+
+    assert response.status_code == 200
+    # The room asked for before the ZIP starts (then make_scratch_dir's own).
+    assert asked[0] == len(first)
+    assert in_scratch == {"a.zip": [], "b.zip": [], "c.log": []}
+
+
+def test_folder_zip_cut_short_after_it_started_is_incomplete_and_audits_what_it_left_out(
+    session, scratch_store, tmp_path, monkeypatch
+):
+    """A failure once the ZIP has started cuts it short: the client gets a
+    ZIP without its central directory, nothing of the file being fetched,
+    scratch is emptied, and what was already left out is audited."""
+    from app.collectors.base import SourceUnreachableError
+
+    app = FastAPI()
+    app.include_router(archive_router)
+    app.dependency_overrides[get_session] = lambda: session
+    client = TestClient(app, raise_server_exceptions=False)
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "1-first.log").write_text("first")
+    (files / "2-hiding.zip").write_bytes(_zip_bytes({"secret.txt": "x"}))
+    (files / "3-broken.log").write_text("never sent")
+    (files / "4-last.log").write_text("last")
+    source = _make_local_source(session, files)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    _add_rule(session, source, 1, RuleType.exclude, "**/secret.txt")
+
+    def fail_on_broken(path, destination):
+        if path == "3-broken.log":
+            destination.write_bytes(b"half of it")
+            raise SourceUnreachableError("the source went away")
+
+    watch_fetches(monkeypatch, fail_on_broken)
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+
+    assert response.status_code == 200
+    assert b"1-first.log" in response.content
+    assert b"3-broken.log" not in response.content
+    assert b"4-last.log" not in response.content
+    with pytest.raises(zipfile.BadZipFile):
+        zipfile.ZipFile(io.BytesIO(response.content))
+    assert session.exec(select(AuditLog).where(AuditLog.action == "folder.download")).one()
+    denied = session.exec(select(AuditLog).where(AuditLog.action == "file.download_denied")).one()
+    assert denied.event_metadata["path"] == "2-hiding.zip"
+    assert denied.event_metadata["reason"] == "archive_hidden_members"
+    assert list(scratch_store.root.iterdir()) == []
+
+
+@pytest.mark.parametrize("with_exclude", [True, False])
+def test_folder_zip_with_an_unreadable_archive(
+    app_client, session, scratch_store, tmp_path, with_exclude
+):
+    """An archive that can't be read counts as hiding something when the
+    source has an exclude rule (_archive_has_hidden_members): left out,
+    listed and audited; with no exclude rule it goes in as it is."""
+    app, client = app_client
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "app.log").write_text("hello")
+    (files / "broken.zip").write_bytes(b"not a zip at all")
+    source = _make_local_source(session, files)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    if with_exclude:
+        _add_rule(session, source, 1, RuleType.exclude, "**/secret.txt")
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+
+    assert response.status_code == 200
+    denied = session.exec(select(AuditLog).where(AuditLog.action == "file.download_denied")).all()
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        if with_exclude:
+            assert zf.namelist() == ["app.log", "SKIPPED.txt"]
+            assert zf.read("SKIPPED.txt") == b"broken.zip" + _SKIPPED_LINE
+            assert [(d.event_metadata["path"], d.event_metadata["folder"]) for d in denied] == [
+                ("broken.zip", "")
+            ]
+        else:
+            assert zf.namelist() == ["app.log", "broken.zip"]
+            assert denied == []
+    assert list(scratch_store.root.iterdir()) == []
 
 
 def _tar_gz_with_links() -> bytes:

@@ -28,6 +28,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
+from tests.test_api_archive import recording_app, watch_fetches
 from tests.test_archives import zip_link_info, zip_with_unsupported_method
 from tests.test_redaction_endpoints import (
     MIDSTREAM,
@@ -122,6 +123,18 @@ def _audit(session, action: str) -> AuditLog:
 
 def _audits(session, action: str) -> list[AuditLog]:
     return list(session.exec(select(AuditLog).where(AuditLog.action == action)).all())
+
+
+def late_skips(session) -> list[dict]:
+    """The file.download_redaction_skipped entries' metadata, without the
+    source's name, sorted by path and member."""
+    return sorted(
+        (
+            {k: v for k, v in entry.event_metadata.items() if k != "target_name"}
+            for entry in _audits(session, "file.download_redaction_skipped")
+        ),
+        key=lambda m: (m["path"], m.get("member", "")),
+    )
 
 
 def _zip_bytes(members: dict[str, bytes]) -> bytes:
@@ -641,7 +654,11 @@ def test_a_folder_zip_lists_unreadable_members_and_symbolic_links(session, downl
         skipped = zf.read("REDACTION-SKIPPED.txt").decode()
     assert "bundle.zip/big.log: compressed with a method that can't be read" in skipped
     assert "bundle.zip/current.log: a symbolic link, which redaction doesn't follow" in skipped
-    assert _audit(session, "folder.download").event_metadata["skipped_count"] == 2
+    assert "skipped_count" not in _audit(session, "folder.download").event_metadata
+    assert sorted(
+        (e.event_metadata["member"], e.event_metadata["reason"])
+        for e in _audits(session, "file.download_redaction_skipped")
+    ) == [("big.log", "unsupported_compression"), ("current.log", "link")]
     assert _scratch_files(store) == []
 
 
@@ -773,15 +790,23 @@ def test_a_folder_zip_is_redacted(session, downloads, store):
     event = _audit(session, "folder.download")
     assert event.event_metadata["redaction"] == "applied"
     assert event.event_metadata["redaction_at"] == "server"
-    # Known before the ZIP starts: what the archives and .gz files leave out.
-    assert event.event_metadata["skipped_count"] == 1
-    # Found while the ZIP was sent: a second entry, once it ended.
-    late = _audit(session, "file.download_redaction_skipped")
-    assert late.target_type == "source" and late.target_id == source.id
-    assert late.event_metadata["path"] == ""
-    assert late.event_metadata["skipped_count"] == 1
-    assert late.event_metadata["skipped"] == ["sub/wider.log"]
-    assert late.id > event.id
+    # Written before the ZIP starts, with every file listed for it (the
+    # hidden secret.log isn't).
+    assert event.event_metadata["file_count"] == 6
+    assert "skipped_count" not in event.event_metadata
+    # Found while the ZIP was sent: one entry each, once it ended.
+    late = _audits(session, "file.download_redaction_skipped")
+    assert all(e.target_type == "source" and e.target_id == source.id for e in late)
+    assert all(e.id > event.id for e in late)
+    assert late_skips(session) == [
+        {
+            "path": "sub/bundle.zip",
+            "member": "nested.tar.gz",
+            "folder": "",
+            "reason": "nested_archive",
+        },
+        {"path": "sub/wider.log", "folder": "", "reason": "redaction_unsupported_encoding"},
+    ]
     assert _scratch_files(store) == []
 
 
@@ -802,15 +827,15 @@ def test_a_folder_zip_leaves_out_unsupported_compressed_formats(session, downloa
         skipped = zf.read("REDACTION-SKIPPED.txt").decode()
     for name in ("plain.log", f"named.log.{fmt}", "inner.log.gz"):
         assert f"{name}: in a compressed format redaction doesn't support" in skipped
-    # The .gz file is prepared before the ZIP starts; the others are only
-    # found to be left out while it is sent.
-    assert _audit(session, "folder.download").event_metadata["skipped_count"] == 1
-    late = _audit(session, "file.download_redaction_skipped")
-    assert late.event_metadata["path"] == "sub"
-    assert late.event_metadata["skipped_count"] == 2
-    assert sorted(late.event_metadata["skipped"]) == sorted(
-        ["sub/plain.log", f"sub/named.log.{fmt}"]
+    # Each one found while the ZIP is sent, the .gz file included: one entry
+    # each, once it ended.
+    late = _audits(session, "file.download_redaction_skipped")
+    assert sorted(e.event_metadata["path"] for e in late) == sorted(
+        ["sub/inner.log.gz", "sub/plain.log", f"sub/named.log.{fmt}"]
     )
+    for entry in late:
+        assert entry.event_metadata["folder"] == "sub"
+        assert entry.event_metadata["reason"] == "redaction_unsupported_format"
     assert _scratch_files(store) == []
 
 
@@ -830,9 +855,12 @@ def test_a_folder_zip_leaves_out_gzip_or_zip_content_under_another_name(session,
         skipped = zf.read("REDACTION-SKIPPED.txt").decode()
     for name in ("app.log.1", "app.log.2", "inner.log.gz"):
         assert f"{name}: in a compressed format redaction doesn't support" in skipped
-    assert _audit(session, "folder.download").event_metadata["skipped_count"] == 1
-    late = _audit(session, "file.download_redaction_skipped")
-    assert sorted(late.event_metadata["skipped"]) == ["sub/app.log.1", "sub/app.log.2"]
+    late = _audits(session, "file.download_redaction_skipped")
+    assert sorted(e.event_metadata["path"] for e in late) == [
+        "sub/app.log.1",
+        "sub/app.log.2",
+        "sub/inner.log.gz",
+    ]
     assert _scratch_files(store) == []
 
 
@@ -988,15 +1016,166 @@ def test_a_folder_zip_leaves_out_a_file_that_turns_utf32_part_way(session, downl
             assert_no_midstream_secret(zf.read(name))
     for name in ("mixed.log", "mixed.log.gz", "bundle.zip/mixed.log"):
         assert f"{name}: in an encoding redaction doesn't support (UTF-32)" in skipped
-    # The .gz file and the archive are prepared before the ZIP starts.
-    assert _audit(session, "folder.download").event_metadata["skipped_count"] == 2
-    late = _audit(session, "file.download_redaction_skipped")
-    assert {
-        "path": "sub",
-        "reason": "redaction_unsupported_encoding",
-        "skipped_count": 1,
-        "skipped": ["sub/mixed.log"],
-    }.items() <= late.event_metadata.items()
+    # The file, the .gz file and the archive's member: one entry each.
+    assert late_skips(session) == [
+        {
+            "path": "sub/bundle.zip",
+            "member": "mixed.log",
+            "folder": "sub",
+            "reason": "redaction_unsupported_encoding",
+        },
+        {"path": "sub/mixed.log", "folder": "sub", "reason": "redaction_unsupported_encoding"},
+        {"path": "sub/mixed.log.gz", "folder": "sub", "reason": "redaction_unsupported_encoding"},
+    ]
+    assert _scratch_files(store) == []
+
+
+def test_a_redacted_folder_zip_sends_earlier_files_before_an_archive_is_read(
+    session, downloads, store, monkeypatch
+):
+    """The redacted ZIP starts at once: each archive and .gz file is fetched
+    and redacted or rebuilt only when its turn comes, once the files before
+    it were sent to the client."""
+    app, _, source, folder = downloads
+    sent: list[bytes] = []
+    client = TestClient(recording_app(app, sent))
+    (folder / "1-first.log").write_text(SAMPLE)
+    (folder / "2-bundle.zip").write_bytes(
+        _zip_bytes({"inner.log": SAMPLE_BYTES, "secret.log": b"hidden"})
+    )
+    (folder / "3-old.log.gz").write_bytes(gzip.compress(SAMPLE_BYTES))
+    (folder / "4-logs.tar.gz").write_bytes(_tar_gz_bytes({"t.log": SAMPLE_BYTES}))
+    sent_before: dict[str, bytes] = {}
+    watch_fetches(monkeypatch, lambda path, _: sent_before.setdefault(path, b"".join(sent)))
+
+    response = _download_zip(client, source)
+
+    assert response.status_code == 200
+    assert response.headers["x-perchtail-redacted"] == "1"
+    assert _disposition_name(response) == "local.redacted.zip"
+    assert sent_before["1-first.log"] == b""
+    assert b"1-first.log" in sent_before["2-bundle.zip"]
+    assert b"2-bundle.zip" not in sent_before["2-bundle.zip"]
+    assert b"2-bundle.zip" in sent_before["3-old.log.gz"]
+    assert b"3-old.log.gz" in sent_before["4-logs.tar.gz"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert zf.namelist() == ["1-first.log", "2-bundle.zip", "3-old.log.gz", "4-logs.tar.gz"]
+        assert zf.read("1-first.log") == _redacted(SAMPLE_BYTES)
+        with zipfile.ZipFile(io.BytesIO(zf.read("2-bundle.zip"))) as inner:
+            assert inner.namelist() == ["inner.log"]
+            assert inner.read("inner.log") == _redacted(SAMPLE_BYTES)
+        assert gzip.decompress(zf.read("3-old.log.gz")) == _redacted(SAMPLE_BYTES)
+        with tarfile.open(fileobj=io.BytesIO(zf.read("4-logs.tar.gz")), mode="r:gz") as tf:
+            assert tf.extractfile("t.log").read() == _redacted(SAMPLE_BYTES)
+    assert late_skips(session) == []
+    assert _scratch_files(store) == []
+
+
+def test_a_redacted_folder_zip_keeps_one_file_in_scratch_at_a_time(
+    session, downloads, store, monkeypatch
+):
+    """Room is asked for the largest file twice over (the original and what
+    it becomes), and each file is gone from scratch before the next one is
+    fetched."""
+    _, client, source, folder = downloads
+    first = _zip_bytes({"a.log": SAMPLE_BYTES * 20})
+    (folder / "a.zip").write_bytes(first)
+    (folder / "b.log.gz").write_bytes(gzip.compress(SAMPLE_BYTES))
+    (folder / "c.log").write_text(SAMPLE)
+    asked: list[int] = []
+    real_ensure_room = store.ensure_room
+    monkeypatch.setattr(
+        store,
+        "ensure_room",
+        lambda expected_bytes=0: (asked.append(expected_bytes), real_ensure_room(expected_bytes)),
+    )
+    in_scratch: dict[str, list[str]] = {}
+    watch_fetches(
+        monkeypatch,
+        lambda path, destination: in_scratch.setdefault(
+            path, sorted(p.name for p in destination.parent.iterdir())
+        ),
+    )
+
+    response = _download_zip(client, source)
+
+    assert response.status_code == 200
+    # The room asked for before the ZIP starts (then make_scratch_dir's own).
+    assert asked[0] == 2 * len(first)
+    assert in_scratch == {"a.zip": [], "b.log.gz": [], "c.log": []}
+    assert _scratch_files(store) == []
+
+
+def test_a_redacted_folder_zip_leaves_out_unreadable_and_too_large_files(
+    session, downloads, store, monkeypatch
+):
+    """An archive or .gz file that can't be read, or that is over
+    MAX_DECOMPRESSED_MB once decompressed, and an archive member over it,
+    are left out when their turn comes, listed and audited once the ZIP
+    ends, one entry each."""
+    _, client, source, folder = downloads
+    monkeypatch.setattr(get_settings(), "max_decompressed_mb", 1)
+    (folder / "app.log").write_text(SAMPLE)
+    (folder / "broken.zip").write_bytes(b"not a zip at all")
+    (folder / "broken.log.gz").write_bytes(b"not gzip either")
+    (folder / "big.log.gz").write_bytes(gzip.compress(_OVER_THE_LIMIT))
+    (folder / "bundle.zip").write_bytes(
+        _zip_bytes({"big.log": _OVER_THE_LIMIT, "small.log": SAMPLE_BYTES})
+    )
+
+    response = _download_zip(client, source)
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert sorted(zf.namelist()) == ["REDACTION-SKIPPED.txt", "app.log", "bundle.zip"]
+        with zipfile.ZipFile(io.BytesIO(zf.read("bundle.zip"))) as inner:
+            assert sorted(inner.namelist()) == ["REDACTION-SKIPPED.txt", "small.log"]
+        skipped = zf.read("REDACTION-SKIPPED.txt").decode()
+    assert "broken.zip: can't be read as an archive or a compressed file" in skipped
+    assert "broken.log.gz: can't be read as an archive or a compressed file" in skipped
+    assert "big.log.gz: too large once decompressed (MAX_DECOMPRESSED_MB)" in skipped
+    assert "bundle.zip/big.log: too large once decompressed (MAX_DECOMPRESSED_MB)" in skipped
+    assert _audit(session, "folder.download").event_metadata["file_count"] == 5
+    assert late_skips(session) == [
+        {"path": "big.log.gz", "folder": "", "reason": "too_large"},
+        {"path": "broken.log.gz", "folder": "", "reason": "archive_unreadable"},
+        {"path": "broken.zip", "folder": "", "reason": "archive_unreadable"},
+        {"path": "bundle.zip", "member": "big.log", "folder": "", "reason": "too_large"},
+    ]
+    assert _scratch_files(store) == []
+
+
+def test_a_redacted_folder_zip_cut_short_after_it_started(session, downloads, store, monkeypatch):
+    """A failure once the redacted ZIP has started (here, rebuilding an
+    archive) cuts it short: nothing of the half-prepared archive is sent,
+    the ZIP has no central directory, scratch is emptied, and what was
+    already left out is audited."""
+    app, _, source, folder = downloads
+    client = TestClient(app, raise_server_exceptions=False)
+    (folder / "0-wider.log").write_bytes(SAMPLE.encode("utf-32"))
+    (folder / "1-first.log").write_text(SAMPLE)
+    (folder / "2-bundle.zip").write_bytes(_zip_bytes({"inner.log": SAMPLE_BYTES}))
+    (folder / "3-last.log").write_text(SAMPLE)
+
+    def half_rebuilt(local_archive, filename, destination, *args, **kwargs):
+        Path(destination).write_bytes(b"HALF-REBUILT")
+        raise RuntimeError("the rebuild failed")
+
+    monkeypatch.setattr(archive_module, "rebuild_archive", half_rebuilt)
+
+    response = _download_zip(client, source)
+
+    assert response.status_code == 200
+    assert b"1-first.log" in response.content
+    assert b"2-bundle.zip" not in response.content
+    assert b"HALF-REBUILT" not in response.content
+    assert b"3-last.log" not in response.content
+    with pytest.raises(zipfile.BadZipFile):
+        zipfile.ZipFile(io.BytesIO(response.content))
+    assert _audit(session, "folder.download").event_metadata["file_count"] == 4
+    assert late_skips(session) == [
+        {"path": "0-wider.log", "folder": "", "reason": "redaction_unsupported_encoding"}
+    ]
     assert _scratch_files(store) == []
 
 
