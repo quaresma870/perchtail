@@ -1,5 +1,6 @@
 import pytest
 from app.collectors import local as local_module
+from app.collectors.base import LinkTargetHiddenError
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 
 
@@ -25,7 +26,7 @@ def test_resolve_path_joins_base_and_relative(tmp_path):
 
 
 def test_resolve_path_never_names_the_base_directory_itself(tmp_path):
-    with pytest.raises(local_module.LocalPathNotAllowedError):
+    with pytest.raises(LinkTargetHiddenError):
         local_module.resolve_path(_source(tmp_path), "")
 
 

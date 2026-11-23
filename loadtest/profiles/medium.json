@@ -1,0 +1,131 @@
+{
+  "name": "medium",
+  "description": "A support department of up to 50 people with about 250 sources. Proposed; to be adjusted in a dedicated test environment.",
+  "customers": 10,
+  "folders_per_customer": 4,
+  "users": 50,
+  "sources": {
+    "ssh": 120,
+    "smb": 50,
+    "local": 5,
+    "winrm": 25
+  },
+  "agents": {
+    "running": 40,
+    "stopped": 5
+  },
+  "files": {
+    "app_folders": 4,
+    "sizes_kb": [10, 1024, 20480, 102400, 512000],
+    "agent_sizes_kb": [10, 1024, 10240],
+    "per_size": 3,
+    "gz": 4,
+    "zip": 2,
+    "large_mb": 1800,
+    "large_count": 4,
+    "growing": 8,
+    "growing_bytes_per_second": 4096,
+    "growing_rotate_mb": 256,
+    "growing_count": 8,
+    "growing_size_mb": 50,
+    "growing_rate_kb_s": 256,
+    "growing_rotate_s": 300,
+    "growing_agents": 2,
+    "heavy_count": 3,
+    "heavy_start_mb": 1,
+    "heavy_rates_mb_s": [1, 5, 10],
+    "heavy_step_seconds": 120,
+    "heavy_rotate_mb": 256,
+    "daily_size_gb": 3,
+    "daily_duration_min": 60
+  },
+  "settings": {
+    "tail_interval_seconds": 2,
+    "explorer_refresh_seconds": 30,
+    "source_check_minutes": 10,
+    "name_index_enabled": true,
+    "name_index_minutes": 15
+  },
+  "scenarios": {
+    "browse": {
+      "vus": 20,
+      "think_seconds": [5, 30],
+      "files_per_visit": [1, 4],
+      "read_seconds": [10, 60],
+      "thresholds": {"p95_ms": 1000, "error_rate": 0.01}
+    },
+    "follow": {
+      "vus": 8,
+      "follow_seconds": 600,
+      "thresholds": {"p95_ms": 1000, "error_rate": 0.01}
+    },
+    "download": {
+      "vus": 4,
+      "think_seconds": [30, 120],
+      "zip_every": 4,
+      "thresholds": {"p95_ms": 30000, "error_rate": 0.01}
+    },
+    "name_search": {
+      "vus": 4,
+      "think_seconds": [10, 60],
+      "read_seconds": [10, 30],
+      "thresholds": {"p95_ms": 500, "error_rate": 0.01}
+    },
+    "agents": {
+      "vus": 6,
+      "think_seconds": [5, 30],
+      "files_per_visit": [1, 3],
+      "read_seconds": [10, 60],
+      "follow_seconds": 300,
+      "thresholds": {"p95_ms": 1500, "error_rate": 0.01}
+    },
+    "background": {},
+    "large_files": {
+      "vus": 4,
+      "hold_seconds": [60, 180],
+      "think_seconds": [10, 30],
+      "thresholds": {"p95_ms": 120000, "error_rate": 0.01}
+    },
+    "ramp": {
+      "start_vus": 10,
+      "step_vus": 10,
+      "steps": 10,
+      "step_seconds": 180,
+      "think_seconds": [3, 15],
+      "files_per_visit": [1, 3],
+      "read_seconds": [5, 30],
+      "warmup_seconds": 30,
+      "min_requests": 300,
+      "thresholds": {"p95_ms": 1000, "error_rate": 0.01}
+    },
+    "growing_files": {
+      "vus": 4,
+      "follow_vus": 4,
+      "think_seconds": [5, 20],
+      "follow_seconds": 420,
+      "download_every": 3,
+      "zip_every": 4,
+      "thresholds": {"open_p95_ms": 15000, "download_p95_ms": 15000, "zip_p95_ms": 60000, "follow_p95_ms": 2000, "error_rate": 0.01}
+    },
+    "growing_heavy": {
+      "followers_per_file": 1,
+      "thresholds": {"open_p95_ms": 15000, "follow_p95_ms": 5000, "error_rate": 0.01}
+    },
+    "daily_log": {
+      "vus": 2,
+      "follow_vus": 2,
+      "every_seconds": [120, 300],
+      "thresholds": {"open_p95_ms": 60000, "download_p95_ms": 60000, "follow_p95_ms": 5000, "error_rate": 0.01}
+    }
+  },
+  "phases": [
+    {"name": "background", "duration": "15m", "scenarios": ["background"]},
+    {"name": "mixed", "duration": "30m", "scenarios": ["browse", "follow", "download", "name_search", "agents"]},
+    {"name": "mixed-index-off", "duration": "15m", "settings": {"name_index_enabled": false}, "scenarios": ["browse", "follow", "download", "agents"]},
+    {"name": "large_files", "duration": "10m", "scenarios": ["large_files"]},
+    {"name": "ramp", "scenarios": ["ramp"]},
+    {"name": "growing_files", "duration": "15m", "scenarios": ["growing_files"]},
+    {"name": "growing_heavy", "duration": "6m", "scenarios": ["growing_heavy"]},
+    {"name": "daily_log", "duration": "60m", "scenarios": ["daily_log"]}
+  ]
+}

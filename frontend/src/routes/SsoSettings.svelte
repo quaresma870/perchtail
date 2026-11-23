@@ -4,6 +4,7 @@
   import Modal from '../lib/components/Modal.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import { confirmAction } from '../lib/confirm'
+  import { canRemoveMapping, mappingRoleLabel } from '../lib/sso-mappings'
   import type { ConnectionCheckResult, GroupRoleMapping, Role, SSOProvider } from '../lib/types'
 
   let provider: SSOProvider | null = null
@@ -140,7 +141,7 @@
   async function deleteMapping(mapping: GroupRoleMapping) {
     const ok = await confirmAction({
       title: 'Remove mapping',
-      message: `Remove the mapping for the group "${mapping.group_name}"? Users in that group keep the role they have now.`,
+      message: `Remove the mapping for the group "${mapping.group_name}"? Users in that group drop to No Access at their next sign-in, unless another mapping matches them.`,
       confirmLabel: 'Remove',
       danger: true,
     })
@@ -200,8 +201,10 @@
   <p class="hint">
     One OIDC provider can be configured at a time (Azure AD/Entra ID, Okta, Google Workspace,
     Keycloak/Authentik — anything speaking standard OIDC). Local accounts keep working
-    alongside it. A first-time SSO sign-in auto-provisions a no-access account — assign it a
-    real role from the <a href="#/settings/users">Users</a> page afterward.
+    alongside it. A first-time SSO sign-in provisions an account with the No Access role. SSO
+    accounts get their role from the group mappings below at every sign-in: with no matching
+    mapping, an account drops to No Access at its next sign-in, so a role set by hand on the
+    <a href="#/settings/users">Users</a> page isn't kept.
   </p>
 
   {#if loading}
@@ -209,6 +212,13 @@
   {:else}
     {#if error}
       <p class="error">{error}</p>
+    {/if}
+
+    {#if provider?.secret_unreadable}
+      <p class="error" role="alert" data-testid="sso-secret-unreadable">
+        The saved client secret can't be decrypted with the current key; enter it again.
+        The issuer URL and client ID were saved with it, so enter them again too.
+      </p>
     {/if}
 
     <form class="card" on:submit|preventDefault={handleSubmit}>
@@ -238,8 +248,10 @@
           data-gramm="false"
           data-enable-grammarly="false"
           bind:value={clientSecret}
-          placeholder={provider ? 'Leave blank to keep the current secret' : ''}
-          required={!provider}
+          placeholder={provider && !provider.secret_unreadable
+            ? 'Leave blank to keep the current secret'
+            : ''}
+          required={!provider || provider.secret_unreadable}
         />
       </label>
       <label>
@@ -261,7 +273,7 @@
 
       <div class="switch-row">
         <label class="switch">
-          <input type="checkbox" bind:checked={enabled} />
+          <input type="checkbox" bind:checked={enabled} aria-label="Enabled" />
           <span class="switch-track"></span>
         </label>
         <span>Enabled</span>
@@ -293,10 +305,12 @@
       <div class="mappings-header">
         <h2>Group → role mapping</h2>
         <p class="hint">
-          Auto-assigns a role on every SSO login based on the user's IdP groups (needs "Group
-          claim" set above). Evaluated in order, last match wins — same rule as source rules.
-          Overrides any role assigned directly in PerchTail as long as the user's groups still
-          match, so remove a mapping (or the user from that group) to stop the sync.
+          Sets the role of SSO accounts at every sign-in from the user's IdP groups (needs
+          "Group claim" set above). Evaluated in order, last match wins — same rule as source
+          rules. An account no mapping matches drops to No Access at its next sign-in, whatever
+          role was set on the Users page; so removing a mapping, or the user from its group,
+          drops its users to No Access at their next sign-in unless another mapping matches. The
+          last active super admin is never demoted this way.
         </p>
       </div>
 
@@ -311,10 +325,18 @@
               <span class="order">{mapping.order}</span>
               <code class="group-name">{mapping.group_name}</code>
               <span class="arrow">→</span>
-              <span class="badge badge-accent">{mapping.role_name}</span>
-              <button class="btn btn-danger btn-sm" type="button" on:click={() => deleteMapping(mapping)}>
-                Remove
-              </button>
+              <span
+                class="badge"
+                class:badge-accent={!mapping.role_outside_authority}
+                class:badge-muted={mapping.role_outside_authority}
+              >
+                {mappingRoleLabel(mapping)}
+              </span>
+              {#if canRemoveMapping(mapping, mappings)}
+                <button class="btn btn-danger btn-sm" type="button" on:click={() => deleteMapping(mapping)}>
+                  Remove
+                </button>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -485,6 +507,10 @@
   .badge-accent {
     background: var(--accent-soft);
     color: var(--accent-hover);
+  }
+  .badge-muted {
+    background: var(--muted-badge-bg);
+    color: var(--muted-badge-text);
   }
   .modal-form {
     display: flex;

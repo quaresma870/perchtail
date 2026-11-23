@@ -1,6 +1,7 @@
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO, NamedTuple
+from typing import BinaryIO, NamedTuple, NoReturn
 
 from app.config import get_settings
 
@@ -16,6 +17,33 @@ class DirEntry:
     # Last modification, as seconds since the epoch (#273); None when the
     # source doesn't say (an agent older than 0.6).
     mtime: float | None = None
+    # A directory's identity on the source (its resolved real path, or
+    # device:inode), when the connector knows it: recursive walks keep the
+    # ones they've listed, so a symlink loop ends (#347). Not compared.
+    real_key: str | None = field(default=None, compare=False)
+    # Where the entry really is, relative to the base path, when a link
+    # (the entry itself or a folder above it) leads somewhere else; None
+    # when it is where its path says. Rules are checked on both.
+    target: str | None = field(default=None, compare=False)
+
+
+class DirListing(list):
+    """What list_directory returns when the source cut the listing short
+    (an agent caps a huge folder, #347): a list of DirEntry with
+    `truncated` set. `real_dir` is where the listed folder really is,
+    relative to the base path, when a link leads there (None otherwise)."""
+
+    truncated: bool = False
+    real_dir: str | None = None
+
+
+def is_truncated(entries) -> bool:
+    return bool(getattr(entries, "truncated", False))
+
+
+# The most entries a folder or archive listing returns (#347); the response
+# says when there were more.
+MAX_LISTING_ENTRIES = 5000
 
 
 class SourceError(Exception):
@@ -50,9 +78,56 @@ class SourceNotFoundError(SourceError):
     error_code = "not_found_on_source"
 
 
+class SourceNotAFileError(SourceError):
+    """A path to read (open, follow, download, an archive's member) is a
+    folder, or a link to one. Answered exactly as a path that isn't there
+    (SourceNotFoundError's status, message and code), so nothing tells a
+    folder from a missing file; the endpoints that serve content audit it
+    with the reason `not_a_file`."""
+
+    status_code = 404
+    public_message = SourceNotFoundError.public_message
+    error_code = SourceNotFoundError.error_code
+
+
+# The audit reason of a read refused as SourceNotAFileError.
+NOT_A_FILE = "not_a_file"
+
+
 class SourceLockedError(SourceError):
     status_code = 409
     public_message = "The file is locked by another process on the source"
+
+
+class SourceArchiveUnreadableError(SourceError):
+    """An agent couldn't read the archive or the .gz file it was asked to
+    list or read from (its codes archive_unreadable and gzip_unreadable,
+    `gzip` for the second). The archive routes answer it as they answer one
+    the server can't read (409 archive_unreadable, audited)."""
+
+    status_code = 409
+    public_message = "This archive or compressed file can't be read"
+    error_code = "archive_unreadable"
+
+    def __init__(self, detail: str = "", *, gzip: bool = False):
+        super().__init__(detail)
+        self.gzip = gzip
+
+
+class SourceMemberUnreadableError(SourceError):
+    """An agent found the archive member it was asked for stored encrypted
+    (its code member_encrypted). The archive routes answer it as they answer
+    one the server finds itself (409 archive_member_unreadable, audited
+    with the reason member_encrypted)."""
+
+    status_code = 409
+    public_message = "This archive member can't be opened"
+    error_code = "archive_member_unreadable"
+
+    def __init__(self, detail: str = "", *, reason: str):
+        super().__init__(detail)
+        # app.archives' SKIP_ENCRYPTED.
+        self.reason = reason
 
 
 class SourceUnreachableError(SourceError):
@@ -97,6 +172,45 @@ class PathOutsideBaseError(PermissionError):
     """A requested path resolves (on the source host, symlinks included) to
     somewhere outside the source's base path. Answered as 404, the same as
     a path the rules hide, so it reveals nothing about what's out there."""
+
+
+# The audit reason of a path refused as PathOutsideBaseError: a link that
+# leads outside the base path or to something the rules hide.
+LINK_TARGET_HIDDEN = "link_target_hidden"
+
+
+class LinkTargetHiddenError(PathOutsideBaseError):
+    """A requested path reaches its file or folder through a link (a
+    symlink, itself or a folder above it) whose target is outside the base
+    path or hidden by the rules. Answered as 404 like PathOutsideBaseError;
+    the endpoints that serve content audit it (`link_target_hidden`)."""
+
+
+# Called with where a path really is, relative to the base path, when a link
+# leads there: whether the rules let it be read. Called with `is_dir=True`
+# (refuse_directory) when that target is a folder, so the rules are checked
+# on it as a folder. None means no link may be followed at all (fail closed).
+TargetCheck = Callable[..., bool] | None
+
+
+def require_target(requested: str, real: str, check: TargetCheck) -> None:
+    """Refuses `requested` when it really is at `real` (a link leads there)
+    and `check` doesn't allow that: rules are checked on the target, not only
+    on the link's name. Nothing to check when the path is where it says."""
+    if real == requested:
+        return
+    if check is None or not check(real):
+        raise LinkTargetHiddenError(requested)
+
+
+def refuse_directory(requested: str, real: str, check: TargetCheck) -> NoReturn:
+    """Refuses a read of `requested`, which is a folder at `real`: through a
+    link (`real` differs), the rules are checked on the target as a folder
+    first, and one they hide (or no check: no link is followed) is a
+    LinkTargetHiddenError, as for a file; otherwise SourceNotAFileError."""
+    if real != requested and (check is None or not check(real, is_dir=True)):
+        raise LinkTargetHiddenError(requested)
+    raise SourceNotAFileError(f"{requested}: is a directory")
 
 
 class FetchTooLargeError(ValueError):
@@ -144,12 +258,6 @@ def copy_with_limit(src: BinaryIO, destination: Path, limit: int) -> int:
 # trip, without fetching the rest of the file. A poll reads at
 # most this much; the agent's own cap is the same (agent/internal/agent).
 RANGE_MAX_BYTES = 1 << 20
-
-
-class RangeNotSupportedError(Exception):
-    """The source can't read a byte range: an agent older than 0.6 doesn't
-    know the read_range command. The viewer falls back to reloading the
-    whole file."""
 
 
 class RangeRead(NamedTuple):

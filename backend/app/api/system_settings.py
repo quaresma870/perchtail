@@ -1,14 +1,17 @@
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
-from app import password_policy, system_settings
+from app import backup, key_strength, password_policy, system_settings
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
+from app.auth import password_reset
 from app.auth.models import GlobalCapability, User
-from app.auth.rbac import require_global_capability
+from app.auth.rbac import forbidden, require_global_capability
+from app.config import get_settings
 from app.db import get_session
 from app.source_roots import HARD_MAX_ROOTS, max_roots
 
@@ -26,9 +29,10 @@ TailIntervalSeconds = Literal[1, 2, 5, 10]
 
 
 class SystemSettingsPublic(BaseModel):
-    search_view_enabled: bool
     audit_view_enabled: bool
     audit_retention_days: int
+    # Whether listing a folder below a source's root is audited.
+    audit_folder_listings: bool
     source_max_roots: int
     connections_view_switchable: bool
     connections_view_default: Literal["list", "tree"]
@@ -47,13 +51,70 @@ class SystemSettingsPublic(BaseModel):
     tail_interval_seconds: int
     # Background source check (#276), minutes; 0 = off.
     source_check_minutes: int
+    # File-name index (#304).
+    name_index_enabled: bool
+    name_index_minutes: int
+    # Live alerts (#305).
+    alerts_interval_seconds: int
+    # Credential age warning (#248); 0 = off.
+    credential_max_age_days: int
+    # Server-side limits (#344, app/limits.py).
+    concurrency_global: int
+    concurrency_per_source: int
+    concurrency_user_transfers: int
+    # Listing cap (#347).
+    listing_max_entries: int
+    # Scheduled backup (#334, app/backup.py), hours; 0 = off.
+    backup_interval_hours: int
+    # Redaction (#382, #249): changed by super admins only.
+    redaction_enabled: bool
+    redaction_downloads: bool
+    redaction_download_suffix: bool
+    # MFA for every local account (app/auth/mfa_policy.py).
+    require_mfa_local_accounts: bool
+    # Password recovery by email (#244, app/auth/password_reset.py):
+    # changed by super admins only.
+    password_reset_enabled: bool
+    password_reset_minutes: int
+    # Why it can't be turned on or doesn't work now (email not set up and
+    # on, PUBLIC_BASE_URL not https), or null when it can.
+    password_reset_unavailable: str | None
+
+
+class BackupPublic(BaseModel):
+    """One backup in BACKUP_DIR (#334). Listed only: never downloadable."""
+
+    name: str
+    created_at: datetime
+    size_bytes: int
+    reason: str
+
+
+# Ranges for the server-side limits (#344).
+CONCURRENCY_GLOBAL_MAX = 256
+CONCURRENCY_PER_SOURCE_MAX = 64
+CONCURRENCY_USER_TRANSFERS_MAX = 32
+# Listing cap (#347): below an agent's own cap (collectors/agent.py).
+LISTING_MAX_ENTRIES_MIN = 100
+LISTING_MAX_ENTRIES_MAX = 20000
+
+
+# The shortest audit retention allowed, in days; 0 (keep forever) is also
+# accepted. Lowering the retention, which deletes evidence sooner, is for
+# super admins only.
+AUDIT_RETENTION_MIN_DAYS = 90
+# Settings whose value is a secret: the audit entry says they changed,
+# never what to.
+SECRET_SETTINGS: frozenset[str] = frozenset()
 
 
 class SystemSettingsUpdate(BaseModel):
-    search_view_enabled: bool | None = None
     audit_view_enabled: bool | None = None
     # 0 means "keep forever" -- see system_settings.INT_DEFAULTS's docstring.
+    # Otherwise at least AUDIT_RETENTION_MIN_DAYS (checked in the endpoint,
+    # so the message can say 0 is allowed too).
     audit_retention_days: int | None = Field(default=None, ge=0)
+    audit_folder_listings: bool | None = None
     # Folders per source (#161): 1 turns several folders off; 100 is the
     # hard cap (source_roots.HARD_MAX_ROOTS).
     source_max_roots: int | None = Field(default=None, ge=1, le=HARD_MAX_ROOTS)
@@ -81,6 +142,36 @@ class SystemSettingsUpdate(BaseModel):
     explorer_refresh_seconds: int | None = Field(default=None, ge=0, le=3600)
     tail_interval_seconds: TailIntervalSeconds | None = None
     source_check_minutes: int | None = Field(default=None, ge=0, le=1440)
+    name_index_enabled: bool | None = None
+    # At least 5 minutes, so listings can't hammer the sources; at most a day.
+    name_index_minutes: int | None = Field(default=None, ge=5, le=1440)
+    # At least 15 s (the scheduler's tick), at most an hour.
+    alerts_interval_seconds: int | None = Field(default=None, ge=15, le=3600)
+    credential_max_age_days: int | None = Field(default=None, ge=0, le=3650)
+    concurrency_global: int | None = Field(default=None, ge=1, le=CONCURRENCY_GLOBAL_MAX)
+    concurrency_per_source: int | None = Field(default=None, ge=1, le=CONCURRENCY_PER_SOURCE_MAX)
+    concurrency_user_transfers: int | None = Field(
+        default=None, ge=1, le=CONCURRENCY_USER_TRANSFERS_MAX
+    )
+    listing_max_entries: int | None = Field(
+        default=None, ge=LISTING_MAX_ENTRIES_MIN, le=LISTING_MAX_ENTRIES_MAX
+    )
+    # 0 = off; otherwise 1 hour to a week.
+    backup_interval_hours: int | None = Field(default=None, ge=0, le=168)
+    # Super admins only (_check_redaction_settings).
+    redaction_enabled: bool | None = None
+    redaction_downloads: bool | None = None
+    redaction_download_suffix: bool | None = None
+    # Super admins only, either way.
+    require_mfa_local_accounts: bool | None = None
+    # Super admins only (_check_password_reset); turning it on needs email
+    # set up and on and PUBLIC_BASE_URL https.
+    password_reset_enabled: bool | None = None
+    password_reset_minutes: int | None = Field(
+        default=None,
+        ge=password_reset.MIN_MINUTES,
+        le=password_reset.MAX_MINUTES,
+    )
 
 
 _PASSWORD_INTS = (
@@ -89,6 +180,12 @@ _PASSWORD_INTS = (
     "password_history",
     "password_required_classes",
     "password_max_age_days",
+)
+_CONCURRENCY_INTS = (
+    "concurrency_global",
+    "concurrency_per_source",
+    "concurrency_user_transfers",
+    "listing_max_entries",
 )
 
 
@@ -102,19 +199,66 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         explorer_refresh_seconds=system_settings.get_int(session, "explorer_refresh_seconds"),
         tail_interval_seconds=system_settings.get_int(session, "tail_interval_seconds"),
         source_check_minutes=system_settings.get_int(session, "source_check_minutes"),
+        name_index_minutes=system_settings.get_int(session, "name_index_minutes"),
+        alerts_interval_seconds=system_settings.get_int(session, "alerts_interval_seconds"),
+        credential_max_age_days=system_settings.get_int(session, "credential_max_age_days"),
+        backup_interval_hours=system_settings.get_int(session, "backup_interval_hours"),
+        password_reset_minutes=system_settings.get_int(session, "password_reset_minutes"),
+        password_reset_unavailable=password_reset.unavailable_reason(session),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
+        **{key: system_settings.get_int(session, key) for key in _CONCURRENCY_INTS},
     )
 
 
 @router.get("", response_model=SystemSettingsPublic)
 def get_system_settings(
-    # Readable by any authenticated user, not just admins -- the frontend
-    # needs this to decide whether to render the Search nav link at all,
-    # for everyone, not only for whoever can change it.
+    # Readable by any authenticated user, not just admins: the frontend reads
+    # some of these settings for everyone, not only for whoever can change
+    # them.
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
     return _read_all(session)
+
+
+@router.get("/backups", response_model=list[BackupPublic])
+def list_system_backups(user: User = Depends(require_manage)):
+    """The backups in BACKUP_DIR, newest first, for Settings -> System
+    (#334). Read-only: there is no way to download one, by design."""
+    return [
+        BackupPublic(
+            name=info.name,
+            created_at=info.created_at,
+            size_bytes=info.size_bytes,
+            reason=info.reason,
+        )
+        for info in backup.list_backups()
+    ]
+
+
+class SystemWarning(BaseModel):
+    code: str
+    message: str
+    advice: str
+
+
+@router.get("/warnings", response_model=list[SystemWarning])
+def list_system_warnings(user: User = Depends(require_manage)):
+    """Problems with how this instance is set up that only its operator can
+    fix, shown at the top of Settings -> System."""
+    warnings: list[SystemWarning] = []
+    # No length or estimated bits here: manage_system_settings can be
+    # delegated, and those numbers narrow the search for the root secret.
+    # They are in the startup log, which is the operator's.
+    if key_strength.is_weak(get_settings().credential_encryption_key):
+        warnings.append(
+            SystemWarning(
+                code="weak_credential_encryption_key",
+                message="CREDENTIAL_ENCRYPTION_KEY is weaker than recommended.",
+                advice=key_strength.WEAK_KEY_ADVICE,
+            )
+        )
+    return warnings
 
 
 @router.patch("", response_model=SystemSettingsPublic)
@@ -128,6 +272,12 @@ def update_system_settings(
     # set_int/set_bool, which would stringify it into a value the getters
     # can't parse back (int("None") raises) on every read after this.
     changed = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    before = _read_all(session).model_dump()
+    _check_redaction_settings(user, changed)
+    _check_audit_retention(user, before["audit_retention_days"], changed)
+    _check_audit_folder_listings(user, before["audit_folder_listings"], changed)
+    _check_require_mfa(user, before["require_mfa_local_accounts"], changed)
+    _check_password_reset(user, before, changed)
     min_length = changed.get(
         "password_min_length", system_settings.get_int(session, "password_min_length")
     )
@@ -142,6 +292,17 @@ def update_system_settings(
         raise HTTPException(
             status_code=422,
             detail="The minimum password length can't be above the maximum",
+        )
+    per_source = changed.get(
+        "concurrency_per_source", system_settings.get_int(session, "concurrency_per_source")
+    )
+    overall = changed.get(
+        "concurrency_global", system_settings.get_int(session, "concurrency_global")
+    )
+    if per_source > overall:
+        raise HTTPException(
+            status_code=422,
+            detail="The limit per source can't be above the limit for the whole server",
         )
     for key in system_settings.INT_DEFAULTS:
         if key in changed:
@@ -165,7 +326,97 @@ def update_system_settings(
         user_id=user.id,
         action="system_settings.update",
         target_type="system_settings",
-        metadata=changed,
+        metadata=_changes(changed, before),
     )
     session.commit()
     return _read_all(session)
+
+
+def _changes(changed: dict, before: dict) -> dict:
+    """What the audit entry records for each setting sent: its value before
+    and after ({"old": ..., "new": ...}), or "changed" for a secret."""
+    out: dict = {}
+    for key, value in changed.items():
+        if key in SECRET_SETTINGS:
+            out[key] = "changed"
+        else:
+            out[key] = {"old": before.get(key), "new": value}
+    return out
+
+
+def _retention_rank(days: int) -> float:
+    # 0 keeps entries forever: longer than any number of days.
+    return float("inf") if days == 0 else days
+
+
+def _check_audit_retention(user: User, current: int, changed: dict) -> None:
+    """At least AUDIT_RETENTION_MIN_DAYS, or 0 for forever; and only a super
+    admin may lower it, since that deletes evidence sooner. Raising it is
+    open to whoever manages system settings."""
+    if "audit_retention_days" not in changed:
+        return
+    days = changed["audit_retention_days"]
+    if days != 0 and days < AUDIT_RETENTION_MIN_DAYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Keep audit entries for at least {AUDIT_RETENTION_MIN_DAYS} days, "
+                "or 0 to keep them forever"
+            ),
+        )
+    if _retention_rank(days) < _retention_rank(current) and not user.role.is_super_admin:
+        raise forbidden(
+            "Only a super admin can shorten how long audit entries are kept",
+            reason="audit_retention_lowered",
+            user=user,
+        )
+
+
+def _check_redaction_settings(user: User, changed: dict) -> None:
+    """Redaction is configured by super admins only (#382, #249): it decides
+    what everyone, super admins included, sees of file content."""
+    if not user.role.is_super_admin and system_settings.REDACTION_SETTINGS & changed.keys():
+        raise forbidden(
+            "Only a super admin can change redaction settings",
+            reason="redaction_settings_super_admin",
+            user=user,
+        )
+
+
+def _check_audit_folder_listings(user: User, current: bool, changed: dict) -> None:
+    """Turning folder-listing auditing off records less evidence, so only a
+    super admin may do it, like shortening the retention. Turning it on is
+    open to whoever manages system settings."""
+    turning_off = current and changed.get("audit_folder_listings") is False
+    if turning_off and not user.role.is_super_admin:
+        raise forbidden(
+            "Only a super admin can turn off auditing of folder listings",
+            reason="audit_folder_listings_disabled",
+            user=user,
+        )
+
+
+def _check_password_reset(user: User, before: dict, changed: dict) -> None:
+    """Password recovery by email changes how accounts are signed into, so
+    only a super admin changes it (#244). Turning it on needs email set up
+    and on and PUBLIC_BASE_URL https: refused with the reason otherwise."""
+    sent = system_settings.PASSWORD_RESET_SETTINGS & changed.keys()
+    if any(changed[key] != before[key] for key in sent) and not user.role.is_super_admin:
+        raise forbidden(
+            "Only a super admin can change password recovery by email",
+            reason="password_reset_settings_super_admin",
+            user=user,
+        )
+    if changed.get("password_reset_enabled") is True and before["password_reset_unavailable"]:
+        raise HTTPException(status_code=422, detail=before["password_reset_unavailable"])
+
+
+def _check_require_mfa(user: User, current: bool, changed: dict) -> None:
+    """Who must use MFA is a super admin's call, both ways."""
+    value = changed.get("require_mfa_local_accounts")
+    if value is not None and value != current and not user.role.is_super_admin:
+        raise forbidden(
+            "Only a super admin can change whether local accounts need MFA",
+            reason="require_mfa_changed",
+            user=user,
+        )

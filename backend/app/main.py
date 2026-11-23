@@ -1,19 +1,26 @@
 import asyncio
 import importlib
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app import instance_lock, key_strength, name_index, source_status
 from app.agent_registry import get_agent_registry
+from app.agent_upgrades import run_scheduled_upgrades
+from app.alerts import run_alert_pass
+from app.api.access_report import router as access_report_router
+from app.api.agent_upgrades import router as agent_upgrades_router
 from app.api.agent_ws import router as agent_ws_router
 from app.api.alerts import router as alerts_router
 from app.api.archive import router as archive_router
@@ -23,27 +30,40 @@ from app.api.config_transfer import router as config_transfer_router
 from app.api.customers import router as customers_router
 from app.api.errors import install as install_error_handlers
 from app.api.errors import path_outside_base as _path_outside_base
+from app.api.files import router as files_router
 from app.api.folders import router as folders_router
+from app.api.monitoring import metrics_router
 from app.api.monitoring import router as monitoring_router
+from app.api.redaction_rules import global_router as redaction_rules_global_router
+from app.api.redaction_rules import source_router as redaction_rules_source_router
 from app.api.roles import router as roles_router
 from app.api.rules import router as rules_router
-from app.api.search import router as search_router
 from app.api.severity_patterns import global_router as severity_patterns_global_router
 from app.api.severity_patterns import source_router as severity_patterns_source_router
+from app.api.smtp_settings import router as smtp_settings_router
 from app.api.sources import router as sources_router
 from app.api.sso import router as sso_router
 from app.api.system_settings import router as system_settings_router
 from app.api.updates import router as updates_router
 from app.api.users import router as users_router
-from app.audit_hash_chain import backfill_chain_if_needed
-from app.audit_integrity import run_audit_integrity_check
-from app.audit_purge import run_audit_purge_sweep
+from app.audit_hash_chain import (
+    backfill_chain_if_needed,
+    ensure_chain_marker,
+    first_signed_row_id,
+    read_chain_marker,
+)
+from app.audit_integrity import report_unsigned_audit_rows, run_audit_integrity_check
+from app.audit_outbox import drain_audit_outbox
+from app.audit_purge import run_audit_purge_sweep, sign_legacy_anchor
 from app.auth.sessions import run_session_purge_sweep
+from app.backup import SCHEDULE_TICK as BACKUP_TICK
+from app.backup import record_pending_restore, run_scheduled_backup
 from app.bootstrap import (
     assert_credential_salt_present,
     backfill_sso_user_issuers,
     seed_initial_super_admin,
     seed_no_access_role,
+    seed_redaction_rules,
     seed_severity_patterns,
     seed_system_log_source,
 )
@@ -53,11 +73,17 @@ from app.crypto import audit_chain_key
 from app.data_layout import leftover_legacy_database
 from app.data_layout import report as report_data_layout
 from app.db import engine, init_db
-from app.health import mark_started
+from app.db import register_upkeep_jobs as register_db_upkeep_jobs
+from app.health import mark_started, readiness_failures
+from app.jobs import register as register_job
+from app.jobs import shutdown as shutdown_background_work
 from app.logging_config import configure_logging, get_logger
+from app.monitoring_access import require_probe_access
+from app.name_index import run_name_index_sweep
+from app.request_context import ClientAddressMiddleware
 from app.scheduler import scheduler
+from app.schema_version import check_database_revision
 from app.scratch import get_scratch_store
-from app.search_index import run_indexing_sweep
 from app.source_status import run_source_checks
 from app.update_check import run_update_check
 from app.version import APP_VERSION
@@ -70,10 +96,17 @@ logger = get_logger(__name__)
 # module to import once at startup, for wiring in a fake protocol connector
 # where no real target is available (real WinRM needs an actual Windows
 # host, unlike ssh/smb which the e2e suite points at real local test
-# servers). Absent everywhere else -- a normal deployment's .env has no
-# reason to ever set this, and this line does nothing unless it's set.
+# servers). It is honoured only with PERCHTAIL_TEST_MODE=true as well, which
+# only that script sets; set without it, startup is refused rather than the
+# setting silently ignored. The Docker image ships neither app/testing nor
+# a way in: its entrypoint refuses to start when either variable is set.
 _test_patch_module = os.environ.get("PERCHTAIL_TEST_PATCH_MODULE")
 if _test_patch_module:
+    if os.environ.get("PERCHTAIL_TEST_MODE", "").lower() != "true":
+        raise RuntimeError(
+            "PERCHTAIL_TEST_PATCH_MODULE is set without PERCHTAIL_TEST_MODE=true; "
+            "it is for the end-to-end tests only. Remove it from the environment."
+        )
     logger.warning("startup.test_patch_module_loaded", module=_test_patch_module)
     importlib.import_module(_test_patch_module)
 
@@ -85,9 +118,21 @@ if _test_patch_module:
 _INSECURE_DEFAULT_CREDENTIAL_KEY = "changeme"
 
 
+_REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def request_id_for(header_value: str | None) -> str:
+    """The caller's x-request-id when it is at most 64 characters of
+    letters, digits, `.`, `_` and `-`; anything else is replaced with a new
+    one, so a caller can't write arbitrary text into every log line."""
+    if header_value is not None and _REQUEST_ID_PATTERN.fullmatch(header_value):
+        return header_value
+    return str(uuid.uuid4())
+
+
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+        request_id = request_id_for(request.headers.get("x-request-id"))
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id)
         response = await call_next(request)
@@ -97,7 +142,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 # CSP: everything the frontend needs is same-origin (see frontend/index.html --
 # no third-party scripts/styles/fonts anywhere). style-src needs
-# 'unsafe-inline' because CodeMirror 6 (app/CLAUDE.md's chosen viewer) injects
+# 'unsafe-inline' because CodeMirror 6 (the viewer's editor) injects
 # its editor styles via a runtime <style> element (the style-mod package), not
 # a static stylesheet -- there's no nonce to hand a static SPA build, so this
 # is the standard, accepted trade-off for CodeMirror-based apps. script-src
@@ -105,8 +150,8 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 # directive that actually matters against XSS. frame-ancestors 'none' is the
 # modern equivalent of X-Frame-Options: DENY, kept alongside it for older
 # browsers/embedded webviews that don't honor CSP framing directives. HSTS is
-# deliberately not set here -- it's a deployment-level concern wherever TLS
-# actually terminates, per CLAUDE.md's "sit behind a reverse proxy" note.
+# deliberately not set here -- PerchTail sits behind a TLS-terminating
+# reverse proxy, and HSTS belongs wherever TLS actually terminates.
 _CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
     "script-src 'self'; "
@@ -116,13 +161,27 @@ _CONTENT_SECURITY_POLICY = (
     "connect-src 'self'; "
     "object-src 'none'; "
     "base-uri 'self'; "
+    # No fallback from default-src for these two: every form in the app is
+    # handled in script, and SSO starts from a link, so only same-origin
+    # form targets are ever needed.
+    "form-action 'self'; "
     "frame-ancestors 'none'"
+)
+
+# Browser features PerchTail never uses, turned off for the page and anything
+# it might load, so an injected script couldn't reach them either. The
+# clipboard isn't listed: the viewer copies lines with it.
+_PERMISSIONS_POLICY = (
+    "accelerometer=(), autoplay=(), camera=(), display-capture=(), "
+    "geolocation=(), gyroscope=(), magnetometer=(), microphone=(), "
+    "midi=(), payment=(), publickey-credentials-get=(), "
+    "screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()"
 )
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Applies to every response, API and static frontend alike -- see
-    ROADMAP.md's security hardening backlog. Cheap and blanket rather than
+    docs/design-decisions.md, "Sessions and CSRF". Cheap and blanket rather than
     tuned per-route: none of these headers restrict anything this app
     actually needs (no inline scripts, no third-party embeds, no framing by
     another origin)."""
@@ -133,6 +192,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = _PERMISSIONS_POLICY
+        # Keeps PerchTail's window out of reach of pages it opens or that
+        # open it (no shared browsing context group).
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         # Tells the browser this answer came from PerchTail itself, so a 502
         # about a source isn't mistaken for a proxy saying PerchTail is down
         # (#276, frontend/src/lib/server-status.ts).
@@ -159,7 +222,7 @@ def _is_same_origin(candidate: str, expected_netloc: str) -> bool:
 class OriginCheckMiddleware(BaseHTTPMiddleware):
     """Defense-in-depth CSRF protection layered on top of the session
     cookie's SameSite=strict attribute (app/api/auth.py's
-    _set_session_cookie) -- see ROADMAP.md's security hardening backlog.
+    _set_session_cookie) -- see docs/design-decisions.md, "Sessions and CSRF".
     SameSite=Strict is already sufficient CSRF protection on its own in any
     standards-compliant browser: it blocks the cookie on every cross-site
     request, including top-level navigation (unlike Lax), so a forged
@@ -182,10 +245,11 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
     Origin/Referer on the way through so this falls to the no-header case
     below rather than comparing two ports that are legitimately different).
 
-    Host-only, deliberately not scheme+host: uvicorn runs with no
-    --proxy-headers/--forwarded-allow-ips trust configured (see
-    docker-entrypoint.sh), so request.url.scheme is always "http" as seen
-    from nginx's plain-HTTP proxy connection, even when the real client
+    Host-only, deliberately not scheme+host: uvicorn runs with
+    --no-proxy-headers (see docker-entrypoint.sh; only the app's own
+    ClientAddressMiddleware reads X-Forwarded-For, for the client address),
+    so request.url.scheme is always "http" as seen from the reverse proxy's
+    plain-HTTP connection, even when the real client
     connected over https and its Origin header correctly says so. Comparing
     scheme too would 403 every state-changing request -- including
     login -- on exactly the TLS-terminating-reverse-proxy setup this
@@ -224,8 +288,41 @@ async def lifespan(app: FastAPI):
             ".env.example); every stored credential is encrypted with a key "
             "derived from it, so this can't be silently defaulted."
         )
+    weak_key = key_strength.weaknesses(settings.credential_encryption_key)
+    if weak_key and settings.credential_key_refuse_weak:
+        logger.critical("startup.weak_credential_encryption_key", reasons=weak_key)
+        raise RuntimeError(
+            "CREDENTIAL_ENCRYPTION_KEY is too weak (" + "; ".join(weak_key) + ") and "
+            "CREDENTIAL_KEY_REFUSE_WEAK is true -- refusing to start. "
+            + key_strength.WEAK_KEY_ADVICE
+        )
+    if weak_key:
+        logger.warning(
+            "startup.weak_credential_encryption_key",
+            reasons=weak_key,
+            hint=key_strength.WEAK_KEY_ADVICE,
+        )
 
+    # One instance per DATA_DIR (#334): taken before anything moves files or
+    # opens the database, held until shutdown has finished.
+    try:
+        lock = instance_lock.acquire(settings)
+    except instance_lock.InstanceLockHeldError as exc:
+        instance_lock.log_held(logger, exc)
+        raise
+    try:
+        async with _started(app, settings):
+            yield
+    finally:
+        lock.release()
+
+
+@asynccontextmanager
+async def _started(app: FastAPI, settings):
     report_data_layout(settings)
+    # A database migrated by a newer PerchTail (#334): refuse before
+    # init_db() touches it.
+    check_database_revision(engine, logger)
     leftover = leftover_legacy_database(settings)
     if leftover is not None:
         logger.warning(
@@ -243,59 +340,162 @@ async def lifespan(app: FastAPI):
         # Must run before anything below that could write an AuditLog row --
         # see backfill_chain_if_needed's own docstring for why order matters
         # here.
-        backfilled = backfill_chain_if_needed(audit_chain_key(), session)
+        # The chain marker in DATA_DIR says whether the chain was ever
+        # started here, whatever the database says (ChainMarker).
+        chain_marker = read_chain_marker()
+        backfilled = backfill_chain_if_needed(audit_chain_key(), session, marker=chain_marker)
         if backfilled:
             logger.info("audit_hash_chain.backfill_complete", rows=backfilled)
+        # Same moment, same reason: the first start after upgrading to 0.7.0
+        # records an anchor left by an older purge (app/audit_purge.py).
+        if sign_legacy_anchor(session, marker_present=chain_marker is not None):
+            logger.info("audit_purge.legacy_anchor_recorded")
         session.commit()
+        # Any row still without a hash was written outside the app.
+        report_unsigned_audit_rows(audit_chain_key(), session)
+        # Events a migration recorded without the chain key become ordinary
+        # entries at the end of the chain (app/audit_outbox.py).
+        drain_audit_outbox(session)
+        # A restore (app/backup.py) can't audit itself in the database it
+        # replaces: the first start on the restored database does.
+        if record_pending_restore(session, settings):
+            session.commit()
         seed_system_log_source(session)
         seed_initial_super_admin(session)
         seed_no_access_role(session)
         seed_severity_patterns(session)
+        seed_redaction_rules(session)
         backfill_sso_user_issuers(session)
+        session.commit()
+        # Once the chain has started (the backfill above, or the seeding on
+        # a new install), the marker says so from outside the database.
+        if ensure_chain_marker(session):
+            logger.info(
+                "audit_hash_chain.marker_written", first_row_id=first_signed_row_id(session)
+            )
 
     store = get_scratch_store()
-    scheduler.add_job(
+    # Nothing in scratch can be in use yet: whatever is there was left by a
+    # crash or a killed container (#329).
+    db_file = settings.database_url.removeprefix("sqlite:///")
+    store.clear_leftovers(
+        # Also the salt and known_hosts, which may live outside DATA_DIR:
+        # losing the salt makes every stored credential unreadable.
+        protected=[
+            Path(settings.data_dir),
+            Path(settings.log_dir),
+            Path(settings.backup_dir),
+            Path(db_file).parent,
+            Path(settings.credential_salt_path),
+            Path(settings.ssh_known_hosts_path),
+        ]
+    )
+    sweep = timedelta(seconds=settings.scratch_sweep_interval_seconds)
+    register_job(
+        scheduler,
+        "scratch_idle_sweep",
+        "Scratch idle sweep",
         store.sweep_idle,
-        "interval",
-        seconds=settings.scratch_sweep_interval_seconds,
+        sweep,
         kwargs={"idle_seconds": settings.scratch_idle_seconds},
     )
-    scheduler.add_job(
-        store.enforce_size_guard,
-        "interval",
-        seconds=settings.scratch_sweep_interval_seconds,
+    register_job(
+        scheduler, "scratch_size_guard", "Scratch size guard", store.enforce_size_guard, sweep
     )
-    scheduler.add_job(
-        run_indexing_sweep,
-        "interval",
-        seconds=settings.search_index_interval_seconds,
+    # Live alerts (#305): ticks every 15 s and runs a pass once the interval
+    # set in Settings -> System has gone by.
+    register_job(scheduler, "alert_pass", "Live alerts", run_alert_pass, timedelta(seconds=15))
+    # File-name index (#304): every minute it lists whatever sources are due.
+    register_job(
+        scheduler, "name_index_sweep", "File-name index", run_name_index_sweep, timedelta(minutes=1)
     )
-    scheduler.add_job(
-        run_audit_purge_sweep,
-        "interval",
-        seconds=settings.audit_purge_interval_seconds,
-    )
-    scheduler.add_job(run_session_purge_sweep, "interval", hours=1)
-    scheduler.add_job(run_update_check, "interval", hours=1)
     # Background source check (#276): every minute it checks whatever is due.
-    scheduler.add_job(run_source_checks, "interval", minutes=1, max_instances=1)
-    scheduler.add_job(
-        run_audit_integrity_check,
-        "interval",
-        days=settings.audit_integrity_check_interval_days,
+    register_job(
+        scheduler, "source_checks", "Source checks", run_source_checks, timedelta(minutes=1)
     )
+    # Agent upgrades (#319): every minute it ends attempts that timed out
+    # and, inside the window, upgrades the agents set to "automatic".
+    register_job(
+        scheduler,
+        "agent_upgrades",
+        "Automatic agent upgrades",
+        run_scheduled_upgrades,
+        timedelta(minutes=1),
+    )
+    # The long-interval jobs catch up after a restart (#327): with a fresh
+    # interval on every start, a container restarted more often than the
+    # interval never ran them.
+    register_job(
+        scheduler,
+        "audit_purge",
+        "Audit log purge",
+        run_audit_purge_sweep,
+        timedelta(seconds=settings.audit_purge_interval_seconds),
+        catch_up=True,
+    )
+    register_job(
+        scheduler,
+        "session_purge",
+        "Expired session purge",
+        run_session_purge_sweep,
+        timedelta(hours=1),
+        catch_up=True,
+    )
+    register_job(
+        scheduler,
+        "update_check",
+        "Update check",
+        run_update_check,
+        timedelta(hours=1),
+        catch_up=True,
+    )
+    register_job(
+        scheduler,
+        "audit_integrity_check",
+        "Audit log integrity check",
+        run_audit_integrity_check,
+        timedelta(days=settings.audit_integrity_check_interval_days),
+        catch_up=True,
+    )
+    # Scheduled backup (#334): ticks every few minutes and backs up once the
+    # interval set in Settings -> System has gone by; 0 is off. 24 hours on a
+    # new install; an install upgraded from before 0.7.0 keeps 0
+    # (app/system_settings.py, backup_interval_hours).
+    register_job(scheduler, "backup", "Scheduled backup", run_scheduled_backup, BACKUP_TICK)
+    register_db_upkeep_jobs(scheduler)
     scheduler.start()
     logger.info("startup.complete")
     yield
-    scheduler.shutdown(wait=False)
+    # Let running jobs and pool work finish, within a limit (#335).
+    await asyncio.to_thread(
+        shutdown_background_work,
+        scheduler,
+        [name_index.pool(), source_status.pool()],
+        settings.shutdown_timeout_seconds,
+    )
 
 
-app = FastAPI(title="PerchTail", version=APP_VERSION, lifespan=lifespan)
+# The API is internal to the web UI: its docs and schema are off unless
+# API_DOCS=true, so /docs, /redoc and /openapi.json answer 404 by default.
+_api_docs = get_settings().api_docs
+app = FastAPI(
+    title="PerchTail",
+    version=APP_VERSION,
+    lifespan=lifespan,
+    openapi_url="/openapi.json" if _api_docs else None,
+    docs_url="/docs" if _api_docs else None,
+    redoc_url="/redoc" if _api_docs else None,
+)
 app.add_middleware(OriginCheckMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
+# Outermost, so everything else sees the resolved client address and the
+# request's audit context (app/request_context.py).
+app.add_middleware(ClientAddressMiddleware)
 app.include_router(auth_router)
+app.include_router(access_report_router)
 app.include_router(alerts_router)
+app.include_router(files_router)
 app.include_router(archive_router)
 app.include_router(audit_router)
 app.include_router(config_transfer_router)
@@ -307,12 +507,16 @@ app.include_router(roles_router)
 app.include_router(users_router)
 app.include_router(sso_router)
 app.include_router(agent_ws_router)
-app.include_router(search_router)
+app.include_router(agent_upgrades_router)
 app.include_router(system_settings_router)
+app.include_router(smtp_settings_router)
 app.include_router(updates_router)
 app.include_router(severity_patterns_global_router)
 app.include_router(severity_patterns_source_router)
+app.include_router(redaction_rules_global_router)
+app.include_router(redaction_rules_source_router)
 app.include_router(monitoring_router)
+app.include_router(metrics_router)
 
 
 @app.exception_handler(LocalPathNotAllowedError)
@@ -325,9 +529,24 @@ install_error_handlers(app)
 path_outside_base = _path_outside_base
 
 
-@app.get("/healthz")
+@app.get("/healthz", dependencies=[Depends(require_probe_access)])
 async def healthz():
+    """Liveness: the process is up and answers HTTP. Touches nothing else
+    for a local or allowed caller, so a busy database never gets the
+    container restarted. Who may call it: app/monitoring_access.py (#366)."""
     return {"status": "ok"}
+
+
+@app.get("/readyz", dependencies=[Depends(require_probe_access)])
+def readyz():
+    """Readiness (#330): a database write works, DATA_DIR is writable and
+    the scheduler runs. 503, naming what failed, when any doesn't. A sync
+    endpoint, so the checks run in the thread pool. Who may call it:
+    app/monitoring_access.py (#366)."""
+    failures = readiness_failures(engine, get_settings().data_dir, scheduler)
+    if failures:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "failed": failures})
+    return {"status": "ready"}
 
 
 # Serves the built frontend SPA (see Dockerfile's node build stage) at "/".

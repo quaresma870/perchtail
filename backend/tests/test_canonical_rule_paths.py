@@ -65,8 +65,10 @@ def test_ordinary_windows_paths_are_accepted(path):
 
 def test_case_insensitive_matching_closes_case_bypass():
     rules = [_rule(0, RuleType.include, "**/*.txt"), _rule(1, RuleType.exclude, "**/secret/**")]
-    assert is_visible("SECRET/a.txt", rules)
+    # Exclude rules ignore case on every source; includes follow the source.
+    assert not is_visible("SECRET/a.txt", rules)
     assert not is_visible("SECRET/a.txt", rules, case_insensitive=True)
+    assert not is_visible("logs/A.TXT", rules)
     assert is_visible("logs/A.TXT", rules, case_insensitive=True)
 
 
@@ -83,7 +85,7 @@ class _FakeConnector:
     def list_directory(self, source, rules, relative_path=""):
         return [DirEntry(name="a.txt", path="a.txt", is_dir=False, size=1)]
 
-    def fetch_file(self, source, relative_path, destination: Path):
+    def fetch_file(self, source, relative_path, destination: Path, **_):
         self.fetched.append(relative_path)
         destination.write_bytes(b"x")
 

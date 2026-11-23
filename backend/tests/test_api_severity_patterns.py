@@ -5,7 +5,7 @@ from app.api.auth import get_current_active_user
 from app.api.severity_patterns import global_router, source_router
 from app.auth.models import Capability, GlobalCapability, Role, RoleGrant, ScopeType, User
 from app.db import get_session
-from app.models import Customer, Protocol, Source
+from app.models import Customer, PatternKind, Protocol, SeverityLevel, SeverityPattern, Source
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -29,7 +29,7 @@ def _make_role_and_user(
 
 
 def _make_source(session) -> Source:
-    customer = Customer(name=f"Vodacom Tanzania {uuid.uuid4().hex}")
+    customer = Customer(name=f"Northwind Telecom {uuid.uuid4().hex}")
     session.add(customer)
     session.commit()
     session.refresh(customer)
@@ -223,14 +223,92 @@ def test_invalid_regex_severity_pattern_is_a_400(session, client_for):
     assert client.get("/severity-patterns").json() == []
 
 
-def test_severity_patterns_keep_full_regex_syntax(session, client_for):
-    # Evaluated in the browser (JavaScript), not by the backend's rule
-    # engine, so lookaround stays allowed here.
+@pytest.mark.parametrize(
+    "pattern",
+    ["re:ERROR(?!: ignored)", "re:(?<=x)error", r"re:(a)\1", "x" * 1001, "re:" + "a" * 998],
+)
+def test_severity_patterns_need_re2_syntax_and_the_rule_length_limit(session, client_for, pattern):
+    # They run in every viewer's browser: like rules, a regex must be RE2
+    # (no lookaround or backreferences) and at most 1000 characters as typed.
+    _, admin = _make_role_and_user(
+        session, global_capabilities=[GlobalCapability.manage_system_settings]
+    )
+    role, user = _make_role_and_user(session)
+    source = _make_source(session)
+    _grant(session, role, source, [Capability.view, Capability.manage_rules])
+    admin_client, client = client_for(admin), client_for(user)
+
+    response = admin_client.post("/severity-patterns", json={"level": "error", "pattern": pattern})
+    assert response.status_code == 400
+    response = client.post(
+        f"/sources/{source.id}/severity-patterns", json={"level": "error", "pattern": pattern}
+    )
+    assert response.status_code == 400
+    assert admin_client.get("/severity-patterns").json() == []
+    assert client.get(f"/sources/{source.id}/severity-patterns").json() == []
+
+    created = admin_client.post("/severity-patterns", json={"level": "error", "pattern": "x"})
+    pattern_id = created.json()["id"]
+    response = admin_client.patch(f"/severity-patterns/{pattern_id}", json={"pattern": pattern})
+    assert response.status_code == 400
+    assert admin_client.get("/severity-patterns").json()[0]["pattern"] == "x"
+
+
+@pytest.mark.parametrize("pattern", ["re:" + "a" * 997, "x" * 1000, r"re:\b(error|fatal)\b"])
+def test_severity_patterns_within_the_limits_are_saved(session, client_for, pattern):
     _, user = _make_role_and_user(
         session, global_capabilities=[GlobalCapability.manage_system_settings]
     )
-    client = client_for(user)
-    response = client.post(
-        "/severity-patterns", json={"level": "error", "pattern": "re:ERROR(?!: ignored)"}
+    response = client_for(user).post(
+        "/severity-patterns", json={"level": "error", "pattern": pattern}
     )
     assert response.status_code == 201
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [("ERROR(?!: ignored)", PatternKind.regex), (r"(a)\1", PatternKind.regex), ("x" * 1001, None)],
+)
+def test_an_old_pattern_beyond_the_limits_can_change_without_being_rewritten(
+    session, client_for, stored
+):
+    # Saved before RE2 and the length limit: switched off, given another
+    # level or flag, or deleted without sending its pattern again, and
+    # untouched by those changes. Sending it again is checked as new.
+    value, kind = stored
+    _, admin = _make_role_and_user(
+        session, global_capabilities=[GlobalCapability.manage_system_settings]
+    )
+    role, user = _make_role_and_user(session)
+    source = _make_source(session)
+    _grant(session, role, source, [Capability.view, Capability.manage_rules])
+    for scope_source, client, base in (
+        (None, client_for(admin), "/severity-patterns"),
+        (source.id, client_for(user), f"/sources/{source.id}/severity-patterns"),
+    ):
+        old = SeverityPattern(
+            source_id=scope_source,
+            level=SeverityLevel.error,
+            pattern=value,
+            pattern_kind=kind or PatternKind.glob,
+        )
+        session.add(old)
+        session.commit()
+        session.refresh(old)
+
+        response = client.patch(
+            f"{base}/{old.id}",
+            json={
+                "level": "warning",
+                "enabled": False,
+                "highlight_line": True,
+                "include_in_navigation": False,
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert (body["pattern"], body["level"], body["enabled"]) == (value, "warning", False)
+
+        typed = f"re:{value}" if kind == PatternKind.regex else value
+        assert client.patch(f"{base}/{old.id}", json={"pattern": typed}).status_code == 400
+        assert client.delete(f"{base}/{old.id}").status_code == 204

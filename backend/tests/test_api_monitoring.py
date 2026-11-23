@@ -83,14 +83,24 @@ def plain_client(session, client_for):
 
 
 @pytest.fixture(autouse=True)
-def _healthy_stubs(monkeypatch):
+def _healthy_stubs(monkeypatch, tmp_path):
     """Every test that exercises GET /monitoring/health gets a deterministic,
     "everything is fine" stand-in for the process-wide scheduler/scratch/
     agent-registry singletons, so status defaults to "ok" unless a test
-    explicitly overrides one of these to check a degraded path."""
+    explicitly overrides one of these to check a degraded path.
+
+    The alert pass and the uptime are process-wide too: an earlier test that
+    started the app (its lifespan marks the start) or ran an alert pass would
+    otherwise make the alerts look overdue once the run is slow enough, as
+    when another run shares the machine. The log folder is the test's own."""
+    from app.config import get_settings
+
     monkeypatch.setattr("app.api.monitoring.scheduler", _FakeScheduler())
     monkeypatch.setattr("app.api.monitoring.get_scratch_store", lambda: _FakeScratchStore())
     monkeypatch.setattr("app.api.monitoring.get_agent_registry", lambda: _FakeAgentRegistry())
+    monkeypatch.setattr("app.api.monitoring.alerts_last_pass", lambda: {"at": None, "stats": None})
+    monkeypatch.setattr("app.api.monitoring.uptime_seconds", lambda: 1.0)
+    monkeypatch.setattr(get_settings(), "log_dir", str(tmp_path / "logs"))
 
 
 def test_regenerate_token_requires_manage_capability(plain_client):
@@ -176,12 +186,18 @@ def test_health_reports_ok_shape_with_valid_token(session, admin_client):
 
     assert body["status"] == "ok"
     assert body["database"]["reachable"] is True
-    assert body["scratch"] == {"used_bytes": 0, "max_bytes": 1024, "used_fraction": 0.0}
+    assert body["scratch"] == {
+        "used_bytes": 0,
+        "max_bytes": 1024,
+        "used_fraction": 0.0,
+        "min_free_bytes": 0,
+    }
     assert body["sources_by_protocol"]["local"] == 1
     assert body["sources_by_protocol"]["ssh"] == 1
     assert body["agent"] == {"configured": 0, "connected": 0}
     assert body["scheduler"]["running"] is True
-    assert body["search_index"]["last_sweep_at"] is None
+    assert body["alerts"]["pending_deliveries"] == 0
+    assert body["alerts"]["failed_deliveries"] == 0
 
 
 def test_health_reports_degraded_when_scheduler_not_running(admin_client, monkeypatch):
@@ -248,3 +264,334 @@ def test_health_reports_logs_and_size_limit_pressure(admin_client, tmp_path, mon
     body = logs()
     assert body["size_limit_deleted_early"] is True
     assert body["size_limit_newest_deleted_day"] == "2026-10-30"
+
+
+def test_health_shows_each_jobs_last_run(session, admin_client):
+    """#327: a job that fails, or never ran, shows in the health report."""
+    from app.models import JobRun
+
+    session.add(
+        JobRun(
+            job_id="job",
+            last_started_at=datetime(2026, 1, 1, 12, 0),
+            last_finished_at=datetime(2026, 1, 1, 12, 1),
+            last_ok=False,
+            last_error="RuntimeError: boom",
+            last_duration_ms=60000,
+        )
+    )
+    session.commit()
+
+    token = admin_client.post("/monitoring/token").json()["token"]
+    body = admin_client.get(
+        "/monitoring/health", headers={"Authorization": f"Bearer {token}"}
+    ).json()
+    (job,) = body["scheduler"]["jobs"]
+    assert job["id"] == "job"
+    assert job["last_ok"] is False
+    assert job["last_error"] == "RuntimeError: boom"
+    assert job["last_finished_at"] == "2026-01-01T12:01:00"
+    assert job["last_success_at"] is None
+
+
+# --- #330: the fuller health report, #331: /metrics -------------------------
+
+
+class _Usage:
+    def __init__(self, free, total):
+        self.free = free
+        self.total = total
+        self.used = total - free
+
+
+def _health(client):
+    token = client.post("/monitoring/token").json()["token"]
+    return client.get("/monitoring/health", headers={"Authorization": f"Bearer {token}"}).json()
+
+
+@pytest.fixture(autouse=True)
+def _plenty_of_disk(monkeypatch):
+    monkeypatch.setattr("app.api.monitoring.disk_usage", lambda path: _Usage(900, 1000))
+
+
+def test_health_reports_disks_instance_and_the_new_sections(session, admin_client):
+    body = _health(admin_client)
+
+    assert body["status"] == "ok"
+    assert set(body["disks"]) == {"data", "scratch", "logs"}
+    assert body["disks"]["data"] == {"free_bytes": 900, "total_bytes": 1000, "free_fraction": 0.9}
+    assert body["instance"]["pid"] > 0
+    assert body["instance"]["hostname"]
+    assert set(body["database"]) >= {"reachable", "latency_ms", "size_bytes", "wal_bytes"}
+    assert body["name_index"]["sources"] == 0
+    assert body["name_index"]["oldest_age_seconds"] is None
+    assert body["source_checks"] == {"failing": 0, "backing_off": 0}
+    assert body["audit_integrity"] == {
+        "status": "unknown",
+        "last_checked_at": None,
+        "broken_row_id": None,
+    }
+    assert body["scheduler"]["failed_jobs"] == 0
+    assert "last_pass_age_seconds" in body["alerts"]
+    assert body["trusted_proxies_suspect"] is False
+
+
+def test_health_reports_a_forwarded_header_from_an_untrusted_peer(admin_client, monkeypatch):
+    monkeypatch.setattr("app.request_context._untrusted_forwarded_seen", True)
+    body = _health(admin_client)
+    assert body["trusted_proxies_suspect"] is True
+    assert body["status"] == "ok"
+
+
+def test_health_reports_an_unreadable_directory_as_unknown(admin_client, monkeypatch):
+    def missing(path):
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr("app.api.monitoring.disk_usage", missing)
+    body = _health(admin_client)
+    assert body["disks"]["logs"] == {"free_bytes": None, "total_bytes": None, "free_fraction": None}
+    assert body["status"] == "ok"
+
+
+def test_health_reports_degraded_when_a_disk_is_nearly_full(admin_client, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "scratch_dir", "/somewhere/scratch")
+    monkeypatch.setattr(
+        "app.api.monitoring.disk_usage",
+        lambda path: _Usage(10, 1000) if "scratch" in str(path) else _Usage(900, 1000),
+    )
+    body = _health(admin_client)
+    assert body["disks"]["scratch"]["free_fraction"] == 0.01
+    assert body["status"] == "degraded"
+
+
+def test_health_reports_degraded_when_a_jobs_last_run_failed(session, admin_client):
+    from app.models import JobRun
+
+    session.add(JobRun(job_id="job", last_ok=False, last_error="RuntimeError: boom"))
+    session.commit()
+
+    body = _health(admin_client)
+    assert body["scheduler"]["failed_jobs"] == 1
+    assert body["status"] == "degraded"
+
+
+def test_a_job_that_works_again_is_no_longer_counted(session, admin_client):
+    from app.models import JobRun
+
+    success = datetime(2026, 1, 1, 12, 0)
+    session.add(JobRun(job_id="job", last_ok=True, last_success_at=success))
+    session.commit()
+
+    body = _health(admin_client)
+    assert body["scheduler"]["failed_jobs"] == 0
+    assert body["scheduler"]["jobs"][0]["last_success_age_seconds"] > 0
+    assert body["status"] == "ok"
+
+
+def test_health_reports_degraded_when_the_audit_chain_is_broken(session, admin_client):
+    from app.auth.models import AuditChainState
+
+    session.add(
+        AuditChainState(status="broken", broken_row_id=42, last_checked_at=datetime(2026, 1, 1))
+    )
+    session.commit()
+
+    body = _health(admin_client)
+    assert body["audit_integrity"] == {
+        "status": "broken",
+        "last_checked_at": "2026-01-01T00:00:00",
+        "broken_row_id": 42,
+    }
+    assert body["status"] == "degraded"
+
+
+def test_health_reports_degraded_for_an_unsigned_audit_row_found_at_startup(session, admin_client):
+    from app.audit import record_audit_event
+    from app.audit_integrity import report_unsigned_audit_rows
+    from app.auth.models import AuditLog
+    from app.crypto import audit_chain_key
+
+    record_audit_event(session, user_id=None, action="a")
+    session.commit()
+    forged = AuditLog(user_id=None, action="forged")
+    session.add(forged)
+    session.commit()
+
+    assert report_unsigned_audit_rows(audit_chain_key(), session) is True
+
+    body = _health(admin_client)
+    assert body["audit_integrity"]["status"] == "broken"
+    assert body["audit_integrity"]["broken_row_id"] == forged.id
+    assert body["status"] == "degraded"
+
+
+def test_race_breaks_waiting_to_be_recorded_do_not_degrade(session, admin_client):
+    from app.auth.models import AuditChainState
+
+    session.add(AuditChainState(status="race_breaks", broken_row_id=7))
+    session.commit()
+    assert _health(admin_client)["status"] == "ok"
+
+
+def test_health_reports_the_name_index_and_source_checks(session, admin_client):
+    from datetime import timedelta
+
+    from app.timeutils import utcnow
+
+    now = utcnow()
+
+    def source(name, **values):
+        session.add(Source(name=name, protocol=Protocol.ssh, host=name, base_path="/", **values))
+
+    source("fresh", name_indexed_at=now - timedelta(minutes=1))
+    source(
+        "old",
+        name_indexed_at=now - timedelta(hours=2),
+        name_index_message="3 folders could not be listed",
+        status="failing",
+    )
+    source("never", check_backoff_until=now + timedelta(minutes=10), check_failures=3)
+    source("opted-out", name_index_enabled=False, name_indexed_at=now - timedelta(days=9))
+    source("disabled", enabled=False, status="failing", name_indexed_at=now - timedelta(days=9))
+    session.commit()
+
+    body = _health(admin_client)
+    index = body["name_index"]
+    assert index["enabled"] is True
+    assert index["sources"] == 3
+    assert index["never_indexed"] == 1
+    assert index["sources_with_message"] == 1
+    assert 7000 < index["oldest_age_seconds"] < 7300
+    assert body["source_checks"] == {"failing": 1, "backing_off": 1}
+    # Failing sources are about the servers, not PerchTail: still ok.
+    assert body["status"] == "ok"
+
+
+def test_health_reports_the_sqlite_file_and_wal_sizes(admin_client, monkeypatch, tmp_path):
+    db_file = tmp_path / "perchtail.db"
+    db_file.write_bytes(b"x" * 4096)
+    monkeypatch.setattr("app.api.monitoring.sqlite_file", lambda: db_file)
+
+    assert _health(admin_client)["database"]["wal_bytes"] == 0
+    (tmp_path / "perchtail.db-wal").write_bytes(b"x" * 100)
+    database = _health(admin_client)["database"]
+    assert database["size_bytes"] == 4096
+    assert database["wal_bytes"] == 100
+
+
+@pytest.fixture()
+def metrics_client(session):
+    from app.api.monitoring import metrics_router
+
+    user = _make_user(session, is_super_admin=True)
+    app = FastAPI()
+    app.include_router(monitoring_router)
+    app.include_router(metrics_router)
+    app.dependency_overrides[get_session] = lambda: session
+    app.dependency_overrides[get_current_active_user] = lambda: user
+    return TestClient(app)
+
+
+def _samples(text):
+    samples = {}
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            name, value = line.rsplit(" ", 1)
+            samples[name] = float(value)
+    return samples
+
+
+def test_metrics_needs_the_monitoring_token(metrics_client):
+    assert metrics_client.get("/metrics").status_code == 401
+    response = metrics_client.get("/metrics", headers={"Authorization": "Bearer whatever"})
+    assert response.status_code == 503
+    metrics_client.post("/monitoring/token")
+    response = metrics_client.get("/metrics", headers={"Authorization": "Bearer wrong"})
+    assert response.status_code == 401
+
+
+def test_metrics_are_the_health_report_in_prometheus_format(session, metrics_client):
+    from app.models import JobRun
+    from app.version import APP_VERSION
+
+    session.add(
+        JobRun(
+            job_id="job",
+            last_ok=True,
+            last_success_at=datetime(2026, 1, 1),
+            last_duration_ms=1500,
+        )
+    )
+    session.add(Source(name="s1", protocol=Protocol.local, host="local", base_path="/"))
+    session.commit()
+    token = metrics_client.post("/monitoring/token").json()["token"]
+
+    response = metrics_client.get("/metrics", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain; version=0.0.4")
+    text = response.text
+    assert "# TYPE perchtail_status gauge" in text
+    samples = _samples(text)
+    assert samples["perchtail_status"] == 0
+    assert samples[f'perchtail_build_info{{version="{APP_VERSION}"}}'] == 1
+    assert samples["perchtail_database_reachable"] == 1
+    assert samples['perchtail_disk_free_bytes{dir="data"}'] == 900
+    assert samples['perchtail_disk_total_bytes{dir="logs"}'] == 1000
+    assert samples['perchtail_sources_enabled{protocol="local"}'] == 1
+    assert samples['perchtail_job_last_ok{job="job"}'] == 1
+    assert samples['perchtail_job_last_success_timestamp_seconds{job="job"}'] == 1767225600
+    assert samples['perchtail_job_last_duration_seconds{job="job"}'] == 1.5
+    assert samples["perchtail_audit_integrity_ok"] == 0
+    assert samples["perchtail_scheduler_running"] == 1
+    # Unknown values are left out rather than written as NaN.
+    assert "perchtail_name_index_oldest_age_seconds" not in text
+
+
+def test_metrics_status_follows_the_health_status(session, metrics_client):
+    from app.models import JobRun
+
+    session.add(JobRun(job_id="job", last_ok=False))
+    session.commit()
+    token = metrics_client.post("/monitoring/token").json()["token"]
+    text = metrics_client.get("/metrics", headers={"Authorization": f"Bearer {token}"}).text
+    samples = _samples(text)
+    assert samples["perchtail_status"] == 1
+    assert samples["perchtail_jobs_failed"] == 1
+    assert samples['perchtail_job_last_ok{job="job"}'] == 0
+
+
+def test_metric_labels_are_escaped():
+    from app.metrics import _escape
+
+    assert _escape('a"b\\c\nd') == 'a\\"b\\\\c\\nd'
+
+
+def test_health_and_metrics_report_the_limits_in_use(session, metrics_client):
+    from app.limits import current_limits, get_limiter
+
+    held = get_limiter().connector(current_limits(session), 42)
+    transfer = get_limiter().transfer(current_limits(session), 7)
+    body = _health(metrics_client)
+    assert body["limits"] == {
+        "global_in_use": 1,
+        "global_max": 16,
+        "per_source_max": 4,
+        "busiest_source_in_use": 1,
+        "sources_in_use": {"42": 1},
+        "per_user_transfers_max": 2,
+        "transfers_in_use": 1,
+        "busiest_user_transfers": 1,
+        "rejected": {"global": 0, "source": 0, "user": 0},
+    }
+    token = metrics_client.post("/monitoring/token").json()["token"]
+    text = metrics_client.get("/metrics", headers={"Authorization": f"Bearer {token}"}).text
+    samples = _samples(text)
+    assert samples["perchtail_connector_slots_in_use"] == 1
+    assert samples["perchtail_connector_slots_max"] == 16
+    assert samples["perchtail_transfers_in_use"] == 1
+    assert samples['perchtail_limit_rejections_total{limit="user"}'] == 0
+    assert "# TYPE perchtail_limit_rejections_total counter" in text
+    held.release()
+    transfer.release()

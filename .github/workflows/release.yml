@@ -3,9 +3,20 @@ name: Release
 # Builds everything a release needs and leaves it as a DRAFT for the
 # maintainer to review and publish:
 #   - the push-agent binaries for Linux (amd64, arm64) and Windows (amd64),
-#     plus SHA256SUMS to verify them;
-#   - the Docker image, pushed to ghcr.io/<owner>/perchtail:<version>, and
-#     its SBOM (CycloneDX);
+#     plus SHA256SUMS to verify them and SHA256SUMS.sig, its Ed25519
+#     signature with the release key (#319): agents upgraded from the portal
+#     install a binary only if this signature verifies against the public
+#     key built into them. The private key is the AGENT_SIGNING_KEY
+#     secret of the `release` environment (see CONTRIBUTING.md); without it the release fails;
+#   - the Docker image, pushed to ghcr.io/<owner>/perchtail:<version>, with
+#     those signed agent binaries in /app/agent-binaries, signed with cosign
+#     (keyless) and with GitHub build provenance, like the agent binaries
+#     (#350);
+#   - SBOMs (CycloneDX) for the image, the backend, the frontend and the
+#     agent;
+#   - perchtail-image.json, naming that image by digest, and
+#     perchtail-image.json.sig, its Ed25519 signature with the same release
+#     key: the updater (#320) only installs an image a signed manifest names;
 #   - release notes taken from the version's CHANGELOG.md section.
 # GitHub adds the source code archives itself when the release is published.
 #
@@ -119,7 +130,11 @@ jobs:
             echo "::error::$tag doesn't match the code at ${sha:0:7}: backend/app/version.py says '$app_version', frontend/package.json says '$ui_version'"
             exit 1
           fi
-          if ! git show "$sha:CHANGELOG.md" | grep -q "^## \[$version\]"; then
+          # Read the whole file first: `git show | grep -q` stops reading at
+          # the first match, git show then dies of SIGPIPE, and with pipefail
+          # that fails the check at random once the CHANGELOG is large.
+          changelog="$(git show "$sha:CHANGELOG.md")"
+          if ! awk -v h="## [$version]" 'index($0, h) == 1 { found = 1 } END { exit !found }' <<<"$changelog"; then
             echo "::error::CHANGELOG.md at ${sha:0:7} has no '## [$version]' section"
             exit 1
           fi
@@ -141,8 +156,14 @@ jobs:
   agent:
     needs: meta
     runs-on: ubuntu-latest
+    # AGENT_SIGNING_KEY is a secret of this environment, not of the
+    # repository, so only a job that names it -- on the branches the
+    # environment allows -- can read it (CONTRIBUTING.md).
+    environment: release
     permissions:
       contents: read
+      id-token: write # keyless signing of the build provenance (Sigstore)
+      attestations: write # store the provenance with the repository
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -178,6 +199,46 @@ jobs:
           sha256sum perchtail-agent-* > SHA256SUMS
           cat SHA256SUMS
 
+      # Every release is signed (#319). The key never reaches the log or the
+      # artifacts: it is written to a file only this user can read, used and
+      # removed. The signature is checked against the public key committed in
+      # the agent's source, so a release can't ship agents that would refuse
+      # their own upgrades.
+      - name: Sign SHA256SUMS
+        working-directory: dist
+        env:
+          AGENT_SIGNING_KEY: ${{ secrets.AGENT_SIGNING_KEY }}
+          PUBLIC_KEY: ../agent/internal/agent/upgrade_signing_key.pub
+        run: |
+          set -euo pipefail
+          if [ -z "${AGENT_SIGNING_KEY:-}" ]; then
+            echo "::error::The AGENT_SIGNING_KEY secret of the release environment is missing: every release must sign SHA256SUMS for agent upgrades from the portal. See CONTRIBUTING.md, 'Agent release signing key'."
+            exit 1
+          fi
+          if ! grep -q "BEGIN PUBLIC KEY" "$PUBLIC_KEY"; then
+            echo "::error::agent/internal/agent/upgrade_signing_key.pub is empty: the agents of this release couldn't verify any upgrade. Commit the release key's public half first (CONTRIBUTING.md)."
+            exit 1
+          fi
+          umask 077
+          keyfile="$(mktemp)"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s\n' "$AGENT_SIGNING_KEY" > "$keyfile"
+          openssl pkeyutl -sign -inkey "$keyfile" -rawin -in SHA256SUMS -out SHA256SUMS.sig
+          rm -f "$keyfile"
+          if ! openssl pkeyutl -verify -pubin -inkey "$PUBLIC_KEY" -rawin \
+              -in SHA256SUMS -sigfile SHA256SUMS.sig; then
+            echo "::error::The AGENT_SIGNING_KEY secret doesn't match agent/internal/agent/upgrade_signing_key.pub."
+            exit 1
+          fi
+          ls -l SHA256SUMS SHA256SUMS.sig
+
+      # Build provenance for each binary (#350): signed through GitHub's
+      # OIDC identity, it says which workflow built it from which commit.
+      # `gh attestation verify` checks it (docs/verifying-releases.md).
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/perchtail-agent-*
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agent
@@ -185,16 +246,29 @@ jobs:
           if-no-files-found: error
 
   image:
-    needs: meta
+    needs: [meta, agent]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write # push to ghcr.io
+      packages: write # push to ghcr.io, with the signature and the attestation
+      id-token: write # keyless signing (Sigstore)
+      attestations: write # store the provenance with the repository
+    outputs:
+      name: ${{ steps.image.outputs.name }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.meta.outputs.sha }}
+
+      # The signed agent binaries go into the image (#319), so agents on
+      # hosts without internet access can upgrade from the server itself.
+      # The Dockerfile copies agent-dist/ to /app/agent-binaries.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agent
+          path: agent-dist
 
       - id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
@@ -222,6 +296,7 @@ jobs:
             org.opencontainers.image.revision=${{ needs.meta.outputs.sha }}
 
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build
         env:
           # No build-record artifact: the draft job only wants agent + sbom.
           DOCKER_BUILD_RECORD_UPLOAD: "false"
@@ -233,6 +308,44 @@ jobs:
           labels: ${{ steps.labels.outputs.labels }}
           provenance: true
           sbom: true
+
+      # The digest the build reported must be the one the registry serves
+      # for this version's tag, since the signed image manifest names it.
+      - name: Check the pushed digest
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          served="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)"
+          if [ -z "$DIGEST" ] || [ "$served" != "$DIGEST" ]; then
+            echo "::error::The registry serves $IMAGE:$VERSION as '$served', but the build pushed '$DIGEST'."
+            exit 1
+          fi
+          echo "$IMAGE:$VERSION -> $DIGEST"
+
+      # The image is signed by digest with cosign, keyless (#350): the
+      # certificate names this workflow and the ref it ran from, and the
+      # signature is logged in Sigstore's public transparency log. Anyone
+      # can check it with `cosign verify` (docs/verifying-releases.md).
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Sign the image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "$IMAGE@$DIGEST"
+
+      # GitHub build provenance for the image, pushed next to it in the
+      # registry and kept with the repository (`gh attestation verify`).
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
       # Trivy doesn't create the output's directory.
       - run: mkdir -p sbom
@@ -249,14 +362,97 @@ jobs:
           format: cyclonedx
           output: sbom/perchtail-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
 
+      # One SBOM per component as well (#350), from its lockfile: the
+      # backend's hashed requirements.txt, the frontend's package-lock.json
+      # and the agent's go.mod/go.sum.
+      - name: Generate SBOM for the backend (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: backend/requirements.txt
+          format: cyclonedx
+          output: sbom/perchtail-backend-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
+
+      - name: Generate SBOM for the frontend (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: frontend/package-lock.json
+          format: cyclonedx
+          output: sbom/perchtail-frontend-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
+
+      - name: Generate SBOM for the push agent (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: agent
+          format: cyclonedx
+          output: sbom/perchtail-agent-${{ needs.meta.outputs.version }}.sbom.cyclonedx.json
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom
           path: sbom/
           if-no-files-found: error
 
+  # perchtail-image.json names this release's image by digest, signed with
+  # the same Ed25519 release key as the agents' SHA256SUMS (#320). The
+  # updater carries the public key and pulls only an image a genuine
+  # release names, by digest, whatever the registry's tags say.
+  image-manifest:
+    needs: [meta, image]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.meta.outputs.sha }}
+
+      - name: Write and sign perchtail-image.json
+        env:
+          AGENT_SIGNING_KEY: ${{ secrets.AGENT_SIGNING_KEY }}
+          PUBLIC_KEY: agent/internal/agent/upgrade_signing_key.pub
+          VERSION: ${{ needs.meta.outputs.version }}
+          IMAGE: ${{ needs.image.outputs.name }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AGENT_SIGNING_KEY:-}" ]; then
+            echo "::error::The AGENT_SIGNING_KEY secret of the release environment is missing. See CONTRIBUTING.md, 'Agent release signing key'."
+            exit 1
+          fi
+          if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::'$DIGEST' isn't an image digest."
+            exit 1
+          fi
+          mkdir -p manifest
+          jq -n --arg version "$VERSION" --arg image "$IMAGE" --arg digest "$DIGEST" \
+            '{version: $version, image: $image, digest: $digest}' > manifest/perchtail-image.json
+          cat manifest/perchtail-image.json
+          umask 077
+          keyfile="$(mktemp)"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s\n' "$AGENT_SIGNING_KEY" > "$keyfile"
+          openssl pkeyutl -sign -inkey "$keyfile" -rawin \
+            -in manifest/perchtail-image.json -out manifest/perchtail-image.json.sig
+          rm -f "$keyfile"
+          if ! openssl pkeyutl -verify -pubin -inkey "$PUBLIC_KEY" -rawin \
+              -in manifest/perchtail-image.json -sigfile manifest/perchtail-image.json.sig; then
+            echo "::error::The AGENT_SIGNING_KEY secret doesn't match agent/internal/agent/upgrade_signing_key.pub."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-manifest
+          path: manifest/
+          if-no-files-found: error
+
   draft:
-    needs: [meta, agent, image]
+    needs: [meta, agent, image, image-manifest]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create or update the draft release
@@ -278,6 +474,11 @@ jobs:
           name: sbom
           path: assets
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-manifest
+          path: assets
+
       - name: Release notes from CHANGELOG.md
         env:
           VERSION: ${{ needs.meta.outputs.version }}
@@ -292,9 +493,12 @@ jobs:
           {
             echo
             echo "### Install"
-            echo "- Docker: \`${IMAGE,,}:${VERSION}\` (amd64, arm64)"
-            echo "- Push agent: the binaries below; check them with \`sha256sum -c SHA256SUMS\`"
+            echo "- Docker: \`${IMAGE,,}:${VERSION}\` (amd64, arm64); \`perchtail-image.json\` names it by digest, and \`perchtail-image.json.sig\` is its Ed25519 signature with the release key"
+            echo "- Push agent: the binaries below; check them with \`sha256sum -c SHA256SUMS\` (\`SHA256SUMS.sig\` is its Ed25519 signature with the release key)"
             echo "- From source: [docs/install-from-source.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/install-from-source.md)"
+            echo
+            echo "### Verify"
+            echo "The image is signed with cosign (keyless), and the image and the agent binaries carry GitHub build provenance; the SBOMs (CycloneDX) list what is in the image, the backend, the frontend and the agent. How to check them: [docs/verifying-releases.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/verifying-releases.md)."
           } >> notes.md
           cat notes.md
 
@@ -333,6 +537,7 @@ jobs:
     if: github.event_name == 'release' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
     steps:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -346,6 +551,7 @@ jobs:
       - name: Point X.Y and latest at this release
         env:
           TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="${TAG#v}"
@@ -354,6 +560,14 @@ jobs:
           fi
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
-          docker buildx imagetools create \
-            -t "$image:$minor" -t "$image:latest" "$image:$version"
-          echo "$image:$minor and :latest -> $version" >> "$GITHUB_STEP_SUMMARY"
+          # A hotfix for an older line (0.6.2 after 0.7.0) moves its own
+          # X.Y but never latest, which stays on the newest full release.
+          newest="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+          tags=(-t "$image:$minor")
+          if [ "$newest" = "$version" ]; then
+            tags+=(-t "$image:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" "$image:$version"
+          echo "${tags[*]} -> $version (newest full release: $newest)" >> "$GITHUB_STEP_SUMMARY"

@@ -16,6 +16,12 @@ _WINDOWS_PROTOCOLS = frozenset({Protocol.smb, Protocol.winrm})
 # these to the long name they abbreviate.
 _SHORT_NAME_ALIAS = re.compile(r"^[^~]{1,8}~\d+(\.[^.]*)?$")
 
+# The most visibility rules a source can have and the longest pattern, as
+# typed (with its `re:` prefix): for the row editor, the pasted text and the
+# import alike.
+MAX_RULES_PER_SOURCE = 500
+MAX_PATTERN_CHARS = 1000
+
 
 class InvalidPatternError(ValueError):
     pass
@@ -28,7 +34,15 @@ def _re2_options(ignore_case: bool = False) -> "re2.Options":
     return options
 
 
-def parse_pattern(raw: str, *, linear_time: bool = True) -> tuple[str, PatternKind]:
+def compile_linear(pattern: str, ignore_case: bool = False):
+    """A regex compiled with RE2, which runs in linear time: for patterns
+    that come from users and run on the backend (rules, file-name search).
+    Raises re2.error for one RE2 can't compile (backreferences,
+    lookaround)."""
+    return re2.compile(pattern, _re2_options(ignore_case))
+
+
+def parse_pattern(raw: str) -> tuple[str, PatternKind]:
     """Splits the admin-facing `re:` prefix convention (CLAUDE.md's rule
     matching semantics) from the pattern itself. Raises InvalidPatternError
     for a regex that doesn't compile, so a typo is rejected when it's saved
@@ -37,36 +51,69 @@ def parse_pattern(raw: str, *, linear_time: bool = True) -> tuple[str, PatternKi
     Rule regexes run on the backend for every path of every browse, so they
     are compiled with RE2, which always matches in linear time: a
     catastrophic pattern like `(a+)+$` can't stall the server (ReDoS). RE2
-    has no backreferences or lookaround, so those are rejected here.
-    linear_time=False keeps Python's full syntax for patterns that never run
-    on the backend (severity patterns, evaluated in the browser)."""
+    has no backreferences or lookaround, so those are rejected here. Severity
+    patterns, which run in every viewer's browser, are held to the same
+    syntax."""
     if raw.startswith("re:"):
         pattern = raw[len("re:") :]
         try:
-            if linear_time:
-                re2.compile(pattern, _re2_options())
-            else:
-                re.compile(pattern)
+            re2.compile(pattern, _re2_options())
         except re2.error as exc:
             raise InvalidPatternError(
                 f"invalid regex {pattern!r} (rules use RE2: no backreferences or "
                 f"lookaround): {exc}"
             ) from exc
-        except re.error as exc:
-            raise InvalidPatternError(f"invalid regex {pattern!r}: {exc}") from exc
         return pattern, PatternKind.regex
     return raw, PatternKind.glob
 
 
+def glob_literal(char: str) -> str:
+    """One literal character of a glob, written so RE2 reads it as itself:
+    letters, digits and non-ASCII as they are, any other ASCII character
+    by its code point. A lone surrogate (an undecodable byte in a local
+    file name) can't be UTF-8 encoded, so it stands for U+FFFD, as in the
+    names it's matched against (_utf8_safe)."""
+    code = ord(char)
+    if 0xD800 <= code <= 0xDFFF:
+        return r"\x{fffd}"
+    if char.isalnum() or char == "_" or code > 127:
+        return char
+    return rf"\x{{{code:x}}}"
+
+
+def _utf8_safe(text: str) -> str:
+    """`text` with lone surrogates as U+FFFD: RE2 matches UTF-8, and a name
+    with an undecodable byte (os.listdir's surrogateescape) can't be
+    encoded otherwise."""
+    return "".join("\ufffd" if 0xD800 <= ord(c) <= 0xDFFF else c for c in text)
+
+
+class _Glob:
+    """A compiled glob: RE2 underneath (#347), so matching is linear in
+    the path's length whatever the pattern (a glob with many `*` made
+    Python's backtracking engine slow down sharply)."""
+
+    __slots__ = ("_regex",)
+
+    def __init__(self, regex):
+        self._regex = regex
+
+    def match(self, text: str):
+        try:
+            return self._regex.match(text)
+        except UnicodeEncodeError:
+            return self._regex.match(_utf8_safe(text))
+
+
 @lru_cache(maxsize=2048)
-def _compile_glob(pattern: str, ignore_case: bool = False) -> re.Pattern[str]:
+def _compile_glob(pattern: str, ignore_case: bool = False) -> _Glob:
     """Translates an rsync/gitignore-style glob to a regex: `**/` matches
     zero or more whole path segments (so `**/*.log` matches both `app.log`
     and `var/log/app.log` — same as .gitignore), a standalone `**` matches
     anything including `/`, `*` matches within a single segment, and `?`
     matches one character within a segment. Unlike stdlib fnmatch, this is
     path-separator-aware, which is the whole point of distinguishing `*`
-    from `**`."""
+    from `**`. Compiled with RE2, like regex rules."""
     out = []
     i, n = 0, len(pattern)
     while i < n:
@@ -83,9 +130,9 @@ def _compile_glob(pattern: str, ignore_case: bool = False) -> re.Pattern[str]:
             out.append("[^/]")
             i += 1
         else:
-            out.append(re.escape(pattern[i]))
+            out.append(glob_literal(pattern[i]))
             i += 1
-    return re.compile(f"^{''.join(out)}$", re.IGNORECASE if ignore_case else 0)
+    return _Glob(re2.compile(f"^{''.join(out)}$", _re2_options(ignore_case)))
 
 
 @lru_cache(maxsize=2048)
@@ -100,7 +147,18 @@ def _compile_regex(pattern: str, ignore_case: bool = False):
         return None
 
 
+def glob_matches(pattern: str, path: str, *, ignore_case: bool = False) -> bool:
+    """Whether `path` matches an rsync/gitignore-style glob, with the same
+    semantics as rules (`**/` any number of folders, `*` within one)."""
+    return _compile_glob(pattern, ignore_case).match(path) is not None
+
+
 def _rule_matches(path: str, rule: Rule, ignore_case: bool) -> bool:
+    # Exclude rules never depend on case, on any protocol: a path can reach
+    # a file under another spelling of its name (Windows OpenSSH, a local
+    # filesystem that ignores case), so `secrets/**` also hides `SECRETS/x`.
+    # Include rules keep the source's own case sensitivity.
+    ignore_case = ignore_case or rule.type == RuleType.exclude
     if rule.pattern_kind == PatternKind.regex:
         compiled = _compile_regex(rule.pattern, ignore_case)
         if compiled is None:
@@ -118,9 +176,16 @@ def is_visible(path: str, rules: list[Rule], *, case_insensitive: bool = False) 
     default".
 
     `case_insensitive` must be set for sources whose filesystem is
-    case-insensitive (see rules_case_insensitive): otherwise `SECRET/x`
-    would slip past an exclude rule written as `secret/**` while still
-    opening the very same file."""
+    case-insensitive (see rules_case_insensitive), so include rules match
+    every spelling there. Exclude rules ignore case on every source
+    (_rule_matches): `SECRET/x` never slips past `secret/**`, even on a
+    source whose filesystem PerchTail can't tell ignores case.
+
+    A path with a control character is never visible: it can't be opened
+    either (is_safe_relative_path), and a name ending in a newline could
+    otherwise slip past an exclude glob (RE2's `$` is end of text only)."""
+    if _has_control_character(path):
+        return False
     verdict = False
     for rule in sorted(rules, key=lambda r: r.order):
         if _rule_matches(path, rule, case_insensitive):
@@ -229,9 +294,9 @@ def is_dir_visible(dir_path: str, rules: list[Rule], *, case_insensitive: bool =
         ):
             continue
         covered = any(
-            later.type == RuleType.exclude
-            and later.pattern_kind == PatternKind.glob
-            and _glob_covers_everything_below(later.pattern, segments, case_insensitive)
+            later.type == RuleType.exclude and later.pattern_kind == PatternKind.glob
+            # Excludes ignore case (_rule_matches).
+            and _glob_covers_everything_below(later.pattern, segments, True)
             for later in ordered[i + 1 :]
         )
         if not covered:
@@ -243,10 +308,32 @@ def is_entry_visible(
     path: str, is_dir: bool, rules: list[Rule], *, case_insensitive: bool = False
 ) -> bool:
     """Listing filter shared by every connector: files go through the rule
-    chain, directories through is_dir_visible."""
+    chain, directories through is_dir_visible. A path with a control
+    character is never listed (see is_visible)."""
+    if _has_control_character(path):
+        return False
     if is_dir:
         return is_dir_visible(path, rules, case_insensitive=case_insensitive)
     return is_visible(path, rules, case_insensitive=case_insensitive)
+
+
+def is_linked_entry_visible(
+    path: str,
+    is_dir: bool,
+    target: str | None,
+    rules: list[Rule],
+    *,
+    case_insensitive: bool = False,
+) -> bool:
+    """is_entry_visible for an entry a link may lead elsewhere (`target`,
+    where it really is relative to the base path, or None): both its own
+    path and its target must be visible, so a link can't show a file or a
+    folder the rules hide under another name."""
+    if not is_entry_visible(path, is_dir, rules, case_insensitive=case_insensitive):
+        return False
+    return target is None or is_entry_visible(
+        target, is_dir, rules, case_insensitive=case_insensitive
+    )
 
 
 def rules_case_insensitive(source: Source) -> bool:

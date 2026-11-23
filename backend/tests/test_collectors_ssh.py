@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import app.collectors.ssh as ssh_module
 import paramiko
 import pytest
+from app.collectors.base import LinkTargetHiddenError
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 from structlog.testing import capture_logs
 
@@ -34,6 +35,11 @@ class FakeSFTPClient:
         self.closed = False
         self.requested_paths = []
         self.fetched_paths = []
+        # Bytes the server sent while copying files.
+        self.bytes_sent = 0
+        # What stat() reports instead of the real size, by path: a file that
+        # grows after it is stat'ed.
+        self.stat_sizes: dict[str, int] = {}
 
     def normalize(self, path):
         path = posixpath.normpath(path)
@@ -53,7 +59,13 @@ class FakeSFTPClient:
 
     def get(self, remote_path, local_path):
         self.fetched_paths.append(remote_path)
+        self.bytes_sent += len(self._files[remote_path])
         Path(local_path).write_bytes(self._files[remote_path])
+
+    def open(self, remote_path, mode="r"):
+        assert mode == "rb"
+        self.fetched_paths.append(remote_path)
+        return _RemoteFile(self, self._files[remote_path])
 
     def stat(self, remote_path):
         name = remote_path.rsplit("/", 1)[-1]
@@ -61,10 +73,34 @@ class FakeSFTPClient:
             return FakeAttr(name, True)
         if remote_path not in self._files:
             raise FileNotFoundError(remote_path)
-        return FakeAttr(name, False, len(self._files[remote_path]))
+        size = self.stat_sizes.get(remote_path, len(self._files[remote_path]))
+        return FakeAttr(name, False, size)
 
     def close(self):
         self.closed = True
+
+
+class _RemoteFile(io.BytesIO):
+    """An open remote file: counts the bytes the server sends."""
+
+    def __init__(self, sftp: FakeSFTPClient, content: bytes):
+        super().__init__(content)
+        self._sftp = sftp
+
+    def prefetch(self, file_size=None):
+        pass
+
+    def read(self, size=-1):
+        chunk = super().read(size)
+        self._sftp.bytes_sent += len(chunk)
+        return chunk
+
+
+class FakeChannel:
+    timeout = None
+
+    def settimeout(self, seconds):
+        self.timeout = seconds
 
 
 class FakeSSHClient:
@@ -73,6 +109,9 @@ class FakeSSHClient:
         self.closed = False
 
     def open_sftp(self):
+        if not hasattr(self._sftp, "get_channel"):
+            channel = FakeChannel()
+            self._sftp.get_channel = lambda: channel
         return self._sftp
 
     def close(self):
@@ -109,29 +148,52 @@ class FakeParamikoClient:
     def __init__(self):
         self.policy = None
         self.loaded_from: list[str] = []
-        self.saved_to: list[str] = []
         self.connect_calls: list[tuple] = []
         self.connect_raises: Exception | None = None
+        # A key the server presents for a host with none on file: connect()
+        # hands it to the policy, as paramiko does.
+        self.presented_key: paramiko.PKey | None = None
+        self.during_connect = None
+        self.host_keys = paramiko.HostKeys()
 
     def set_missing_host_key_policy(self, policy):
         self.policy = policy
+
+    def get_host_keys(self):
+        return self.host_keys
 
     def load_host_keys(self, path):
         self.loaded_from.append(path)
 
     def connect(self, hostname, port=22, **kwargs):
         self.connect_calls.append((hostname, port, kwargs))
+        if self.during_connect is not None:
+            self.during_connect()
         if self.connect_raises is not None:
             raise self.connect_raises
+        if self.presented_key is not None:
+            name = ssh_module.host_key_name(hostname, port)
+            self.policy.missing_host_key(self, name, self.presented_key)
 
-    def save_host_keys(self, path):
-        self.saved_to.append(path)
+    def get_transport(self):
+        if not hasattr(self, "transport"):
+            self.transport = SimpleNamespace(keepalive=None)
+            self.transport.set_keepalive = lambda s: setattr(self.transport, "keepalive", s)
+        return self.transport
 
     def close(self):
         pass
 
 
-def _patch_ssh_infra(monkeypatch, tmp_path, *, connect_raises=None, policy="tofu"):
+def _patch_ssh_infra(
+    monkeypatch,
+    tmp_path,
+    *,
+    connect_raises=None,
+    policy="tofu",
+    presented_key=None,
+    during_connect=None,
+):
     """Patches paramiko.SSHClient to FakeParamikoClient (registering every
     created instance so a test can inspect it afterward) and points
     ssh_known_hosts_path at a fresh tmp_path location. Returns the list of
@@ -143,7 +205,9 @@ def _patch_ssh_infra(monkeypatch, tmp_path, *, connect_raises=None, policy="tofu
         ssh_module,
         "get_settings",
         lambda: SimpleNamespace(
-            ssh_known_hosts_path=str(tmp_path / "known_hosts"), ssh_host_key_policy=policy
+            ssh_known_hosts_path=str(tmp_path / "known_hosts"),
+            ssh_host_key_policy=policy,
+            remote_read_timeout_seconds=60,
         ),
     )
     created: list[FakeParamikoClient] = []
@@ -151,6 +215,8 @@ def _patch_ssh_infra(monkeypatch, tmp_path, *, connect_raises=None, policy="tofu
     def _factory():
         client = FakeParamikoClient()
         client.connect_raises = connect_raises
+        client.presented_key = presented_key
+        client.during_connect = during_connect
         created.append(client)
         return client
 
@@ -184,10 +250,60 @@ def test_trust_on_first_use_pins_the_key_and_logs_its_fingerprint():
 
 
 def test_connect_skips_loading_a_known_hosts_file_that_does_not_exist_yet(monkeypatch, tmp_path):
-    created = _patch_ssh_infra(monkeypatch, tmp_path)
+    key = paramiko.ECDSAKey.generate()
+    created = _patch_ssh_infra(monkeypatch, tmp_path, presented_key=key)
     ssh_module._connect(_source())
     assert created[0].loaded_from == []
-    assert created[0].saved_to == [str(tmp_path / "known_hosts")]
+    saved = paramiko.HostKeys(str(tmp_path / "known_hosts"))
+    assert saved.lookup("app01.example.com")[key.get_name()] == key
+    assert stat_module.S_IMODE((tmp_path / "known_hosts").stat().st_mode) == 0o600
+
+
+def _write_known_hosts(path, entries: dict[str, paramiko.PKey]) -> None:
+    keys = paramiko.HostKeys()
+    for name, key in entries.items():
+        keys.add(name, key.get_name(), key)
+    keys.save(str(path))
+
+
+def test_a_pin_removed_during_a_connection_stays_removed(monkeypatch, tmp_path):
+    # Another source's pin is removed (app/source_pins.py) while a
+    # connection that loaded the file is in its handshake; the connection
+    # pins its own new host without writing the removed pin back.
+    known_hosts = tmp_path / "known_hosts"
+    removed, kept, new = (paramiko.ECDSAKey.generate() for _ in range(3))
+    _write_known_hosts(known_hosts, {"gone.example.com": removed, "kept.example.com": kept})
+
+    def remove_gone():
+        keys = paramiko.HostKeys(str(known_hosts))
+        del keys["gone.example.com"]
+        keys.save(str(known_hosts))
+
+    _patch_ssh_infra(monkeypatch, tmp_path, presented_key=new, during_connect=remove_gone)
+    ssh_module._connect(_source())
+
+    saved = paramiko.HostKeys(str(known_hosts))
+    assert "gone.example.com" not in saved
+    assert saved.lookup("kept.example.com")[kept.get_name()] == kept
+    assert saved.lookup("app01.example.com")[new.get_name()] == new
+
+
+def test_a_connection_to_a_pinned_host_does_not_rewrite_known_hosts(monkeypatch, tmp_path):
+    known_hosts = tmp_path / "known_hosts"
+    removed, pinned = paramiko.ECDSAKey.generate(), paramiko.ECDSAKey.generate()
+    _write_known_hosts(known_hosts, {"gone.example.com": removed, "app01.example.com": pinned})
+
+    def remove_gone():
+        keys = paramiko.HostKeys(str(known_hosts))
+        del keys["gone.example.com"]
+        keys.save(str(known_hosts))
+
+    _patch_ssh_infra(monkeypatch, tmp_path, during_connect=remove_gone)
+    ssh_module._connect(_source())
+
+    saved = paramiko.HostKeys(str(known_hosts))
+    assert saved.lookup("gone.example.com") is None
+    assert saved.lookup("app01.example.com") is not None
 
 
 def test_connect_loads_previously_saved_host_keys_on_a_later_call(monkeypatch, tmp_path):
@@ -210,7 +326,11 @@ def test_connect_creates_the_known_hosts_parent_directory(monkeypatch, tmp_path)
     monkeypatch.setattr(
         ssh_module,
         "get_settings",
-        lambda: SimpleNamespace(ssh_known_hosts_path=str(nested), ssh_host_key_policy="tofu"),
+        lambda: SimpleNamespace(
+            ssh_known_hosts_path=str(nested),
+            ssh_host_key_policy="tofu",
+            remote_read_timeout_seconds=60,
+        ),
     )
     monkeypatch.setattr(ssh_module.paramiko, "SSHClient", FakeParamikoClient)
 
@@ -228,7 +348,8 @@ def test_connect_propagates_bad_host_key_exception_without_saving(monkeypatch, t
 
     # A key mismatch is a real MITM-detection signal -- nothing should be
     # (re)written to disk when connect() itself rejected the host.
-    assert created[0].saved_to == []
+    assert created[0].connect_calls
+    assert not (tmp_path / "known_hosts").exists()
 
 
 def test_list_directory_always_shows_directories_but_filters_files(monkeypatch):
@@ -339,6 +460,50 @@ def test_passphrase_protected_private_key_is_a_clear_error():
         ssh_module.load_private_key(key_text)
 
 
+def _encrypted_pem_rsa_key() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.BestAvailableEncryption(b"secret"),
+    ).decode()
+
+
+def test_is_encrypted_private_key_spots_openssh_and_pem_keys():
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    openssh = _openssh_private_key(ed25519.Ed25519PrivateKey.generate(), b"secret")
+    assert ssh_module.is_encrypted_private_key(openssh) is True
+    assert ssh_module.is_encrypted_private_key(_encrypted_pem_rsa_key()) is True
+    assert ssh_module.is_encrypted_private_key(_generated_key("ed25519")) is False
+    assert ssh_module.is_encrypted_private_key("not a key at all") is False
+
+
+@pytest.mark.parametrize("key_text", ["not a key at all", "encrypted"])
+def test_a_key_that_cannot_be_loaded_is_the_neutral_credential_error(
+    monkeypatch, tmp_path, key_text
+):
+    """A key saved before saving refused encrypted ones, or one paramiko
+    can't parse, answers like a wrong credential -- never a 500."""
+    from app.collectors.base import SourceAuthError
+    from app.collectors.registry import CONNECTORS
+    from app.models import Protocol
+
+    if key_text == "encrypted":
+        key_text = _encrypted_pem_rsa_key()
+    _patch_ssh_infra(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        ssh_module, "decrypt_credential", lambda _ref: {"username": "svc", "private_key": key_text}
+    )
+
+    with pytest.raises(SourceAuthError) as caught:
+        CONNECTORS[Protocol.ssh].list_directory(_source(), [], "")
+    assert caught.value.public_message == "Authentication to the source failed"
+
+
 def test_fetch_refuses_a_file_over_max_fetch_mb_before_transferring_it(monkeypatch, tmp_path):
     from app.collectors.base import FetchTooLargeError
 
@@ -350,6 +515,24 @@ def test_fetch_refuses_a_file_over_max_fetch_mb_before_transferring_it(monkeypat
     with pytest.raises(FetchTooLargeError):
         ssh_module.fetch_file(_source(), "big.log", destination)
     assert not destination.exists()
+    assert sftp.bytes_sent == 0
+
+
+def test_fetch_stops_copying_a_file_that_grows_past_max_fetch_mb(monkeypatch, tmp_path):
+    """A file small when stat'ed that grows past MAX_FETCH_MB during the
+    transfer: the copy stops at the limit instead of reading it all."""
+    from app.collectors.base import _CHUNK, FetchTooLargeError
+
+    sftp = FakeSFTPClient(files={"/var/log/appname/big.log": b"x" * (8 * _CHUNK)})
+    sftp.stat_sizes["/var/log/appname/big.log"] = 10
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 1024)
+
+    destination = tmp_path / "out"
+    with pytest.raises(FetchTooLargeError):
+        ssh_module.fetch_file(_source(), "big.log", destination)
+    assert not destination.exists()
+    assert sftp.bytes_sent <= 1024 + _CHUNK
 
 
 # --- containment: symlinks must not lead outside base_path (lab F-10) ------
@@ -414,11 +597,93 @@ def test_fetch_through_an_inward_symlink_reads_the_resolved_target(monkeypatch, 
     sftp = _escape_fixture()
     monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
 
-    ssh_module.fetch_file(_source(), "inner.log", tmp_path / "out")
+    checked = []
+
+    def target_check(real):
+        checked.append(real)
+        return True
+
+    ssh_module.fetch_file(_source(), "inner.log", tmp_path / "out", target_check=target_check)
 
     assert (tmp_path / "out").read_bytes() == b"hello"
-    # The resolved real path is what gets read, not the link's own path.
+    # The resolved real path is what gets read, not the link's own path,
+    # and the rules were asked about it.
     assert sftp.fetched_paths == ["/var/log/appname/app.log"]
+    assert checked == ["app.log"]
+
+
+def _hidden_target_fixture():
+    return FakeSFTPClient(
+        listing=[
+            FakeAttr("app.log", False, 5),
+            FakeAttr("current.log", False, 9, is_link=True),
+            FakeAttr("sneaky.log", False, 9, is_link=True),
+            FakeAttr("logs", False, 4, is_link=True),
+        ],
+        files={
+            "/var/log/appname/app.log": b"hello",
+            "/var/log/appname/secret/key.log": b"TOP SECRET",
+        },
+        symlinks={
+            "/var/log/appname/current.log": "/var/log/appname/app.log",
+            "/var/log/appname/sneaky.log": "/var/log/appname/secret/key.log",
+            "/var/log/appname/logs": "/var/log/appname/secret",
+        },
+        dirs={"/var/log/appname", "/var/log/appname/secret"},
+    )
+
+
+_HIDE_SECRET = [_rule(0, RuleType.include, "**/*"), _rule(1, RuleType.exclude, "secret/**")]
+
+
+def test_listing_leaves_out_inward_links_whose_target_the_rules_hide(monkeypatch):
+    sftp = _hidden_target_fixture()
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    entries = {e.name: e for e in ssh_module.list_directory(_source(), _HIDE_SECRET)}
+
+    assert set(entries) == {"app.log", "current.log"}
+    assert entries["current.log"].target == "app.log"
+    assert entries["app.log"].target is None
+
+
+def test_browse_into_a_linked_folder_whose_target_is_hidden_is_refused(monkeypatch):
+    sftp = _hidden_target_fixture()
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    with pytest.raises(LinkTargetHiddenError):
+        ssh_module.list_directory(_source(), _HIDE_SECRET, "logs")
+    assert sftp.requested_paths == []
+
+
+def test_fetch_through_a_link_to_a_hidden_file_is_refused(monkeypatch, tmp_path):
+    from app.collectors.registry import CONNECTORS
+
+    sftp = _hidden_target_fixture()
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    with pytest.raises(LinkTargetHiddenError):
+        CONNECTORS[Protocol.ssh].fetch_file(
+            _source(), "sneaky.log", tmp_path / "out", rules=_HIDE_SECRET
+        )
+    assert sftp.fetched_paths == []
+    CONNECTORS[Protocol.ssh].fetch_file(
+        _source(), "current.log", tmp_path / "out", rules=_HIDE_SECRET
+    )
+    assert (tmp_path / "out").read_bytes() == b"hello"
+
+
+def test_fetch_through_an_inward_symlink_needs_its_target_allowed(monkeypatch, tmp_path):
+    sftp = _escape_fixture()
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    with pytest.raises(LinkTargetHiddenError):
+        ssh_module.fetch_file(_source(), "inner.log", tmp_path / "out")
+    with pytest.raises(LinkTargetHiddenError):
+        ssh_module.fetch_file(
+            _source(), "inner.log", tmp_path / "out", target_check=lambda real: False
+        )
+    assert sftp.fetched_paths == []
 
 
 def test_a_symlinked_base_path_is_resolved_before_comparing(monkeypatch, tmp_path):
@@ -502,3 +767,23 @@ def test_read_range_refuses_a_link_out_of_the_base(monkeypatch):
     monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
     with pytest.raises(ssh_module.PathOutsideBaseError):
         ssh_module.read_range(_source(), "app.log", 0, 10)
+
+
+def test_connect_sets_read_deadlines_and_keepalive(monkeypatch, tmp_path):
+    """#343: a server that stalls after login can't block a thread forever."""
+    created = _patch_ssh_infra(monkeypatch, tmp_path)
+    ssh_module._connect(_source())
+    kwargs = created[0].connect_calls[0][2]
+    assert kwargs["banner_timeout"] == kwargs["auth_timeout"] == 60
+    assert kwargs["channel_timeout"] == 60
+    assert created[0].transport.keepalive == ssh_module.KEEPALIVE_SECONDS
+
+
+def test_sftp_reads_have_a_timeout(monkeypatch):
+    monkeypatch.setattr(
+        ssh_module, "get_settings", lambda: SimpleNamespace(remote_read_timeout_seconds=42)
+    )
+    sftp = FakeSFTPClient(listing=[FakeAttr("app.log", False, 10)])
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+    ssh_module.list_directory(_source(), [_rule(1, RuleType.include, "**/*.log")])
+    assert sftp.get_channel().timeout == 42

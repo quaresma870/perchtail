@@ -1,19 +1,30 @@
-import tempfile
+import os
 from contextlib import contextmanager
 from pathlib import Path
 
 import smbclient
 
 from app.collectors import base as collector_base
-from app.collectors.base import DirEntry, PathOutsideBaseError
+from app.collectors.base import DirEntry, PathOutsideBaseError, SourceNotAFileError
+from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
 from app.models import Rule, Source
 from app.rules import is_entry_visible
+from app.scratch import scratch_temp_dir
 
 __all__ = ["DirEntry", "fetch_file", "list_directory", "local_copy"]
 
 logger = get_logger(__name__)
+
+# smbprotocol reads this as each connection is made: after this long without
+# a word from the server it sends an echo, and when that goes unanswered as
+# long again it fails every pending request (#343). Its default (600 s) kept
+# a stalled server's request waiting for 20 minutes; requests themselves
+# have no timeout in smbclient. An operator's own value wins.
+os.environ.setdefault(
+    "SMB_EXPERIMENTAL_TRANSPORT_RECEIVE_TIMEOUT", str(get_settings().remote_read_timeout_seconds)
+)
 
 
 def _connect_kwargs(source: Source) -> dict:
@@ -39,7 +50,12 @@ def _connect_kwargs(source: Source) -> dict:
     all (no /etc/krb5.conf) can fail the whole SPNEGO negotiation outright
     -- pyspnego.exceptions.BadMechanismError ("unable to negotiate common
     mechanism") -- instead of ever falling back to the NTLM this app
-    actually authenticates with."""
+    actually authenticates with.
+
+    require_signing and encrypt are the source's own choices: signing is
+    required unless the source turns it off (smbprotocol's default, which
+    the connector always used), and encryption is asked for only when the
+    source wants it; otherwise the server decides, as before."""
     collector_base.require_credential(source)
     creds = decrypt_credential(source.credential_ref)
     return {
@@ -47,6 +63,8 @@ def _connect_kwargs(source: Source) -> dict:
         "password": creds["password"],
         "port": source.port or 445,
         "auth_protocol": "ntlm",
+        "require_signing": source.smb_require_signing,
+        "encrypt": True if source.smb_encrypt else None,
     }
 
 
@@ -65,6 +83,8 @@ def _unc_path(source: Source, relative_path: str = "") -> str:
 # so one inside the share leads anywhere the account can read; they are
 # never listed or followed.
 _REPARSE_POINT = 0x400
+# FILE_ATTRIBUTE_DIRECTORY (MS-FSCC 2.6).
+_DIRECTORY = 0x10
 
 
 @contextmanager
@@ -79,7 +99,9 @@ def _connection(source: Source):
     cache: dict = {}
     kwargs = {**_connect_kwargs(source), "connection_cache": cache}
     try:
-        smbclient.register_session(source.host, **kwargs)
+        smbclient.register_session(
+            source.host, connection_timeout=get_settings().remote_read_timeout_seconds, **kwargs
+        )
         yield kwargs
     finally:
         smbclient.reset_connection_cache(fail_on_error=False, connection_cache=cache)
@@ -100,6 +122,16 @@ def _require_no_reparse_points(source: Source, relative_path: str, kwargs: dict)
         if _is_reparse_point(attributes):
             logger.warning("smb.path_outside_base", source_id=source.id, path=prefix)
             raise PathOutsideBaseError(relative_path)
+
+
+def _file_stat(remote_path: str, relative_path: str, kwargs: dict):
+    """The stat of a path to read, refusing a folder before it is opened
+    (SourceNotAFileError). SMB refuses every link, so there is no target
+    to check the rules on."""
+    info = smbclient.stat(remote_path, **kwargs)
+    if getattr(info, "st_file_attributes", 0) & _DIRECTORY:
+        raise SourceNotAFileError(f"{relative_path}: is a directory")
+    return info
 
 
 def _mtime(smb_info) -> float | None:
@@ -159,7 +191,7 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
         # Refuse before transferring anything when the size is already over
         # the cap (#167) -- copy_with_limit stays as the backstop for a file
         # that grows while it's being read.
-        size = smbclient.stat(remote_path, **kwargs).st_size
+        size = _file_stat(remote_path, relative_path, kwargs).st_size
         if size > limit:
             raise collector_base.too_large(size, limit)
         # share_access="rwd": a read-only open that tolerates other readers,
@@ -171,7 +203,7 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
 
 @contextmanager
 def local_copy(source: Source, relative_path: str):
-    with tempfile.TemporaryDirectory() as tmp:
+    with scratch_temp_dir() as tmp:
         path = Path(tmp) / "fetched"
         fetch_file(source, relative_path, path)
         yield path
@@ -186,6 +218,7 @@ def read_range(
     with _connection(source) as kwargs:
         _require_no_reparse_points(source, relative_path, kwargs)
         remote_path = _unc_path(source, relative_path)
+        _file_stat(remote_path, relative_path, kwargs)
         with smbclient.open_file(remote_path, mode="rb", share_access="rwd", **kwargs) as f:
             size = smbclient.stat(remote_path, **kwargs).st_size
             return collector_base.read_range_from(f, size, offset, length, head)

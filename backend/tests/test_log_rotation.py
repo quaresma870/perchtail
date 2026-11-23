@@ -154,3 +154,37 @@ def test_quiet_third_party_caps_protocol_loggers(tmp_path, monkeypatch):
         monkeypatch.delenv("LOG_QUIET_THIRD_PARTY")
         get_settings.cache_clear()
         configure_logging()
+
+
+def test_smb_and_ssh_libraries_log_warnings_only_at_info(tmp_path, monkeypatch):
+    # At INFO, smbprotocol logs every SMB2 message and paramiko every closed
+    # session: they stay at WARNING unless PerchTail logs at DEBUG.
+    from app.config import get_settings
+    from app.logging_config import configure_logging
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+    monkeypatch.setenv("LOG_QUIET_THIRD_PARTY", "false")
+    get_settings.cache_clear()
+    try:
+        configure_logging()
+        for name in ("smbprotocol", "spnego", "paramiko"):
+            assert logging.getLogger(name).level == logging.WARNING
+            assert not logging.getLogger(name).isEnabledFor(logging.INFO)
+        assert logging.getLogger("urllib3").level == logging.NOTSET
+        assert logging.getLogger("app").isEnabledFor(logging.INFO)
+
+        monkeypatch.setenv("LOG_LEVEL", "ERROR")
+        get_settings.cache_clear()
+        configure_logging()
+        assert not logging.getLogger("paramiko").isEnabledFor(logging.WARNING)
+
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        get_settings.cache_clear()
+        configure_logging()
+        assert logging.getLogger("smbprotocol").isEnabledFor(logging.DEBUG)
+    finally:
+        monkeypatch.delenv("LOG_LEVEL")
+        monkeypatch.delenv("LOG_QUIET_THIRD_PARTY")
+        get_settings.cache_clear()
+        configure_logging()

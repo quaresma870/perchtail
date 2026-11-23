@@ -2,9 +2,17 @@
   import { createEventDispatcher, onMount, tick } from 'svelte'
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
+  import { currentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import FolderPicker from '../lib/components/FolderPicker.svelte'
   import SeverityPatternEditor from '../lib/components/SeverityPatternEditor.svelte'
+  import RedactionRuleEditor from '../lib/components/RedactionRuleEditor.svelte'
+  import {
+    agentRedactionWarning,
+    detectorInfo,
+    inheritedRules,
+    type InheritedRule,
+  } from '../lib/redaction-rules'
   import {
     basePathHint,
     basePathPlaceholder,
@@ -19,9 +27,15 @@
     Customer,
     Folder,
     Protocol,
+    RedactionRule,
     Source,
     SourceRoot,
   } from '../lib/types'
+
+  // The WinRM part of the source setup guide, which explains the read-only
+  // JEA endpoint.
+  const WINRM_SETUP_GUIDE =
+    'https://github.com/quaresma870/perchtail/blob/main/docs/source-setup.md#winrm-windows-fallback-when-smb-isnt-open'
 
   export let params: { id?: string } = {}
   /** In a popup over the sources (#302): no settings navigation or page
@@ -65,8 +79,12 @@
   // JEA endpoint (#169): the PowerShell session configuration name; empty =
   // the WinRS shell.
   let winrmConfiguration = ''
+  // SMB: signing required unless turned off for a server that can't sign;
+  // encryption only when asked for.
+  let smbRequireSigning = true
+  let smbEncrypt = false
   let enabled = true
-  let searchIndexingEnabled = false
+  let nameIndexEnabled = true
   let username = ''
   let password = ''
   let privateKey = ''
@@ -81,6 +99,9 @@
   // here rather than forcing a detour through a separate admin page that
   // doesn't exist yet.
   const NEW_OPTION = '__new__'
+  // Only a super admin adds customers; everyone else picks one of the
+  // customers their grants reach.
+  $: canCreateCustomer = $currentUser?.is_super_admin ?? false
   let showNewCustomerForm = false
   let newCustomerName = ''
   let creatingCustomer = false
@@ -181,6 +202,9 @@
   }
 
   onMount(async () => {
+    // A new source's form starts as it is now: Escape while the customers
+    // still load mustn't count as unsaved changes.
+    savedState = formState()
     try {
       await loadCustomers()
       if (sourceId !== null) {
@@ -201,10 +225,12 @@
           winrmScheme = source.winrm_effective_scheme ?? 'https'
           tlsCaPem = source.tls_ca_pem ?? ''
           winrmConfiguration = source.winrm_configuration ?? ''
+          smbRequireSigning = source.smb_require_signing
+          smbEncrypt = source.smb_encrypt
           originalPaths = JSON.stringify(roots.map((r) => r.path))
           originalHostPort = `${source.host}:${source.port ?? ''}`
           enabled = source.enabled
-          searchIndexingEnabled = source.search_indexing_enabled
+          nameIndexEnabled = source.name_index_enabled
         }
       }
     } catch (err) {
@@ -215,7 +241,51 @@
       await tick()
       savedState = formState()
     }
+    if (showRedaction) await loadRedaction()
   })
+
+  // Redaction (#382, #249): only a super admin sees and changes a source's
+  // redaction (the API refuses anyone else): which system rules apply here
+  // and the source's own rules. Saved at once, apart from the form above.
+  $: showRedaction = !isNew && sourceId !== null && ($currentUser?.is_super_admin ?? false)
+  let inherited: InheritedRule[] = []
+  let redactionLoading = true
+  let redactionError = ''
+  let redactionBusy = false
+  $: agentWarning = source ? agentRedactionWarning(source) : null
+
+  async function loadRedaction() {
+    redactionError = ''
+    try {
+      const [system, effective] = await Promise.all([
+        api.get<RedactionRule[]>('/redaction-rules'),
+        api.get<RedactionRule[]>(`/sources/${sourceId}/redaction-rules/effective`),
+      ])
+      inherited = inheritedRules(system, effective)
+    } catch (err) {
+      redactionError = err instanceof ApiError ? err.detail : 'Failed to load the redaction rules'
+    } finally {
+      redactionLoading = false
+    }
+  }
+
+  async function setRuleHere(item: InheritedRule, input: HTMLInputElement) {
+    redactionBusy = true
+    redactionError = ''
+    try {
+      await api.put(`/sources/${sourceId}/redaction-overrides/${item.rule.id}`, { disabled: !input.checked })
+      await loadRedaction()
+    } catch (err) {
+      input.checked = item.appliesHere
+      redactionError = err instanceof ApiError ? err.detail : 'Failed to update the rule for this source'
+    } finally {
+      redactionBusy = false
+    }
+  }
+
+  function inheritedTitle(rule: RedactionRule): string {
+    return rule.detector !== null ? detectorInfo(rule.detector).title : rule.name
+  }
 
   // Unsaved changes, so the popup can ask before closing (#302).
   let savedState = ''
@@ -231,8 +301,10 @@
       winrmScheme,
       tlsCaPem,
       winrmConfiguration,
+      smbRequireSigning,
+      smbEncrypt,
       enabled,
-      searchIndexingEnabled,
+      nameIndexEnabled,
       username,
       password,
       privateKey,
@@ -253,7 +325,9 @@
 
   $: multiRoot = roots.length > 1
   // A saved credential is only sent to the host and port it was saved for,
-  // so pointing the source elsewhere needs it typed again.
+  // so pointing the source elsewhere needs it typed again. The folder picker
+  // then browses the typed host as for a new source: given the saved
+  // source, the server always browses the saved host.
   $: hostPortChanged = !isNew && originalHostPort !== '' && `${host}:${port ?? ''}` !== originalHostPort
   $: needsCredentialAgain =
     hostPortChanged && !!source?.has_credential && protocol !== 'agent' && protocol !== 'local'
@@ -291,6 +365,11 @@
     }
   }
 
+  function smbPayload(): Record<string, boolean> {
+    if (protocol !== 'smb') return {}
+    return { smb_require_signing: smbRequireSigning, smb_encrypt: smbEncrypt }
+  }
+
   function locationPayload() {
     const cleaned = roots.map((r) => ({ label: r.label.trim(), path: r.path.trim() }))
     if (cleaned.length > 1) return { base_path: cleaned[0].path, roots: cleaned }
@@ -314,8 +393,9 @@
           port,
           ...locationPayload(),
           ...winrmPayload(),
+          ...smbPayload(),
           enabled,
-          search_indexing_enabled: searchIndexingEnabled,
+          name_index_enabled: nameIndexEnabled,
           ...(credential ? { credential } : {}),
         })
         // Land on the read-only overview, not back on this form (#157).
@@ -331,8 +411,9 @@
           port,
           ...locationPayload(),
           ...winrmPayload(),
+          ...smbPayload(),
           enabled,
-          search_indexing_enabled: searchIndexingEnabled,
+          name_index_enabled: nameIndexEnabled,
           ...(credential ? { credential } : {}),
         })
         savedState = formState()
@@ -404,7 +485,9 @@
             {#each customers as customer (customer.id)}
               <option value={customer.id}>{customer.name}</option>
             {/each}
-            <option value={NEW_OPTION}>+ Create new customer…</option>
+            {#if canCreateCustomer}
+              <option value={NEW_OPTION}>+ Create new customer…</option>
+            {/if}
           </select>
         </label>
         <label>
@@ -576,6 +659,40 @@
             which needs an account with remote-shell rights.
           </span>
         </label>
+        {#if !winrmConfiguration.trim()}
+          <p class="warning small" data-testid="winrm-no-jea-warning">
+            Without a JEA endpoint the account must be able to open a remote shell, which in
+            practice means an administrator on the server, and it can then do anything an
+            administrator can. Prefer the read-only JEA endpoint:
+            <a href={WINRM_SETUP_GUIDE} target="_blank" rel="noopener noreferrer"
+              >how to set it up</a
+            >.
+          </p>
+        {/if}
+      {/if}
+      {#if protocol === 'smb'}
+        <fieldset>
+          <legend>SMB security</legend>
+          <label class="checkbox">
+            <input type="checkbox" bind:checked={smbRequireSigning} />
+            Require signing
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" bind:checked={smbEncrypt} />
+            Encrypt (SMB 3)
+          </label>
+          <span class="hint small">
+            Signing stops the messages from being changed on the way; turn it off only for a
+            server that can't sign. Encryption also hides the content on the network, and is
+            refused by a server that can't encrypt.
+          </span>
+          {#if !smbRequireSigning}
+            <p class="warning small" data-testid="smb-signing-off-warning">
+              Signing is off: someone on the network between PerchTail and this server could
+              change what it reads. Turn it on unless the server can't sign.
+            </p>
+          {/if}
+        </fieldset>
       {/if}
 
       <div class="roots">
@@ -629,8 +746,12 @@
               {host}
               {port}
               credential={buildCredential()}
-              sourceId={isNew ? null : sourceId}
-              winrm={protocol === 'winrm' ? winrmPayload() : null}
+              sourceId={isNew || hostPortChanged ? null : sourceId}
+              connection={protocol === 'winrm'
+                ? winrmPayload()
+                : protocol === 'smb'
+                  ? smbPayload()
+                  : null}
               startPath={root.path}
               on:pick={(e) => pickedFolder(index, e.detail)}
               on:close={() => (pickerFor = null)}
@@ -655,7 +776,7 @@
         {#if pathsChanged}
           <p class="warning small">
             Rules are relative to the base path, so after saving they apply to what's at the new
-            location — check they still match. The source's search index is cleared and rebuilt.
+            location — check they still match.
           </p>
         {/if}
       </div>
@@ -666,12 +787,11 @@
       </label>
 
       <label class="checkbox">
-        <input type="checkbox" bind:checked={searchIndexingEnabled} />
-        Include in full-text search
+        <input type="checkbox" bind:checked={nameIndexEnabled} />
+        Index file names
       </label>
       <p class="hint indent">
-        Off by default — stores short per-line snippets of this source's rule-visible content in a
-        local search index so it shows up under Search, refreshed periodically in the background.
+        On by default: PerchTail lists this source's files in the background and keeps their names, sizes and times (never their content), so they can be found by name across sources. Turn it off to leave the source out; what was indexed is dropped.
       </p>
 
       {#if protocol === 'agent'}
@@ -773,6 +893,72 @@
         baseUrl={`/sources/${sourceId}/severity-patterns`}
         readOnly={source?.is_system ?? false}
       />
+    {/if}
+
+    {#if showRedaction && sourceId !== null}
+      <section class="redaction card" aria-labelledby="source-redaction-title" data-testid="source-redaction">
+        <h3 id="source-redaction-title">Redaction</h3>
+        <p class="hint">
+          Replaces secrets and personal data in this source's file content, for every user, super admins included.
+          The system rules come from Settings → Redaction; turn one off here to leave this source out of it, or add
+          rules of this source's own. Saved at once.
+        </p>
+        {#if !$systemSettings.redaction_enabled}
+          <p class="hint" role="status">Redaction is off (Settings → Redaction): nothing is redacted until it's on.</p>
+        {/if}
+        {#if agentWarning}
+          <p class="warning small" role="status" data-testid="agent-redaction-warning">{agentWarning}</p>
+        {/if}
+        {#if redactionError}
+          <p class="error" role="alert">{redactionError}</p>
+        {/if}
+
+        <h4>System rules</h4>
+        {#if redactionLoading}
+          <p class="hint">Loading…</p>
+        {:else if inherited.length === 0}
+          <p class="hint">No system rules.</p>
+        {:else}
+          <ul class="inherited-list">
+            {#each inherited as item (item.rule.id)}
+              <li class="inherited-row" data-testid={`source-redaction-rule-${item.rule.name}`}>
+                <div>
+                  <span class="inherited-name">{inheritedTitle(item.rule)}</span>
+                  <span class="inherited-state">
+                    {#if !item.rule.enabled}
+                      off for every source
+                    {:else if item.turnedOffHere}
+                      turned off on this source
+                    {:else}
+                      applies here
+                    {/if}
+                  </span>
+                </div>
+                {#if item.rule.enabled}
+                  <label class="switch">
+                    <input
+                      type="checkbox"
+                      aria-label={`Apply ${inheritedTitle(item.rule)} on this source`}
+                      checked={item.appliesHere}
+                      disabled={redactionBusy}
+                      on:change={(e) => setRuleHere(item, e.currentTarget)}
+                    />
+                    <span class="switch-track"></span>
+                  </label>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+
+        <h4>This source's own rules</h4>
+        <p class="hint">Applied after the system rules, on this source only.</p>
+        <RedactionRuleEditor
+          rulesUrl={`/sources/${sourceId}/redaction-rules`}
+          idPrefix="source-redaction"
+          on:changed={loadRedaction}
+        />
+      </section>
     {/if}
   {/if}
 </div>
@@ -932,5 +1118,54 @@
   .override-hint {
     font-size: 0.78rem;
     margin: 0;
+  }
+  .redaction {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 1.25rem 1.5rem;
+  }
+  .redaction h3 {
+    margin: 0;
+    font-size: 1rem;
+    color: var(--text);
+  }
+  .redaction h4 {
+    margin: 0.4rem 0 0;
+    font-size: 0.88rem;
+    color: var(--text);
+  }
+  .redaction .hint {
+    font-size: 0.78rem;
+    margin: 0;
+    line-height: 1.5;
+  }
+  .inherited-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .inherited-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    background: var(--bg);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    padding: 0.4rem 0.6rem;
+    font-size: 0.85rem;
+  }
+  .inherited-name {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .inherited-state {
+    color: var(--text-faint);
+    font-size: 0.76rem;
+    margin-left: 0.5rem;
   }
 </style>

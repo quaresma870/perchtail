@@ -3,13 +3,13 @@ import { api } from './api'
 import type { SystemSettings } from './types'
 
 // Readable by any authenticated user (see backend/app/api/system_settings.py)
-// -- needed to decide whether to render the Search nav link at all, for
+// -- needed to decide whether to render the Audit log page at all, for
 // everyone, not just whoever can change it. Defaults keep every feature on
 // until the real value loads, so nothing flashes hidden then visible.
 export const systemSettings = writable<SystemSettings>({
-  search_view_enabled: true,
   audit_view_enabled: true,
   audit_retention_days: 365,
+  audit_folder_listings: true,
   source_max_roots: 20,
   connections_view_switchable: true,
   connections_view_default: 'list',
@@ -25,6 +25,22 @@ export const systemSettings = writable<SystemSettings>({
   explorer_refresh_seconds: 30,
   tail_interval_seconds: 2,
   source_check_minutes: 10,
+  name_index_enabled: true,
+  name_index_minutes: 15,
+  alerts_interval_seconds: 60,
+  credential_max_age_days: 90,
+  concurrency_global: 16,
+  concurrency_per_source: 4,
+  concurrency_user_transfers: 2,
+  listing_max_entries: 5000,
+  backup_interval_hours: 0,
+  redaction_enabled: false,
+  redaction_downloads: true,
+  redaction_download_suffix: true,
+  require_mfa_local_accounts: false,
+  password_reset_enabled: false,
+  password_reset_minutes: 30,
+  password_reset_unavailable: null,
 })
 
 let loadedAt = 0

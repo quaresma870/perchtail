@@ -37,8 +37,8 @@ class FakeSFTPClient:
     def listdir_attr(self, path):
         return self.listing
 
-    def get(self, remote_path, local_path):
-        Path(local_path).write_bytes(self.files[remote_path])
+    def open(self, remote_path, mode="r"):
+        return _RemoteFile(self.files[remote_path])
 
     def stat(self, remote_path):
         return FakeAttr(remote_path.rsplit("/", 1)[-1], False, len(self.files[remote_path]))
@@ -47,11 +47,26 @@ class FakeSFTPClient:
         pass
 
 
+class _RemoteFile(io.BytesIO):
+    def prefetch(self, file_size=None):
+        pass
+
+
+class FakeChannel:
+    timeout = None
+
+    def settimeout(self, seconds):
+        self.timeout = seconds
+
+
 class FakeSSHClient:
     def __init__(self, sftp: FakeSFTPClient):
         self._sftp = sftp
 
     def open_sftp(self):
+        if not hasattr(self._sftp, "get_channel"):
+            channel = FakeChannel()
+            self._sftp.get_channel = lambda: channel
         return self._sftp
 
     def close(self):
@@ -189,8 +204,33 @@ def test_browse_denied_without_view_capability(app_client, session, fake_sftp):
     source = _make_source(session, customer=customer)
     _make_user(session, app, is_super_admin=False)
 
+    # With no access at all the source answers like one that doesn't exist.
     response = client.get(f"/sources/{source.id}/browse")
-    assert response.status_code == 403
+    missing = client.get(f"/sources/{source.id + 1000}/browse")
+    assert response.status_code == missing.status_code == 404
+    assert response.json() == missing.json() == {"detail": "Source not found"}
+
+
+def test_browse_denied_with_access_but_without_view(app_client, session, fake_sftp):
+    app, client = app_client
+    customer = Customer(name="Acme")
+    session.add(customer)
+    session.commit()
+    session.refresh(customer)
+    source = _make_source(session, customer=customer)
+    user = _make_user(session, app, is_super_admin=False)
+    session.add(
+        RoleGrant(
+            role_id=user.role_id,
+            scope_type=ScopeType.source,
+            scope_id=source.id,
+            capabilities=[Capability.download],
+        )
+    )
+    session.commit()
+
+    # A source the user reaches without view is a plain refusal.
+    assert client.get(f"/sources/{source.id}/browse").status_code == 403
 
 
 def test_browse_expands_zip_archive_members(app_client, session, fake_sftp):
@@ -220,6 +260,8 @@ def test_open_fetches_file_and_returns_scratch_key(app_client, session, fake_sft
     assert response.status_code == 200
     assert response.content == b"hello world"
     assert "x-scratch-key" in response.headers
+    # File content is never cached by the browser or a proxy.
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_open_denies_file_not_matched_by_rules(app_client, session, fake_sftp, scratch_store):
@@ -328,6 +370,61 @@ def test_close_releases_the_scratch_entry(app_client, session, fake_sftp, scratc
     assert key not in scratch_store._entries
 
 
+def _as_session(session_ref: str):
+    """Runs a request as if it came with the session `session_ref`
+    (app/request_context.py, set by get_current_user in the app)."""
+    from contextlib import contextmanager
+
+    from app import request_context
+
+    @contextmanager
+    def scope():
+        original = request_context.current
+        context = request_context.RequestContext(session_id=session_ref)
+        request_context.current = lambda: context
+        try:
+            yield
+        finally:
+            request_context.current = original
+
+    return scope()
+
+
+def test_a_viewer_only_closes_its_own_scratch(app_client, session, fake_sftp, scratch_store):
+    """Two sessions with the same file open: closing it in one leaves the
+    other's copy alone, and only the owner's close releases it."""
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    other = User(username="other@example.com", role_id=user.role_id)
+    session.add(other)
+    session.commit()
+    session.refresh(other)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+    fake_sftp.files["/var/log/appname/app.log"] = b"hello world"
+    url = f"/sources/{source.id}"
+
+    with _as_session("session-a"):
+        key_a = client.get(f"{url}/open", params={"path": "app.log"}).headers["x-scratch-key"]
+    with _as_session("session-b"):
+        key_b = client.get(f"{url}/open", params={"path": "app.log"}).headers["x-scratch-key"]
+    assert key_a != key_b
+
+    with _as_session("session-b"):
+        assert client.post(f"{url}/close", json={"path": "app.log"}).status_code == 204
+    assert key_a in scratch_store._entries
+    assert key_b not in scratch_store._entries
+    # Another user in a session with the same reference can't close it either.
+    app.dependency_overrides[get_current_active_user] = lambda: other
+    with _as_session("session-a"):
+        client.post(f"{url}/close", json={"path": "app.log"})
+    assert key_a in scratch_store._entries
+    app.dependency_overrides[get_current_active_user] = lambda: user
+    with _as_session("session-a"):
+        client.post(f"{url}/close", json={"path": "app.log"})
+    assert key_a not in scratch_store._entries
+
+
 def test_download_releases_automatically_without_explicit_close(
     app_client, session, fake_sftp, scratch_store
 ):
@@ -341,6 +438,7 @@ def test_download_releases_automatically_without_explicit_close(
     response = client.get(f"/sources/{source.id}/download", params={"path": "app.log"})
     assert response.status_code == 200
     assert response.content == b"hello world"
+    assert response.headers["cache-control"] == "no-store"
     assert len(scratch_store._entries) == 0
 
 
@@ -406,6 +504,116 @@ def test_open_local_gz_file_still_uses_scratch(app_client, session, scratch_stor
     assert "x-scratch-key" in response.headers
 
 
+# --- a read slower than SCRATCH_IDLE_SECONDS keeps its scratch file ----------
+
+IDLE_SECONDS = 0.2
+SLOW_CONTENT = b"first part of the file\n" + b"x" * 300_000 + b"\nlast line\n"
+
+
+@pytest.fixture()
+def slow_reads(fake_sftp, scratch_store, monkeypatch):
+    """SCRATCH_IDLE_SECONDS made short, and `slow_down(phase)`: the fetch
+    ("fetch", the connector half way through the file) or the response
+    ("send", before the scratch file is sent) stalls longer than that, and
+    the idle sweep runs then, as the scheduled job would."""
+    import time
+
+    import app.api.archive as archive_module
+
+    monkeypatch.setattr(get_settings(), "scratch_idle_seconds", IDLE_SECONDS)
+
+    def stall_and_sweep() -> None:
+        time.sleep(IDLE_SECONDS * 3)
+        scratch_store.sweep_idle(get_settings().scratch_idle_seconds)
+
+    class Controls:
+        sweeps_while_fetching = 0
+        sweeps_while_sending = 0
+
+        def sweep_while_fetching(self) -> None:
+            class SlowRemoteFile(_RemoteFile):
+                stalled = False
+
+                def read(self, size=-1):
+                    chunk = super().read(size)
+                    if chunk and not self.stalled:
+                        self.stalled = True
+                        stall_and_sweep()
+                        Controls.sweeps_while_fetching += 1
+                    return chunk
+
+            monkeypatch.setattr(
+                fake_sftp, "open", lambda path, mode="r": SlowRemoteFile(fake_sftp.files[path])
+            )
+
+        def sweep_while_sending(self) -> None:
+            original = archive_module._SnapshotFileResponse._handle_simple
+
+            async def handle(response, *args, **kwargs):
+                stall_and_sweep()
+                Controls.sweeps_while_sending += 1
+                await original(response, *args, **kwargs)
+
+            monkeypatch.setattr(archive_module._SnapshotFileResponse, "_handle_simple", handle)
+
+        def slow_down(self, phase: str) -> None:
+            {"fetch": self.sweep_while_fetching, "send": self.sweep_while_sending}[phase]()
+
+        def swept(self, phase: str) -> int:
+            return {"fetch": self.sweeps_while_fetching, "send": self.sweeps_while_sending}[phase]
+
+    fake_sftp.files["/var/log/appname/app.log"] = SLOW_CONTENT
+    return Controls()
+
+
+def _scratch_files_left(store) -> list[Path]:
+    return [p for p in store.root.rglob("*")]
+
+
+@pytest.mark.parametrize("phase", ["fetch", "send"])
+def test_an_open_slower_than_the_idle_time_keeps_its_scratch_file(
+    app_client, session, scratch_store, slow_reads, phase
+):
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+    slow_reads.slow_down(phase)
+
+    response = client.get(f"/sources/{source.id}/open", params={"path": "app.log"})
+    assert response.status_code == 200
+    assert response.content == SLOW_CONTENT
+    assert slow_reads.swept(phase) == 1
+    key = response.headers["x-scratch-key"]
+    assert key in scratch_store._entries
+
+    assert client.post(f"/sources/{source.id}/close", json={"path": "app.log"}).status_code == 204
+    assert _scratch_files_left(scratch_store) == []
+    assert scratch_store._entries == {}
+
+
+@pytest.mark.parametrize("phase", ["fetch", "send"])
+def test_a_download_slower_than_the_idle_time_keeps_its_scratch_file(
+    app_client, session, scratch_store, slow_reads, phase
+):
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    _grant_view_and_download(session, user, source)
+    _add_rule(session, source, 0, RuleType.include, "*.log")
+    slow_reads.slow_down(phase)
+
+    with client.stream(
+        "GET", f"/sources/{source.id}/download", params={"path": "app.log"}
+    ) as response:
+        assert response.status_code == 200
+        body = b"".join(response.iter_bytes())
+    assert body == SLOW_CONTENT
+    assert slow_reads.swept(phase) == 1
+    assert _scratch_files_left(scratch_store) == []
+    assert scratch_store._entries == {}
+
+
 def test_download_zip_bundles_only_rule_visible_files(app_client, session, tmp_path):
     app, client = app_client
     (tmp_path / "app.log").write_text("hello")
@@ -421,6 +629,7 @@ def test_download_zip_bundles_only_rule_visible_files(app_client, session, tmp_p
     response = client.get(f"/sources/{source.id}/download-zip")
     assert response.status_code == 200
     assert response.headers["content-disposition"].startswith("attachment")
+    assert response.headers["cache-control"] == "no-store"
 
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
         names = set(zf.namelist())
@@ -819,6 +1028,109 @@ def test_413_reports_file_size_and_limit(
     assert detail["limit_bytes"] == 8
 
 
+@pytest.mark.parametrize("archive", ["big.zip", "big.tar.gz", "big.tgz"])
+@pytest.mark.parametrize("all_members", [False, True])
+def test_browsing_an_archive_over_max_fetch_mb_is_the_413_opening_it_gives(
+    app_client, session, fake_sftp, scratch_store, monkeypatch, archive, all_members
+):
+    """F1 of the 0.7.0-rc.3 retest: expanding an archive over MAX_FETCH_MB
+    answered 500; it answers the 413 opening one of its members gives, with
+    the same body, and the audit log holds the same for both: nothing."""
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 8)
+    monkeypatch.setattr("app.api.archive.max_fetch_bytes", lambda: 8)
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    content = (
+        _zip_bytes({"app.log": "x" * 100})
+        if archive.endswith(".zip")
+        else _tar_gz_bytes({"app.log": "x" * 100})
+    )
+    fake_sftp.files[f"/var/log/appname/{archive}"] = content
+    params = {"path": archive, **({"all": "true"} if all_members else {})}
+
+    browsed = client.get(f"/sources/{source.id}/browse", params=params)
+    opened = client.get(f"/sources/{source.id}/open", params={"path": archive, "member": "app.log"})
+
+    assert browsed.status_code == 413
+    assert opened.status_code == 413
+    assert browsed.json() == opened.json()
+    assert browsed.json()["detail"]["error_code"] == "fetch_too_large"
+    assert browsed.json()["detail"]["size_bytes"] == len(content)
+    assert session.exec(select(AuditLog)).all() == []
+
+
+def test_browsing_a_local_archive_over_max_fetch_mb_lists_it_as_opening_reads_it(
+    app_client, session, scratch_store, tmp_path, monkeypatch
+):
+    """A local source reads its files in place, without MAX_FETCH_MB: an
+    archive over it is listed, as one of its members opens, rather than a
+    500."""
+    monkeypatch.setattr("app.collectors.base.max_fetch_bytes", lambda: 8)
+    monkeypatch.setattr("app.api.archive.max_fetch_bytes", lambda: 8)
+    app, client = app_client
+    (tmp_path / "big.zip").write_bytes(_zip_bytes({"app.log": "x" * 100}))
+    source = _make_local_source(session, tmp_path)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+
+    browsed = client.get(f"/sources/{source.id}/browse", params={"path": "big.zip"})
+    flat = client.get(f"/sources/{source.id}/browse", params={"path": "big.zip", "all": "true"})
+    opened = client.get(
+        f"/sources/{source.id}/open", params={"path": "big.zip", "member": "app.log"}
+    )
+
+    assert browsed.status_code == 200
+    assert [e["path"] for e in browsed.json()] == ["big.zip/app.log"]
+    assert [e["path"] for e in flat.json()] == ["big.zip/app.log"]
+    assert opened.status_code == 200
+
+
+@pytest.mark.parametrize("all_members", [False, True])
+def test_browsing_an_archive_the_agent_finds_over_a_limit_is_a_413(
+    app_client, session, scratch_store, monkeypatch, all_members
+):
+    """An archive listed on the agent's host (list_archive) that the agent
+    finds over MAX_FETCH_MB, or over MAX_DECOMPRESSED_MB once read: the
+    413s opening it gives, not a 500. The agent's command doesn't change."""
+    from app.archives import DecompressionLimitError
+    from app.collectors.base import FetchTooLargeError
+
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    raised: list[Exception] = [
+        FetchTooLargeError("over", size=100, limit=8),
+        DecompressionLimitError("over"),
+    ]
+
+    class _Connector:
+        def call(self, name, *args, **kwargs):
+            assert name == "list_archive"
+            raise raised.pop(0)
+
+    monkeypatch.setattr("app.api.archive._lists_on_agent", lambda session, source: True)
+    monkeypatch.setattr("app.api.archive._connector", lambda source: _Connector())
+    params = {"path": "big.zip", **({"all": "true"} if all_members else {})}
+
+    fetch = client.get(f"/sources/{source.id}/browse", params=params)
+    decompressed = client.get(f"/sources/{source.id}/browse", params=params)
+
+    assert fetch.status_code == 413
+    assert fetch.json()["detail"] == {
+        "message": "This file is 0.0 MB, over this server's 0 MB limit (MAX_FETCH_MB).",
+        "error_code": "fetch_too_large",
+        "size_bytes": 100,
+        "limit_bytes": 8,
+    }
+    assert decompressed.status_code == 413
+    assert decompressed.json()["detail"] == (
+        "File is too large once decompressed (MAX_DECOMPRESSED_MB)"
+    )
+
+
 def test_source_open_names_the_source_and_its_customer(app_client, session, fake_sftp):
     """#239: opening a source recorded only `source` and an id."""
     app, client = app_client
@@ -836,6 +1148,68 @@ def test_source_open_names_the_source_and_its_customer(app_client, session, fake
     assert event.event_metadata == {"target_name": source.name, "target_context": "Acme"}
 
 
+# --- a disabled source is off ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("get", "browse?path="),
+        ("get", "open?path=app.log"),
+        ("get", "follow?path=app.log&offset=0"),
+        ("get", "download?path=app.log"),
+        ("get", "download-zip?path="),
+    ],
+)
+def test_a_disabled_source_is_not_read_whatever_the_grants(
+    session, app_client, tmp_path, method, path
+):
+    app, client = app_client
+    (tmp_path / "app.log").write_text("line\n")
+    source = _make_local_source(session, tmp_path)
+    _add_rule(session, source, 0, RuleType.include, "**")
+    source.enabled = False
+    session.add(source)
+    session.commit()
+    _make_user(session, app, is_super_admin=True)
+    response = getattr(client, method)(f"/sources/{source.id}/{path}")
+    assert response.status_code == 409
+    # A code of its own: the viewer offers no Try again and Tail stops.
+    assert response.json()["detail"]["error_code"] == "source_disabled"
+    assert "disabled" in response.json()["detail"]["message"]
+
+
+def test_closing_a_tab_still_works_on_a_disabled_source(session, app_client, tmp_path):
+    app, client = app_client
+    source = _make_local_source(session, tmp_path)
+    source.enabled = False
+    session.add(source)
+    session.commit()
+    _make_user(session, app, is_super_admin=True)
+    response = client.post(f"/sources/{source.id}/close", json={"path": "app.log"})
+    assert response.status_code == 204
+
+
+def test_checking_a_disabled_source_does_not_contact_it(session, tmp_path, monkeypatch):
+    from app.api.sources import router as sources_router
+
+    contacted = []
+    monkeypatch.setattr(
+        "app.api.sources.source_status.check", lambda *a, **k: contacted.append(a) or []
+    )
+    app = FastAPI()
+    app.include_router(sources_router)
+    app.dependency_overrides[get_session] = lambda: session
+    source = _make_local_source(session, tmp_path)
+    source.enabled = False
+    session.add(source)
+    session.commit()
+    _make_user(session, app, is_super_admin=True)
+    response = TestClient(app).post(f"/sources/{source.id}/check")
+    assert response.status_code == 409 and contacted == []
+    assert response.json()["detail"]["error_code"] == "source_disabled"
+
+
 # --- whole archives with members hidden by the rules ------------------------
 
 
@@ -851,6 +1225,7 @@ def _tar_gz_bytes(members: dict[str, str]) -> bytes:
 
 
 _ARCHIVE_BUILDERS = {"logs.zip": _zip_bytes, "logs.tar.gz": _tar_gz_bytes}
+_SKIPPED_LINE = b": can't be included whole; open or download its files one by one\n"
 
 
 @pytest.mark.parametrize("archive", sorted(_ARCHIVE_BUILDERS))
@@ -908,6 +1283,7 @@ def test_whole_archive_is_refused_on_open_too(app_client, session, fake_sftp, sc
     assert response.status_code == 403
     assert response.json()["detail"]["error_code"] == "archive_not_downloadable_whole"
     assert len(scratch_store._entries) == 0
+    assert list(scratch_store.root.iterdir()) == []
     event = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).one()
     assert event.target_type == "source" and event.target_id == source.id
     assert event.event_metadata["path"] == "logs.zip"
@@ -963,14 +1339,15 @@ def test_whole_archive_is_read_from_the_source_once(app_client, session, fake_sf
     original = _zip_bytes({"app.log": "hello"})
     fake_sftp.files["/var/log/appname/logs.zip"] = original
     reads = []
-    real_get = fake_sftp.get
-    fake_sftp.get = lambda remote, local: (reads.append(remote), real_get(remote, local))[1]
+    real_open = fake_sftp.open
+    fake_sftp.open = lambda remote, mode="r": (reads.append(remote), real_open(remote, mode))[1]
 
     response = client.get(f"/sources/{source.id}/download", params={"path": "logs.zip"})
 
     assert response.status_code == 200
     assert response.content == original
     assert reads == ["/var/log/appname/logs.zip"]
+    assert list(scratch_store.root.iterdir()) == []
 
 
 def test_case_insensitive_source_matches_members_ignoring_case(
@@ -1032,33 +1409,223 @@ def test_corrupt_archive_is_refused_only_when_the_source_has_an_exclude(
         assert response.content == b"not really a zip"
 
 
+@pytest.mark.parametrize("name", ["broken.zip", "broken.tar.gz"])
+def test_a_corrupt_archive_is_refused_alike_when_browsed_and_when_a_member_is_opened(
+    app_client, session, fake_sftp, scratch_store, name
+):
+    """An archive that is really text can't be listed or opened: the
+    explorer gets the same refusal as opening one of its members, not a 500."""
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    _grant_view_and_download(session, user, source)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files[f"/var/log/appname/{name}"] = b"just some text\n" * 10
+
+    opened = client.get(f"/sources/{source.id}/open", params={"path": name, "member": "a.log"})
+    browsed = client.get(f"/sources/{source.id}/browse", params={"path": name})
+
+    assert opened.status_code == 409
+    assert opened.json()["detail"]["error_code"] == "archive_unreadable"
+    assert (browsed.status_code, browsed.json()) == (opened.status_code, opened.json())
+    event = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).one()
+    assert event.event_metadata["reason"] == "archive_unreadable"
+
+
+def _long_name_tar(tar_format: int) -> bytes:
+    """A tar whose only member's name is too long for a ustar header: it
+    starts with a pax or GNU long-name header and its data (1024 bytes)."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tar_format) as tf:
+        info = tarfile.TarInfo("n" * 150 + ".log")
+        info.size = 4
+        tf.addfile(info, io.BytesIO(b"line"))
+    return buffer.getvalue()
+
+
+def _global_header_tar() -> bytes:
+    """A tar that starts with a global pax header and its data (1024
+    bytes), as git archive writes, then app.log."""
+    buffer = io.BytesIO()
+    with tarfile.open(
+        fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT, pax_headers={"comment": "c" * 40}
+    ) as tf:
+        info = tarfile.TarInfo("app.log")
+        info.size = 4
+        tf.addfile(info, io.BytesIO(b"line"))
+    data = buffer.getvalue()
+    assert data[156:157] == tarfile.XGLTYPE and data[1024 + 156 : 1024 + 157] == tarfile.REGTYPE
+    return data
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        gzip.compress(b"just some text\n"),
+        gzip.compress(b""),
+        gzip.compress(_long_name_tar(tarfile.PAX_FORMAT)[:1024]),
+        gzip.compress(_long_name_tar(tarfile.PAX_FORMAT)[:1124]),
+        gzip.compress(_long_name_tar(tarfile.GNU_FORMAT)[:1024]),
+        gzip.compress(_global_header_tar()[:1024]),
+        gzip.compress(_global_header_tar()[:1124]),
+        gzip.compress(_global_header_tar(), compresslevel=0)[:1100],
+    ],
+    ids=[
+        "short",
+        "nothing",
+        "pax-header-then-nothing",
+        "pax-cut-in-the-header",
+        "gnu-name",
+        "global-header-then-nothing",
+        "global-cut-in-the-header",
+        "global-gzip-cut",
+    ],
+)
+def test_a_tar_gz_that_ends_before_its_first_header_is_refused(
+    app_client, session, fake_sftp, scratch_store, content
+):
+    """Less than one tar block once decompressed, nothing at all, or a long
+    name or global header followed by nothing or part of the entry's header:
+    not a tar, refused alike when browsed and when a member is opened, as the
+    agent refuses it (TestAnArchiveCutBeforeItsFirstHeader...)."""
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/logs.tar.gz"] = content
+
+    browsed = client.get(f"/sources/{source.id}/browse", params={"path": "logs.tar.gz"})
+    opened = client.get(
+        f"/sources/{source.id}/open", params={"path": "logs.tar.gz", "member": "app.log"}
+    )
+
+    assert opened.status_code == 409, opened.text
+    assert opened.json()["detail"]["error_code"] == "archive_unreadable"
+    assert (browsed.status_code, browsed.json()) == (opened.status_code, opened.json())
+    event = session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).one()
+    assert event.event_metadata["reason"] == "archive_unreadable"
+    assert list(scratch_store.root.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [_tar_gz_bytes({}), gzip.compress(bytes(512))],
+    ids=["end-of-archive-blocks", "one-zero-block"],
+)
+def test_a_tar_gz_with_no_members_lists_empty(
+    app_client, session, fake_sftp, scratch_store, content
+):
+    """A tar whose first block is all zeros (its end-of-archive blocks) is
+    an empty archive, not an unreadable one."""
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/logs.tar.gz"] = content
+
+    response = client.get(f"/sources/{source.id}/browse", params={"path": "logs.tar.gz"})
+
+    assert (response.status_code, response.json()) == (200, [])
+
+
+def _zip_with_a_damaged_local_header() -> bytes:
+    """A zip whose index lists app.log, whose own (local) header is damaged."""
+    content = _zip_bytes({"app.log": "a line\n"})
+    assert content.startswith(b"PK\x03\x04")
+    return b"PK\x00\x00" + content[4:]
+
+
+@pytest.mark.parametrize(
+    "endpoint, action", [("open", "file.open_denied"), ("download", "file.download_denied")]
+)
+def test_a_zip_member_with_a_damaged_header_is_an_audited_refusal(
+    app_client, session, fake_sftp, scratch_store, endpoint, action
+):
+    """The zip's index lists the member, so the archive browses; the member
+    itself can't be read: 409 archive_unreadable, audited, as on an agent."""
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/logs.zip"] = _zip_with_a_damaged_local_header()
+
+    browsed = client.get(f"/sources/{source.id}/browse", params={"path": "logs.zip"})
+    response = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "logs.zip", "member": "app.log"}
+    )
+
+    assert browsed.status_code == 200, browsed.text
+    assert [entry["name"] for entry in browsed.json()] == ["app.log"]
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error_code"] == "archive_unreadable"
+    event = session.exec(select(AuditLog).where(AuditLog.action == action)).one()
+    assert event.event_metadata["path"] == "logs.zip/app.log"
+    assert event.event_metadata["reason"] == "archive_unreadable"
+    assert list(scratch_store.root.iterdir()) == []
+
+
+@pytest.mark.parametrize("endpoint", ["open", "download"])
+def test_a_gz_file_that_isnt_gzip_is_refused_not_a_500(
+    app_client, session, fake_sftp, scratch_store, endpoint
+):
+    """A .gz file that can't be decompressed (damaged, or not really gzip)
+    gets the same refusal as an archive that can't be read, audited, rather
+    than a 500."""
+    app, client = app_client
+    source = _make_source(session)
+    user = _make_user(session, app, is_super_admin=True)
+    _grant_view_and_download(session, user, source)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/broken.log.gz"] = b"just some text\n" * 10
+
+    response = client.get(f"/sources/{source.id}/{endpoint}", params={"path": "broken.log.gz"})
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["error_code"] == "archive_unreadable"
+    assert ".gz" in detail["message"]
+    action = "file.open_denied" if endpoint == "open" else "file.download_denied"
+    event = session.exec(select(AuditLog).where(AuditLog.action == action)).one()
+    assert event.event_metadata["reason"] == "archive_unreadable"
+    assert list(scratch_store.root.iterdir()) == []
+
+
 def test_local_source_whole_archive_with_an_excluded_member_is_refused(
     app_client, session, scratch_store, tmp_path
 ):
     app, client = app_client
-    (tmp_path / "logs.zip").write_bytes(_zip_bytes({"app.log": "a", "secret.txt": "x"}))
-    source = _make_local_source(session, tmp_path)
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "logs.zip").write_bytes(_zip_bytes({"app.log": "a", "secret.txt": "x"}))
+    source = _make_local_source(session, files)
     _make_user(session, app, is_super_admin=True)
     _add_rule(session, source, 0, RuleType.include, "**/*")
     _add_rule(session, source, 1, RuleType.exclude, "**/secret.txt")
 
     response = client.get(f"/sources/{source.id}/download", params={"path": "logs.zip"})
+    opened = client.get(f"/sources/{source.id}/open", params={"path": "logs.zip"})
 
     assert response.status_code == 403
     assert response.json()["detail"]["error_code"] == "archive_not_downloadable_whole"
+    assert opened.status_code == 403
     event = session.exec(select(AuditLog).where(AuditLog.action == "file.download_denied")).one()
     assert event.event_metadata["reason"] == "archive_hidden_members"
+    assert session.exec(select(AuditLog).where(AuditLog.action == "file.open_denied")).one()
 
 
-def test_folder_zip_leaves_out_archives_with_hidden_members(app_client, session, tmp_path):
+def test_folder_zip_leaves_out_archives_with_hidden_members(
+    app_client, session, scratch_store, tmp_path
+):
     app, client = app_client
-    (tmp_path / "app.log").write_text("hello")
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "app.log").write_text("hello")
     clean = _zip_bytes({"a.log": "a"})
-    (tmp_path / "clean.zip").write_bytes(clean)
-    nested = tmp_path / "nested"
+    (files / "clean.zip").write_bytes(clean)
+    nested = files / "nested"
     nested.mkdir()
     (nested / "hiding.tar.gz").write_bytes(_tar_gz_bytes({"b.log": "b", "secret.txt": "x"}))
-    source = _make_local_source(session, tmp_path)
+    source = _make_local_source(session, files)
     _make_user(session, app, is_super_admin=True)
     _add_rule(session, source, 0, RuleType.include, "**/*")
     _add_rule(session, source, 1, RuleType.exclude, "**/secret.txt")
@@ -1070,13 +1637,83 @@ def test_folder_zip_leaves_out_archives_with_hidden_members(app_client, session,
         assert set(zf.namelist()) == {"app.log", "clean.zip", "SKIPPED.txt"}
         assert zf.read("app.log") == b"hello"
         assert zf.read("clean.zip") == clean
-        assert zf.read("SKIPPED.txt") == (
-            b"nested/hiding.tar.gz: can't be included whole; open or download its files one by "
-            b"one\n"
-        )
+        assert zf.read("SKIPPED.txt") == b"nested/hiding.tar.gz" + _SKIPPED_LINE
     event = session.exec(select(AuditLog).where(AuditLog.action == "folder.download")).one()
     assert event.event_metadata["file_count"] == 2
     assert event.event_metadata["skipped_archives"] == ["nested/hiding.tar.gz"]
+    # Nothing is left behind in scratch, the archive left out included.
+    assert list(scratch_store.root.iterdir()) == []
+
+
+def test_folder_zip_reads_each_archive_from_the_source_once(
+    app_client, session, scratch_store, tmp_path, monkeypatch
+):
+    """The archive checked before the ZIP starts is the copy zipped."""
+    import app.collectors.local as local_connector
+
+    fetched = []
+    real_fetch = local_connector.fetch_file
+    monkeypatch.setattr(
+        local_connector,
+        "fetch_file",
+        lambda *a, **kw: (fetched.append(a[1]), real_fetch(*a, **kw))[1],
+    )
+    app, client = app_client
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "app.log").write_text("hello")
+    clean = _zip_bytes({"a.log": "a"})
+    (files / "clean.zip").write_bytes(clean)
+    (files / "hiding.zip").write_bytes(_zip_bytes({"secret.txt": "x"}))
+    source = _make_local_source(session, files)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    _add_rule(session, source, 1, RuleType.exclude, "**/secret.txt")
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert zf.read("clean.zip") == clean
+    assert sorted(fetched) == ["app.log", "clean.zip", "hiding.zip"]
+    assert list(scratch_store.root.iterdir()) == []
+
+
+def test_folder_zip_archive_left_out_does_not_count_against_the_limit(
+    app_client, session, scratch_store, tmp_path, monkeypatch
+):
+    """The fetched budget counts what goes into the ZIP: an archive left out
+    doesn't use it up."""
+    import app.collectors.local as local_connector
+
+    app, client = app_client
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "app.log").write_text("x" * 400)
+    hiding = _zip_bytes({"secret.txt": "y" * 50})
+    (files / "hiding.zip").write_bytes(hiding)
+    source = _make_local_source(session, files)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    _add_rule(session, source, 1, RuleType.exclude, "**/secret.txt")
+    # Room for both as listed, then the log grows past what's left once the
+    # archive is counted: only leaving the archive out keeps it under.
+    limit = 400 + len(hiding) + 10
+    monkeypatch.setattr(get_settings(), "max_fetch_mb", limit / 1024**2)
+    real_fetch = local_connector.fetch_file
+
+    def growing_fetch(source_, relative_path, destination, **kwargs):
+        real_fetch(source_, relative_path, destination, **kwargs)
+        if relative_path == "app.log":
+            Path(destination).write_text("x" * (limit - 5))
+
+    monkeypatch.setattr(local_connector, "fetch_file", growing_fetch)
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert set(zf.namelist()) == {"app.log", "SKIPPED.txt"}
 
 
 @pytest.mark.parametrize("with_exclude", [True, False])
@@ -1091,11 +1728,11 @@ def test_archive_inside_an_archive_counts_as_hidden_when_the_source_has_an_exclu
     app, client = app_client
     inner = _zip_bytes({"app.log": "a", "secret.key": "x"})
     outer = _zip_bytes({"inner.zip": inner, "readme.log": "r"})
-    logs = tmp_path / "logs"
-    logs.mkdir()
+    logs = tmp_path / "files" / "logs"
+    logs.mkdir(parents=True)
     (logs / "outer.zip").write_bytes(outer)
     (logs / "app.log").write_text("hello")
-    source = _make_local_source(session, tmp_path)
+    source = _make_local_source(session, tmp_path / "files")
     user = _make_user(session, app, is_super_admin=True)
     _add_rule(session, source, 0, RuleType.include, "**/*")
     if with_exclude:
@@ -1143,6 +1780,7 @@ def test_archive_inside_an_archive_counts_as_hidden_when_the_source_has_an_exclu
     assert opened.event_metadata["reason"] == "archive_hidden_members"
     # A refused member leaves nothing held in scratch.
     assert len(scratch_store._entries) == 0
+    assert list(scratch_store.root.iterdir()) == []
 
 
 def test_upper_case_inner_archive_counts_as_hidden_with_an_exclude(
@@ -1151,8 +1789,10 @@ def test_upper_case_inner_archive_counts_as_hidden_with_an_exclude(
     """`INNER.ZIP` is an archive just like `inner.zip`."""
     app, client = app_client
     inner = _zip_bytes({"app.log": "a", "secret.key": "x"})
-    (tmp_path / "outer.zip").write_bytes(_zip_bytes({"INNER.ZIP": inner, "readme.log": "r"}))
-    source = _make_local_source(session, tmp_path)
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "outer.zip").write_bytes(_zip_bytes({"INNER.ZIP": inner, "readme.log": "r"}))
+    source = _make_local_source(session, files)
     _make_user(session, app, is_super_admin=True)
     _add_rule(session, source, 0, RuleType.include, "**/*")
     _add_rule(session, source, 1, RuleType.exclude, "**/*.key")
@@ -1245,9 +1885,7 @@ def test_folder_zip_skipped_list_avoids_an_existing_skipped_txt(app_client, sess
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
         assert set(zf.namelist()) == {"SKIPPED.txt", "SKIPPED (PerchTail).txt"}
         assert zf.read("SKIPPED.txt") == b"the folder's own file"
-        assert zf.read("SKIPPED (PerchTail).txt") == (
-            b"hiding.zip: can't be included whole; open or download its files one by one\n"
-        )
+        assert zf.read("SKIPPED (PerchTail).txt") == b"hiding.zip" + _SKIPPED_LINE
 
 
 def _tar_gz_with_links() -> bytes:
@@ -1311,6 +1949,18 @@ def test_tar_links_are_not_listed_and_cannot_be_opened(
     assert opened.status_code == 200 and opened.content == b"hello"
 
 
+def test_tar_links_are_not_in_the_flat_member_list(app_client, session, fake_sftp, scratch_store):
+    """The flat listing of a whole archive (#347, `all`) leaves links out too."""
+    app, client = app_client
+    archive = "logs.tar.gz"
+    source = _links_source(session, app, fake_sftp, archive, _tar_gz_with_links())
+
+    listed = client.get(f"/sources/{source.id}/browse", params={"path": archive, "all": True})
+
+    assert listed.status_code == 200
+    assert [e["name"] for e in listed.json()] == ["app.log"]
+
+
 @pytest.mark.parametrize("excluded", [True, False])
 def test_whole_tar_with_an_excluded_link_is_refused(
     app_client, session, fake_sftp, scratch_store, excluded
@@ -1371,3 +2021,50 @@ def test_zip_links_are_read_as_stored(app_client, session, fake_sftp, scratch_st
     assert [e["name"] for e in listed.json()] == ["app.log", "link.log"]
     opened = client.get(f"{url}/open", params={"path": archive, "member": "link.log"})
     assert opened.status_code == 200 and opened.content == b"secret.txt"
+
+
+def _unreadable_member_zip(tmp_path, kind: str) -> bytes:
+    from tests.test_archives import zip_with_unsupported_method
+    from tests.test_redaction_downloads import _mark_encrypted
+
+    path = tmp_path / "unreadable.zip"
+    if kind == "encrypted":
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("big.log", "secret")
+            zf.writestr("app.log", "fine")
+        return _mark_encrypted(path.read_bytes(), "big.log")
+    zip_with_unsupported_method(path, "big.log", b"secret", others=[("app.log", b"fine")])
+    return path.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "kind, reason",
+    [("encrypted", "member_encrypted"), ("method", "member_unsupported_compression")],
+)
+@pytest.mark.parametrize(
+    "endpoint, action", [("open", "file.open_denied"), ("download", "file.download_denied")]
+)
+def test_an_unreadable_zip_member_is_an_audited_refusal(
+    app_client, session, fake_sftp, scratch_store, tmp_path, kind, reason, endpoint, action
+):
+    """An encrypted member, or one compressed with a method zipfile can't
+    read, is a clean, audited 409 rather than a 500."""
+    app, client = app_client
+    source = _make_source(session)
+    _make_user(session, app, is_super_admin=True)
+    _add_rule(session, source, 0, RuleType.include, "**/*")
+    fake_sftp.files["/var/log/appname/logs.zip"] = _unreadable_member_zip(tmp_path, kind)
+
+    response = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "logs.zip", "member": "big.log"}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "archive_member_unreadable"
+    [denied] = session.exec(select(AuditLog).where(AuditLog.action == action)).all()
+    assert denied.event_metadata["path"] == "logs.zip/big.log"
+    assert denied.event_metadata["reason"] == reason
+    readable = client.get(
+        f"/sources/{source.id}/{endpoint}", params={"path": "logs.zip", "member": "app.log"}
+    )
+    assert readable.status_code == 200 and readable.content == b"fine"

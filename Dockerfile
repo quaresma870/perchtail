@@ -29,13 +29,26 @@ RUN groupadd --system --gid 10001 perchtail \
     && mkdir -p /data && chown perchtail:perchtail /data
 
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Every package is pinned with its hashes, so a package that changed on the
+# index (or a dependency missing from the pins) fails the build instead of
+# ending up in the image. pip itself is removed afterwards: nothing runs it
+# once the image is built, and it would only add its own advisories.
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt \
+    && pip uninstall --yes pip
 
 COPY backend/app ./app
 COPY backend/migrations ./migrations
 COPY backend/alembic.ini .
 COPY backend/docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
+# .gitattributes keeps it LF; this also covers a checkout made without it
+# (a CRLF shebang stops the container from starting).
+RUN sed -i 's/\r$//' /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
+
+# The signed push-agent binaries of this version (#319), which agents
+# upgraded from the portal download from the server (app/agent_upgrades.py).
+# The release workflow puts them in agent-dist/; in any other build the
+# folder only holds its .gitkeep, and agents use the GitHub release instead.
+COPY agent-dist/ /app/agent-binaries/
 
 # Sibling of backend/, matching the repo layout — app/main.py locates it via
 # a path relative to itself, so this placement isn't arbitrary.
@@ -48,15 +61,21 @@ COPY --from=frontend-build /frontend/dist /app/frontend/dist
 # undecryptable, and losing known_hosts silently resets SSH host-key
 # pinning), /data/logs and /data/scratch what can be lost. Images before
 # 0.5.0 kept the database and its siblings at /data itself; the entrypoint
-# moves them (app/data_layout.py). PERCHTAIL_INSTALL tells the Updates card
-# under Settings -> System which upgrade steps to show (#215).
+# moves them (app/data_layout.py). /data/backups holds the encrypted backups
+# `python -m app.backup` makes (docs/backup-and-restore.md); copy them off
+# the host. PERCHTAIL_INSTALL tells the Updates card under Settings ->
+# System which upgrade steps to show (#215).
 ENV DATA_DIR=/data/db \
     LOG_DIR=/data/logs \
     SCRATCH_DIR=/data/scratch \
+    BACKUP_DIR=/data/backups \
+    AGENT_BINARIES_DIR=/app/agent-binaries \
     PERCHTAIL_INSTALL=docker
 
 EXPOSE 8000
 
+# Liveness only: /readyz (database, DATA_DIR, scheduler) is for an orchestrator's
+# readiness probe, see docs/high-availability.md.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')" || exit 1
 

@@ -38,9 +38,9 @@ def client_for(session):
 
 
 _DEFAULTS = {
-    "search_view_enabled": True,
     "audit_view_enabled": True,
     "audit_retention_days": 365,
+    "audit_folder_listings": True,
     "source_max_roots": 20,
     "connections_view_switchable": True,
     "connections_view_default": "list",
@@ -56,6 +56,22 @@ _DEFAULTS = {
     "explorer_refresh_seconds": 30,
     "tail_interval_seconds": 2,
     "source_check_minutes": 10,
+    "name_index_enabled": True,
+    "name_index_minutes": 15,
+    "alerts_interval_seconds": 60,
+    "credential_max_age_days": 90,
+    "concurrency_global": 16,
+    "concurrency_per_source": 4,
+    "concurrency_user_transfers": 2,
+    "listing_max_entries": 5000,
+    "backup_interval_hours": 24,
+    "redaction_enabled": False,
+    "redaction_downloads": True,
+    "redaction_download_suffix": True,
+    "require_mfa_local_accounts": False,
+    "password_reset_enabled": False,
+    "password_reset_minutes": 30,
+    "password_reset_unavailable": "Set up email under Settings → Email and turn it on first",
 }
 
 
@@ -72,30 +88,30 @@ def test_plain_user_cannot_update_settings(session, client_for):
     user = _make_user(session)
     client = client_for(user)
 
-    response = client.patch("/system-settings", json={"search_view_enabled": False})
+    response = client.patch("/system-settings", json={"audit_view_enabled": False})
     assert response.status_code == 403
 
 
-def test_admin_capability_can_toggle_search_view(session, client_for):
+def test_admin_capability_can_toggle_audit_view(session, client_for):
     user = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
     client = client_for(user)
 
-    response = client.patch("/system-settings", json={"search_view_enabled": False})
+    response = client.patch("/system-settings", json={"audit_view_enabled": False})
     assert response.status_code == 200
-    assert response.json() == {**_DEFAULTS, "search_view_enabled": False}
+    assert response.json() == {**_DEFAULTS, "audit_view_enabled": False}
 
     # Persists for a fresh read, not just echoed back from the PATCH response.
     response = client.get("/system-settings")
-    assert response.json() == {**_DEFAULTS, "search_view_enabled": False}
+    assert response.json() == {**_DEFAULTS, "audit_view_enabled": False}
 
 
 def test_super_admin_can_toggle_without_the_explicit_capability(session, client_for):
     user = _make_user(session, is_super_admin=True)
     client = client_for(user)
 
-    response = client.patch("/system-settings", json={"search_view_enabled": False})
+    response = client.patch("/system-settings", json={"audit_view_enabled": False})
     assert response.status_code == 200
-    assert response.json()["search_view_enabled"] is False
+    assert response.json()["audit_view_enabled"] is False
 
 
 def test_partial_update_leaves_other_settings_unchanged(session, client_for):
@@ -111,12 +127,150 @@ def test_audit_retention_days_can_be_updated(session, client_for):
     user = _make_user(session, is_super_admin=True)
     client = client_for(user)
 
-    response = client.patch("/system-settings", json={"audit_retention_days": 30})
+    response = client.patch("/system-settings", json={"audit_retention_days": 90})
     assert response.status_code == 200
-    assert response.json()["audit_retention_days"] == 30
+    assert response.json()["audit_retention_days"] == 90
 
     response = client.get("/system-settings")
-    assert response.json()["audit_retention_days"] == 30
+    assert response.json()["audit_retention_days"] == 90
+
+
+@pytest.mark.parametrize("days", [1, 30, 89])
+def test_audit_retention_below_the_minimum_is_refused(session, client_for, days):
+    client = client_for(_make_user(session, is_super_admin=True))
+    response = client.patch("/system-settings", json={"audit_retention_days": days})
+    assert response.status_code == 422
+    assert "90 days" in response.json()["detail"]
+    assert client.get("/system-settings").json()["audit_retention_days"] == 365
+
+
+@pytest.mark.parametrize(("current", "new"), [(365, 90), (0, 365), (0, 90)])
+def test_only_a_super_admin_shortens_the_audit_retention(session, client_for, current, new):
+    from app import system_settings
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    system_settings.set_int(session, "audit_retention_days", current)
+    session.commit()
+    delegated = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+
+    response = client_for(delegated).patch("/system-settings", json={"audit_retention_days": new})
+    assert response.status_code == 403
+    assert system_settings.get_int(session, "audit_retention_days") == current
+    assert session.exec(select(AuditLog)).all() == []
+
+    admin = _make_user(session, is_super_admin=True)
+    response = client_for(admin).patch("/system-settings", json={"audit_retention_days": new})
+    assert response.status_code == 200
+    assert response.json()["audit_retention_days"] == new
+
+
+@pytest.mark.parametrize(("current", "new"), [(365, 400), (365, 0), (90, 365)])
+def test_a_delegated_admin_may_lengthen_the_audit_retention(session, client_for, current, new):
+    from app import system_settings
+
+    system_settings.set_int(session, "audit_retention_days", current)
+    session.commit()
+    delegated = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+    response = client_for(delegated).patch("/system-settings", json={"audit_retention_days": new})
+    assert response.status_code == 200
+    assert response.json()["audit_retention_days"] == new
+
+
+def test_only_a_super_admin_turns_off_folder_listing_auditing(session, client_for):
+    from app import system_settings
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    delegated = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+    response = client_for(delegated).patch(
+        "/system-settings", json={"audit_folder_listings": False}
+    )
+    assert response.status_code == 403
+    assert system_settings.get_bool(session, "audit_folder_listings") is True
+    assert session.exec(select(AuditLog)).all() == []
+
+    admin = _make_user(session, is_super_admin=True)
+    response = client_for(admin).patch("/system-settings", json={"audit_folder_listings": False})
+    assert response.status_code == 200
+    assert response.json()["audit_folder_listings"] is False
+
+
+def test_a_delegated_admin_may_turn_folder_listing_auditing_on(session, client_for):
+    from app import system_settings
+
+    system_settings.set_bool(session, "audit_folder_listings", False)
+    session.commit()
+    delegated = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+    client = client_for(delegated)
+
+    response = client.patch("/system-settings", json={"audit_folder_listings": True})
+    assert response.status_code == 200
+    assert response.json()["audit_folder_listings"] is True
+    # Sending the value it already has changes nothing and is not refused.
+    response = client.patch("/system-settings", json={"audit_folder_listings": True})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("start", [False, True])
+def test_only_a_super_admin_changes_whether_local_accounts_need_mfa(session, client_for, start):
+    from app import system_settings
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    system_settings.set_bool(session, "require_mfa_local_accounts", start)
+    session.commit()
+    delegated = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+    client = client_for(delegated)
+    response = client.patch("/system-settings", json={"require_mfa_local_accounts": not start})
+    assert response.status_code == 403
+    assert system_settings.get_bool(session, "require_mfa_local_accounts") is start
+    assert session.exec(select(AuditLog)).all() == []
+    # Sending the value it already has changes nothing and is not refused.
+    response = client.patch("/system-settings", json={"require_mfa_local_accounts": start})
+    assert response.status_code == 200
+
+    admin = _make_user(session, is_super_admin=True)
+    response = client_for(admin).patch(
+        "/system-settings", json={"require_mfa_local_accounts": not start}
+    )
+    assert response.status_code == 200
+    assert response.json()["require_mfa_local_accounts"] is (not start)
+    entry = session.exec(select(AuditLog).order_by(AuditLog.id.desc())).first()
+    assert entry.action == "system_settings.update"
+    assert entry.event_metadata["require_mfa_local_accounts"] == {"old": start, "new": not start}
+
+
+def test_the_audit_entry_records_old_and_new_values(session, client_for):
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    client = client_for(_make_user(session, is_super_admin=True))
+    response = client.patch(
+        "/system-settings",
+        json={"audit_retention_days": 400, "audit_folder_listings": False},
+    )
+    assert response.status_code == 200
+    [entry] = session.exec(
+        select(AuditLog).where(AuditLog.action == "system_settings.update")
+    ).all()
+    assert entry.event_metadata["audit_retention_days"] == {"old": 365, "new": 400}
+    assert entry.event_metadata["audit_folder_listings"] == {"old": True, "new": False}
+
+
+def test_a_secret_setting_is_recorded_only_as_changed(session, client_for, monkeypatch):
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    monkeypatch.setattr(
+        "app.api.system_settings.SECRET_SETTINGS", frozenset({"audit_retention_days"})
+    )
+    client = client_for(_make_user(session, is_super_admin=True))
+    assert client.patch("/system-settings", json={"audit_retention_days": 400}).status_code == 200
+    [entry] = session.exec(
+        select(AuditLog).where(AuditLog.action == "system_settings.update")
+    ).all()
+    assert entry.event_metadata["audit_retention_days"] == "changed"
 
 
 def test_audit_retention_days_zero_means_keep_forever_and_is_accepted(session, client_for):
@@ -203,3 +357,40 @@ def test_tail_interval_refuses_other_values(session, client_for, seconds):
     response = client.patch("/system-settings", json={"tail_interval_seconds": seconds})
     assert response.status_code == 422
     assert client.get("/system-settings").json()["tail_interval_seconds"] == 2
+
+
+@pytest.mark.parametrize("minutes", [4, 1441])
+def test_name_index_interval_is_kept_between_5_minutes_and_a_day(session, client_for, minutes):
+    admin = _make_user(session, is_super_admin=True)
+    response = client_for(admin).patch("/system-settings", json={"name_index_minutes": minutes})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "payload, status",
+    [
+        ({"concurrency_global": 32, "concurrency_per_source": 8}, 200),
+        ({"concurrency_user_transfers": 5}, 200),
+        ({"concurrency_global": 0}, 422),
+        ({"concurrency_global": 257}, 422),
+        ({"concurrency_per_source": 65}, 422),
+        ({"concurrency_user_transfers": 0}, 422),
+        # More per source than in all makes no sense (#344).
+        ({"concurrency_per_source": 20}, 422),
+        ({"concurrency_global": 2}, 422),
+        ({"listing_max_entries": 100}, 200),
+        ({"listing_max_entries": 99}, 422),
+        ({"listing_max_entries": 20001}, 422),
+        ({"backup_interval_hours": 24}, 200),
+        ({"backup_interval_hours": 168}, 200),
+        ({"backup_interval_hours": -1}, 422),
+        ({"backup_interval_hours": 169}, 422),
+    ],
+)
+def test_limits_are_kept_within_their_ranges(session, client_for, payload, status):
+    client = client_for(_make_user(session, is_super_admin=True))
+    response = client.patch("/system-settings", json=payload)
+    assert response.status_code == status
+    current = client.get("/system-settings").json()
+    for key, value in payload.items():
+        assert (current[key] == value) is (status == 200)

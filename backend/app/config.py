@@ -1,9 +1,27 @@
+import ipaddress
 import os
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+
+@lru_cache(maxsize=8)
+def parse_networks(raw: str) -> tuple[Network, ...]:
+    """A comma-separated list of addresses or CIDR blocks (#366). Raises
+    ValueError naming the entry that isn't one."""
+    networks = []
+    for entry in (part.strip() for part in raw.split(",")):
+        if not entry:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError as exc:
+            raise ValueError(f"{entry!r} is not an IP address or CIDR block") from exc
+    return tuple(networks)
 
 
 class Settings(BaseSettings):
@@ -30,6 +48,14 @@ class Settings(BaseSettings):
     data_dir: str = "./data/db"
     database_url: str = ""
     credential_encryption_key: str = "changeme"
+    # A key that fails the strength check (app/key_strength.py) is only
+    # warned about; true refuses to start with it instead. Meant to become
+    # the default in 1.0.
+    credential_key_refuse_weak: bool = False
+    # The interactive API documentation (/docs) and the OpenAPI schema
+    # (/openapi.json) answer 404 unless this is true: the API is internal to
+    # the web UI, and the schema maps every endpoint for whoever reaches it.
+    api_docs: bool = False
     # Per-install random salt for deriving the Fernet key from
     # credential_encryption_key (see app/crypto.py) — generated on first use
     # and persisted here, not stored in the DB, since crypto.py has no DB
@@ -53,14 +79,14 @@ class Settings(BaseSettings):
     ssh_host_key_policy: Literal["tofu", "strict"] = "tofu"
     # Username for the auto-seeded break-glass super-admin (see
     # app/bootstrap.py's seed_initial_super_admin) — only used on a fresh
-    # deployment with zero users; its password is randomly generated and
-    # logged once, never read from config.
+    # deployment with zero users; its password is randomly generated, never
+    # read from config, and written to DATA_DIR/initial-admin-password
+    # (mode 0600, deleted once it is changed); the log only names the file.
     initial_admin_username: str = "admin"
     # The externally-reachable URL this deployment is served at — used to
     # build the OIDC redirect_uri registered with the IdP. Deriving this from
     # the incoming request instead would mean trusting X-Forwarded-* headers
-    # from whatever sits in front of this app (see CLAUDE.md's "sit behind an
-    # nginx reverse proxy" packaging note); an explicit setting sidesteps that
+    # from the reverse proxy PerchTail sits behind; an explicit setting sidesteps that
     # trust question entirely. Must match what's registered as the redirect
     # URI in the IdP's client configuration.
     public_base_url: str = "http://localhost:8080"
@@ -68,6 +94,10 @@ class Settings(BaseSettings):
     # Cookie's Secure flag — disable only for local HTTP development; a
     # browser silently drops Secure cookies over plain HTTP.
     session_cookie_secure: bool = True
+    # The OIDC issuer and every endpoint its discovery document names must be
+    # https:// (app/auth/providers/oidc.py). For local development only, this
+    # also accepts http:// on localhost, 127.0.0.1 and ::1; never elsewhere.
+    sso_allow_http_localhost: bool = False
 
     # Login brute-force lockout (app/login_throttle.py) — consecutive failed
     # attempts against one username before it's locked out, and how long the
@@ -90,6 +120,13 @@ class Settings(BaseSettings):
     # signal — deletes anything untouched past this, regardless of refcount.
     scratch_idle_seconds: int = 300
     scratch_sweep_interval_seconds: int = 60
+    # Free space to keep on the filesystem holding SCRATCH_DIR (#345): a new
+    # fetch is refused (507) once free space would drop below the larger of
+    # SCRATCH_MIN_FREE_GB and SCRATCH_MIN_FREE_PERCENT of the filesystem, so
+    # a full scratch can't stop the database and the logs sharing its disk.
+    # 0 for both turns the check off.
+    scratch_min_free_gb: float = 1.0
+    scratch_min_free_percent: float = 5.0
     # Largest output one .gz file or one .zip/.tar.gz member may decompress
     # to before the fetch is refused -- a tiny crafted archive could
     # otherwise expand to fill the scratch disk.
@@ -98,19 +135,16 @@ class Settings(BaseSettings):
     # largest total a folder ZIP may collect -- keeps one request from filling
     # the scratch disk or (for WinRM/agent) memory.
     max_fetch_mb: float = 2048.0
+    # Longest a remote source may go without answering once connected (SFTP
+    # channel reads, SMB requests) before the call fails (#343), so a server
+    # that stalls after login can't hold a worker thread forever.
+    remote_read_timeout_seconds: int = 60
+    # How long shutdown waits for running background jobs and the worker
+    # pools to finish (#335). Keep the container's stop grace period above it.
+    shutdown_timeout_seconds: int = 20
 
-    # Phase 3 full-text search (app/search_index.py) — how often the
-    # background indexer sweeps opted-in sources, and the largest single
-    # file it will read into memory to index (skips anything bigger, same
-    # spirit as the scratch size-guard: a safety valve, not a design goal).
-    search_index_interval_seconds: int = 300
-    search_index_max_file_size_mb: float = 20.0
-    # Most time one source may spend reading files in a sweep (#218). A
-    # first index of a large source can take many minutes; without a limit
-    # it held the whole sweep, so every other source's index (and the
-    # alerts that ride on it) went stale. A source that runs out of time
-    # carries on where it left off on the next sweep. 0 = no limit.
-    search_index_source_budget_seconds: int = 120
+    # SEARCH_INDEX_* settings went with the content index (#303); extra="ignore"
+    # above keeps an old .env that still sets them starting.
 
     # Release check (#215): at most once a day, ask GitHub for the latest
     # release and show it to super admins under Settings -> System. On by
@@ -121,11 +155,18 @@ class Settings(BaseSettings):
     # Docker image sets PERCHTAIL_INSTALL=docker; anything else counts as an
     # install from source.
     perchtail_install: str = ""
+    # Push-agent upgrades from the portal (#319): the folder holding the
+    # signed agent binaries of this server's version (the release's
+    # perchtail-agent-*, SHA256SUMS and SHA256SUMS.sig), served to connected
+    # agents at /agent/binaries/. The Docker image sets /app/agent-binaries;
+    # empty, or a folder without them, means agents download the release
+    # from GitHub instead.
+    agent_binaries_dir: str = ""
 
     # Full audit log viewer (app/audit_purge.py) -- how often the purge
     # sweep runs. *What* it purges (retention in days, 0 = keep forever) is
     # admin-configurable from Settings -> System (SystemSetting), not an env
-    # var, per ROADMAP.md's explicit direction; only the sweep cadence
+    # var, per docs/design-decisions.md ("Audit log"); only the sweep cadence
     # itself is an operational/deployment concern like the other interval
     # settings above.
     audit_purge_interval_seconds: int = 86400
@@ -139,7 +180,35 @@ class Settings(BaseSettings):
     # tampering gets caught. In days, not seconds, since a year expressed in
     # seconds (31536000) is unreadable at a glance and APScheduler's
     # IntervalTrigger accepts a `days=` kwarg directly.
-    audit_integrity_check_interval_days: int = 365
+    audit_integrity_check_interval_days: int = 1
+
+    # Reverse proxies whose X-Forwarded-For is believed (app/request_context.py):
+    # comma-separated addresses or CIDR blocks. The client address recorded
+    # in the audit log, and checked by the monitoring allowlists below, is
+    # the first address in X-Forwarded-For, read from the right, that isn't
+    # one of these; a request from anywhere else keeps its socket address
+    # and its X-Forwarded-For is ignored. Loopback only by default.
+    trusted_proxies: str = "127.0.0.0/8, ::1"
+
+    # Who may call the monitoring endpoints without the monitoring token
+    # (#366, app/monitoring_access.py): comma-separated addresses or CIDR
+    # blocks. PROBE_ALLOWED_NETWORKS opens /healthz and /readyz to a load
+    # balancer or kubelet that can't send a header; loopback without proxy
+    # headers is always allowed. MONITORING_ALLOWED_NETWORKS, when set,
+    # restricts /monitoring/health and /metrics to those callers on top of
+    # the token.
+    probe_allowed_networks: str = ""
+    monitoring_allowed_networks: str = ""
+
+    # Online backups (#334, app/backup.py): where `python -m app.backup create`
+    # and the scheduled backup write their encrypted archives (by default
+    # `backups` next to DATA_DIR, /data/backups in the image), how many
+    # manual and scheduled ones to keep (the last 3 pre-upgrade ones are kept
+    # on their own), and an optional key of their own. Without it, the
+    # archive key is derived from CREDENTIAL_ENCRYPTION_KEY.
+    backup_dir: str = ""
+    backup_keep: int = 7
+    backup_encryption_key: str = ""
 
     # Which of the three DATA_DIR paths were left to default, so the legacy
     # layout move (app/data_layout.py) never touches an explicit setting.
@@ -158,6 +227,20 @@ class Settings(BaseSettings):
             self.ssh_known_hosts_path = os.path.join(self.data_dir, "ssh_known_hosts")
             derived.add("ssh_known_hosts")
         self.derived_from_data_dir = frozenset(derived)
+        if not self.backup_dir:
+            parent = os.path.dirname(os.path.normpath(self.data_dir)) or "."
+            self.backup_dir = os.path.join(parent, "backups")
+        return self
+
+    @model_validator(mode="after")
+    def _check_networks(self) -> "Settings":
+        # Refuse to start on a typo rather than silently allow no one (or
+        # everyone) through.
+        for name in ("probe_allowed_networks", "monitoring_allowed_networks", "trusted_proxies"):
+            try:
+                parse_networks(getattr(self, name))
+            except ValueError as exc:
+                raise ValueError(f"{name.upper()}: {exc}") from exc
         return self
 
 

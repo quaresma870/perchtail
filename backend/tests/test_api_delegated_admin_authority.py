@@ -243,3 +243,35 @@ def test_super_admin_can_map_a_group_to_super_admin(session, client_for):
         "/sso/group-mappings", json={"order": 0, "group_name": "admins", "role_id": super_role.id}
     )
     assert response.status_code == 201
+
+
+def test_group_mappings_dont_name_roles_beyond_a_delegated_admins_authority(session, client_for):
+    """The roles list hides roles beyond a delegated admin's authority, so
+    the mappings don't name them either: role_name is null and
+    role_outside_authority says why. A super admin sees every name."""
+    from app.auth.models import SSOGroupRoleMapping
+
+    super_role = _role(session, is_super_admin=True)
+    stronger = _role(session, caps=[GlobalCapability.manage_users])
+    weaker = _role(session)
+    for order, role in enumerate((super_role, stronger, weaker)):
+        session.add(SSOGroupRoleMapping(order=order, group_name=f"g{order}", role_id=role.id))
+    session.commit()
+
+    actor = _user(session, _role(session, caps=[GlobalCapability.manage_sso]))
+    listed = client_for(actor).get("/sso/group-mappings")
+    assert listed.status_code == 200
+    assert [(m["role_id"], m["role_name"], m["role_outside_authority"]) for m in listed.json()] == [
+        (super_role.id, None, True),
+        (stronger.id, None, True),
+        (weaker.id, weaker.name, False),
+    ]
+    visible = {r["id"] for r in client_for(actor).get("/roles").json()}
+    assert visible >= {weaker.id} and not visible & {super_role.id, stronger.id}
+
+    listed = client_for(_user(session, super_role)).get("/sso/group-mappings")
+    assert [(m["role_name"], m["role_outside_authority"]) for m in listed.json()] == [
+        (super_role.name, False),
+        (stronger.name, False),
+        (weaker.name, False),
+    ]

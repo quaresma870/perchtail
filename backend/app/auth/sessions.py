@@ -41,6 +41,32 @@ def create_session(
     return auth_session, token
 
 
+def replace_session(session: Session, user: User, old_token: str | None) -> str:
+    """Swaps the caller's session for a new one with a new token, the same
+    lifetime and user agent, and returns the raw token -- after a password
+    change, so a token seen before it stops working. Doesn't commit: the
+    caller commits it with the change that called for it."""
+    user_agent = None
+    if old_token is not None:
+        old = session.exec(
+            select(AuthSession).where(AuthSession.token_hash == hash_token(old_token))
+        ).first()
+        if old is not None:
+            user_agent = old.user_agent
+            session.delete(old)
+    token = secrets.token_urlsafe(32)
+    ttl = timedelta(hours=get_settings().session_ttl_hours)
+    session.add(
+        AuthSession(
+            token_hash=hash_token(token),
+            user_id=user.id,
+            expires_at=utcnow() + ttl,
+            user_agent=user_agent,
+        )
+    )
+    return token
+
+
 def get_user_by_token(session: Session, token: str) -> User | None:
     auth_session = session.exec(
         select(AuthSession).where(AuthSession.token_hash == hash_token(token))
@@ -125,9 +151,16 @@ def purge_expired_sessions(session: Session) -> int:
 
 
 def run_session_purge_sweep() -> None:
-    from app.db import engine  # deferred: same reason as the other sweeps
+    # Deferred: same reason as the other sweeps; password_reset imports this
+    # module.
+    from app.auth.password_reset import purge_expired_tokens
+    from app.db import engine
 
     with Session(engine) as session:
         purged = purge_expired_sessions(session)
+        # Password-reset links past their expiry (#244) go with the sessions.
+        purged_links = purge_expired_tokens(session)
     if purged:
         logger.info("sessions.expired_purged", count=purged)
+    if purged_links:
+        logger.info("password_reset.expired_purged", count=purged_links)

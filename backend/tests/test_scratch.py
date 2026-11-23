@@ -139,3 +139,182 @@ def test_size_accounting_counts_every_fetch_of_a_key(tmp_path):
     store.acquire("key1").write_bytes(b"x" * 10)
     store.acquire("key1").write_bytes(b"x" * 20)
     assert store.total_bytes() == 30
+
+
+# --- busy entries: an operation under way is never swept ---------------------
+
+
+def test_the_idle_sweep_never_deletes_a_busy_entry(tmp_path):
+    store = _store(tmp_path)
+    path = store.acquire("key1", busy=True)
+    path.write_text("being fetched")
+    store._entries["key1"].last_accessed = time.monotonic() - 1000
+
+    assert store.sweep_idle(idle_seconds=0) == 0
+    assert path.exists()
+
+    # Idleness counts from the end of the operation; past that, it goes.
+    store.end_busy("key1")
+    assert store._entries["key1"].last_accessed > time.monotonic() - 1000
+    assert store.sweep_idle(idle_seconds=0) == 1
+    assert not path.exists()
+    assert list(store.root.iterdir()) == []
+
+
+def test_a_write_after_the_entry_was_swept_leaves_no_orphan(tmp_path):
+    # An operation that outlived its entry (swept half way) and wrote its
+    # file again: releasing the key the store no longer knows still deletes it.
+    store = _store(tmp_path)
+    path = store.acquire("key1")
+    path.write_text("first part")
+    store.sweep_idle(idle_seconds=0)
+    assert not path.exists()
+    path.write_text("first part, then the rest")
+
+    store.release("key1")
+    assert list(store.root.iterdir()) == []
+
+
+def test_ending_an_operation_on_a_swept_entry_leaves_no_orphan(tmp_path):
+    store = _store(tmp_path)
+    path = store.acquire("key1")
+    store.sweep_idle(idle_seconds=0)
+    path.write_text("written after the sweep")
+    path.with_name(f"{path.name}.source").write_text("working copy")
+
+    store.end_busy("key1")
+    assert list(store.root.iterdir()) == []
+
+
+def test_releasing_a_busy_entry_deletes_it_when_the_operation_ends(tmp_path):
+    store = _store(tmp_path)
+    path = store.acquire("key1", busy=True)
+    path.write_text("still being sent")
+
+    store.release("key1")  # the viewer closed it while it was being sent
+    assert path.exists()
+    store.end_busy("key1")
+    assert not path.exists()
+    assert "key1" not in store._entries
+
+
+def test_the_size_guard_never_evicts_a_busy_entry(tmp_path):
+    store = _store(tmp_path, max_bytes=5)
+    path = store.acquire("a", busy=True)
+    path.write_bytes(b"x" * 100)
+    store._entries["a"].refcount = 0  # released while still being sent
+    store._entries["a"].last_accessed = time.monotonic() - 1000
+
+    assert store.enforce_size_guard() == 0
+    assert path.exists()
+
+
+def test_strays_of_a_key_dont_reach_other_files(tmp_path):
+    store = _store(tmp_path)
+    other = store.acquire("key12")
+    other.write_text("another key")
+    unrelated = store.root / "perchtail-zip-1"
+    unrelated.mkdir()
+    named_alike = store.root / "key1-not-a-scratch-file"
+    named_alike.write_text("x")
+
+    store.release("key1")  # unknown key
+    assert other.exists()
+    assert unrelated.exists()
+    assert named_alike.exists()
+
+
+# --- #329: leftovers and usage on disk ----------------------------------------
+
+
+def test_clear_leftovers_deletes_everything_in_the_scratch_directory(tmp_path):
+    store = _store(tmp_path)
+    (store.root / "abc-123").write_bytes(b"x" * 10)
+    leftover_dir = store.root / "perchtail-zip-1"
+    leftover_dir.mkdir()
+    (leftover_dir / "download.zip").write_bytes(b"y")
+
+    assert store.clear_leftovers(protected=[tmp_path / "db"]) == 2
+    assert list(store.root.iterdir()) == []
+
+
+def test_clear_leftovers_refuses_a_directory_holding_the_database(tmp_path):
+    store = ScratchStore(root=tmp_path, max_bytes=1)
+    database = tmp_path / "db"
+    database.mkdir()
+    (database / "perchtail.db").write_bytes(b"data")
+
+    assert store.clear_leftovers(protected=[database]) == 0
+    assert (database / "perchtail.db").exists()
+
+
+def test_usage_counts_files_on_disk_not_only_tracked_ones(tmp_path):
+    store = _store(tmp_path)
+    store.acquire("key1").write_bytes(b"a" * 100)
+    untracked = store.root / "perchtail-zip-1"
+    untracked.mkdir()
+    (untracked / "download.zip").write_bytes(b"b" * 50)
+
+    assert store.total_bytes() == 150
+
+
+def test_the_size_guard_counts_untracked_files_too(tmp_path):
+    store = _store(tmp_path, max_bytes=120)
+    path = store.acquire("key1")
+    path.write_bytes(b"a" * 100)
+    store._entries["key1"].refcount = 0  # as in the eviction tests above
+    store._entries["key1"].last_accessed = time.monotonic() - 100
+    other = store.acquire("key2")
+    other.write_bytes(b"c" * 10)
+    store._entries["key2"].refcount = 0
+    # Tracked entries alone (110 bytes) are under the cap; a ZIP being built
+    # (not tracked by the store, still on its disk) takes it over.
+    (store.root / "perchtail-zip-1").mkdir()
+    (store.root / "perchtail-zip-1" / "download.zip").write_bytes(b"b" * 50)
+
+    assert store.enforce_size_guard() == 1
+    assert not path.exists()
+    assert other.exists()
+
+
+def test_remote_copies_live_under_the_scratch_directory(tmp_path, monkeypatch):
+    from app.config import get_settings
+    from app.scratch import make_scratch_dir, scratch_temp_dir
+
+    monkeypatch.setattr(get_settings(), "scratch_dir", str(tmp_path / "scratch"))
+    with scratch_temp_dir() as tmp:
+        assert tmp.parent == tmp_path / "scratch"
+        (tmp / "fetched").write_bytes(b"x")
+    assert not tmp.exists()
+    made = make_scratch_dir("perchtail-zip-")
+    assert made.parent == tmp_path / "scratch"
+
+
+def test_scratch_is_readable_by_the_app_user_only(tmp_path):
+    import os
+    import stat
+
+    root = tmp_path / "scratch"
+    root.mkdir(mode=0o500)
+    os.chmod(root, 0o500)
+    store = ScratchStore(root, 10_000_000)
+    path = store.acquire("k")
+
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert path.exists()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_scratch_folder_it_cant_chmod_still_starts(tmp_path, monkeypatch):
+    # SCRATCH_DIR owned by someone else (a mount point): a warning, not a
+    # failure to start; the files are still created 0600.
+    import os
+    import stat
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("not the owner")
+
+    monkeypatch.setattr("app.scratch.os.chmod", refuse)
+    store = ScratchStore(tmp_path / "scratch", 10_000_000)
+    path = store.acquire("k")
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600

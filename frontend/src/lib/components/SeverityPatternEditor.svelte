@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { api, ApiError } from '../api'
   import { parsePatternInput } from '../rule-format'
+  import { severityPatternInput, severityUpdatePayload } from '../severity-pattern-update'
   import type { SeverityLevel, SeverityPattern } from '../types'
 
   // Global scope: baseUrl="/severity-patterns". Per-source override scope:
@@ -14,6 +15,9 @@
   const LEVELS: SeverityLevel[] = ['error', 'warning', 'info', 'debug']
 
   let patterns: SeverityPattern[] = []
+  // Each indicator's pattern as last loaded, so an update sends it only
+  // when it was edited (severityUpdatePayload).
+  let savedPatterns = new Map<number, string>()
   let loading = true
   let error = ''
 
@@ -26,6 +30,7 @@
     error = ''
     try {
       patterns = await api.get<SeverityPattern[]>(baseUrl)
+      savedPatterns = new Map(patterns.map((p) => [p.id, severityPatternInput(p)]))
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load severity patterns'
     } finally {
@@ -51,13 +56,7 @@
 
   async function updatePattern(pattern: SeverityPattern) {
     try {
-      await api.patch(`${baseUrl}/${pattern.id}`, {
-        level: pattern.level,
-        pattern: pattern.pattern_kind === 'regex' ? `re:${pattern.pattern}` : pattern.pattern,
-        enabled: pattern.enabled,
-        highlight_line: pattern.highlight_line,
-        include_in_navigation: pattern.include_in_navigation,
-      })
+      await api.patch(`${baseUrl}/${pattern.id}`, severityUpdatePayload(pattern, savedPatterns.get(pattern.id)))
       await load()
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to update pattern'
@@ -115,7 +114,7 @@
           <input
             class="input pattern-input mono"
             disabled={readOnly}
-            value={pattern.pattern_kind === 'regex' ? `re:${pattern.pattern}` : pattern.pattern}
+            value={severityPatternInput(pattern)}
             on:change={(e) => {
               const parsed = parsePatternInput((e.target as HTMLInputElement).value)
               pattern.pattern = parsed.pattern

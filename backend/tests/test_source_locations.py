@@ -16,8 +16,7 @@ from app.collectors.base import DirEntry
 from app.collectors.smb_shares import Share
 from app.config import get_settings
 from app.db import get_session
-from app.models import PatternKind, Protocol, Rule, RuleType, SearchIndexState, Source
-from app.timeutils import utcnow
+from app.models import AlertFileState, PatternKind, Protocol, Rule, RuleType, Source
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -103,6 +102,30 @@ def test_winrm_base_path_must_be_absolute(client, path):
     assert "absolute Windows path" in response.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "\\\\fileserver\\share\\Logs",  # UNC
+        "//fileserver/share/Logs",
+        "\\\\?\\C:\\Logs",  # device paths
+        "\\\\.\\C:\\Logs",
+        "\\\\?\\UNC\\fileserver\\share",
+        "\\??\\C:\\Logs",
+    ],
+)
+def test_winrm_base_path_refuses_unc_and_device_paths(session, client, path):
+    response = _create(client, protocol="winrm", base_path=path)
+    assert response.status_code == 400
+    assert "on a drive" in response.json()["detail"]
+    roots = _create(
+        client,
+        protocol="winrm",
+        roots=[{"label": "a", "path": "D:\\Logs"}, {"label": "b", "path": path}],
+    )
+    assert roots.status_code == 400
+    assert session.exec(select(Source)).all() == []
+
+
 def test_winrm_base_path_on_another_drive_is_accepted(client):
     response = _create(client, protocol="winrm", base_path="E:\\Apps\\Logs\\")
     assert response.status_code == 201
@@ -122,28 +145,23 @@ def test_unchanged_base_path_is_not_revalidated(session, client):
 # --- location change -----------------------------------------------------
 
 
-def _index_something(session, source_id):
-    from app.search_index import _insert_fts_rows
-
-    _insert_fts_rows(session, source_id, "app.log", "secret token here")
-    session.add(
-        SearchIndexState(source_id=source_id, file_path="app.log", size=1, indexed_at=utcnow())
-    )
+def _alert_position(session, source_id):
+    session.add(AlertFileState(alert_id=1, source_id=source_id, file_path="app.log", offset=5))
     session.commit()
 
 
 @pytest.mark.parametrize(
     "patch", [{"base_path": "/srv/other"}, {"host": "other.example.com"}, {"port": 2222}]
 )
-def test_moving_a_source_clears_its_index_and_audits_old_and_new(session, client, patch):
-    created = _create(client, search_indexing_enabled=True).json()
-    _index_something(session, created["id"])
+def test_moving_a_source_clears_alert_positions_and_audits_old_and_new(session, client, patch):
+    created = _create(client).json()
+    _alert_position(session, created["id"])
 
     if "host" in patch or "port" in patch:
         patch = {**patch, "credential": {"username": "u", "password": "p"}}
     assert client.patch(f"/sources/{created['id']}", json=patch).status_code == 200
 
-    assert session.exec(select(SearchIndexState)).all() == []
+    assert session.exec(select(AlertFileState)).all() == []
     event = session.exec(select(AuditLog).where(AuditLog.action == "source.update")).one()
     field = next(k for k in patch if k != "credential")
     change = event.event_metadata["changes"][field]
@@ -151,16 +169,16 @@ def test_moving_a_source_clears_its_index_and_audits_old_and_new(session, client
     assert change["from"] != patch[field]
 
 
-def test_renaming_keeps_the_index_and_never_audits_credential_values(session, client):
-    created = _create(client, search_indexing_enabled=True).json()
-    _index_something(session, created["id"])
+def test_renaming_keeps_alert_positions_and_never_audits_credential_values(session, client):
+    created = _create(client).json()
+    _alert_position(session, created["id"])
 
     client.patch(
         f"/sources/{created['id']}",
         json={"name": "renamed", "credential": {"username": "u", "password": "n3w-s3cret"}},
     )
 
-    assert len(session.exec(select(SearchIndexState)).all()) == 1
+    assert len(session.exec(select(AlertFileState)).all()) == 1
     event = session.exec(select(AuditLog).where(AuditLog.action == "source.update")).one()
     assert event.event_metadata["changes"]["credential"] == "replaced"
     assert "n3w-s3cret" not in json.dumps(event.event_metadata)
@@ -230,19 +248,28 @@ def test_picker_lists_only_folders_and_audits(session, client, fake_ssh):
     assert [e.event_metadata["path"] for e in events] == ["/var", "/"]
 
 
-def test_picker_reuses_the_saved_credential_only_for_the_same_host(session, client, fake_ssh):
+def test_picker_with_a_saved_source_always_uses_its_host(session, client, fake_ssh):
     created = _create(client).json()
 
     ok = client.post("/sources/pick-folder", json={"source_id": created["id"], "path": "/"})
     assert ok.status_code == 200
 
-    moved = client.post(
-        "/sources/pick-folder",
-        json={"source_id": created["id"], "host": "attacker.example.com", "path": "/"},
-    )
-    assert moved.status_code == 400
-    assert "credential again" in moved.json()["detail"]
-    assert ("/", "attacker.example.com", "") not in fake_ssh.calls
+    # Neither the saved credential nor a typed one is ever sent elsewhere
+    # through a saved source: its own host is browsed.
+    for credential in (None, {"username": "u", "password": "p"}):
+        fake_ssh.calls.clear()
+        moved = client.post(
+            "/sources/pick-folder",
+            json={
+                "source_id": created["id"],
+                "host": "attacker.example.com",
+                "port": 2222,
+                "path": "/",
+                **({"credential": credential} if credential else {}),
+            },
+        )
+        assert moved.status_code == 200
+        assert {host for _path, host, _rel in fake_ssh.calls} == {created["host"]}
 
 
 def test_picker_requires_manage_sources(session, fake_ssh):
@@ -303,6 +330,33 @@ def test_picker_winrm_lists_drives_then_folders(client, monkeypatch):
     assert folders["kind"] == "folders"
     assert folders["parent"] == ""
     assert folders["entries"] == [{"name": "Logs", "path": "D:\\Logs"}]
+
+
+@pytest.mark.parametrize(
+    "protocol, path",
+    [
+        ("winrm", "\\\\fileserver\\share"),
+        ("winrm", "//fileserver/share"),
+        ("winrm", "\\\\?\\C:\\Logs"),
+        ("winrm", "\\\\.\\PhysicalDrive0"),
+        ("smb", "\\\\otherserver\\share"),
+        ("smb", "\\\\?\\C:\\Logs"),
+    ],
+)
+def test_picker_refuses_unc_and_device_paths(client, monkeypatch, protocol, path):
+    """Listing one would have the source's host reach out to another
+    machine (with its own credentials, over WinRM)."""
+    import app.collectors.winrm as winrm_module
+
+    def never(*args, **kwargs):
+        raise AssertionError("nothing may be listed")
+
+    monkeypatch.setattr(winrm_module, "_run_ps", never)
+    monkeypatch.setattr(registry.CONNECTORS[Protocol.smb], "_module", None)
+    creds = {"protocol": protocol, "host": "w", "credential": {"username": "u", "password": "p"}}
+
+    response = client.post("/sources/pick-folder", json={**creds, "path": path})
+    assert response.status_code == 400, response.text
 
 
 def test_picker_smb_top_level_lists_shares(client, monkeypatch):

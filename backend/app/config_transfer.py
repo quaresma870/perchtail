@@ -8,10 +8,15 @@ under the same customer -- and anything in the database that the file
 doesn't mention is left alone (nothing is ever deleted by an import).
 
 A source's `rules`, when given, replace its rule list; leave the key out to
-keep the rules it has. Credentials are never exported. On import a source
+keep the rules it has; the same goes for its `redaction_rules` (its own
+redaction rules) and `redaction_disable` (the system redaction rules it
+turns off, by name). Credentials are never exported. On import a source
 gets a credential from the file (inline, or `${env:PERCHTAIL_IMPORT_...}`
 read from the server's environment), from the values typed in the import
-screen, or keeps the one it already has.
+screen, or keeps the one it already has. A credential given for an
+existing source always replaces the saved one: it is never compared with
+it, so the plan can't tell whether a credential is the one saved (and the
+second run of a file with credentials replaces them again).
 
 The whole file is checked before anything is written, and applying it is
 one transaction: either every change lands or none does."""
@@ -27,12 +32,39 @@ from sqlmodel import Session, select
 
 from app import source_roots
 from app.agent_registry import disconnect_after_commit
+from app.alerts import forget_source
 from app.audit import record_audit_event
-from app.crypto import decrypt_credential, encrypt_credential
+from app.collectors import ssh
+from app.crypto import encrypt_credential
 from app.logging_config import get_logger
-from app.models import Customer, Folder, PatternKind, Protocol, Rule, RuleType, Source
-from app.rules import InvalidPatternError, parse_pattern
-from app.search_index import delete_source_index
+from app.models import (
+    Customer,
+    Folder,
+    PatternKind,
+    Protocol,
+    RedactionRule,
+    Rule,
+    RuleType,
+    Source,
+    SourceRedactionOverride,
+)
+from app.name_index import drop_source_names, prune_hidden_names
+from app.redaction_rules import (
+    MAX_RULES_PER_SCOPE,
+    RedactionRuleInvalid,
+    check_custom_rule,
+    check_name,
+    disabled_rule_ids,
+    source_rules,
+    system_rules,
+)
+from app.rules import (
+    MAX_PATTERN_CHARS,
+    MAX_RULES_PER_SOURCE,
+    InvalidPatternError,
+    parse_pattern,
+)
+from app.timeutils import utcnow
 
 logger = get_logger(__name__)
 
@@ -49,12 +81,21 @@ _SOURCE_KEYS = {
     "base_path",
     "roots",
     "enabled",
-    "search_indexing_enabled",
+    "search_indexing_enabled",  # ignored with a warning (#303), refused from 1.0
+    "name_index_enabled",
     "credential",
     "rules",
     "winrm_scheme",
     "tls_ca_pem",
+    "smb_require_signing",
+    "smb_encrypt",
+    "agent_upgrade_policy",
+    "redaction_rules",
+    "redaction_disable",
 }
+_REDACTION_RULE_KEYS = {"name", "pattern", "max_length", "secret_group", "enabled", "notes"}
+# Push-agent sources only (#319): follow Settings -> Agents, or their own.
+_AGENT_UPGRADE_POLICIES = ("inherit", "off", "manual", "automatic")
 _CONTAINER_KEYS = {"name", "folders", "sources"}
 
 
@@ -86,6 +127,16 @@ class _RuleSpec:
 
 
 @dataclass
+class _RedactionRuleSpec:
+    name: str
+    pattern: str
+    max_length: int
+    secret_group: int | None
+    enabled: bool
+    notes: str | None
+
+
+@dataclass
 class _SourceSpec:
     where: str
     key: str
@@ -98,11 +149,20 @@ class _SourceSpec:
     base_path: str
     roots: list[dict] | None
     enabled: bool
-    search_indexing_enabled: bool
+    name_index_enabled: bool
     credential: dict | None
     rules: list[_RuleSpec] | None
     winrm_scheme: str | None = None
     tls_ca_pem: str | None = None
+    # SMB only. None (key left out) keeps what the source has; a new source
+    # then gets signing required and no encryption.
+    smb_require_signing: bool | None = None
+    smb_encrypt: bool | None = None
+    agent_upgrade_policy: str = "inherit"
+    # Redaction (#382): the source's own rules, and the names of the system
+    # rules it turns off. None (key left out) keeps what the source has.
+    redaction_rules: list[_RedactionRuleSpec] | None = None
+    redaction_disable: list[str] | None = None
 
 
 @dataclass
@@ -111,6 +171,9 @@ class Parsed:
     folders: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     sources: list[_SourceSpec] = field(default_factory=list)
     problems: list[Problem] = field(default_factory=list)
+    # Things the import goes ahead with but the file should change: they
+    # don't stop it.
+    warnings: list[Problem] = field(default_factory=list)
 
 
 def source_key(customer: str | None, folders: tuple[str, ...], name: str) -> str:
@@ -256,8 +319,19 @@ def _parse_source(
     ):
         problems.append(Problem(f"{where}.port", "port must be a number from 1 to 65535"))
         return
+    if "search_indexing_enabled" in node:
+        parsed.warnings.append(
+            Problem(
+                f"{where}.search_indexing_enabled",
+                "Ignored: the full-text search index was removed in 0.7. "
+                "Remove this key; from 1.0 it's refused.",
+            )
+        )
     flags = {}
-    for flag, default in (("enabled", True), ("search_indexing_enabled", False)):
+    for flag, default in (
+        ("enabled", True),
+        ("name_index_enabled", True),
+    ):
         value = node.get(flag, default)
         if not isinstance(value, bool):
             problems.append(Problem(f"{where}.{flag}", f"{flag} must be true or false"))
@@ -288,9 +362,7 @@ def _parse_source(
             if not isinstance(raw_path, str):
                 problems.append(Problem(f"{where}.base_path", "base_path (or roots) is required"))
                 return
-            base_path = (
-                raw_path if protocol == Protocol.agent else _validate_base_path(protocol, raw_path)
-            )
+            base_path = _validate_base_path(protocol, raw_path)
     except HTTPException as exc:
         problems.append(Problem(f"{where}.base_path", str(exc.detail)))
         return
@@ -313,10 +385,48 @@ def _parse_source(
         # As in the editor: a WinRM source always stores its scheme.
         scheme = "https" if not port or port == 5986 else "http"
 
+    smb_options: dict[str, bool] = {}
+    for key in ("smb_require_signing", "smb_encrypt"):
+        if key not in node:
+            continue
+        if not isinstance(node[key], bool):
+            problems.append(Problem(f"{where}.{key}", f"{key} must be true or false"))
+            return
+        if protocol != Protocol.smb:
+            problems.append(Problem(f"{where}.{key}", f"{key} is for SMB sources only"))
+            return
+        smb_options[key] = node[key]
+
+    upgrade_policy = node.get("agent_upgrade_policy", "inherit")
+    if upgrade_policy is False:
+        upgrade_policy = "off"  # YAML reads an unquoted off as false
+    if upgrade_policy not in _AGENT_UPGRADE_POLICIES:
+        problems.append(
+            Problem(
+                f"{where}.agent_upgrade_policy",
+                f"agent_upgrade_policy must be one of {', '.join(_AGENT_UPGRADE_POLICIES)}",
+            )
+        )
+        return
+    if protocol != Protocol.agent and upgrade_policy != "inherit":
+        problems.append(
+            Problem(
+                f"{where}.agent_upgrade_policy",
+                "agent_upgrade_policy is for push-agent sources only",
+            )
+        )
+        return
+
     credential = _parse_credential(
         node.get("credential"), protocol, f"{where}.credential", problems
     )
     rules = _parse_rules(node.get("rules"), f"{where}.rules", problems)
+    redaction_rules = _parse_redaction_rules(
+        node.get("redaction_rules"), f"{where}.redaction_rules", problems
+    )
+    redaction_disable = _parse_redaction_disable(
+        node.get("redaction_disable"), f"{where}.redaction_disable", problems
+    )
 
     parsed.sources.append(
         _SourceSpec(
@@ -334,6 +444,10 @@ def _parse_source(
             rules=rules,
             winrm_scheme=scheme,
             tls_ca_pem=ca_pem,
+            **smb_options,
+            agent_upgrade_policy=upgrade_policy,
+            redaction_rules=redaction_rules,
+            redaction_disable=redaction_disable,
             **flags,
         )
     )
@@ -378,6 +492,9 @@ def _parse_credential(
     ):
         problems.append(Problem(where, "credential needs a username and a password or private_key"))
         return None
+    if resolved.get("private_key") and ssh.is_encrypted_private_key(resolved["private_key"]):
+        problems.append(Problem(f"{where}.private_key", ssh.ENCRYPTED_PRIVATE_KEY_DETAIL))
+        return None
     return resolved
 
 
@@ -390,6 +507,11 @@ def _parse_rules(value: Any, where: str, problems: list[Problem]) -> list[_RuleS
         return None
     if not isinstance(value, list):
         problems.append(Problem(where, "rules must be a list"))
+        return None
+    if len(value) > MAX_RULES_PER_SOURCE:
+        # The same limits as the rule editor, so an import can't leave a
+        # source with rules the editor would refuse.
+        problems.append(Problem(where, f"A source can have at most {MAX_RULES_PER_SOURCE} rules"))
         return None
     out = []
     for i, item in enumerate(value):
@@ -420,6 +542,11 @@ def _parse_rules(value: Any, where: str, problems: list[Problem]) -> list[_RuleS
         if not raw:
             problems.append(Problem(rule_where, "The rule has no pattern"))
             continue
+        if len(raw) > MAX_PATTERN_CHARS:
+            problems.append(
+                Problem(rule_where, f"The pattern is longer than {MAX_PATTERN_CHARS} characters")
+            )
+            continue
         if isinstance(item, str) and _quoted(raw):
             # `[include **/*, exclude "*/secret/**"]` is valid YAML, but each
             # item is one plain string, so the quotes would be part of the
@@ -439,6 +566,81 @@ def _parse_rules(value: Any, where: str, problems: list[Problem]) -> list[_RuleS
             continue
         out.append(_RuleSpec(rule_type, pattern, kind, notes))
     return out
+
+
+def _parse_redaction_rules(
+    value: Any, where: str, problems: list[Problem]
+) -> list[_RedactionRuleSpec] | None:
+    """A source's own redaction rules, checked like the API checks them
+    (app.redaction_rules.check_custom_rule)."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        problems.append(Problem(where, "redaction_rules must be a list"))
+        return None
+    if len(value) > MAX_RULES_PER_SCOPE:
+        problems.append(Problem(where, f"At most {MAX_RULES_PER_SCOPE} redaction rules"))
+        return None
+    out: list[_RedactionRuleSpec] = []
+    names: set[str] = set()
+    for i, item in enumerate(value):
+        rule_where = f"{where}[{i}]"
+        if not isinstance(item, dict):
+            problems.append(Problem(rule_where, "Expected name, pattern and max_length"))
+            continue
+        unknown = set(item) - _REDACTION_RULE_KEYS
+        if unknown:
+            problems.append(
+                Problem(rule_where, f"Unknown keys: {', '.join(sorted(map(str, unknown)))}")
+            )
+            continue
+        name, pattern = item.get("name"), item.get("pattern")
+        max_length, group = item.get("max_length"), item.get("secret_group")
+        enabled, notes = item.get("enabled", True), item.get("notes")
+        if not isinstance(name, str) or not isinstance(pattern, str):
+            problems.append(Problem(rule_where, "name and pattern are required text"))
+            continue
+        if isinstance(max_length, bool) or not isinstance(max_length, int):
+            problems.append(Problem(rule_where, "max_length (in bytes) is required"))
+            continue
+        if group is not None and (isinstance(group, bool) or not isinstance(group, int)):
+            problems.append(Problem(rule_where, "secret_group must be a number"))
+            continue
+        if not isinstance(enabled, bool):
+            problems.append(Problem(rule_where, "enabled must be true or false"))
+            continue
+        if notes is not None and not isinstance(notes, str):
+            problems.append(Problem(rule_where, "notes must be text"))
+            continue
+        try:
+            name = check_name(name)
+            if group is not None and group < 0:
+                raise RedactionRuleInvalid("secret_group can't be negative")
+            check_custom_rule(pattern, group, max_length)
+        except RedactionRuleInvalid as exc:
+            problems.append(Problem(rule_where, str(exc)))
+            continue
+        if name.casefold() in names:
+            problems.append(Problem(rule_where, f"Redaction rule {name!r} is listed twice"))
+            continue
+        names.add(name.casefold())
+        out.append(_RedactionRuleSpec(name, pattern, max_length, group, enabled, notes))
+    return out
+
+
+def _parse_redaction_disable(value: Any, where: str, problems: list[Problem]) -> list[str] | None:
+    """Names of the system redaction rules the source turns off; checked
+    against the system rules when the file is applied."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        problems.append(Problem(where, "redaction_disable must be a list of system rule names"))
+        return None
+    names: list[str] = []
+    for name in value:
+        if name.strip().casefold() not in {n.casefold() for n in names}:
+            names.append(name.strip())
+    return names
 
 
 # --- planning and applying -------------------------------------------------
@@ -464,6 +666,7 @@ def run(
         return items, problems
 
     roots_limit = source_roots.max_roots(session)
+    system_redaction = {rule.name.casefold(): rule for rule in system_rules(session)}
     customer_ids: dict[str, int | None] = {}
     for name in parsed.customers:
         customer = session.exec(select(Customer).where(Customer.name == name)).first()
@@ -551,11 +754,29 @@ def run(
                 Problem(f"{spec.where}.roots", source_roots.roots_limit_message(allowed))
             )
             continue
+        disable_ids = None
+        if spec.redaction_disable is not None:
+            unknown = [n for n in spec.redaction_disable if n.casefold() not in system_redaction]
+            if unknown:
+                problems.append(
+                    Problem(
+                        f"{spec.where}.redaction_disable",
+                        f"No system redaction rule named {', '.join(map(repr, unknown))}",
+                    )
+                )
+                continue
+            disable_ids = sorted(
+                {system_redaction[name.casefold()].id for name in spec.redaction_disable}
+            )
         credential = credentials.get(spec.key) or spec.credential
         if existing:
-            item = _update_source(session, existing[0], spec, folder_id, credential, apply, user_id)
+            item = _update_source(
+                session, existing[0], spec, folder_id, credential, apply, user_id, disable_ids
+            )
         else:
-            item = _create_source(session, spec, customer_id, folder_id, credential, apply, user_id)
+            item = _create_source(
+                session, spec, customer_id, folder_id, credential, apply, user_id, disable_ids
+            )
         if isinstance(item, Problem):
             problems.append(item)
         else:
@@ -563,7 +784,7 @@ def run(
     return items, problems
 
 
-def _create_source(session, spec, customer_id, folder_id, credential, apply, user_id):
+def _create_source(session, spec, customer_id, folder_id, credential, apply, user_id, disable_ids):
     item = PlanItem(
         "create",
         "source",
@@ -573,6 +794,10 @@ def _create_source(session, spec, customer_id, folder_id, credential, apply, use
         needs_credential=spec.protocol in _CREDENTIAL_PROTOCOLS and credential is None,
         protocol=spec.protocol.value,
     )
+    if spec.redaction_rules:
+        item.changes.append(f"{len(spec.redaction_rules)} redaction rules")
+    if disable_ids:
+        item.changes.append(f"turns off redaction rules: {', '.join(spec.redaction_disable)}")
     if spec.protocol == Protocol.agent:
         item.changes.append("generate the agent token in the source's settings afterwards")
     if not apply:
@@ -587,32 +812,50 @@ def _create_source(session, spec, customer_id, folder_id, credential, apply, use
         base_path=spec.base_path,
         roots=spec.roots,
         enabled=spec.enabled,
-        search_indexing_enabled=spec.search_indexing_enabled,
+        name_index_enabled=spec.name_index_enabled,
         credential_ref=encrypt_credential(credential) if credential else None,
+        credential_updated_at=utcnow() if credential else None,
         winrm_scheme=spec.winrm_scheme,
         tls_ca_pem=spec.tls_ca_pem,
+        smb_require_signing=(
+            spec.smb_require_signing if spec.smb_require_signing is not None else True
+        ),
+        smb_encrypt=spec.smb_encrypt if spec.smb_encrypt is not None else False,
+        agent_upgrade_policy=spec.agent_upgrade_policy,
     )
     session.add(source)
     session.flush()
     _replace_rules(session, source, spec.rules or [])
+    metadata = {
+        "name": source.name,
+        "protocol": source.protocol,
+        "host": source.host,
+        "base_path": source.base_path,
+        "via": "import",
+    }
+    if source.protocol == Protocol.smb:
+        metadata["smb_require_signing"] = source.smb_require_signing
+        metadata["smb_encrypt"] = source.smb_encrypt
+    if spec.redaction_rules:
+        _replace_redaction_rules(session, source.id, spec.redaction_rules)
+        metadata["redaction_rules"] = [
+            _redaction_audit(rule, order) for order, rule in enumerate(spec.redaction_rules)
+        ]
+    if disable_ids:
+        _replace_redaction_overrides(session, source.id, disable_ids)
+        metadata["redaction_disable"] = _rule_names(session, disable_ids)
     record_audit_event(
         session,
         user_id=user_id,
         action="source.create",
         target_type="source",
         target_id=source.id,
-        metadata={
-            "name": source.name,
-            "protocol": source.protocol,
-            "host": source.host,
-            "base_path": source.base_path,
-            "via": "import",
-        },
+        metadata=metadata,
     )
     return item
 
 
-def _update_source(session, source, spec, folder_id, credential, apply, user_id):
+def _update_source(session, source, spec, folder_id, credential, apply, user_id, disable_ids):
     if source.protocol != spec.protocol:
         return Problem(
             spec.where,
@@ -635,10 +878,14 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         "base_path": spec.base_path,
         "roots": spec.roots,
         "enabled": spec.enabled,
-        "search_indexing_enabled": spec.search_indexing_enabled,
+        "name_index_enabled": spec.name_index_enabled,
         "winrm_scheme": spec.winrm_scheme,
         "tls_ca_pem": spec.tls_ca_pem,
+        "agent_upgrade_policy": spec.agent_upgrade_policy,
     }
+    for key in ("smb_require_signing", "smb_encrypt"):
+        if getattr(spec, key) is not None:
+            wanted[key] = getattr(spec, key)
     changes = {
         k: {"from": getattr(source, k), "to": v}
         for k, v in wanted.items()
@@ -648,9 +895,15 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
     rules_change = spec.rules is not None and _rules_tuple(current_rules) != _rules_tuple(
         spec.rules
     )
-    credential_change = credential is not None and (
-        source.credential_ref is None or decrypt_credential(source.credential_ref) != credential
-    )
+    current_redaction = source_rules(session, source.id)
+    redaction_change = spec.redaction_rules is not None and _redaction_tuple(
+        current_redaction
+    ) != _redaction_tuple(spec.redaction_rules)
+    current_disabled = sorted(disabled_rule_ids(session, source.id))
+    disable_change = disable_ids is not None and current_disabled != disable_ids
+    # A credential in the file always replaces the saved one: comparing them
+    # would let the plan say whether a guessed credential is the saved one.
+    credential_change = credential is not None
     labels = [
         f"{k}: {v['from']!r} → {v['to']!r}"
         for k, v in changes.items()
@@ -662,6 +915,15 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         labels.append("moved to another folder")
     if rules_change:
         labels.append(f"rules replaced ({len(current_rules)} → {len(spec.rules)})")
+    if redaction_change:
+        labels.append(
+            f"redaction rules replaced ({len(current_redaction)} → {len(spec.redaction_rules)})"
+        )
+    if disable_change:
+        labels.append(
+            "redaction rules turned off: "
+            + (", ".join(_rule_names(session, disable_ids)) or "none")
+        )
     if credential_change:
         labels.append("credential replaced" if source.credential_ref else "credential set")
     needs_credential = (
@@ -693,10 +955,18 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         setattr(source, key, change["to"])
     if credential_change:
         source.credential_ref = encrypt_credential(credential)
+        source.credential_updated_at = utcnow()
     if rules_change:
         _replace_rules(session, source, spec.rules)
-    if location_changed or not (source.enabled and source.search_indexing_enabled):
-        delete_source_index(session, source.id)
+        prune_hidden_names(session, source)
+    if redaction_change:
+        _replace_redaction_rules(session, source.id, spec.redaction_rules)
+    if disable_change:
+        _replace_redaction_overrides(session, source.id, disable_ids)
+    if location_changed:
+        forget_source(session, source.id)
+    if location_changed or not (source.enabled and source.name_index_enabled):
+        drop_source_names(session, source.id)
     if source.protocol == Protocol.agent and not source.enabled:
         disconnect_after_commit(session, source.id, "source disabled")
     session.add(source)
@@ -705,6 +975,15 @@ def _update_source(session, source, spec, folder_id, credential, apply, user_id)
         audit_changes["tls_ca_pem"] = "replaced" if spec.tls_ca_pem else "removed"
     if rules_change:
         audit_changes["rules"] = "replaced"
+    if redaction_change:
+        audit_changes["redaction_rules"] = _redaction_audit_changes(
+            current_redaction, spec.redaction_rules
+        )
+    if disable_change:
+        audit_changes["redaction_disable"] = {
+            "from": _rule_names(session, current_disabled),
+            "to": _rule_names(session, disable_ids),
+        }
     if credential_change:
         audit_changes["credential"] = "replaced"
     record_audit_event(
@@ -737,6 +1016,83 @@ def _replace_rules(session: Session, source: Source, rules: list[_RuleSpec]) -> 
     session.refresh(source)
 
 
+def _redaction_tuple(rules) -> list[tuple]:
+    return [
+        (r.name, r.pattern, r.max_length, r.secret_group or 0, r.enabled, r.notes or None)
+        for r in rules
+    ]
+
+
+def _redaction_audit(rule, order: int) -> dict:
+    """What the audit log keeps of one redaction rule, with the fields the
+    API's redaction_rule.create records, so an import is as traceable."""
+    return {
+        "name": rule.name,
+        "pattern": rule.pattern,
+        "secret_group": rule.secret_group or None,
+        "max_length": rule.max_length,
+        "enabled": rule.enabled,
+        "order": order,
+        "notes": rule.notes or None,
+    }
+
+
+def _redaction_audit_changes(current, wanted) -> list[dict]:
+    """Each redaction rule an import adds, changes or removes, by name, with
+    its values before (`from`, null when added) and after (`to`, null when
+    removed). Rules that stay the same are left out."""
+    before = {r.name.casefold(): _redaction_audit(r, i) for i, r in enumerate(current)}
+    after = {r.name.casefold(): _redaction_audit(r, i) for i, r in enumerate(wanted)}
+    changes = []
+    for key in [*before, *(k for k in after if k not in before)]:
+        old, new = before.get(key), after.get(key)
+        if old != new:
+            changes.append({"name": (new or old)["name"], "from": old, "to": new})
+    return changes
+
+
+def _rule_names(session: Session, rule_ids) -> list[str]:
+    names = []
+    for rule_id in rule_ids:
+        rule = session.get(RedactionRule, rule_id)
+        if rule is not None:
+            names.append(rule.name)
+    return names
+
+
+def _replace_redaction_rules(
+    session: Session, source_id: int, rules: list[_RedactionRuleSpec]
+) -> None:
+    for rule in source_rules(session, source_id):
+        session.delete(rule)
+    session.flush()
+    for order, spec in enumerate(rules):
+        session.add(
+            RedactionRule(
+                source_id=source_id,
+                name=spec.name,
+                pattern=spec.pattern,
+                secret_group=spec.secret_group,
+                max_length=spec.max_length,
+                enabled=spec.enabled,
+                order=order,
+                notes=spec.notes,
+            )
+        )
+    session.flush()
+
+
+def _replace_redaction_overrides(session: Session, source_id: int, rule_ids: list[int]) -> None:
+    for override in session.exec(
+        select(SourceRedactionOverride).where(SourceRedactionOverride.source_id == source_id)
+    ).all():
+        session.delete(override)
+    session.flush()
+    for rule_id in rule_ids:
+        session.add(SourceRedactionOverride(source_id=source_id, rule_id=rule_id, disabled=True))
+    session.flush()
+
+
 # --- export ----------------------------------------------------------------
 
 _EXPORT_HEADER = """\
@@ -754,7 +1110,22 @@ def _rule_out(rule: Rule) -> str | dict:
     return f"{rule.type.value} {pattern}"
 
 
-def _source_out(source: Source) -> dict:
+def _redaction_rule_out(rule: RedactionRule) -> dict:
+    out: dict[str, Any] = {
+        "name": rule.name,
+        "pattern": rule.pattern,
+        "max_length": rule.max_length,
+    }
+    if rule.secret_group:
+        out["secret_group"] = rule.secret_group
+    if not rule.enabled:
+        out["enabled"] = False
+    if rule.notes:
+        out["notes"] = rule.notes
+    return out
+
+
+def _source_out(source: Source, session: Session) -> dict:
     out: dict[str, Any] = {
         "name": source.name,
         "protocol": source.protocol.value,
@@ -770,11 +1141,25 @@ def _source_out(source: Source) -> dict:
         out["winrm_scheme"] = source.winrm_scheme
     if source.tls_ca_pem:
         out["tls_ca_pem"] = source.tls_ca_pem
+    if source.protocol == Protocol.smb and not source.smb_require_signing:
+        out["smb_require_signing"] = False
+    if source.protocol == Protocol.smb and source.smb_encrypt:
+        out["smb_encrypt"] = True
     if not source.enabled:
         out["enabled"] = False
-    if source.search_indexing_enabled:
-        out["search_indexing_enabled"] = True
+    if not source.name_index_enabled:
+        out["name_index_enabled"] = False
+    if source.protocol == Protocol.agent and source.agent_upgrade_policy not in (None, "inherit"):
+        out["agent_upgrade_policy"] = source.agent_upgrade_policy
     out["rules"] = [_rule_out(r) for r in sorted(source.rules, key=lambda r: r.order)]
+    # Redaction (#382): the source's own rules and the system rules it
+    # turns off, by name. The system rules themselves aren't exported.
+    own = source_rules(session, source.id)
+    if own:
+        out["redaction_rules"] = [_redaction_rule_out(r) for r in own]
+    disabled = _rule_names(session, sorted(disabled_rule_ids(session, source.id)))
+    if disabled:
+        out["redaction_disable"] = disabled
     return out
 
 
@@ -795,7 +1180,7 @@ def export(session: Session) -> str:
             node["folders"] = [folder_out(f) for f in subfolders]
         own = sorted(by_folder.get(folder.id, []), key=lambda s: s.name.lower())
         if own:
-            node["sources"] = [_source_out(s) for s in own]
+            node["sources"] = [_source_out(s, session) for s in own]
         return node
 
     customers_out = []
@@ -812,11 +1197,11 @@ def export(session: Session) -> str:
             key=lambda s: s.name.lower(),
         )
         if own:
-            node["sources"] = [_source_out(s) for s in own]
+            node["sources"] = [_source_out(s, session) for s in own]
         customers_out.append(node)
 
     doc: dict[str, Any] = {"version": SCHEMA_VERSION, "customers": customers_out}
     loose = sorted((s for s in sources if s.customer_id is None), key=lambda s: s.name.lower())
     if loose:
-        doc["sources"] = [_source_out(s) for s in loose]
+        doc["sources"] = [_source_out(s, session) for s in loose]
     return _EXPORT_HEADER + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=100)

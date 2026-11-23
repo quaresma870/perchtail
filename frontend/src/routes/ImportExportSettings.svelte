@@ -22,6 +22,8 @@
     applied: boolean
     items: PlanItem[]
     problems: Problem[]
+    // Non-blocking: e.g. a key PerchTail no longer uses, ignored.
+    warnings: Problem[]
   }
 
   let text = ''
@@ -185,6 +187,17 @@
       </div>
     {/if}
 
+    {#if result.warnings.length > 0}
+      <div class="card">
+        <h2>Warnings</h2>
+        <ul class="warnings">
+          {#each result.warnings as warning, i (i)}
+            <li><code>{warning.where}</code> {warning.message}</li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
+
     {#if !result.applied && needingCredential.length > 0 && result.problems.length === 0}
       <div class="card">
         <h2>Credentials</h2>
@@ -297,10 +310,18 @@
   .card {
     padding: 1rem 1.25rem;
   }
+  /* The import box can be dragged wider for long YAML, and the card grows
+     with it (never narrower than the page); the page scrolls sideways. */
   .editor {
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
+    width: fit-content;
+    min-width: 100%;
+  }
+  .editor textarea {
+    resize: both;
+    max-width: none;
   }
   .actions {
     display: flex;
@@ -353,6 +374,7 @@
     color: var(--warning, #b58105);
   }
   .problems,
+  .warnings,
   .unchanged {
     margin: 0;
     padding-left: 1.1rem;
@@ -361,6 +383,9 @@
   }
   .problems li {
     color: var(--danger);
+  }
+  .warnings li {
+    color: var(--warning, #b58105);
   }
   .cred-row {
     display: grid;

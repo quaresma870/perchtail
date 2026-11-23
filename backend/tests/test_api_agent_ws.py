@@ -1,5 +1,6 @@
 import time
 
+import pytest
 from app.agent_registry import get_agent_registry
 from app.api.agent_ws import _hash_token
 from app.api.agent_ws import router as agent_ws_router
@@ -112,6 +113,69 @@ def test_reconnecting_agent_stays_connected_when_the_old_socket_closes(session):
     assert _wait_until(lambda: not registry.is_connected(source.id))
 
 
+def test_a_replaced_connection_is_audited_with_both_addresses(session):
+    """A second connection with the token of a connected agent replaces the
+    first (a legitimate reconnection, usually), and that is audited."""
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    headers = {"authorization": "Bearer s3cret"}
+
+    with client.websocket_connect("/agent/connect", headers=headers):
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        assert session.exec(select(AuditLog)).all() == []
+        with client.websocket_connect("/agent/connect", headers=headers):
+            session.expire_all()
+            assert _wait_until(
+                lambda: session.exec(
+                    select(AuditLog).where(AuditLog.action == "agent.connection_replaced")
+                ).first()
+                is not None
+            )
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+    [entry] = session.exec(
+        select(AuditLog).where(AuditLog.action == "agent.connection_replaced")
+    ).all()
+    assert (entry.user_id, entry.target_type, entry.target_id) == (None, "source", source.id)
+    # The test client connects from "testclient" both times.
+    assert entry.event_metadata["previous_address"] == "testclient"
+    assert entry.event_metadata["address"] == "testclient"
+
+
+def test_the_replaced_connection_is_closed_only_after_the_commit(session, monkeypatch):
+    """Closing the old socket may wait on its peer; the audit row's write
+    transaction (and SQLite's write lock) mustn't stay open meanwhile."""
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    original_register = registry.register
+    seen = []
+
+    def register_watching_the_close(sid, websocket, features=frozenset(), address=None):
+        replaced = original_register(sid, websocket, features, address)
+        if replaced is not None:
+            original_close = replaced.websocket.close
+
+            async def close(*args, **kwargs):
+                seen.append(session.in_transaction())
+                await original_close(*args, **kwargs)
+
+            replaced.websocket.close = close
+        return replaced
+
+    monkeypatch.setattr(registry, "register", register_watching_the_close)
+    client = _client(session)
+    headers = {"authorization": "Bearer s3cret"}
+    with client.websocket_connect("/agent/connect", headers=headers):
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        with client.websocket_connect("/agent/connect", headers=headers):
+            assert _wait_until(lambda: seen)
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+    assert seen == [False]
+
+
 def test_connect_records_the_os_the_agent_reports(session):
     """#189: rules for a Windows agent are matched case-insensitively, so
     the backend needs to know which OS the agent runs on."""
@@ -162,7 +226,8 @@ def test_a_streamed_fetch_through_the_endpoint_lands_in_the_destination(session,
         with _client(session) as client:
             registry.bind_loop(client.portal.call(asyncio.get_running_loop))
             with client.websocket_connect(
-                "/agent/connect", headers={"authorization": "Bearer s3cret"}
+                "/agent/connect",
+                headers={"authorization": "Bearer s3cret", "x-perchtail-agent-features": "links/1"},
             ) as ws:
                 assert _wait_until(lambda: registry.is_connected(source.id))
                 thread = threading.Thread(target=fetch)
@@ -170,6 +235,7 @@ def test_a_streamed_fetch_through_the_endpoint_lands_in_the_destination(session,
 
                 command = ws.receive_json()
                 assert command["type"] == "fetch" and command["path"] == "app.log"
+                assert command["expect_real"] == "app.log"
                 assert command["chunk_size"] == agent_collector.FETCH_CHUNK_BYTES
                 for seq, part in enumerate([content[:12], content[12:]]):
                     ws.send_json(
@@ -197,6 +263,88 @@ def test_a_streamed_fetch_through_the_endpoint_lands_in_the_destination(session,
     assert destination.read_bytes() == content
 
 
+def test_progress_messages_keep_a_slow_command_waiting_and_are_never_its_answer(session):
+    """F5 (rc.3): an agent with progress/1 is asked for progress on a content
+    command, and its progress messages keep the command waiting past the
+    wait (scaled down here) without being taken for the answer."""
+    import asyncio
+    import threading
+
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    previous_loop = registry._loop
+    results: list = []
+
+    def read():
+        try:
+            results.append(
+                registry.send_command_sync(source.id, "read_range", timeout=0.4, path="app.log")
+            )
+        except Exception as exc:  # noqa: BLE001 - reported by the assert below
+            results.append(exc)
+
+    try:
+        with _client(session) as client:
+            registry.bind_loop(client.portal.call(asyncio.get_running_loop))
+            with client.websocket_connect(
+                "/agent/connect",
+                headers={
+                    "authorization": "Bearer s3cret",
+                    "x-perchtail-agent-features": "links/1,progress/1",
+                },
+            ) as ws:
+                assert _wait_until(lambda: registry.is_connected(source.id))
+                thread = threading.Thread(target=read)
+                thread.start()
+                command = ws.receive_json()
+                assert command["type"] == "read_range" and command["progress"] is True
+                until = time.monotonic() + 1.0
+                while time.monotonic() < until:
+                    ws.send_json({"type": "progress", "id": command["id"]})
+                    time.sleep(0.1)
+                ws.send_json(
+                    {"type": "read_range_result", "id": command["id"], "size": 0, "data_b64": ""}
+                )
+                thread.join(timeout=5)
+    finally:
+        registry.bind_loop(previous_loop)
+
+    assert len(results) == 1 and isinstance(results[0], dict), results
+    assert results[0]["type"] == "read_range_result"
+
+
+def test_nothing_is_read_from_a_connected_agent_without_links(session, tmp_path):
+    """An agent that doesn't say where links lead is never sent a content
+    command: it must be updated first. Listing still works."""
+    import asyncio
+
+    from app.collectors import agent as agent_collector
+
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    previous_loop = registry._loop
+    try:
+        with _client(session) as client:
+            registry.bind_loop(client.portal.call(asyncio.get_running_loop))
+            with client.websocket_connect(
+                "/agent/connect",
+                headers={
+                    "authorization": "Bearer s3cret",
+                    "x-perchtail-agent-features": "redaction/1",
+                },
+            ):
+                assert _wait_until(lambda: registry.is_connected(source.id))
+                with pytest.raises(agent_collector.AgentUpdateRequiredError):
+                    agent_collector.fetch_file(source, "app.log", tmp_path / "fetched")
+                with pytest.raises(agent_collector.AgentUpdateRequiredError):
+                    agent_collector.read_range(source, "app.log", 0, 10)
+                assert not (tmp_path / "fetched").exists()
+                session.refresh(source)
+                assert agent_collector.agent_update_required(source)
+    finally:
+        registry.bind_loop(previous_loop)
+
+
 def test_connect_records_the_version_the_agent_reports(session):
     """#215: shown on the source page, with a warning when it's older than
     the server."""
@@ -220,6 +368,54 @@ def test_connect_records_the_version_the_agent_reports(session):
             session.refresh(source)
             assert source.agent_version is None
         assert _wait_until(lambda: not registry.is_connected(source.id))
+
+
+def test_connect_records_the_features_the_agent_announces(session):
+    """#382, #249: an agent that redacts on its host says so; the live
+    connection decides what it is sent, the source keeps it for the UI."""
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    headers = {
+        "authorization": "Bearer s3cret",
+        "x-perchtail-agent-features": "redaction/1, Bogus Feature, other/2",
+    }
+    with client.websocket_connect("/agent/connect", headers=headers):
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        assert registry.features(source.id) == frozenset({"redaction/1", "other/2"})
+        assert registry.redacts_on_host(source.id)
+        session.refresh(source)
+        assert source.agent_features == "other/2,redaction/1"
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+    assert not registry.redacts_on_host(source.id)
+
+    # An older agent announces nothing: it can't redact on the host.
+    with client.websocket_connect("/agent/connect", headers={"authorization": "Bearer s3cret"}):
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        assert not registry.redacts_on_host(source.id)
+        session.refresh(source)
+        assert source.agent_features is None
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+
+
+def test_a_connected_agent_does_not_hold_a_database_connection(session):
+    # The socket lives as long as the agent runs. Once the handshake is
+    # committed, messages from the agent must not start a new transaction on
+    # the request's session, or each agent keeps a pooled connection and a
+    # few dozen of them exhaust the pool for everyone else.
+    source = _agent_source(session, "s3cret")
+    source_id = source.id
+    registry = get_agent_registry()
+    client = _client(session)
+    with client.websocket_connect(
+        "/agent/connect", headers={"authorization": "Bearer s3cret"}
+    ) as ws:
+        assert _wait_until(lambda: registry.is_connected(source_id))
+        for n in range(3):
+            ws.send_json({"type": "list_result", "id": f"stray-{n}", "entries": []})
+        time.sleep(0.2)
+        assert not session.in_transaction()
+    assert _wait_until(lambda: not registry.is_connected(source_id))
 
 
 # --- the server closes the connection when the agent may no longer use it ---
@@ -337,13 +533,13 @@ def test_a_token_regenerated_during_the_handshake_still_closes_the_connection(se
     original_register = registry.register
     registered = []
 
-    def register_after_a_regeneration(sid, websocket):
+    def register_after_a_regeneration(sid, websocket, features=frozenset(), address=None):
         session.execute(
             update(Source).where(Source.id == sid).values(agent_token_hash=_hash_token("new"))
         )
         session.commit()
         registry.disconnect(sid, "agent token regenerated")  # finds nothing yet
-        replaced = original_register(sid, websocket)
+        replaced = original_register(sid, websocket, features, address)
         registered.append(sid)
         return replaced
 
@@ -361,3 +557,130 @@ def test_a_token_regenerated_during_the_handshake_still_closes_the_connection(se
         except WebSocketDisconnect as exc:
             code = exc.code
     assert code == 1008
+
+
+# --- keepalive (#333) ---------------------------------------------------------
+
+
+def test_a_silent_agent_is_disconnected_and_its_socket_closed(session, monkeypatch):
+    from app import agent_registry as registry_module
+
+    monkeypatch.setattr(registry_module, "AGENT_PING_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(registry_module, "AGENT_DEAD_AFTER_SECONDS", 0.4)
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    with client.websocket_connect(
+        "/agent/connect", headers={"authorization": "Bearer s3cret"}
+    ) as ws:
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        # The server pings; this agent never answers.
+        assert ws.receive_json()["type"] == "ping"
+        assert _wait_until(lambda: not registry.is_connected(source.id), timeout=3)
+        code = None
+        try:
+            while True:
+                ws.receive_json()
+        except WebSocketDisconnect as exc:
+            code = exc.code
+        assert code == 1001
+
+
+def test_an_agent_that_answers_pings_stays_connected(session, monkeypatch):
+    from app import agent_registry as registry_module
+
+    monkeypatch.setattr(registry_module, "AGENT_PING_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(registry_module, "AGENT_DEAD_AFTER_SECONDS", 0.4)
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    with client.websocket_connect(
+        "/agent/connect", headers={"authorization": "Bearer s3cret"}
+    ) as ws:
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            ping = ws.receive_json()
+            assert ping["type"] == "ping"
+            ws.send_json({"type": "pong", "id": ping["id"]})
+        assert registry.is_connected(source.id)
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+
+
+# --- upgrades from the portal (#319) -------------------------------------------
+
+
+def test_upgrade_progress_and_the_reconnect_reach_the_attempt(session):
+    from app.agent_upgrades import begin_run
+    from app.models import AgentUpgradeRun
+    from app.version import APP_VERSION
+
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+
+    def status():
+        session.expire_all()
+        return session.get(AgentUpgradeRun, run_id).status
+
+    headers = {"authorization": "Bearer s3cret", "x-perchtail-agent-version": "0.0.1"}
+    with client.websocket_connect("/agent/connect", headers=headers) as ws:
+        assert _wait_until(lambda: registry.is_connected(source.id))
+        run = begin_run(session, source.id, "0.0.1", trigger="manual", user_id=None)
+        run_id, command_id = run.id, run.command_id
+        ws.send_json(
+            {"type": "upgrade_progress", "id": command_id, "stage": "downloading", "detail": "x"}
+        )
+        assert _wait_until(lambda: status() == "downloading")
+        ws.send_json({"type": "upgrade_progress", "id": command_id, "stage": "restarting"})
+        assert _wait_until(lambda: status() == "restarting")
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+
+    # The agent restarted into the new version and connects again.
+    headers["x-perchtail-agent-version"] = APP_VERSION
+    with client.websocket_connect("/agent/connect", headers=headers):
+        assert _wait_until(lambda: status() == "succeeded")
+
+
+def _binaries(tmp_path, monkeypatch):
+    from app.config import get_settings
+    from app.version import APP_VERSION
+
+    name = f"perchtail-agent-{APP_VERSION}-linux-amd64"
+    (tmp_path / name).write_bytes(b"agent binary")
+    (tmp_path / "SHA256SUMS").write_text(f"{'0' * 64}  {name}\n", encoding="utf-8")
+    (tmp_path / "SHA256SUMS.sig").write_bytes(b"s" * 64)
+    monkeypatch.setattr(get_settings(), "agent_binaries_dir", str(tmp_path))
+    return name
+
+
+def test_the_bundled_binaries_are_served_to_an_agent_with_its_token(session, tmp_path, monkeypatch):
+    name = _binaries(tmp_path, monkeypatch)
+    _agent_source(session, "s3cret")
+    client = _client(session)
+    auth = {"authorization": "Bearer s3cret"}
+    response = client.get(f"/agent/binaries/{name}", headers=auth)
+    assert response.status_code == 200
+    assert response.content == b"agent binary"
+    assert client.get("/agent/binaries/SHA256SUMS.sig", headers=auth).status_code == 200
+    assert client.get("/agent/binaries/other-file", headers=auth).status_code == 404
+
+
+def test_the_bundled_binaries_need_a_valid_agent_token(session, tmp_path, monkeypatch):
+    name = _binaries(tmp_path, monkeypatch)
+    _agent_source(session, "s3cret")
+    disabled = Source(
+        name="agent02",
+        protocol=Protocol.agent,
+        host="agent02",
+        base_path="/var/log/app",
+        agent_token_hash=_hash_token("disabled-token"),
+        enabled=False,
+    )
+    session.add(disabled)
+    session.commit()
+    client = _client(session)
+    assert client.get(f"/agent/binaries/{name}").status_code == 401
+    for token in ("wrong", "disabled-token"):
+        headers = {"authorization": f"Bearer {token}"}
+        assert client.get(f"/agent/binaries/{name}", headers=headers).status_code == 401

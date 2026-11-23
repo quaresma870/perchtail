@@ -15,8 +15,8 @@
   let host: HTMLDivElement
   let view: MergeView | null = null
 
-  // Read-only on both sides -- ROADMAP.md's "Compare files" item is a
-  // viewer feature, not an editor; this tool never writes back to a
+  // Read-only on both sides -- Compare is a viewer feature
+  // (docs/design-decisions.md, "Scope and principles"), not an editor; this tool never writes back to a
   // source, and a diff of two already-fetched snapshots is no exception.
   function sideExtensions(filename: string) {
     return [

@@ -3,8 +3,8 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { fileURLToPath } from 'node:url'
 
-// Compare, Beautify/Minify, Follow, and Highlight (ROADMAP.md's "Viewer:
-// toward an advanced editor" toolbar items) are exercised here against the
+// Compare, Beautify/Minify, Follow, and Highlight (docs/design-decisions.md,
+// "Live browsing, scratch and the viewer") are exercised here against the
 // built-in super-admin log-viewer system source (same one viewer.spec.ts
 // already uses), with two small JSON fixture files written directly into
 // LOG_DIR -- the `local` connector reads straight off disk with no caching
@@ -40,8 +40,10 @@ test.afterAll(() => {
 // each tab's label as same-named buttons -- scope to `.tree-body` so a
 // click always means "pick from the tree," not whichever same-named
 // element Playwright's accessible-name matching happens to find first.
+// A file's accessible name is "<name>, <size>" (#377).
 function treeFile(page: import('@playwright/test').Page, name: string) {
-  return page.locator('.tree-body').getByRole('button', { name, exact: true })
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return page.locator('.tree-body').getByRole('button', { name: new RegExp(`^${escaped}, `) })
 }
 
 test.beforeEach(async ({ page }) => {

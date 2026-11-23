@@ -31,6 +31,11 @@
   let newUserOpen = false
   let createError = ''
   let resetResult: { username: string; password: string } | null = null
+  // Edit (#356): name, email, role and status in one popup.
+  type EditForm = { user: AppUser; displayName: string; email: string; roleId: number; active: boolean }
+  let editing: EditForm | null = null
+  let savingEdit = false
+  let editError = ''
   let resetCopied = false
 
   async function load() {
@@ -78,6 +83,55 @@
       createError = err instanceof ApiError ? err.detail : 'Failed to create user'
     } finally {
       creating = false
+    }
+  }
+
+  function openEdit(user: AppUser) {
+    editError = ''
+    editing = {
+      user,
+      displayName: user.display_name ?? '',
+      email: user.email ?? '',
+      roleId: user.role_id,
+      active: user.active,
+    }
+  }
+
+  async function saveEdit() {
+    if (!editing) return
+    const { user } = editing
+    const patch: Record<string, unknown> = {}
+    if (user.auth_provider === 'local') {
+      if (editing.displayName.trim() !== (user.display_name ?? '')) patch.display_name = editing.displayName.trim()
+      if (editing.email.trim() !== (user.email ?? '')) patch.email = editing.email.trim()
+    }
+    if (editing.roleId !== user.role_id) patch.role_id = editing.roleId
+    if (editing.active !== user.active) {
+      if (!editing.active) {
+        const ok = await confirmAction({
+          title: 'Deactivate user',
+          message: `Deactivate ${user.username}? They're signed out and can't sign in until reactivated; their history is kept.`,
+          confirmLabel: 'Deactivate',
+          danger: true,
+        })
+        if (!ok) return
+      }
+      patch.active = editing.active
+    }
+    if (Object.keys(patch).length === 0) {
+      editing = null
+      return
+    }
+    savingEdit = true
+    editError = ''
+    try {
+      await api.patch(`/users/${user.id}`, patch)
+      editing = null
+      await load()
+    } catch (err) {
+      editError = err instanceof ApiError ? err.detail : 'Failed to save the user'
+    } finally {
+      savingEdit = false
     }
   }
 
@@ -152,6 +206,9 @@
   })
   $: saveViewState(VIEW_KEY, view)
 
+  // A delegated admin only gets the roles within their authority: a user
+  // holding another role shows it by id and can't be changed from here.
+  const knownRole = (id: number) => roles.some((r) => r.id === id)
   const roleName = (id: number) => roles.find((r) => r.id === id)?.name ?? `#${id}`
   const signInLabel = (u: AppUser) => (u.auth_provider === 'local' ? 'Local' : 'SSO')
   const formatLogin = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : 'never')
@@ -242,7 +299,9 @@
           {#each visible as user (user.id)}
             <tr>
               <td class="username">
-                {user.username}
+                <button class="link username-link" title="Edit {user.username}" on:click={() => openEdit(user)}
+                  >{user.username}</button
+                >
                 {#if user.display_name || user.email}
                   <div class="user-sub">
                     {[user.display_name, user.email].filter(Boolean).join(' · ')}
@@ -252,10 +311,15 @@
               <td>
                 <select
                   class="input"
+                  aria-label="Role of {user.username}"
                   value={user.role_id}
+                  disabled={!knownRole(user.role_id)}
                   on:change={(e) =>
                     changeRole(user, Number((e.target as HTMLSelectElement).value))}
                 >
+                  {#if !knownRole(user.role_id)}
+                    <option value={user.role_id} disabled>{roleName(user.role_id)}</option>
+                  {/if}
                   {#each roles as role (role.id)}
                     <option value={role.id}>{role.name}</option>
                   {/each}
@@ -273,6 +337,7 @@
               <td class="last-login">{formatLogin(user.last_login_at)}</td>
               <td>
                 <div class="row-actions">
+                  <button class="btn btn-ghost btn-sm" on:click={() => openEdit(user)}>Edit</button>
                   {#if user.auth_provider === 'local'}
                     <button class="btn btn-ghost btn-sm" on:click={() => resetPassword(user)}>Reset password</button>
                   {/if}
@@ -328,6 +393,46 @@
       </Modal>
     {/if}
 
+    {#if editing}
+      <Modal title="Edit {editing.user.username}" on:close={() => (editing = null)}>
+        <form id="edit-user-form" class="modal-form" on:submit|preventDefault={saveEdit}>
+          <label class="field">Username <input class="input" value={editing.user.username} disabled /></label>
+          {#if editing.user.auth_provider === 'local'}
+            <label class="field">Display name <input class="input" bind:value={editing.displayName} /></label>
+            <label class="field">Email <input class="input" type="email" bind:value={editing.email} /></label>
+          {:else}
+            <label class="field">Display name <input class="input" value={editing.displayName} disabled /></label>
+            <label class="field">Email <input class="input" value={editing.email} disabled /></label>
+            <p class="hint">An SSO account's name and email come from the identity provider at each sign-in.</p>
+          {/if}
+          <label class="field"
+            >Role
+            <select class="input" bind:value={editing.roleId} disabled={!knownRole(editing.user.role_id)}>
+              {#if !knownRole(editing.user.role_id)}
+                <option value={editing.user.role_id} disabled>{roleName(editing.user.role_id)}</option>
+              {/if}
+              {#each roles as role (role.id)}
+                <option value={role.id}>{role.name}</option>
+              {/each}
+            </select>
+          </label>
+          <label class="check-field">
+            <input type="checkbox" bind:checked={editing.active} />
+            Active (an inactive user can't sign in; their history is kept)
+          </label>
+          {#if editError}
+            <p class="error" role="alert">{editError}</p>
+          {/if}
+        </form>
+        <svelte:fragment slot="footer">
+          <button class="btn btn-ghost" type="button" on:click={() => (editing = null)}>Cancel</button>
+          <button class="btn btn-primary" type="submit" form="edit-user-form" disabled={savingEdit}>
+            {savingEdit ? 'Saving…' : 'Save'}
+          </button>
+        </svelte:fragment>
+      </Modal>
+    {/if}
+
     {#if resetResult}
       <Modal title="Temporary password" on:close={() => (resetResult = null)}>
         <p class="modal-text">
@@ -347,6 +452,23 @@
 </div>
 
 <style>
+  .username-link {
+    font-weight: inherit;
+    color: var(--text);
+    padding: 0;
+    text-align: left;
+  }
+  .username-link:hover {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  .check-field {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
   .page {
     padding: 1.75rem 2rem;
     display: flex;

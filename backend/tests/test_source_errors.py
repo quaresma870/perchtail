@@ -107,7 +107,7 @@ def test_unknown_errors_are_left_alone():
 # --- through the API -------------------------------------------------------
 
 
-def _user(session, *, super_admin=False, customer=None):
+def _user(session, *, super_admin=False, customer=None, capabilities=(Capability.view,)):
     role = Role(name=f"r-{uuid.uuid4().hex}", is_super_admin=super_admin)
     session.add(role)
     session.commit()
@@ -117,7 +117,7 @@ def _user(session, *, super_admin=False, customer=None):
                 role_id=role.id,
                 scope_type=ScopeType.customer,
                 scope_id=customer.id,
-                capabilities=[Capability.view],
+                capabilities=list(capabilities),
             )
         )
         session.commit()
@@ -181,7 +181,7 @@ def test_permission_error_on_open_is_a_403_with_a_safe_message(session, monkeypa
     assert "/var/log/app" not in response.json()["detail"]
 
 
-def test_check_hides_raw_error_from_view_only_users(session, monkeypatch):
+def test_check_needs_manage_source_and_never_returns_the_raw_error(session, monkeypatch):
     customer, source = _source(session)
 
     def boom(*args, **kwargs):
@@ -190,16 +190,56 @@ def test_check_hides_raw_error_from_view_only_users(session, monkeypatch):
     monkeypatch.setattr(CONNECTORS[Protocol.ssh]._module, "list_directory", boom)
 
     viewer = _client(session, _user(session, customer=customer))
+    manager = _client(
+        session,
+        _user(session, customer=customer, capabilities=(Capability.view, Capability.manage_source)),
+    )
     admin = _client(session, _user(session, super_admin=True))
 
-    as_viewer = viewer.post(f"/sources/{source.id}/check").json()
-    as_admin = admin.post(f"/sources/{source.id}/check").json()
+    assert viewer.post(f"/sources/{source.id}/check").status_code == 403
+    for client in (manager, admin):
+        answer = client.post(f"/sources/{source.id}/check").json()
+        assert answer["ok"] is False
+        assert "internal-host" not in answer["detail"]
+        assert "/var/log/app" in answer["detail"]
+        assert "ChrootDirectory" in answer["detail"]
 
-    assert as_viewer["ok"] is False
-    assert "internal-host" not in as_viewer["detail"]
-    assert "/var/log/app" in as_viewer["detail"]
-    assert "ChrootDirectory" in as_viewer["detail"]
-    assert "internal-host" in as_admin["detail"]
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"),
+        TimeoutError("timed out"),
+        OSError(errno.EHOSTUNREACH, "No route to host"),
+        EOFError("closed while reading the banner"),
+    ],
+)
+def test_check_and_picker_say_the_same_for_every_failed_connection(session, monkeypatch, failure):
+    """A closed port, a refused connection, a timeout or an error the
+    connector doesn't map all get the same neutral answer, so neither
+    endpoint can be used to probe which ports answer."""
+    customer, source = _source(session)
+
+    def boom(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(CONNECTORS[Protocol.ssh]._module, "list_directory", boom)
+    admin = _client(session, _user(session, super_admin=True))
+
+    check = admin.post(f"/sources/{source.id}/check").json()
+    assert check == {"ok": False, "detail": "Can't reach the source (base path: /var/log/app)"}
+
+    picked = admin.post(
+        "/sources/pick-folder",
+        json={
+            "protocol": "ssh",
+            "host": "10.0.0.9",
+            "port": 2222,
+            "credential": {"username": "u", "password": "p"},
+            "path": "/",
+        },
+    )
+    assert (picked.status_code, picked.json()) == (502, {"detail": "Can't reach the source"})
 
 
 @pytest.mark.parametrize(
@@ -284,7 +324,44 @@ def test_a_source_without_a_credential_says_so(protocol):
     `'NoneType' object has no attribute …`."""
     from app.collectors.base import SourceNoCredentialError
 
-    source = Source(name="x", protocol=protocol, host="h", base_path="Logs", credential_ref=None)
+    base_path = "D:\\Logs" if protocol == Protocol.winrm else "Logs"
+    source = Source(name="x", protocol=protocol, host="h", base_path=base_path, credential_ref=None)
     with pytest.raises(SourceNoCredentialError) as raised:
         CONNECTORS[protocol].list_directory(source, [], "")
     assert "no credential" in raised.value.public_message
+
+
+def test_a_read_limit_no_endpoint_caught_is_its_413_not_a_500():
+    """F1 of the 0.7.0-rc.3 retest: a read over MAX_FETCH_MB or
+    MAX_DECOMPRESSED_MB that an endpoint lets through gets the 413 the
+    endpoints give (app/api/archive.py), never a 500."""
+    from app.archives import DecompressionLimitError
+    from app.collectors.base import FetchTooLargeError
+
+    app = FastAPI()
+    install_error_handlers(app)
+
+    @app.get("/fetch")
+    def fetch():
+        raise FetchTooLargeError("over", size=3 * 1024**2, limit=1024**2)
+
+    @app.get("/decompress")
+    def decompress():
+        raise DecompressionLimitError("over")
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    fetch_answer = client.get("/fetch")
+    decompress_answer = client.get("/decompress")
+
+    assert fetch_answer.status_code == 413
+    assert fetch_answer.json()["detail"] == {
+        "message": "This file is 3.0 MB, over this server's 1 MB limit (MAX_FETCH_MB).",
+        "error_code": "fetch_too_large",
+        "size_bytes": 3 * 1024**2,
+        "limit_bytes": 1024**2,
+    }
+    assert decompress_answer.status_code == 413
+    assert decompress_answer.json()["detail"] == (
+        "File is too large once decompressed (MAX_DECOMPRESSED_MB)"
+    )

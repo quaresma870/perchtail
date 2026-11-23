@@ -4,6 +4,7 @@ editing the role they hold, and not by handing out a role or grant reaching
 beyond what they hold themselves at that customer, folder or source."""
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from app.api.auth import get_current_active_user
@@ -229,12 +230,13 @@ def test_cannot_create_a_grant_beyond_their_own(session, customers):
     client = _client(session, admin)
     role_id = client.post("/roles", json={"name": "Tier 2"}).json()["id"]
 
-    _assert_refused(
-        client.post(
-            f"/roles/{role_id}/grants",
-            json={"scope_type": "customer", "scope_id": customer_b.id, "capabilities": ["view"]},
-        )
+    # A customer outside the admin's reach answers as if it didn't exist.
+    hidden = client.post(
+        f"/roles/{role_id}/grants",
+        json={"scope_type": "customer", "scope_id": customer_b.id, "capabilities": ["view"]},
     )
+    assert hidden.status_code == 404, hidden.text
+    assert hidden.json()["detail"] == "customer not found"
     _assert_refused(
         client.post(
             f"/roles/{role_id}/grants",
@@ -489,11 +491,20 @@ def test_removing_a_narrower_grant_cannot_widen_the_role_beyond_theirs(session, 
     )
     client = _client(session, admin)
     role_id = client.post("/roles", json={"name": "Tier 2"}).json()["id"]
-    narrower = client.post(
+    # A grant holding nothing can't be saved any more; one saved before can
+    # remain, and still takes away what a broader grant gives.
+    refused = client.post(
         f"/roles/{role_id}/grants",
         json={"scope_type": "folder", "scope_id": folder_x.id, "capabilities": []},
     )
-    assert narrower.status_code == 201, narrower.text
+    assert refused.status_code == 422
+    legacy = RoleGrant(
+        role_id=role_id, scope_type=ScopeType.folder, scope_id=folder_x.id, capabilities=[]
+    )
+    session.add(legacy)
+    session.commit()
+    session.refresh(legacy)
+    narrower = SimpleNamespace(json=lambda: {"id": legacy.id})
     wider = client.post(
         f"/roles/{role_id}/grants",
         json={"scope_type": "customer", "scope_id": customer_a.id, "capabilities": ["view"]},
@@ -535,3 +546,183 @@ def test_super_admin_is_never_limited(session, customers):
     wider = _role(session, grants=[(ScopeType.customer, customer_b.id, VIEW_DOWNLOAD)])
 
     assert role_within_authority(session, admin, wider)
+
+
+# --- manage_source ----------------------------------------------------------
+
+
+MANAGE_SOURCE = [Capability.view, Capability.manage_source]
+
+
+def test_manage_source_is_granted_only_where_the_admin_holds_it(session, customers):
+    """The new capability follows the same authority rule as the others: a
+    delegated admin grants manage_source only where they hold it."""
+    customer_a, customer_b = customers
+    admin = _user(
+        session,
+        _role(
+            session,
+            global_capabilities=[GlobalCapability.manage_roles],
+            grants=[
+                (ScopeType.customer, customer_a.id, MANAGE_SOURCE),
+                (ScopeType.customer, customer_b.id, VIEW),
+            ],
+        ),
+    )
+    target = _role(session)
+    client = _client(session, admin)
+
+    def grant(customer):
+        return client.post(
+            f"/roles/{target.id}/grants",
+            json={"scope_type": "customer", "scope_id": customer.id, "capabilities": MANAGE_SOURCE},
+        )
+
+    _assert_refused(grant(customer_b))
+    allowed = grant(customer_a)
+    assert allowed.status_code == 201, allowed.text
+    assert not grant_within_authority(
+        session,
+        admin,
+        scope_type=ScopeType.customer,
+        scope_id=customer_b.id,
+        capabilities=[Capability.manage_source],
+    )
+
+
+def test_manage_source_counts_when_assigning_a_role(session, customers):
+    customer_a, _ = customers
+    admin = _admin(session, customer_a, GlobalCapability.manage_users)
+    wider = _role(session, grants=[(ScopeType.customer, customer_a.id, MANAGE_SOURCE)])
+    other = _user(session, _role(session))
+    client = _client(session, admin)
+
+    _assert_refused(client.patch(f"/users/{other.id}", json={"role_id": wider.id}))
+
+
+def test_duplicating_a_role_keeps_manage_source(session, customers):
+    customer_a, _ = customers
+    admin = _user(session, _role(session, is_super_admin=True))
+    original = _role(session, grants=[(ScopeType.customer, customer_a.id, MANAGE_SOURCE)])
+    client = _client(session, admin)
+
+    response = client.post(f"/roles/{original.id}/duplicate", json={})
+    assert response.status_code == 201, response.text
+    copied = session.exec(select(RoleGrant).where(RoleGrant.role_id == response.json()["id"]))
+    assert [list(g.capabilities) for g in copied.all()] == [MANAGE_SOURCE]
+
+
+# --- the last super admin ---------------------------------------------------
+
+
+def test_the_last_super_admin_role_keeps_the_flag(session):
+    from app.api.roles import LAST_SUPER_ADMIN_ROLE_REFUSED
+
+    custom = _role(session, is_super_admin=True)
+    admin = _user(session, custom)
+    client = _client(session, admin)
+
+    response = client.patch(f"/roles/{custom.id}", json={"is_super_admin": False})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == LAST_SUPER_ADMIN_ROLE_REFUSED
+    session.refresh(custom)
+    assert custom.is_super_admin
+    # Renaming it is still fine.
+    assert client.patch(f"/roles/{custom.id}", json={"name": "renamed"}).status_code == 200
+
+
+def test_a_super_admin_role_can_drop_the_flag_while_another_has_active_users(session):
+    custom = _role(session, is_super_admin=True)
+    _user(session, custom)
+    admin = _user(session, _role(session, is_super_admin=True))
+    client = _client(session, admin)
+
+    response = client.patch(f"/roles/{custom.id}", json={"is_super_admin": False})
+    assert response.status_code == 200, response.text
+
+
+def test_inactive_super_admins_elsewhere_do_not_count(session):
+    custom = _role(session, is_super_admin=True)
+    admin = _user(session, custom)
+    inactive = _user(session, _role(session, is_super_admin=True))
+    inactive.active = False
+    session.add(inactive)
+    session.commit()
+    client = _client(session, admin)
+
+    assert client.patch(f"/roles/{custom.id}", json={"is_super_admin": False}).status_code == 409
+
+
+def test_a_super_admin_role_without_active_users_can_drop_the_flag(session):
+    unused = _role(session, is_super_admin=True)
+    admin = _user(session, _role(session, is_super_admin=True))
+    client = _client(session, admin)
+
+    response = client.patch(f"/roles/{unused.id}", json={"is_super_admin": False})
+    assert response.status_code == 200, response.text
+
+
+def test_the_last_active_super_admin_is_never_deactivated(session):
+    admin = _user(session, _role(session, is_super_admin=True))
+    client = _client(session, admin)
+
+    assert client.delete(f"/users/{admin.id}").status_code == 409
+    assert client.patch(f"/users/{admin.id}", json={"active": False}).status_code == 409
+    session.refresh(admin)
+    assert admin.active
+
+
+# --- grants holding nothing -----------------------------------------------------
+
+
+def test_a_grant_holding_nothing_is_refused(session, customers):
+    """A grant with no capability would pass any authority check and widen
+    what the role reaches (customer and folder names) while giving nothing:
+    refused when it is added or edited, by anyone."""
+    customer_a, customer_b = customers
+    elsewhere = _source(session, customer_b)
+    admin = _admin(session, customer_a, GlobalCapability.manage_roles)
+    target = _role(session)
+    client = _client(session, admin)
+
+    for scope_type, scope_id in (
+        ("source", elsewhere.id),
+        ("customer", customer_b.id),
+        ("customer", customer_a.id),
+    ):
+        response = client.post(
+            f"/roles/{target.id}/grants",
+            json={"scope_type": scope_type, "scope_id": scope_id, "capabilities": []},
+        )
+        assert response.status_code == 422, response.text
+    granted = client.post(
+        f"/roles/{target.id}/grants",
+        json={"scope_type": "customer", "scope_id": customer_a.id, "capabilities": ["view"]},
+    )
+    assert granted.status_code == 201
+    emptied = client.patch(
+        f"/roles/{target.id}/grants/{granted.json()['id']}", json={"capabilities": []}
+    )
+    assert emptied.status_code == 422
+    assert [
+        list(g.capabilities)
+        for g in session.exec(select(RoleGrant).where(RoleGrant.role_id == target.id)).all()
+    ] == [VIEW]
+
+
+def test_a_grant_on_a_source_out_of_reach_answers_like_a_missing_one(session, customers):
+    customer_a, customer_b = customers
+    elsewhere = _source(session, customer_b)
+    admin = _admin(session, customer_a, GlobalCapability.manage_roles)
+    target = _role(session)
+    client = _client(session, admin)
+
+    def grant(source_id):
+        return client.post(
+            f"/roles/{target.id}/grants",
+            json={"scope_type": "source", "scope_id": source_id, "capabilities": ["view"]},
+        )
+
+    hidden, missing = grant(elsewhere.id), grant(elsewhere.id + 1000)
+    assert hidden.status_code == missing.status_code == 404
+    assert hidden.json() == missing.json() == {"detail": "source not found"}

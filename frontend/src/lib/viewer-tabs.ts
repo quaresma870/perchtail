@@ -17,8 +17,8 @@ export interface Tab {
   scratchKey: string | null
   wrapEnabled: boolean
   showWhitespace: boolean
-  // Pure client-side/session state (ROADMAP.md: never written to the file,
-  // never persisted server-side) -- 1-indexed line numbers, sorted.
+  // Pure client-side/session state (docs/design-decisions.md, "Scope and
+  // principles": never written to the file, never persisted server-side) -- 1-indexed line numbers, sorted.
   bookmarks: number[]
   markPatterns: MarkPattern[]
   // Display-only reformat for JSON/XML tabs; 'none' = raw content.
@@ -30,13 +30,27 @@ export interface Tab {
   missing?: boolean
   // Incremental follow (#254): how many bytes of the file `content` holds,
   // the server's identity of its start (from the last follow answer), and
-  // whether only what was appended can be fetched ('reload': .gz files,
-  // archive members and agents older than 0.6 reload the whole file).
+  // whether only what was appended can be fetched ('reload': .gz files
+  // and archive members reload the whole file).
   byteSize: number
   followHead: string | null
   followMode: 'incremental' | 'reload'
   // Lines appended while the reader was scrolled up, for "jump to end".
   newLines: number
+  // Tail's buffer cap (#347): newlines in `content` (counted once, then
+  // kept up to date as Tail appends) and lines dropped from the top so far.
+  newlineCount?: number
+  droppedLines?: number
+  // Opened at its end only (a large file, #347): Reload reads the end
+  // again rather than the whole file.
+  endOnly?: boolean
+  // Redaction (#382, #249): the server redacted the content, how many
+  // values it replaced in what the tab holds, and how many characters at
+  // the end of `content` stand for an unfinished last line that the next
+  // Follow answer sends again.
+  redacted?: boolean
+  redactionCount?: number
+  partialChars?: number
 }
 
 export interface ViewerState {

@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Optional
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, String
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
@@ -11,13 +11,13 @@ class Protocol(StrEnum):
     smb = "smb"
     winrm = "winrm"
     local = "local"
-    # Phase 2: for sources not reachable inbound. The Go push-agent dials
-    # *out* to this app (solving the firewall/NAT problem) and holds that
-    # connection open; the connector then sends live list/fetch commands
-    # down it on demand — see collectors/agent.py and app/agent_registry.py.
-    # Deliberately not a proactive sync: CLAUDE.md's always-fresh,
-    # nothing-persisted rule still applies here, just relayed through the
-    # agent's connection instead of a direct SSH/SMB/WinRM dial.
+    # For sources not reachable inbound. The Go push-agent dials *out* to
+    # this app (solving the firewall/NAT problem) and holds that connection
+    # open; the connector then sends live list/fetch commands down it on
+    # demand — see collectors/agent.py and app/agent_registry.py.
+    # Deliberately not a proactive sync: every open is a fresh read and no
+    # file content is kept, just relayed through the agent's connection
+    # instead of a direct SSH/SMB/WinRM dial.
     agent = "agent"
 
 
@@ -60,7 +60,7 @@ class Folder(SQLModel, table=True):
     folders) into an arbitrarily nested tree, for both browsing and RBAC
     scoping (see auth/rbac.py). A folder always belongs to exactly one
     customer — folders don't span customers — and nests only within that
-    same customer (see CLAUDE.md's "Access control" section)."""
+    same customer."""
 
     __table_args__ = NO_ID_REUSE
 
@@ -93,6 +93,9 @@ class Source(SQLModel, table=True):
     # Encrypted at rest via app.crypto (SSH key, SMB/WinRM password, etc.);
     # null for the local protocol, which needs no credential.
     credential_ref: str | None = None
+    # When the credential was last set (#248), for its age; None when it
+    # was set before 0.7 or there is none.
+    credential_updated_at: datetime | None = None
     base_path: str
     # Two or more {"label", "path"} entries when the source reads several
     # folders (#161; see app/source_roots.py), else null. base_path then
@@ -110,8 +113,13 @@ class Source(SQLModel, table=True):
     # over HTTPS) -- internal PKI or a self-signed certificate, without a
     # server-wide REQUESTS_CA_BUNDLE. Public data, not a secret.
     tls_ca_pem: str | None = None
+    # SMB only: refuse a session whose messages aren't signed, and ask for
+    # SMB 3 encryption (refused by a server that can't encrypt). Signing,
+    # which smbprotocol always asked for, is on by default; turning it off
+    # is for a server that can't sign, and the source's page warns about it.
+    smb_require_signing: bool = True
+    smb_encrypt: bool = False
     enabled: bool = True
-    schedule_cron: str | None = None
     is_system: bool = False
     # Push-agent (protocol=agent) enrollment: only the SHA-256 hash of the
     # enrollment token is stored (same rationale as password/session-token
@@ -132,6 +140,22 @@ class Source(SQLModel, table=True):
     # sends on connect (#215). Null until an agent that reports it (0.6 or
     # later) has connected.
     agent_version: str | None = None
+    # What the agent says it can do beyond the basic commands, from the
+    # X-PerchTail-Agent-Features header it sends on connect (#382, #249):
+    # comma-separated, "redaction/1" when it redacts on its host. Kept so the
+    # UI can say an agent doesn't redact on the host while it's offline too;
+    # whether a request is redacted on the agent goes by the live
+    # connection's features (app.agent_registry), never by this. Null until
+    # an agent has connected, and for an agent that announces nothing.
+    agent_features: str | None = None
+    # Remote upgrades (#319, app/agent_upgrades.py): this source's own
+    # policy -- "inherit" (follow Settings -> Agents), "off", "manual" or
+    # "automatic" -- and its consecutive failed upgrades. At the failure
+    # limit automatic upgrades skip it until an admin resumes it.
+    agent_upgrade_policy: str = Field(
+        default="inherit", sa_column_kwargs={"server_default": "inherit"}
+    )
+    agent_upgrade_failures: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
     # Reachability (#276), shared by everyone: "ok" or "failing", when it was
     # last known, and the public reason when failing (never the raw error).
     # Set by the background check and by every real operation on the source
@@ -140,12 +164,18 @@ class Source(SQLModel, table=True):
     status: str | None = None
     status_checked_at: datetime | None = None
     status_message: str | None = None
-    # Phase 3 full-text search (see app/search_index.py and ROADMAP.md):
-    # opt-in, off by default — same "explicit opt-in, not on-by-default"
-    # conservatism as the rule engine's zero-rules-matches-nothing default,
-    # since indexing stores short line-level snippets at rest, which some
-    # customers' logs may be too sensitive for even in that reduced form.
-    search_indexing_enabled: bool = False
+    # Background-check backoff (#343): consecutive failed background checks,
+    # and until when they're skipped. Reset by any success.
+    check_failures: int = 0
+    check_backoff_until: datetime | None = None
+    # File-name index (#304, app/name_index.py): names, sizes and times of the
+    # source's rule-visible files, never content. On by default; off here
+    # leaves the source out (and drops what was indexed).
+    name_index_enabled: bool = True
+    name_indexed_at: datetime | None = None
+    name_index_files: int | None = None
+    # Why the last pass failed or stopped short; None when it went to the end.
+    name_index_message: str | None = None
 
     customer: Customer | None = Relationship(back_populates="sources")
     folder: Folder | None = Relationship(back_populates="sources")
@@ -168,9 +198,7 @@ class Rule(SQLModel, table=True):
 
 
 class SeverityPattern(SQLModel, table=True):
-    """Admin-configurable line-highlighting rule for the Viewer (see
-    CLAUDE.md's CodeMirror choice and ROADMAP.md's "Viewer: toward an
-    advanced editor" section) — display-only, never affects what's
+    """Admin-configurable line-highlighting rule for the Viewer — display-only, never affects what's
     readable/fetchable the way `Rule` does. Matching itself runs client-side
     (see frontend/src/lib/severity-highlighting.ts); this table is pure
     config storage + CRUD.
@@ -197,63 +225,90 @@ class SeverityPattern(SQLModel, table=True):
     # when stepping through "next problem" navigation. A pattern can be
     # visually highlighted without cluttering that step-through, or vice
     # versa -- deliberately not reusing `enabled` for both meanings (see
-    # ROADMAP.md's open-decision note on this).
+    # docs/design-decisions.md, "Frontend and UI").
     include_in_navigation: bool = True
 
 
-class SearchIndexState(SQLModel, table=True):
-    """Per-file bookkeeping for the Phase 3 full-text search indexer (see
-    app/search_index.py) — tracks what's already indexed for a source so a
-    sweep only re-reads files that changed. Deliberately separate from the
-    actual searchable content, which lives in the `search_index_fts` SQLite
-    FTS5 virtual table (raw SQL, not an ORM model — see
-    app.db.ensure_search_schema) rather than here, since FTS5 tables aren't
-    representable as a SQLModel/SQLAlchemy table class.
+class RedactionRule(SQLModel, table=True):
+    """A redaction rule (#382, #249, app/redaction_rules.py): what the
+    redaction engine (app/redaction) replaces in file content before it
+    leaves the server, when redaction is on (the `redaction_enabled` system
+    setting). Only super admins configure them, and they apply to everyone.
 
-    Staleness is tracked by file size alone, not size+mtime: none of the
-    connector protocols (ssh/smb/winrm/local/agent) report a file's
-    modification time today, only name/path/is_dir/size (see
-    collectors/base.py's DirEntry) — so size is the only signal available
-    across all of them uniformly. This under-detects the rare case of a
-    same-size content change, which is an accepted tradeoff for a lagging,
-    approximate secondary index over log files that are typically
-    append-only (grow) or rotated (renamed), not edited in place."""
+    `source_id` null is a system rule, which applies to every source; set,
+    a source's own rule. A built-in rule has a `detector` (one of
+    app.redaction.DETECTOR_NAMES; seeded once, disabled, never deleted); a
+    custom rule has an RE2 `pattern`, the capture group to replace
+    (`secret_group`, null for the whole match) and the longest match it can
+    make in bytes (`max_length`). A source can turn a system rule off with a
+    SourceRedactionOverride.
 
-    __tablename__ = "search_index_state"
-    __table_args__ = (
-        UniqueConstraint("source_id", "file_path", name="uq_search_index_state_source_path"),
-    )
+    The engine labels each replacement `[redacted: <name>]`, so names are
+    short and unique in their scope."""
+
+    __tablename__ = "redaction_rule"
+    __table_args__ = NO_ID_REUSE
 
     id: int | None = Field(default=None, primary_key=True)
-    source_id: int = Field(foreign_key="source.id")
-    file_path: str
+    source_id: int | None = Field(default=None, foreign_key="source.id", index=True)
+    name: str
+    detector: str | None = None
+    pattern: str | None = None
+    secret_group: int | None = None
+    max_length: int | None = None
+    enabled: bool = False
+    order: int = 0
+    notes: str | None = None
+
+
+class SourceRedactionOverride(SQLModel, table=True):
+    """A source turning one system redaction rule off (#382): the source's
+    effective rules are the enabled system rules it doesn't turn off, then
+    its own enabled rules."""
+
+    __tablename__ = "source_redaction_override"
+
+    source_id: int = Field(foreign_key="source.id", primary_key=True)
+    rule_id: int = Field(foreign_key="redaction_rule.id", primary_key=True)
+    disabled: bool = True
+
+
+class FileNameEntry(SQLModel, table=True):
+    """One rule-visible file of a source, in the file-name index (#304): its
+    path, size and modification time as the last listing saw them. Never any
+    content. The `file_name_fts` FTS5 table (trigram tokenizer, see
+    app/name_index_store.py) indexes `path` for substring search."""
+
+    __tablename__ = "file_name_entry"
+    __table_args__ = (UniqueConstraint("source_id", "path", name="uq_file_name_entry_source_path"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_id: int = Field(foreign_key="source.id", index=True)
+    path: str
     size: int
-    indexed_at: datetime
+    mtime: float | None = None
+    seen_at: datetime
 
 
 class Alert(SQLModel, table=True):
-    """Phase 3 alerting (see ROADMAP.md) — notifies a webhook when new
-    content matching `query` appears in a source's full-text search index.
-    Rides entirely on the existing FTS5 index (app/search_index.py) and its
-    indexer, no parallel structure: an alert can only ever fire on sources
-    with `search_indexing_enabled` already on, evaluated by
-    `app.alerts.evaluate_alerts()` right after each indexing sweep so it
-    always sees fresh `SearchIndexState.indexed_at` timestamps.
+    """Live alerts (#305, app/alerts.py): a webhook is called when lines
+    matching `query` are written to files the alert watches. Each pass reads
+    only what was appended to those files since the last pass, the way Tail
+    does, so nothing of their content is kept.
 
-    `source_id` null means "every source the owner can currently view",
-    resolved dynamically at each evaluation via `auth.rbac.
-    visible_source_ids` rather than frozen at creation time — same "checked
-    live, not a snapshot" RBAC spirit as everywhere else in this project.
-    A consequence: revoking the owner's access to a scoped source silently
-    stops that alert from firing again, without needing to also edit or
-    delete it.
+    Scope: `source_id`, `folder_id` (and every folder below it) or
+    `customer_id`, at most one of them; none means every source the owner
+    can view. It's resolved at each pass against the owner's current access,
+    so revoking it stops the alert without editing it. Within the scope,
+    `file_glob` (default `**/*.log`) picks the files, among those the
+    file-name index lists; compressed files and archives are never read.
 
-    `last_checked_at` drives "new since last time" — only files whose
-    `SearchIndexState.indexed_at` has advanced past it are re-checked, not
-    the whole index every sweep. Webhook-only notification channel for v1
-    (no SMTP sending exists anywhere in this project); enabling an alert is
-    a deliberate "content leaves the system" export choice, same category
-    of decision as opting a source into indexing at all."""
+    `query` is plain text matched anywhere in a line, ignoring case, or a
+    regular expression (RE2, linear time) when `regex` is set.
+
+    Delivery (#328): a failed webhook is retried with backoff for up to an
+    hour (AlertDelivery); after that it's counted in `failed_deliveries`
+    with `last_error`, and the alert moves on."""
 
     __tablename__ = "alert"
 
@@ -261,26 +316,51 @@ class Alert(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id")
     name: str
     query: str
+    regex: bool = False
     source_id: int | None = Field(default=None, foreign_key="source.id")
-    webhook_url: str
+    folder_id: int | None = Field(default=None, foreign_key="folder.id")
+    customer_id: int | None = Field(default=None, foreign_key="customer.id")
+    file_glob: str = "**/*.log"
+    # The webhook URL, Fernet-encrypted (app/crypto.py): its path or query
+    # often carries the receiver's secret. The API never returns it.
+    webhook_url_encrypted: str = Field(sa_column=Column("webhook_url", String, nullable=False))
     enabled: bool = True
     last_checked_at: datetime | None = None
+    last_fired_at: datetime | None = None
+    failed_deliveries: int = 0
+    last_error: str | None = None
     created_at: datetime
 
 
 class AlertFileState(SQLModel, table=True):
-    """How far into each file an alert has already reported -- so a
-    re-indexed file (the indexer re-reads a changed file in full) only fires
-    for lines past this point, not every old match again. If the file now
-    ends before this line, it was rotated or rewritten, and every line in
-    it counts as new."""
+    """Where an alert has read each file up to: the byte `offset` of the
+    next unread line, and a hash of the file's first bytes (`head`) to tell
+    a rotated or rewritten file (same path, new content) from one that
+    only grew. A file first seen starts at its end."""
 
     __tablename__ = "alert_file_state"
 
     alert_id: int = Field(foreign_key="alert.id", primary_key=True)
     source_id: int = Field(foreign_key="source.id", primary_key=True)
     file_path: str = Field(primary_key=True)
-    reported_through_line: int
+    offset: int = 0
+    head: str | None = None
+    checked_at: datetime | None = None
+
+
+class AlertDelivery(SQLModel, table=True):
+    """A webhook call waiting to be sent or retried (#328). Sent right away;
+    when that fails, retried with backoff until it succeeds or is an hour
+    old, then dropped and counted on the alert."""
+
+    __tablename__ = "alert_delivery"
+
+    id: int | None = Field(default=None, primary_key=True)
+    alert_id: int = Field(foreign_key="alert.id", index=True)
+    payload: dict = Field(sa_column=Column("payload", JSON, nullable=False))
+    created_at: datetime
+    attempts: int = 0
+    next_attempt_at: datetime
 
 
 class UpdateCheckState(SQLModel, table=True):
@@ -305,19 +385,91 @@ class UpdateCheckState(SQLModel, table=True):
     notified_version: str | None = None
 
 
+class JobRun(SQLModel, table=True):
+    """The last run of each scheduled job (#327, app/jobs.py), so a job that
+    fails or never runs shows, and one overdue after a restart runs soon
+    instead of waiting a full interval. last_error never holds a URL."""
+
+    __tablename__ = "job_run"
+
+    job_id: str = Field(primary_key=True)
+    last_started_at: datetime | None = None
+    last_finished_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_ok: bool | None = None
+    last_error: str | None = None
+    last_duration_ms: int | None = None
+
+
+class AgentUpgradeRun(SQLModel, table=True):
+    """One attempt to upgrade a push agent from the portal (#319,
+    app/agent_upgrades.py), from the request to how it ended. The agent's
+    progress updates the row; it only succeeds once the agent reconnects
+    reporting the new version. Deleted with its source."""
+
+    __tablename__ = "agent_upgrade_run"
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_id: int = Field(foreign_key="source.id", index=True)
+    # The id of the "upgrade" command, which the agent's progress refers to.
+    command_id: str = Field(index=True, unique=True)
+    from_version: str | None = None
+    to_version: str
+    # Null when the schedule asked (trigger "automatic").
+    requested_by_user_id: int | None = None
+    trigger: str  # manual | automatic
+    started_at: datetime
+    # The last news from the agent, for the timeout.
+    updated_at: datetime
+    finished_at: datetime | None = None
+    # requested | accepted | downloading | installing | restarting, then
+    # succeeded | failed | refused | too_old | timeout.
+    status: str = Field(index=True)
+    message: str | None = None
+    # This failure reached the failure limit: automatic upgrades of the
+    # source stopped here.
+    suspended_source: bool = False
+
+
 class SystemSetting(SQLModel, table=True):
     """Deployment-wide feature toggles, admin-configurable from Settings ->
     System (see app/api/system_settings.py) rather than only via an env var
-    and a redeploy. Key-value rather than dedicated columns so a new toggle
-    (e.g. the audit log viewer, once built) slots in without its own
-    migration each time. Missing key == default, defined in code
-    (app.system_settings.DEFAULTS), not stored — so shipping a new toggle
+    and a redeploy. Key-value rather than dedicated columns so a new setting
+    slots in without its own migration each time. Missing key == default,
+    defined in code (app/system_settings.py: BOOL_DEFAULTS, INT_DEFAULTS and
+    CHOICE_DEFAULTS), not stored — so shipping a new setting
     doesn't require backfilling every existing deployment's rows."""
 
     __tablename__ = "system_setting"
 
     key: str = Field(primary_key=True)
     value: str
+
+
+class SmtpSettings(SQLModel, table=True):
+    """The system SMTP server (#244), set by a super admin from Settings ->
+    Email (app/api/smtp_settings.py) and used by app/email_delivery.py.
+    Singleton by convention, like MonitoringToken. Nothing is sent while
+    there's no row or `enabled` is false. TLS is always on: `security` is
+    "starttls" (upgrade on connect, port 587) or "tls" (implicit TLS, 465).
+    The password is Fernet-encrypted like Source.credential_ref, never
+    returned by the API and never logged or audited."""
+
+    __tablename__ = "smtp_settings"
+
+    id: int | None = Field(default=None, primary_key=True)
+    host: str
+    port: int
+    security: str = "starttls"
+    # Null for a relay that takes mail without authentication.
+    username: str | None = None
+    password_encrypted: str | None = None
+    from_address: str
+    from_name: str | None = "PerchTail"
+    # PEM CA certificates trusted on top of the system's, for an internal PKI.
+    tls_ca_pem: str | None = None
+    enabled: bool = False
+    updated_at: datetime
 
 
 class MonitoringToken(SQLModel, table=True):

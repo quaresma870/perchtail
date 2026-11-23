@@ -6,12 +6,13 @@
   import ConnectionsTree from '../lib/components/ConnectionsTree.svelte'
   import SourceNode from '../lib/components/SourceNode.svelte'
   import ScopeResults from '../lib/components/ScopeResults.svelte'
+  import SearchResults from '../lib/components/SearchResults.svelte'
   import {
     advancedFilter,
     clearScopes,
     compileMatcher,
     contextFromTree,
-    filterOptions,
+    parseQuery,
     isGroupScope,
     isMatcherError,
     removeScope,
@@ -30,20 +31,41 @@
   import { countAppended, countMatches, matchIndexAt, type MatchCount } from '../lib/find-count'
   import ToolbarIcon from '../lib/components/ToolbarIcon.svelte'
   import { buildConnectionTree } from '../lib/connection-tree'
-  import { filterConnections } from '../lib/connection-filter'
-  import { readFetchFailure, type FetchProblem } from '../lib/fetch-errors'
+  import { readFetchFailure, readFollowFailure, tailStoppedNotice, type FetchProblem } from '../lib/fetch-errors'
   import { trackedFetch } from '../lib/server-status'
   import { parentPath, refreshFolder, startAutoRefresh, stopAutoRefresh } from '../lib/explorer-refresh'
   import { connectionsViewPreference, migrateLegacyViewChoice, savePreference } from '../lib/preferences'
-  import { countLines, followUrl, readFollowHeaders, tailIntervalMs } from '../lib/follow'
+  import {
+    appendReplacingPartial,
+    countLines,
+    decodeWithPartial,
+    followUrl,
+    readFollowHeaders,
+    readRedactionHeaders,
+    tailIntervalMs,
+  } from '../lib/follow'
   import { canFormat, formatContent } from '../lib/format-content'
   import { languageForFilename } from '../lib/file-language'
   import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
+  import { redactionCountAfterCap, redactionCountLabel } from '../lib/redaction-markers'
+  import { slowSeverityPatterns } from '../lib/severity-highlighting'
   import { parsePatternInput } from '../lib/rule-format'
   import { systemSettings } from '../lib/settings'
   import { tabKey } from '../lib/tab-key'
   import type { SeverityPattern, Source } from '../lib/types'
   import { explorerExpanded, setExpanded, sourceHue, viewerState, type Tab } from '../lib/viewer-tabs'
+  import { formatSize } from '../lib/file-details'
+  import {
+    capTailBuffer,
+    countNewlines,
+    dropPartialFirstLine,
+    isLargeFile,
+    shiftBookmarks,
+    tabLimitMessage,
+    tabLimitReached,
+    TAIL_MAX_LINES,
+    tailStartOffset,
+  } from '../lib/viewer-limits'
 
   /** The viewer is one explorer across every source the user can see
    * (#162): machines expand in place in the sidebar, and tabs from
@@ -61,11 +83,14 @@
 
   let recentSources: Source[] = []
   let allSources: Source[] = []
-  let connectionsQuery = ''
   let loading = true
   let loadError = ''
   // Per-source severity patterns, fetched on first use for that source.
   let severityBySource: Record<number, SeverityPattern[]> = {}
+  // Severity patterns turned off for taking too long (severity-highlighting.ts);
+  // the warning shows those not dismissed yet.
+  let dismissedSlowPatterns = 0
+  $: newSlowPatterns = $slowSeverityPatterns.slice(dismissedSlowPatterns)
 
   // A failed open/reload/compare shows here, above the editor, with the
   // server's reason -- it never replaces the explorer (#160).
@@ -184,6 +209,9 @@
   $: activeTab = tabs.find((t) => t.key === activeKey) ?? null
   $: activeSource = activeTab ? allSources.find((s) => s.id === activeTab.sourceId) ?? null : null
   $: canDownloadActive = activeSource?.my_capabilities?.includes('download') ?? false
+  // Redaction (#382, #249): a file the viewer got redacted is downloaded
+  // redacted too, unless downloads are left out of redaction.
+  $: downloadLabel = activeTab?.redacted && $systemSettings.redaction_downloads ? 'Download (redacted)' : 'Download'
   $: activeSeverityPatterns = activeTab ? (severityBySource[activeTab.sourceId] ?? []) : []
   $: displayContent = activeTab
     ? (formatContent(activeTab.content, languageForFilename(activeTab.name), activeTab.format) ??
@@ -198,17 +226,34 @@
   // While ticking, the tree stays; the files show on "Show the files" or as
   // soon as something is typed in the filter.
   let pickingScopes = true
-  $: showScoped = $advancedFilter && $scopes.length > 0 && !pickingScopes
+  // One search (#300): with nothing ticked it searches sources and file
+  // names everywhere (SearchResults); with sources or folders ticked, their
+  // files live, as before. `$advancedFilter` now means "Select" is on (the
+  // checkboxes show).
+  $: showScoped = $scopes.length > 0 && !pickingScopes
+  $: showSearch = fileQuery.trim().length > 0 && $scopes.length === 0 && !$advancedFilter
   $: if ($scopes.length === 0) pickingScopes = true
   const scopeLabel = (scope: Scope) =>
     isGroupScope(scope) ? scope.name : `${sourceLabel(scope.sourceId)}${scope.path ? ` › ${scope.path}` : ''}`
   // Which sources sit under each customer and folder (#284), from every
   // source the user can see, not only the ones the search box shows.
   $: scopeContext.set(contextFromTree(buildConnectionTree(allSources)))
-  $: compiledFilter = compileMatcher(fileQuery, $filterOptions)
+  $: parsedQuery = parseQuery(fileQuery)
+  $: compiledFilter = compileMatcher(parsedQuery.text, { regex: parsedQuery.regex, matchCase: false })
   $: fileMatcher = isMatcherError(compiledFilter) ? null : compiledFilter
 
-  $: filteredAllSources = filterConnections(allSources, $advancedFilter ? '' : connectionsQuery)
+  $: filteredAllSources = allSources
+
+  function revealSource(source: Source) {
+    fileQuery = ''
+    revealInTree(source)
+    setExpanded(`source:${source.id}`, true)
+  }
+
+  function startSelecting() {
+    advancedFilter.set(true)
+    pickingScopes = true
+  }
 
   // List or tree: the admin's default (Settings -> System), and -- when
   // switching is allowed -- each user's own choice, kept on the server so
@@ -236,7 +281,8 @@
     statusTimer = setInterval(async () => {
       if (document.hidden) return
       try {
-        allSources = await api.get<Source[]>('/sources')
+        allSources = viewable(await api.get<Source[]>('/sources'))
+        closeTabsOfHiddenSources()
       } catch {
         // the banner (server-status) says when PerchTail doesn't answer
       }
@@ -261,16 +307,23 @@
     viewerState.update((state) => ({ ...state, ...patch }))
   }
 
+  // A disabled source keeps its configuration (Settings → Sources) but is
+  // off: it isn't shown here at all, and the server refuses to read it.
+  function viewable(sources: Source[]): Source[] {
+    return sources.filter((s) => s.enabled)
+  }
+
   async function loadSources() {
     loading = true
     loadError = ''
     try {
-      allSources = await api.get<Source[]>('/sources')
+      allSources = viewable(await api.get<Source[]>('/sources'))
+      closeTabsOfHiddenSources()
     } catch {
       loadError = 'Failed to load sources'
     }
     try {
-      recentSources = await api.get<Source[]>('/sources/recent')
+      recentSources = viewable(await api.get<Source[]>('/sources/recent'))
     } catch {
       recentSources = []
     }
@@ -306,12 +359,26 @@
     path: string,
     member: string | null,
     name: string,
+    size?: number,
+    force = false,
   ): Promise<boolean> {
     const key = tabKey(sourceId, path, member)
     if (tabs.some((t) => t.key === key)) {
       setState({ activeKey: key })
       return true
     }
+    // Bounds on one browser tab (#347): so many files open at once, and a
+    // very large file only after a warning.
+    if (tabLimitReached(tabs.length)) {
+      notice = { message: tabLimitMessage(), retryable: false }
+      return false
+    }
+    if (!force && size !== undefined && isLargeFile(size)) {
+      largeFile = { sourceId, sourceName, path, member, name, size }
+      notice = null
+      return false
+    }
+    largeFile = null
     try {
       const response = await trackedFetch(openUrl(sourceId, path, member), { credentials: 'include' })
       if (!response.ok) {
@@ -322,16 +389,17 @@
         notice = {
           ...problem,
           retry: problem.retryable
-            ? () => openFile(sourceId, sourceName, path, member, name)
+            ? () => openFile(sourceId, sourceName, path, member, name, size, true)
             : undefined,
         }
         return false
       }
-      const bytes = await response.arrayBuffer()
+      const bytes = new Uint8Array(await response.arrayBuffer())
       // Streaming, so a character the file's end splits is completed by
       // the first Follow answer (#254) instead of turning into two U+FFFD.
       const decoder = new TextDecoder()
-      const content = decoder.decode(bytes, { stream: true })
+      const redaction = readRedactionHeaders(response.headers)
+      const { text: content, partialChars } = decodeWithPartial(decoder, bytes, redaction.partialBytes)
       followDecoders.set(key, decoder)
       const tab: Tab = {
         key,
@@ -348,12 +416,17 @@
         markPatterns: [],
         format: 'none',
         following: false,
-        byteSize: bytes.byteLength,
+        // Redacted content isn't as long as the file: the Tail goes on from
+        // the offset in the original the server gives.
+        byteSize: redaction.sourceOffset ?? bytes.byteLength,
         followHead: response.headers.get('x-follow-head'),
         // A .gz file or an archive member is decompressed on the server: only
         // the whole of it can be reloaded.
         followMode: member || name.toLowerCase().endsWith('.gz') ? 'reload' : 'incremental',
         newLines: 0,
+        redacted: redaction.redacted,
+        redactionCount: redaction.count,
+        partialChars,
       }
       notice = null
       ensureSeverityPatterns(sourceId)
@@ -363,21 +436,161 @@
       notice = {
         message: `${name}: the server could not be reached.`,
         retryable: true,
-        retry: () => openFile(sourceId, sourceName, path, member, name),
+        retry: () => openFile(sourceId, sourceName, path, member, name, size, true),
       }
       return false
     }
   }
 
+  // A file over LARGE_FILE_BYTES waiting for the reader's choice (#347):
+  // its end with Tail, a download, or the whole file anyway.
+  let largeFile: {
+    sourceId: number
+    sourceName: string
+    path: string
+    member: string | null
+    name: string
+    size: number
+  } | null = null
+  $: largeFileSource = largeFile ? (allSources.find((s) => s.id === largeFile?.sourceId) ?? null) : null
+  $: largeFileCanTail =
+    largeFile !== null && largeFile.member === null && !largeFile.name.toLowerCase().endsWith('.gz')
+  $: largeFileCanDownload = largeFileSource?.my_capabilities?.includes('download') ?? false
+  $: largeFileDownloadHref = largeFile
+    ? `/sources/${largeFile.sourceId}/download?${new URLSearchParams({ path: largeFile.path, ...(largeFile.member ? { member: largeFile.member } : {}) }).toString()}`
+    : ''
+
+  function openLargeFileAnyway() {
+    if (!largeFile) return
+    const { sourceId, sourceName, path, member, name, size } = largeFile
+    largeFile = null
+    openFile(sourceId, sourceName, path, member, name, size, true)
+  }
+
+  function tailLargeFile() {
+    if (!largeFile) return
+    const { sourceId, sourceName, path, name, size } = largeFile
+    largeFile = null
+    openEnd(sourceId, sourceName, path, name, size)
+  }
+
+  interface EndRead {
+    content: string
+    byteSize: number
+    followHead: string | null
+    redacted: boolean
+    redactionCount: number
+    partialChars: number
+  }
+
+  /** Reads the end of a file (its last TAIL_START_BYTES) through Follow,
+   * from `size` as listed; once more from the size the server reports when
+   * the file shrank since it was listed. */
+  async function readEnd(
+    sourceId: number,
+    path: string,
+    name: string,
+    size: number,
+    retried = false,
+  ): Promise<EndRead | FetchProblem> {
+    const offset = tailStartOffset(size)
+    const response = await trackedFetch(followUrl(sourceId, path, offset, null, true), { credentials: 'include' })
+    if (!response.ok) {
+      // What the server says (an agent to update, content redaction can't
+      // read...); only a file Tail can't follow from an offset gets this.
+      const failure = await readFollowFailure(response, name)
+      if (failure.reloadWhole) {
+        return { message: `${name} can't be read from its end. Open it whole or download it.`, retryable: false }
+      }
+      return { message: failure.message, retryable: failure.retryable, missing: failure.missing }
+    }
+    const answer = readFollowHeaders(response.headers, offset)
+    if (answer.reset) {
+      const now = Number(response.headers.get('x-file-size'))
+      if (!retried && Number.isFinite(now)) return readEnd(sourceId, path, name, now, true)
+      return { message: `${name} changed while it was being read. Try again.`, retryable: true }
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    const redaction = readRedactionHeaders(response.headers)
+    const { text, partialChars } = decodeWithPartial(new TextDecoder(), bytes, redaction.partialBytes)
+    return {
+      // Redacted, the server already started at the next whole line.
+      content: redaction.aligned ? text : dropPartialFirstLine(text, offset),
+      byteSize: answer.offset,
+      followHead: answer.head,
+      redacted: redaction.redacted,
+      redactionCount: redaction.count,
+      partialChars,
+    }
+  }
+
+  /** Opens only the end of a large file, with Tail on (#347). */
+  async function openEnd(sourceId: number, sourceName: string, path: string, name: string, size: number) {
+    const key = tabKey(sourceId, path, null)
+    if (tabLimitReached(tabs.length)) {
+      notice = { message: tabLimitMessage(), retryable: false }
+      return
+    }
+    try {
+      const read = await readEnd(sourceId, path, name, size)
+      if ('message' in read) {
+        notice = read.retryable ? { ...read, retry: () => openEnd(sourceId, sourceName, path, name, size) } : read
+        return
+      }
+      followDecoders.set(key, new TextDecoder())
+      followStarted.add(key)
+      const tab: Tab = {
+        key,
+        sourceId,
+        sourceName,
+        path,
+        member: null,
+        name,
+        content: read.content,
+        scratchKey: null,
+        wrapEnabled: false,
+        showWhitespace: false,
+        bookmarks: [],
+        markPatterns: [],
+        format: 'none',
+        following: true,
+        byteSize: read.byteSize,
+        followHead: read.followHead,
+        followMode: 'incremental',
+        newLines: 0,
+        endOnly: true,
+        redacted: read.redacted,
+        redactionCount: read.redactionCount,
+        partialChars: read.partialChars,
+      }
+      notice = null
+      ensureSeverityPatterns(sourceId)
+      setState({ tabs: [...tabs.filter((t) => t.key !== key), tab], activeKey: key })
+    } catch {
+      notice = {
+        message: `${name}: the server could not be reached.`,
+        retryable: true,
+        retry: () => openEnd(sourceId, sourceName, path, name, size),
+      }
+    }
+  }
+
   async function handleOpen(
-    event: CustomEvent<{ sourceId: number; sourceName: string; path: string; member: string | null; name: string }>,
+    event: CustomEvent<{
+      sourceId: number
+      sourceName: string
+      path: string
+      member: string | null
+      name: string
+      size?: number
+    }>,
   ) {
-    const { sourceId, sourceName, path, member, name } = event.detail
+    const { sourceId, sourceName, path, member, name, size } = event.detail
     if (compareArmed) {
       await pickCompareTarget(sourceId, path, member, name)
       return
     }
-    await openFile(sourceId, sourceName, path, member, name)
+    await openFile(sourceId, sourceName, path, member, name, size)
   }
 
   // "Compare": a one-shot snapshot of another file -- from any source, so
@@ -438,6 +651,30 @@
         activeKey === tab.key ? (remaining.length > 0 ? remaining[remaining.length - 1].key : null) : activeKey,
     })
     if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
+  }
+
+  // Tabs of a source that isn't in the list any more (disabled, deleted, or
+  // no longer granted) close, so nothing of it stays on screen. Only after
+  // a list was actually loaded: an empty list from a failed request mustn't
+  // close everything.
+  function closeTabsOfHiddenSources() {
+    const shown = new Set(allSources.map((s) => s.id))
+    const hidden = tabs.filter((t) => !shown.has(t.sourceId))
+    if (hidden.length === 0) return
+    for (const tab of hidden) {
+      followDecoders.delete(tab.key)
+      followStarted.delete(tab.key)
+      if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
+    }
+    const remaining = tabs.filter((t) => shown.has(t.sourceId))
+    setState({
+      tabs: remaining,
+      activeKey: remaining.some((t) => t.key === activeKey)
+        ? activeKey
+        : remaining.length > 0
+          ? remaining[remaining.length - 1].key
+          : null,
+    })
   }
 
   function updateActiveTab(patch: Partial<Tab>) {
@@ -518,6 +755,10 @@
   }
 
   async function reloadTab(tab: Tab) {
+    if (tab.endOnly) {
+      await reloadEnd(tab)
+      return
+    }
     try {
       const response = await trackedFetch(openUrl(tab.sourceId, tab.path, tab.member), {
         credentials: 'include',
@@ -531,20 +772,66 @@
         notice = { ...problem, retry: problem.retryable ? reloadActiveTab : undefined }
         return
       }
-      const bytes = await response.arrayBuffer()
+      const bytes = new Uint8Array(await response.arrayBuffer())
       const decoder = new TextDecoder()
-      const content = decoder.decode(bytes, { stream: true })
+      const redaction = readRedactionHeaders(response.headers)
+      const { text: content, partialChars } = decodeWithPartial(decoder, bytes, redaction.partialBytes)
       const scratchKey = response.headers.get('x-scratch-key')
       const followHead = response.headers.get('x-follow-head')
       followDecoders.set(tab.key, decoder)
       setState({
         tabs: tabs.map((t) =>
           t.key === tab.key
-            ? { ...t, content, scratchKey, byteSize: bytes.byteLength, followHead, newLines: 0, missing: false }
+            ? {
+                ...t,
+                content,
+                scratchKey,
+                byteSize: redaction.sourceOffset ?? bytes.byteLength,
+                followHead,
+                newLines: 0,
+                missing: false,
+                newlineCount: undefined,
+                droppedLines: 0,
+                redacted: redaction.redacted,
+                redactionCount: redaction.count,
+                partialChars,
+              }
             : t,
         ),
       })
       if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
+    } catch {
+      notice = { message: `${tab.name}: the server could not be reached.`, retryable: true, retry: reloadActiveTab }
+    }
+  }
+
+  /** Reload of a tab that holds only the end of its file: the end again,
+   * from the file's size now. */
+  async function reloadEnd(tab: Tab) {
+    try {
+      const probe = await trackedFetch(followUrl(tab.sourceId, tab.path, tab.byteSize, tab.followHead, false), {
+        credentials: 'include',
+      })
+      const size = Number(probe.headers.get('x-file-size'))
+      const read = await readEnd(tab.sourceId, tab.path, tab.name, Number.isFinite(size) ? size : tab.byteSize)
+      if ('message' in read) {
+        notice = read
+        return
+      }
+      followDecoders.set(tab.key, new TextDecoder())
+      updateTab(tab.key, {
+        content: read.content,
+        byteSize: read.byteSize,
+        followHead: read.followHead,
+        newLines: 0,
+        missing: false,
+        newlineCount: undefined,
+        droppedLines: 0,
+        bookmarks: [],
+        redacted: read.redacted,
+        redactionCount: read.redactionCount,
+        partialChars: read.partialChars,
+      })
     } catch {
       notice = { message: `${tab.name}: the server could not be reached.`, retryable: true, retry: reloadActiveTab }
     }
@@ -584,23 +871,42 @@
     let byteSize = tab.byteSize
     let followHead = tab.followHead
     let appended = ''
+    // Redacted (#382, #249): an unfinished last line is shown as a marker
+    // that the next answer replaces. `partialChars` is that marker's length
+    // at the end of what the tab holds plus `appended`; what of it was
+    // already in the content before this tick is dropped from it.
+    let partialChars = tab.partialChars ?? 0
+    let dropFromContent = 0
+    let redacted = tab.redacted ?? false
+    let redactionCount = tab.redactionCount ?? 0
     for (let round = 0; round < FOLLOW_ROUNDS_PER_TICK; round++) {
       const start = !followStarted.has(tab.key)
       const response = await trackedFetch(followUrl(tab.sourceId, tab.path, byteSize, followHead, start), {
         credentials: 'include',
       })
-      if (response.status === 409) {
-        // A .gz file, an archive member or an agent older than 0.6: this
-        // tab reloads the whole file from now on.
-        followStarted.add(tab.key)
-        updateTab(tab.key, { followMode: 'reload' })
-        await reloadTab(tab)
-        return
-      }
       if (!response.ok) {
-        const problem = await readFetchFailure(response, tab.name)
-        if (problem.missing) markMissing(tab)
-        else notice = problem
+        const { reloadWhole, stopFollowing, ...problem } = await readFollowFailure(response, tab.name)
+        if (reloadWhole) {
+          // A .gz file or an archive member (follow_unsupported): this tab
+          // reloads the whole file from now on.
+          followStarted.add(tab.key)
+          updateTab(tab.key, { followMode: 'reload' })
+          await reloadTab(tab)
+          return
+        }
+        if (problem.missing) {
+          markMissing(tab)
+          return
+        }
+        // A refusal the next poll won't change (an agent to update, content
+        // redaction can't read): Tail stops and the tab keeps what it had.
+        if (stopFollowing) {
+          updateTab(tab.key, { following: false })
+          followStarted.delete(tab.key)
+          notice = tailStoppedNotice(problem)
+          return
+        }
+        notice = problem
         return
       }
       followStarted.add(tab.key)
@@ -616,7 +922,17 @@
         decoder = new TextDecoder()
         followDecoders.set(tab.key, decoder)
       }
-      appended += decoder.decode(bytes, { stream: true })
+      const redaction = readRedactionHeaders(response.headers)
+      const decoded = decodeWithPartial(decoder, bytes, redaction.partialBytes)
+      ;({ appended, dropFromContent } = appendReplacingPartial(
+        appended,
+        dropFromContent,
+        partialChars,
+        decoded.text,
+      ))
+      partialChars = decoded.partialChars
+      redacted = redacted || redaction.redacted
+      redactionCount += redaction.count
       byteSize = answer.offset
       followHead = answer.head
       if (!answer.more) break
@@ -625,11 +941,32 @@
     const current = tabs.find((t) => t.key === tab.key)
     if (!current || current.byteSize !== tab.byteSize) return
     const readingAbove = appended !== '' && tab.key === activeKey && !(paneRef?.isAtBottom() ?? true)
+    // The unfinished line the answers replaced holds no newline, so the
+    // newline count stays right.
+    const kept = dropFromContent > 0 ? current.content.slice(0, current.content.length - dropFromContent) : current.content
+    // Tail keeps at most TAIL_MAX_LINES lines (#347): older ones go from
+    // the top, and the toolbar says so.
+    const newlines = (current.newlineCount ?? countNewlines(current.content)) + countNewlines(appended)
+    const held = kept + appended
+    const capped = capTailBuffer(held, newlines)
+    // The count is of what the tab shows: the values in the lines that
+    // left the top go with them.
+    if (capped.dropped > 0) redactionCount = redactionCountAfterCap(held, capped.content, redactionCount)
     updateTab(tab.key, {
-      content: current.content + appended,
+      content: capped.content,
+      newlineCount: capped.newlines,
+      droppedLines: (current.droppedLines ?? 0) + capped.dropped,
+      bookmarks: shiftBookmarks(current.bookmarks, capped.dropped),
       byteSize,
       followHead,
-      newLines: readingAbove ? current.newLines + countLines(appended) : current.newLines,
+      // Redacted, only whole lines are new: the marker of an unfinished
+      // one comes back on every poll until the line is written.
+      newLines: readingAbove
+        ? current.newLines + (redacted ? countNewlines(appended) : countLines(appended))
+        : current.newLines,
+      redacted,
+      redactionCount,
+      partialChars,
     })
   }
 
@@ -745,66 +1082,51 @@
 <div class="viewer">
   <aside class="explorer">
     <div class="explorer-header">
-      {#if $advancedFilter}
-        <input
-          class="input search-box"
-          type="search"
-          aria-label="Filter files"
-          placeholder="Filter files in the ticked sources and folders (text, glob like app-*.log, or regex)"
-          bind:value={fileQuery}
-          on:input={() => { if (fileQuery.trim() && $scopes.length > 0) pickingScopes = false }}
-        />
-      {:else}
-        <input
-          class="input search-box"
-          type="search"
-          placeholder="Search by folder, customer, or host…"
-          bind:value={connectionsQuery}
-        />
-      {/if}
-      <button
-        class="view-toggle-btn advanced-toggle"
-        class:active={$advancedFilter}
-        aria-pressed={$advancedFilter}
-        title="Advanced filter: tick sources and folders, then filter their files by name"
-        on:click={() => advancedFilter.update((on) => !on)}
-      >
-        Advanced filter
-      </button>
-      {#if switchable}
-        <div class="view-toggle" role="group" aria-label="View">
-          <button
-            class="view-toggle-btn"
-            class:active={connectionsView === 'list'}
-            on:click={() => chooseView('list')}
-          >
-            List
-          </button>
-          <button
-            class="view-toggle-btn"
-            class:active={connectionsView === 'tree'}
-            on:click={() => chooseView('tree')}
-          >
-            Tree
-          </button>
-        </div>
-      {/if}
-    </div>
-    {#if $advancedFilter}
-      <div class="scope-bar">
-        <label class="filter-option">
-          <input type="checkbox" bind:checked={$filterOptions.regex} />
-          Regex
-        </label>
-        <label class="filter-option">
-          <input type="checkbox" bind:checked={$filterOptions.matchCase} />
-          Match case
-        </label>
-        {#if isMatcherError(compiledFilter)}
-          <span class="filter-error" role="status">{compiledFilter.error}</span>
+      <input
+        class="input search-box"
+        type="search"
+        aria-label="Search sources and files"
+        placeholder="Search sources and files: text, app-*.log, or /regex/"
+        bind:value={fileQuery}
+        on:input={() => { if (fileQuery.trim() && $scopes.length > 0) pickingScopes = false }}
+      />
+      <div class="header-row">
+        {#if switchable}
+          <div class="view-toggle" role="group" aria-label="View">
+            <button
+              class="view-toggle-btn"
+              class:active={connectionsView === 'list'}
+              on:click={() => chooseView('list')}
+            >
+              List
+            </button>
+            <button
+              class="view-toggle-btn"
+              class:active={connectionsView === 'tree'}
+              on:click={() => chooseView('tree')}
+            >
+              Tree
+            </button>
+          </div>
         {/if}
+        <button
+          class="view-toggle-btn advanced-toggle"
+          class:active={$advancedFilter}
+          aria-pressed={$advancedFilter}
+          title="Tick sources and folders to search their files live"
+          on:click={() => advancedFilter.update((on) => !on)}
+        >
+          Filter sources
+        </button>
+      </div>
+    </div>
+    {#if isMatcherError(compiledFilter)}
+      <p class="filter-error search-error" role="status">{compiledFilter.error}</p>
+    {/if}
+    {#if $advancedFilter || $scopes.length > 0}
+    <div class="scope-bar">
         {#if $scopes.length === 0}
-          <span class="hint">Tick the sources and folders to filter files in.</span>
+          <span class="hint">Tick the sources and folders to search their files live.</span>
         {:else}
           {#each $scopes as scope (scopeKey(scope))}
             <span class="scope-chip">
@@ -826,7 +1148,7 @@
             </button>
           {/if}
         {/if}
-      </div>
+    </div>
     {/if}
     <div class="explorer-body">
       {#if loading}
@@ -868,17 +1190,24 @@
             {/if}
           {/each}
         </div>
+      {:else if showSearch}
+        <SearchResults
+          query={parsedQuery.text}
+          regex={parsedQuery.regex}
+          sources={allSources}
+          on:open={handleOpen}
+          on:reveal={(e) => revealSource(e.detail.source)}
+          on:select={startSelecting}
+        />
       {:else if filteredAllSources.length === 0}
-        <p class="hint">
-          {connectionsQuery.trim() ? 'No connections match that search.' : 'No sources visible to your account.'}
-        </p>
+        <p class="hint">No sources visible to your account.</p>
       {:else if connectionsView === 'tree'}
         <div class="connections-tree-body">
           {#each connectionTree as node (node.id)}
             <ConnectionsTree
               {node}
               expandedIds={expandedTreeIds}
-              forceExpand={connectionsQuery.trim().length > 0}
+              forceExpand={false}
               {activeKey}
               {focusSourceId}
               on:toggle={(e) => toggleTreeNode(e.detail.id)}
@@ -928,6 +1257,42 @@
             <button class="link" on:click={() => notice?.retry?.()}>Try again</button>
           {/if}
           <button class="link" aria-label="Dismiss" on:click={() => (notice = null)}>✕</button>
+        </span>
+      </div>
+    {/if}
+    {#if newSlowPatterns.length > 0}
+      <div class="notice" role="alert">
+        <span>
+          {newSlowPatterns.length === 1 ? 'A severity indicator' : 'Some severity indicators'} took too
+          long to match and {newSlowPatterns.length === 1 ? 'is' : 'are'} turned off until you reload the
+          page: {newSlowPatterns.map((p) => p.pattern).join(', ')}
+        </span>
+        <span class="notice-actions">
+          <button
+            class="link"
+            aria-label="Dismiss"
+            on:click={() => (dismissedSlowPatterns = $slowSeverityPatterns.length)}>✕</button
+          >
+        </span>
+      </div>
+    {/if}
+    {#if largeFile}
+      <div class="notice" role="alert">
+        <span>
+          {largeFile.name} is {formatSize(largeFile.size)}. Opening it loads the whole file into this browser tab,
+          which can be slow.
+        </span>
+        <span class="notice-actions">
+          {#if largeFileCanTail}
+            <button class="link" on:click={tailLargeFile}>Tail the end</button>
+          {/if}
+          {#if largeFileCanDownload}
+            <a class="link" href={largeFileDownloadHref} target="_blank" rel="noreferrer" on:click={() => (largeFile = null)}>
+              Download
+            </a>
+          {/if}
+          <button class="link" on:click={openLargeFileAnyway}>Open anyway</button>
+          <button class="link" aria-label="Cancel" on:click={() => (largeFile = null)}>✕</button>
         </span>
       </div>
     {/if}
@@ -1067,7 +1432,7 @@
               aria-pressed={activeTab.following}
               title={activeTab.followMode === 'incremental'
                 ? "Show new lines as they're written, like tail -f: fetches only what was appended"
-                : "Show new lines as they're written: reloads the whole file (compressed files, archive members, agents older than 0.6)"}
+                : "Show new lines as they're written: reloads the whole file (compressed files and archive members)"}
               on:click={toggleFollow}
             >
               {#if activeTab.following}<span class="live-dot" aria-hidden="true"></span>{/if}
@@ -1077,6 +1442,26 @@
               <!-- Only while Tail is on (#283); set under Settings -> System. -->
               <span class="follow-interval" title="How often Tail checks for new lines (Settings → System)">
                 every {followIntervalMs / 1000} s
+              </span>
+            {/if}
+            {#if activeTab.endOnly}
+              <span class="hint" title="A large file: only its end was loaded. Reload reads the end again.">
+                End of the file only
+              </span>
+            {/if}
+            {#if activeTab.droppedLines}
+              <span class="hint" role="status" title="Reload to read the file again from the source">
+                Older lines dropped: Tail keeps the last {TAIL_MAX_LINES.toLocaleString('en')} lines
+              </span>
+            {/if}
+            {#if activeTab.redacted}
+              <span
+                class="hint redaction-count"
+                role="status"
+                data-testid="redaction-count"
+                title="Redaction is on: the server replaced these values before sending the file"
+              >
+                {redactionCountLabel(activeTab.redactionCount ?? 0)}
               </span>
             {/if}
           </div>
@@ -1148,8 +1533,8 @@
             {#if canDownloadActive}
               <a
                 class="icon-btn"
-                title="Download"
-                aria-label="Download"
+                title={downloadLabel}
+                aria-label={downloadLabel}
                 href={`/sources/${activeTab.sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
                 target="_blank"
                 rel="noreferrer"
@@ -1246,6 +1631,11 @@
     padding: 0.75rem;
     border-bottom: 1px solid var(--border-soft);
   }
+  .header-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
   .advanced-toggle {
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -1260,15 +1650,12 @@
     border-bottom: 1px solid var(--border-soft);
     font-size: 0.78rem;
   }
-  .filter-option {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    color: var(--text-muted);
-    cursor: pointer;
-  }
   .filter-error {
     color: var(--danger);
+  }
+  .search-error {
+    margin: 0 0.75rem 0.4rem;
+    font-size: 0.8rem;
   }
   .group-scope {
     border-bottom: 1px solid var(--border-soft);

@@ -3,26 +3,35 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 
 const backendTarget = 'http://127.0.0.1:8000'
 
-// The production deployment (docker-compose + nginx, see CLAUDE.md's
-// Packaging section) proxies these same top-level paths straight to the
-// backend and serves everything else as the SPA — mirrored here so `npm run
-// dev` behaves the same way without a `/api` prefix rewrite.
+// In production the backend serves the built app and the API from one
+// origin. In `npm run dev`, Vite serves the app and these top-level API
+// paths are proxied to the backend, so the app calls them without a `/api`
+// prefix rewrite. backend/tests/test_dev_proxy_prefixes.py checks that this
+// list names every top-level path the backend's routes use.
 const apiPrefixes = [
+  '/access-report',
   '/admin',
-  '/auth',
-  '/customers',
-  '/folders',
-  '/sources',
-  '/roles',
-  '/users',
-  '/search',
+  '/agent',
+  '/agent-upgrades',
   '/alerts',
   '/audit',
-  '/sso',
-  '/system-settings',
-  '/severity-patterns',
-  '/monitoring',
+  '/auth',
+  '/customers',
+  '/files',
+  '/folders',
   '/healthz',
+  '/metrics',
+  '/monitoring',
+  '/readyz',
+  '/redaction-rules',
+  '/roles',
+  '/severity-patterns',
+  '/smtp-settings',
+  '/sources',
+  '/sso',
+  '/system',
+  '/system-settings',
+  '/users',
 ]
 
 export default defineConfig({

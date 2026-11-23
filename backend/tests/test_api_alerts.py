@@ -6,7 +6,7 @@ from app.api.auth import get_current_active_user
 from app.auth.models import Capability, Role, ScopeType, User
 from app.auth.rbac import create_role_grant
 from app.db import get_session
-from app.models import Alert, AlertFileState, Customer, Protocol, Source
+from app.models import Alert, AlertFileState, Customer, Folder, Protocol, Source
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -104,8 +104,69 @@ def test_create_alert_requires_visible_source(session, client_for):
             "webhook_url": "https://example.com/hook",
         },
     )
+    missing = client.post(
+        "/alerts",
+        json={
+            "name": "x",
+            "query": "q",
+            "source_id": source.id + 1000,
+            "webhook_url": "https://example.com/hook",
+        },
+    )
 
-    assert response.status_code == 403
+    # Answered exactly like a source that doesn't exist, so the answer
+    # doesn't say which ids exist (the refusal is a ConcealedDenial, audited
+    # by app/api/errors.py: see tests/test_audit_origin.py).
+    assert response.status_code == missing.status_code == 404
+    assert response.json() == missing.json() == {"detail": "Source not found"}
+
+
+def test_create_alert_requires_visible_folder_and_customer(session, client_for):
+    user = _make_user(session, is_super_admin=False)
+    customer = Customer(name="Hidden")
+    session.add(customer)
+    session.commit()
+    folder = Folder(name="f", customer_id=customer.id)
+    session.add(folder)
+    session.commit()
+    client = client_for(user)
+
+    def create(**scope):
+        return client.post(
+            "/alerts",
+            json={"name": "x", "query": "q", "webhook_url": "https://example.com/hook", **scope},
+        )
+
+    assert create(folder_id=folder.id).json() == create(folder_id=folder.id + 1000).json()
+    assert create(folder_id=folder.id).status_code == 404
+    assert create(customer_id=customer.id).json() == create(customer_id=customer.id + 1000).json()
+    assert create(customer_id=customer.id).status_code == 404
+
+
+def test_the_webhook_test_is_limited_per_user(session, client_for, monkeypatch):
+    from app.api import alerts as alerts_api
+
+    sent = []
+    monkeypatch.setattr(alerts_api, "post_webhook", lambda url, payload: sent.append(url))
+    user, other = _make_user(session), _make_user(session)
+
+    def alert_of(client):
+        return client.post(
+            "/alerts", json={"name": "a", "query": "q", "webhook_url": "https://example.com/hook"}
+        ).json()["id"]
+
+    client = client_for(user)
+    alert_id = alert_of(client)
+    for _ in range(alerts_api.TEST_CALLS_PER_USER):
+        assert client.post(f"/alerts/{alert_id}/test").json() == {"ok": True, "error": None}
+    refused = client.post(f"/alerts/{alert_id}/test")
+    assert refused.status_code == 429
+    assert 1 <= int(refused.headers["Retry-After"]) <= alerts_api.TEST_WINDOW_SECONDS
+    assert len(sent) == alerts_api.TEST_CALLS_PER_USER
+
+    # Another user has their own allowance.
+    other_client = client_for(other)
+    assert other_client.post(f"/alerts/{alert_of(other_client)}/test").status_code == 200
 
 
 def test_create_alert_succeeds_once_source_is_visible(session, client_for):
@@ -215,7 +276,8 @@ def test_update_alert_rejects_source_the_user_cannot_view(session, client_for):
 
     response = client.patch(f"/alerts/{created['id']}", json={"source_id": other_source.id})
 
-    assert response.status_code == 403
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Source not found"}
 
 
 def test_delete_alert_requires_ownership(session, client_for):
@@ -244,7 +306,7 @@ def test_delete_alert_drops_its_per_file_progress(session, client_for):
             alert_id=created["id"],
             source_id=source.id,
             file_path="app.log",
-            reported_through_line=10,
+            offset=10,
         )
     )
     session.commit()
@@ -256,7 +318,7 @@ def test_delete_alert_drops_its_per_file_progress(session, client_for):
 def test_test_endpoint_sends_a_synthetic_webhook(session, client_for, monkeypatch):
     posted = {}
     monkeypatch.setattr(
-        "app.api.alerts.send_webhook", lambda alert, hits: posted.update(hits=hits) or True
+        "app.api.alerts.post_webhook", lambda url, payload: posted.update(payload) or None
     )
 
     user = _make_user(session)
@@ -268,8 +330,8 @@ def test_test_endpoint_sends_a_synthetic_webhook(session, client_for, monkeypatc
     response = client.post(f"/alerts/{created['id']}/test")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert len(posted["hits"]) == 1
+    assert response.json() == {"ok": True, "error": None}
+    assert len(posted["hits"]) == 1 and posted["test"] is True
 
 
 def test_creating_an_alert_requires_manage_alerts(session, client_for):
@@ -315,3 +377,86 @@ def test_alert_changes_are_audited_without_the_full_webhook_url(session, client_
     assert [e.action for e in events] == ["alert.create", "alert.update", "alert.delete"]
     assert events[0].event_metadata["webhook_host"] == "example.com"
     assert "SECRET" not in str([e.event_metadata for e in events])
+
+
+def test_a_folder_scope_counts_sources_in_its_subfolders(session, client_for):
+    from app.models import Folder
+
+    customer = Customer(name=f"c-{uuid.uuid4().hex[:6]}")
+    session.add(customer)
+    session.commit()
+    parent = Folder(name="eu", customer_id=customer.id)
+    session.add(parent)
+    session.commit()
+    child = Folder(name="prod", customer_id=customer.id, parent_folder_id=parent.id)
+    session.add(child)
+    session.commit()
+    source = _make_source(session)
+    source.customer_id, source.folder_id = customer.id, child.id
+    session.add(source)
+    session.commit()
+    user = _make_user(session)
+    create_role_grant(
+        session,
+        actor_user_id=None,
+        role_id=user.role_id,
+        scope_type=ScopeType.source,
+        scope_id=source.id,
+        capabilities=[Capability.view],
+    )
+    session.commit()
+
+    response = client_for(user).post(
+        "/alerts",
+        json={
+            "name": "a",
+            "query": "q",
+            "folder_id": parent.id,
+            "webhook_url": "https://example.com/hook",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_the_webhook_url_is_encrypted_at_rest_and_never_returned(session, client_for):
+    from app.alerts import webhook_url
+    from app.models import Alert
+
+    client = client_for(_make_user(session))
+    secret_url = "https://example.com:8443/hook?token=SECRET"
+    created = client.post("/alerts", json={"name": "a", "query": "q", "webhook_url": secret_url})
+    assert created.status_code == 201
+    body = created.json()
+    assert "webhook_url" not in body
+    assert body["webhook_url_masked"] == "https://example.com:8443/…"
+    listed = client.get("/alerts").json()
+    assert "SECRET" not in str(listed)
+
+    alert = session.get(Alert, body["id"])
+    session.refresh(alert)
+    assert "SECRET" not in alert.webhook_url_encrypted
+    assert "example.com" not in alert.webhook_url_encrypted
+    assert webhook_url(alert) == secret_url
+
+
+def test_an_update_without_the_webhook_url_keeps_it(session, client_for):
+    from app.alerts import webhook_url
+    from app.models import Alert
+
+    client = client_for(_make_user(session))
+    created = client.post(
+        "/alerts", json={"name": "a", "query": "q", "webhook_url": "https://example.com/one"}
+    ).json()
+
+    assert client.patch(f"/alerts/{created['id']}", json={"name": "b"}).status_code == 200
+    assert client.patch(f"/alerts/{created['id']}", json={"webhook_url": None}).status_code == 200
+    alert = session.get(Alert, created["id"])
+    session.refresh(alert)
+    assert webhook_url(alert) == "https://example.com/one"
+
+    changed = client.patch(
+        f"/alerts/{created['id']}", json={"webhook_url": "https://other.example.com/two"}
+    )
+    assert changed.json()["webhook_url_masked"] == "https://other.example.com/…"
+    session.refresh(alert)
+    assert webhook_url(alert) == "https://other.example.com/two"

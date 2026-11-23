@@ -85,14 +85,16 @@ func FuzzFetchStaysInBase(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, p string) {
 		var streamed bytes.Buffer
-		_, _, _ = StreamFetch(base, p, minChunkSize, 0, func(data []byte) error {
+		// The path as its own expected target: whatever a server says, the
+		// read never leaves the base.
+		_, _, _ = StreamFetch(base, p, p, minChunkSize, 0, func(data []byte) error {
 			streamed.Write(data)
 			return nil
 		})
 		if bytes.Contains(streamed.Bytes(), []byte(outsideMarker)) {
 			t.Fatalf("StreamFetch(%q) returned content from outside the base", p)
 		}
-		if content, err := HandleFetch(base, p); err == nil && bytes.Contains(content, []byte(outsideMarker)) {
+		if content, err := HandleFetch(base, p, p); err == nil && bytes.Contains(content, []byte(outsideMarker)) {
 			t.Fatalf("HandleFetch(%q) returned content from outside the base", p)
 		}
 		if entries, err := HandleList(base, p); err == nil {

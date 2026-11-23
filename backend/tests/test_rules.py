@@ -236,10 +236,53 @@ def test_exclude_order_matters_like_for_files():
     assert rules_module.is_dir_visible("secret", rules)
 
 
-def test_case_insensitive_sources_hide_differently_cased_folders():
+def test_exclude_rules_hide_differently_cased_folders_on_every_source():
     rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "secret/**")]
-    assert rules_module.is_dir_visible("SECRET", rules)
+    assert not rules_module.is_dir_visible("SECRET", rules)
     assert not rules_module.is_dir_visible("SECRET", rules, case_insensitive=True)
+    assert not rules_module.is_dir_visible("Secret/sub", rules)
+
+
+def test_exclude_rules_ignore_case_on_a_case_sensitive_source():
+    # A source PerchTail treats as case-sensitive (SSH, local) can still
+    # sit on a filesystem that ignores case (Windows OpenSSH, macOS):
+    # `SECRET/x` must not slip past `secret/**` (fail closed).
+    rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "secret/**")]
+    assert not is_visible("SECRET/x.log", rules)
+    assert not is_visible("Secret/x.log", rules)
+    assert is_visible("public/x.log", rules)
+
+
+def test_regex_exclude_rules_ignore_case_too():
+    rules = [
+        _r(0, RuleType.include, "**/*"),
+        _r(1, RuleType.exclude, r"(^|/)secret\.log$", PatternKind.regex),
+    ]
+    assert not is_visible("logs/SECRET.LOG", rules)
+    assert not is_visible("logs/secret.log", rules)
+    assert is_visible("logs/app.log", rules)
+
+
+def test_include_rules_keep_the_sources_case_sensitivity():
+    rules = [_r(0, RuleType.include, "app/*.log")]
+    assert is_visible("app/x.log", rules)
+    assert not is_visible("APP/x.log", rules)
+    assert is_visible("APP/x.log", rules, case_insensitive=True)
+    regex = [_r(0, RuleType.include, r"^app/.*\.log$", PatternKind.regex)]
+    assert not is_visible("APP/x.log", regex)
+    assert is_visible("APP/x.log", regex, case_insensitive=True)
+
+
+def test_a_later_include_still_reopens_a_differently_cased_path():
+    # Last match wins: an include after the exclude matches with the
+    # source's own case sensitivity.
+    rules = [
+        _r(0, RuleType.include, "**/*"),
+        _r(1, RuleType.exclude, "secret/**"),
+        _r(2, RuleType.include, "SECRET/public.log"),
+    ]
+    assert is_visible("SECRET/public.log", rules)
+    assert not is_visible("secret/public.log", rules)
 
 
 def test_regex_rules_are_treated_conservatively():
@@ -258,46 +301,62 @@ def test_glob_exclude_with_wildcards_covers_matching_folders():
     assert rules_module.is_dir_visible("x/public", rules)
 
 
+def test_a_name_with_a_control_character_is_never_visible():
+    # RE2's `$` is end of text only: `logs/secret.key\n` slipped past
+    # `exclude logs/*.key` while `include logs/*` still matched.
+    from app.rules import is_entry_visible
+
+    rules = [
+        _rule(1, RuleType.include, "logs/*"),
+        _rule(2, RuleType.exclude, "logs/*.key"),
+    ]
+    assert not is_visible("logs/secret.key", rules)
+    assert not is_visible("logs/secret.key\n", rules)
+    assert not is_entry_visible("logs/app\x07.log", False, rules)
+    assert not is_entry_visible("logs/odd\tdir", True, [_rule(1, RuleType.include, "**")])
+    assert is_visible("logs/app.log", rules)
+
+
 # --- explicitly excluded paths (whole-archive downloads) --------------------
 
 
 def test_explicitly_excluded_when_the_last_matching_rule_is_an_exclude():
-    rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "**/*.tmp")]
+    rules = [_rule(0, RuleType.include, "**/*"), _rule(1, RuleType.exclude, "**/*.tmp")]
     assert rules_module.is_explicitly_excluded("logs.zip/cache.tmp", rules)
     assert not rules_module.is_explicitly_excluded("logs.zip/app.log", rules)
 
 
 def test_unmatched_path_is_not_explicitly_excluded():
-    rules = [_r(0, RuleType.include, "**/*.zip")]
+    rules = [_rule(0, RuleType.include, "**/*.zip")]
     assert not rules_module.is_explicitly_excluded("logs.zip/secret.txt", rules)
     assert not rules_module.is_explicitly_excluded("anything", [])
 
 
 def test_a_later_include_cancels_an_earlier_exclude():
     rules = [
-        _r(0, RuleType.include, "**/*"),
-        _r(1, RuleType.exclude, "logs.zip/**"),
-        _r(2, RuleType.include, "logs.zip/app.log"),
+        _rule(0, RuleType.include, "**/*"),
+        _rule(1, RuleType.exclude, "logs.zip/**"),
+        _rule(2, RuleType.include, "logs.zip/app.log"),
     ]
     assert not rules_module.is_explicitly_excluded("logs.zip/app.log", rules)
     assert rules_module.is_explicitly_excluded("logs.zip/other.log", rules)
 
 
 def test_explicitly_excluded_follows_rule_order_not_list_order():
-    rules = [_r(1, RuleType.include, "**/*"), _r(0, RuleType.exclude, "**/*.tmp")]
+    rules = [_rule(1, RuleType.include, "**/*"), _rule(0, RuleType.exclude, "**/*.tmp")]
     assert not rules_module.is_explicitly_excluded("a.tmp", rules)
 
 
-def test_explicitly_excluded_honours_case_insensitivity():
-    rules = [_r(0, RuleType.include, "**/*"), _r(1, RuleType.exclude, "**/secret.log")]
-    assert not rules_module.is_explicitly_excluded("logs.zip/SECRET.log", rules)
+def test_explicitly_excluded_ignores_case_on_every_source():
+    rules = [_rule(0, RuleType.include, "**/*"), _rule(1, RuleType.exclude, "**/secret.log")]
+    assert rules_module.is_explicitly_excluded("logs.zip/SECRET.log", rules)
     assert rules_module.is_explicitly_excluded("logs.zip/SECRET.log", rules, case_insensitive=True)
 
 
 def test_explicitly_excluded_with_a_regex_exclude():
     rules = [
-        _r(0, RuleType.include, "**/*"),
-        _r(1, RuleType.exclude, r"\.key$", PatternKind.regex),
+        _rule(0, RuleType.include, "**/*"),
+        _rule(1, RuleType.exclude, r"\.key$", PatternKind.regex),
     ]
     assert rules_module.is_explicitly_excluded("certs.tar.gz/server.key", rules)
     assert not rules_module.is_explicitly_excluded("certs.tar.gz/server.crt", rules)
@@ -305,17 +364,17 @@ def test_explicitly_excluded_with_a_regex_exclude():
 
 def test_broken_regex_exclude_counts_as_excluding():
     rules = [
-        _r(0, RuleType.include, "**/*"),
-        _r(1, RuleType.exclude, "(?=x)", PatternKind.regex),
+        _rule(0, RuleType.include, "**/*"),
+        _rule(1, RuleType.exclude, "(?=x)", PatternKind.regex),
     ]
     assert rules_module.is_explicitly_excluded("logs.zip/app.log", rules)
 
 
 def test_broken_regex_include_does_not_count_as_excluding():
-    rules = [_r(0, RuleType.include, "(?=x)", PatternKind.regex)]
+    rules = [_rule(0, RuleType.include, "(?=x)", PatternKind.regex)]
     assert not rules_module.is_explicitly_excluded("logs.zip/app.log", rules)
 
 
 @pytest.mark.parametrize("path", ["logs.zip/a\nb.log", "logs.zip/a\x00.log", "x\x7f"])
 def test_path_with_a_control_character_counts_as_excluded(path):
-    assert rules_module.is_explicitly_excluded(path, [_r(0, RuleType.include, "**/*")])
+    assert rules_module.is_explicitly_excluded(path, [_rule(0, RuleType.include, "**/*")])

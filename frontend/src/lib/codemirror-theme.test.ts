@@ -9,9 +9,10 @@ import {
 
 // The actual matching logic (which pattern matches which substring, glob vs
 // regex, enabled/highlight_line handling) is pure and unit-tested
-// independently in severity-highlighting.test.ts. This file only smoke-tests
-// the CodeMirror glue, since exercising a ViewPlugin's decorations for real
-// needs a live EditorView/DOM rather than something worth mocking here.
+// independently in severity-matching.test.ts, and the worker that runs it in
+// severity-highlighting.test.ts. This file only smoke-tests the CodeMirror
+// glue; the decorations themselves are checked in a real browser
+// (e2e/severity-worker.spec.ts).
 
 describe('darkTheme', () => {
   it('is a CodeMirror theme extension', () => {
@@ -20,9 +21,9 @@ describe('darkTheme', () => {
 })
 
 describe('severityHighlighting', () => {
-  it('returns a line-tint plugin and a token-mark plugin', () => {
+  it('returns one plugin for line tints and token marks', () => {
     const extensions = severityHighlighting([])
-    expect(extensions).toHaveLength(2)
+    expect(extensions).toHaveLength(1)
   })
 
   it('does not throw when given an empty or a populated pattern list', () => {

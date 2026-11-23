@@ -12,7 +12,7 @@ from app.models import Customer, Folder, PatternKind, Protocol, Rule, RuleType, 
 
 
 def test_customer_source_rule_relationships(session):
-    customer = Customer(name="Vodacom Tanzania")
+    customer = Customer(name="Northwind Telecom")
     session.add(customer)
     session.commit()
     session.refresh(customer)
@@ -61,7 +61,7 @@ def test_source_defaults_and_system_source():
 
 def test_role_grant_capabilities_roundtrip(session):
     role = Role(
-        name="Tier 2 — Vodacom, view only",
+        name="Tier 2 — Northwind, view only",
         global_capabilities=[GlobalCapability.create_source],
     )
     session.add(role)
@@ -105,7 +105,7 @@ def test_user_role_relationship(session):
 
 
 def test_folder_nests_arbitrarily_deep_and_groups_sources(session):
-    customer = Customer(name="Vodacom Tanzania")
+    customer = Customer(name="Northwind Telecom")
     session.add(customer)
     session.commit()
     session.refresh(customer)

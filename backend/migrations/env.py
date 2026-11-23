@@ -1,15 +1,39 @@
+import sys
 from logging.config import fileConfig
 
 import app.db  # noqa: F401  ensures the sqlite parent directory exists
 from alembic import context
+from app import instance_lock
 from app.config import get_settings
 from app.data_layout import migrate_legacy_layout
+from app.logging_config import configure_logging, get_logger
+from app.schema_version import database_revision, is_known_revision, log_database_newer_than_app
 from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+
+def _refusal_logger():
+    """A refusal is logged the way the app logs (JSON, in the app's log
+    file too); the caller then exits non-zero without a traceback."""
+    configure_logging()
+    return get_logger("migrations.env")
+
+
+# One instance per DATA_DIR (#334): migrating while PerchTail runs on the
+# same DATA_DIR is refused, before anything is moved or migrated. Released
+# at the end of run_migrations_online().
+_lock = None
+if not context.is_offline_mode():
+    try:
+        _lock = instance_lock.acquire()
+    except instance_lock.InstanceLockHeldError as exc:
+        instance_lock.log_held(_refusal_logger(), exc)
+        sys.exit(1)
+
 # A pre-0.5.0 layout is moved first, so upgrading can never create an empty
 # database next to the real one (app/data_layout.py).
 migrate_legacy_layout()
@@ -31,6 +55,13 @@ target_metadata = SQLModel.metadata
 # ... etc.
 
 
+def _include_object(obj, name, type_, reflected, compare_to):
+    """FTS5 tables (file_name_fts, see app/name_index_store.py) and their
+    shadow tables are created in raw SQL, not from the models, so autogenerate
+    and `alembic check` leave them alone."""
+    return not (type_ == "table" and name is not None and name.startswith("file_name_fts"))
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -47,6 +78,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=_include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -68,8 +100,19 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
+    # A database migrated by a newer PerchTail (#334): refuse with a clear
+    # event instead of Alembic's "Can't locate revision".
+    revision = database_revision(connectable)
+    if not is_known_revision(revision):
+        log_database_newer_than_app(_refusal_logger(), revision)
+        sys.exit(1)
+
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=_include_object,
+        )
 
         with context.begin_transaction():
             context.run_migrations()
@@ -78,4 +121,8 @@ def run_migrations_online() -> None:
 if context.is_offline_mode():
     run_migrations_offline()
 else:
-    run_migrations_online()
+    try:
+        run_migrations_online()
+    finally:
+        if _lock is not None:
+            _lock.release()

@@ -69,14 +69,15 @@ jobs:
           package-manager-cache: false
 
       # Every severity, dev dependencies included: the lockfile is all
-      # npm audit needs, nothing is installed.
+      # npm audit needs, nothing is installed. Both branches are checked
+      # with dev's script and dev's exceptions (.github/npm-audit-exceptions.json).
       - name: npm audit (main and dev)
         run: |
           status=0
-          for ref in main dev; do
-            echo "== $ref"
-            (cd "$ref/frontend" && npm audit --audit-level=low) || status=1
-          done
+          echo "== main"
+          python3 dev/.github/scripts/npm_audit.py --level low --other-branch main/frontend || status=1
+          echo "== dev"
+          python3 dev/.github/scripts/npm_audit.py --level low dev/frontend || status=1
           exit "$status"
 
   agent-source:
@@ -124,6 +125,15 @@ jobs:
   image:
     runs-on: ubuntu-latest
     steps:
+      # .grype.yaml lists the advisories accepted, each with a reason and a
+      # review date; the check below fails once a date has passed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: dev
+      - name: Check the Grype exceptions' review dates
+        run: python3 .github/scripts/grype_exceptions.py
+
       # The image people run (docker compose, k3s or any Kubernetes): the
       # latest full release, OS packages included. Only findings with a fix
       # available fail the run -- those need a rebuilt release.
@@ -131,6 +141,7 @@ jobs:
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: ghcr.io/quaresma870/perchtail:latest
+          config: .grype.yaml
           only-fixed: true
           severity-cutoff: low
           fail-build: true

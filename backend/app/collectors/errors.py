@@ -12,19 +12,26 @@ from contextlib import ExitStack, contextmanager
 from types import ModuleType
 
 from app import source_roots
+from app.archives import SKIP_ENCRYPTED
 from app.collectors.base import (
     FetchTooLargeError,
+    LinkTargetHiddenError,
     PathOutsideBaseError,
-    RangeNotSupportedError,
+    SourceArchiveUnreadableError,
     SourceAuthError,
     SourceError,
     SourceHostKeyError,
     SourceLockedError,
+    SourceMemberUnreadableError,
+    SourceNotAFileError,
     SourceNotFoundError,
     SourcePermissionError,
     SourceTLSError,
     SourceUnreachableError,
+    TargetCheck,
 )
+from app.rules import is_dir_visible, is_visible, rules_case_insensitive
+from app.scratch import ScratchFullError
 
 Translator = Callable[[BaseException], SourceError | None]
 
@@ -35,6 +42,7 @@ _NT_BAD_NETWORK_NAME = 0xC00000CC
 _NT_ACCESS_DENIED = 0xC0000022
 _NT_SHARING_VIOLATION = 0xC0000043
 _NT_LOGON_FAILURE = 0xC000006D
+_NT_FILE_IS_A_DIRECTORY = 0xC00000BA
 
 
 # OpenSSL's X509_V_ERR_* codes, as ssl.SSLCertVerificationError.verify_code.
@@ -98,6 +106,13 @@ def _common(exc: BaseException) -> SourceError | None:
         return _tls_error(exc)
     if isinstance(exc, PermissionError):
         return SourcePermissionError(text)
+    # A folder opened as a file: the connectors check first, so a link to a
+    # folder has its rules checked on the folder (base.refuse_directory);
+    # this only catches one that turned into a folder since.
+    if isinstance(exc, IsADirectoryError) or (
+        isinstance(exc, OSError) and exc.errno == errno.EISDIR
+    ):
+        return SourceNotAFileError(text)
     if isinstance(exc, FileNotFoundError | NotADirectoryError):
         return SourceNotFoundError(text)
     if isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR):
@@ -112,7 +127,13 @@ def _common(exc: BaseException) -> SourceError | None:
 def translate_ssh(exc: BaseException) -> SourceError | None:
     import paramiko
 
+    from app.collectors.ssh import PrivateKeyError
+
     text = str(exc)
+    if isinstance(exc, PrivateKeyError):
+        # Saving refuses an encrypted key; one saved before that, or a key
+        # paramiko can't parse, still gets the neutral credential error.
+        return SourceAuthError(text)
     if isinstance(exc, paramiko.BadHostKeyException):
         return SourceHostKeyError(text)
     if isinstance(exc, paramiko.AuthenticationException):
@@ -147,6 +168,8 @@ def translate_smb(exc: BaseException) -> SourceError | None:
             public_message="That share doesn't exist on the server. For SMB, Base path is a "
             "share name (e.g. AppLogs), not a drive path.",
         )
+    if status == _NT_FILE_IS_A_DIRECTORY:
+        return SourceNotAFileError(text)
     if status == _NT_ACCESS_DENIED:
         return SourcePermissionError(text)
     if status == _NT_SHARING_VIOLATION:
@@ -218,6 +241,20 @@ def translate_winrm(exc: BaseException) -> SourceError | None:
     return _common(exc)
 
 
+# What an agent before the is_directory code (0.7.0-rc.3 and earlier) ends
+# its error with when the path to read is a folder.
+_OLD_AGENT_IS_A_DIRECTORY = ": is a directory"
+
+
+def is_directory_answer(exc) -> bool:
+    """Whether an agent's AgentCommandError says the path to read is a
+    folder: the code is_directory, or, from an older agent that sends no
+    code, a message ending in ": is a directory"."""
+    if exc.code == "is_directory":
+        return True
+    return exc.code is None and str(exc).endswith(_OLD_AGENT_IS_A_DIRECTORY)
+
+
 def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | None:
     from app.agent_registry import (
         AgentCommandError,
@@ -233,6 +270,23 @@ def translate_agent(exc: BaseException) -> SourceError | PathOutsideBaseError | 
     if isinstance(exc, AgentTimeoutError):
         return SourceUnreachableError(text, public_message="The agent didn't answer in time")
     if isinstance(exc, AgentCommandError):
+        if exc.code == "link_target":
+            # A link out of the base path (FEATURE_LINKS): 404, audited as
+            # link_target_hidden, like a link the rules hide.
+            return LinkTargetHiddenError(text)
+        if exc.code in ("archive_unreadable", "gzip_unreadable"):
+            # The archive, or the .gz file to decompress, can't be read
+            # (damaged, or not that kind of file): said by its code since
+            # the 0.7.0 agent, never guessed from the text.
+            return SourceArchiveUnreadableError(text, gzip=exc.code == "gzip_unreadable")
+        if exc.code == "member_encrypted":
+            # A zip member stored encrypted, which the agent can't read.
+            return SourceMemberUnreadableError(text, reason=SKIP_ENCRYPTED)
+        if is_directory_answer(exc):
+            # A folder read as a file. Content commands go through
+            # agent._following_links, which checks the rules on a link's
+            # target as a folder first.
+            return SourceNotAFileError(text)
         lowered = text.lower()
         # Go's os.Root refuses a path through a symlink that leaves the base
         # ("openat x: path escapes from parent"), and the agent refuses
@@ -261,7 +315,13 @@ def translate_local(exc: BaseException) -> SourceError | None:
     return _common(exc)
 
 
-_PASS_THROUGH = (SourceError, FetchTooLargeError, PathOutsideBaseError, RangeNotSupportedError)
+# ScratchFullError (#345): refused before anything reached the source.
+_PASS_THROUGH = (
+    SourceError,
+    FetchTooLargeError,
+    PathOutsideBaseError,
+    ScratchFullError,
+)
 
 
 @contextmanager
@@ -294,6 +354,27 @@ def translated(translate: Translator) -> Iterator[None]:
         raise mapped from exc
 
 
+def target_check_for(source, rules, label: str = "") -> TargetCheck:
+    """The target_check (collectors.base.require_target) for a read on
+    `source` with its visibility `rules`: where a link leads must be a file
+    the rules show, on its virtual path (`label/...` inside a root of a
+    source with several), or with `is_dir`, a folder they show (the read is
+    then refused as not a file, collectors.base.refuse_directory). None, so
+    no link is followed, without rules."""
+    if rules is None:
+        return None
+    case_insensitive = rules_case_insensitive(source)
+    prefix = f"{label}/" if label else ""
+
+    def check(real: str, is_dir: bool = False) -> bool:
+        if is_dir:
+            virtual = f"{label}/{real}" if label and real else (label or real)
+            return is_dir_visible(virtual, rules, case_insensitive=case_insensitive)
+        return is_visible(prefix + real, rules, case_insensitive=case_insensitive)
+
+    return check
+
+
 class TranslatingConnector:
     """Wraps a collector module so every list/fetch raises SourceError types.
     Anything else (helpers like local.resolve_path) is forwarded as is."""
@@ -315,26 +396,61 @@ class TranslatingConnector:
                 return source_roots.list_directory(self._module, source, rules, relative_path)
             return self._module.list_directory(source, rules, relative_path)
 
-    def fetch_file(self, source, relative_path: str, destination):
-        with tracked(source), translated(self._translate):
-            if source_roots.is_multi_root(source):
-                source, relative_path = source_roots.split(source, relative_path)
-            return self._module.fetch_file(source, relative_path, destination)
+    def _link_kwargs(self, source, rules, label: str) -> dict:
+        """For a connector that follows links (FOLLOWS_LINKS): the
+        target_check its reads get, built from the source's `rules` on the
+        virtual path (`label/...` for a root of a source with several). With
+        no rules, no link is followed (fail closed). SMB and WinRM refuse
+        every link themselves and take no target_check."""
+        if not getattr(self._module, "FOLLOWS_LINKS", False):
+            return {}
+        return {"target_check": target_check_for(source, rules, label)}
 
-    def read_range(self, source, relative_path: str, offset: int, length: int, head: int = 0):
+    def _split(self, source, relative_path: str):
+        """(the source or its root, the path inside it, the root's label)."""
+        if source_roots.is_multi_root(source):
+            rooted, rest = source_roots.split(source, relative_path)
+            return rooted, rest, relative_path.partition("/")[0]
+        return source, relative_path, ""
+
+    # `rules` are the source's visibility rules: a read through a link is
+    # allowed only when they show where the link leads too
+    # (collectors.base.require_target). The caller has already checked the
+    # requested path itself.
+
+    def fetch_file(self, source, relative_path: str, destination, *, rules=None):
+        with tracked(source), translated(self._translate):
+            target, path, label = self._split(source, relative_path)
+            link = self._link_kwargs(source, rules, label)
+            return self._module.fetch_file(target, path, destination, **link)
+
+    def read_range(
+        self, source, relative_path: str, offset: int, length: int, head: int = 0, *, rules=None
+    ):
         """Incremental follow (#254): a RangeRead (collectors/base.py)."""
         with tracked(source), translated(self._translate):
-            if source_roots.is_multi_root(source):
-                source, relative_path = source_roots.split(source, relative_path)
-            return self._module.read_range(source, relative_path, offset, length, head)
+            target, path, label = self._split(source, relative_path)
+            link = self._link_kwargs(source, rules, label)
+            return self._module.read_range(target, path, offset, length, head, **link)
+
+    def call(self, name: str, source, *args, rules=None, **kwargs):
+        """One of the collector's own functions that take the source first
+        (the agent's redacted commands, #382, #249), with its errors
+        translated and the source's reachability tracked like the calls
+        above. Single-root sources only (push agents). `rules`, for one that
+        reads content, are the source's visibility rules: through a link, it
+        reads only when they show where the link leads."""
+        link = self._link_kwargs(source, rules, "") if rules is not None else {}
+        with tracked(source), translated(self._translate):
+            return getattr(self._module, name)(source, *args, **kwargs, **link)
 
     @contextmanager
-    def local_copy(self, source, relative_path: str):
+    def local_copy(self, source, relative_path: str, *, rules=None):
         # Only the fetch is translated; exceptions from the caller's `with`
         # body propagate unchanged.
         with ExitStack() as stack:
             with tracked(source), translated(self._translate):
-                if source_roots.is_multi_root(source):
-                    source, relative_path = source_roots.split(source, relative_path)
-                local = stack.enter_context(self._module.local_copy(source, relative_path))
+                target, path, label = self._split(source, relative_path)
+                link = self._link_kwargs(source, rules, label)
+                local = stack.enter_context(self._module.local_copy(target, path, **link))
             yield local

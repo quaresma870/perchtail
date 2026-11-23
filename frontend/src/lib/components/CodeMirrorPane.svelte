@@ -18,6 +18,7 @@
     darkTheme,
     languageExtension,
     markHighlighting,
+    redactionHighlighting,
     severityHighlighting,
     whitespaceHighlighting,
   } from '../codemirror-theme'
@@ -81,11 +82,16 @@
       severityHighlighting(severityPatterns),
       bookmarkHighlighting(bookmarks),
       markHighlighting(markPatterns),
+      redactionHighlighting,
       languageExtension(languageForFilename(filename)),
       ...(wrapEnabled ? [EditorView.lineWrapping] : []),
       ...(showWhitespace ? [whitespaceHighlighting(content)] : []),
       EditorView.editable.of(false),
       EditorState.readOnly.of(true),
+      // The content element has role="textbox" and needs a name (#377).
+      EditorView.contentAttributes.of({
+        'aria-label': filename ? `Contents of ${filename}` : 'File contents',
+      }),
     ]
   }
 
@@ -304,24 +310,27 @@
     return text.includes('\n') ? '' : text
   }
 
-  // "Next/previous problem" step command (ROADMAP.md's severity-indicators
-  // navigation item): steps through lines matching a navigation-eligible
+  // "Next/previous problem" step command (docs/design-decisions.md,
+  // "Frontend and UI", severity patterns): steps through lines matching a navigation-eligible
   // severity pattern, wrapping around at either end. Uses the cursor's
   // current line as the starting point, same as an IDE's "next diagnostic".
-  function jumpToProblem(step: typeof nextProblemLine | typeof previousProblemLine) {
+  // The lines are found in the severity worker, so the step lands a moment
+  // later, from wherever the cursor is by then.
+  async function jumpToProblem(step: typeof nextProblemLine | typeof previousProblemLine) {
     if (!view) return
-    const problemLines = findProblemLines(view.state.doc.toString(), severityPatterns)
+    const problemLines = await findProblemLines(view.state.doc.toString(), severityPatterns)
+    if (!view) return
     const currentLine = view.state.doc.lineAt(view.state.selection.main.head).number
     const target = step(problemLines, currentLine)
     if (target !== null) scrollToLine(target)
   }
 
   export function jumpToNextProblem() {
-    jumpToProblem(nextProblemLine)
+    void jumpToProblem(nextProblemLine)
   }
 
   export function jumpToPreviousProblem() {
-    jumpToProblem(previousProblemLine)
+    void jumpToProblem(previousProblemLine)
   }
 
   // Exposed so Viewer.svelte can toggle a bookmark on whatever line the

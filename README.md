@@ -6,8 +6,8 @@
 
 > Live, rule-scoped log browsing across Linux and Windows servers — agentless by default, nothing mirrored, nothing left behind.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.6.4%20%28pre--1.0%29-blue.svg)](#status)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-v0.7.0%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -19,15 +19,17 @@
 
 ## Status
 
-🟢 **v0.6.4** is the current release: usable today, still pre-1.0.
+🟢 **v0.7.0** is the current release: usable today, still pre-1.0.
 
 - **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
-- **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks.
-- **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults) and optional TOTP; OIDC single sign-on with group-to-role mapping.
-- **Operations:** settings in popups, an update check, a detailed health endpoint, an audit log that is hash-chained and verified, bulk YAML import and export.
-- **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
+- **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks. One search box finds sources and file names across every source, from a file-name index that stores no content. Live alerts read only what was appended and call a webhook. Redaction hides secrets, card numbers and personal data in what users open, Tail and download, on the server or on the push agent's host.
+- **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults), TOTP, required for administrators and optionally for everyone, and optional password recovery by email; OIDC single sign-on with group-to-role mapping; an access report of who holds what, where, with flags for privileged, inactive and MFA-less accounts, on its own Settings page and as JSON or CSV, for access reviews.
+- **Operations:** settings in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained, verified daily and records where each action came from, including refused requests, bulk YAML import and export, server-side limits on listings and downloads running at once (Settings → System), and a system SMTP server for email, always over verified TLS (Settings → Email).
+- **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, encrypted online backups, push agents upgraded from the portal only to binaries signed with the release key, signed images and release files, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
 
-**What's next.** 0.7 is the last feature release before 1.0. It removes the content index and the full-text Search page, so nothing from the logs is stored, and adds a file-name index with one search across sources, folders and files, live alerts, PostgreSQL support, push-agent upgrades from the portal, user groups and temporary access, notifications and API tokens. 1.0 adds no features: load tests and a sizing guide, OWASP ZAP, OpenSSF Scorecard and provenance in CI, and an external pentest. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+**What's next.** 0.7 is the last feature release before 1.0. 1.0 adds no features: load tests and a sizing guide, security controls in CI and releases, and an internal pentest. PostgreSQL, high availability, user groups, temporary access, notifications, API tokens and an external pentest come after 1.0. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+
+**Support.** Which releases get fixes, and for how long, is in [SECURITY.md](SECURITY.md#support-and-end-of-life).
 
 Tested with `pytest` (backend), `vitest` (frontend units) and a Playwright suite that drives the real UI against real SSH and SMB servers, and every release candidate is retested in a lab with Linux, Windows and push-agent sources before the release. SAML isn't built (OIDC covers Entra ID, Okta, Google Workspace and Keycloak), and PerchTail hasn't seen production traffic beyond the maintainer's own use.
 
@@ -37,7 +39,7 @@ PerchTail gives support and ops engineers one place to browse, open, and downloa
 log files live from a mix of Linux and Windows servers — without installing
 anything on those servers, and without permanently copying their content anywhere.
 
-You configure **sources** (a host and how to reach it — SSH/SFTP, SMB, WinRM, or a push agent), attach **rules** (which files and folders are visible, glob or regex, evaluated in order), and PerchTail lists and fetches matching files live, opened in a Notepad++/VS-Code-style viewer and downloadable as single files or zipped folders. A `.zip` or `.tar.gz` archive opens as a folder whose files go through the same rules; an archive with a file whose last matching rule is an exclude can't be downloaded whole (its other files still open and download one by one), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Nothing is proactively mirrored or cached across views — every open is a fresh fetch, because the logs behind it are still being written.
+You configure **sources** (a host and how to reach it — SSH/SFTP, SMB, WinRM, or a push agent), attach **rules** (which files and folders are visible, glob or regex, evaluated in order), and PerchTail lists and fetches matching files live, opened in a Notepad++/VS-Code-style viewer and downloadable as single files or zipped folders. A `.zip`, `.tar.gz` or `.tgz` archive opens as a folder whose files go through the same rules; an archive with a file whose last matching rule is an exclude can't be downloaded whole (its other files still open and download one by one; with [redaction](docs/redaction.md) applied to downloads, it is rebuilt without them instead), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Nothing is proactively mirrored or cached across views — every open is a fresh fetch, because the logs behind it are still being written.
 
 RBAC is built in from day one: access is scoped per customer/environment, not just
 per user, so a support engineer working one account can't accidentally browse
@@ -85,7 +87,7 @@ A role in its editor, opened over the roles list: global capabilities and access
 
 ![Role editor in a popup, with switches for global capabilities and a table of customer access grants](docs/images/screenshot-role-editor.png)
 
-The `create_source` global capability adds sources and folders; changing, moving or deleting an existing source, or moving or deleting a folder, also needs manage rules on it (and, to move it, where it goes), and a move can't give the person moving it more access than they had. Short of super admin, someone with `manage_users` or `manage_roles` can't change their own role or edit the role they hold, and can only hand out roles and grants within their own: no global capability they lack, and no capability in a customer, folder or source that they don't hold there themselves.
+A grant gives, in its customer, folder or source, any of `view` (browse and open files), `download` (whole files and folder ZIPs), `manage_rules` (edit the visibility rules) and `manage_source` (shown as "Manage sources": change the sources and folders there). The `create_source` global capability adds sources and folders where the role has `manage_source`; changing, moving or deleting an existing source (its settings, agent token, saved credential and agent upgrades), or moving or deleting a folder, also needs `manage_source` on it (and, to move it, where it goes), and a move can't give the person moving it more access than they had; renaming a folder needs `manage_source` on it, and renaming or deleting a customer needs `manage_source` in a grant on that customer. Only a super admin creates customers, and everyone else sees only the customers and folders their grants reach. `manage_rules` only governs the rules. Short of super admin, someone with `manage_users` or `manage_roles` can't change their own role or edit the role they hold, and can only hand out roles and grants within their own: no global capability they lack, and no capability in a customer, folder or source that they don't hold there themselves.
 
 ## Quick start
 
@@ -118,35 +120,33 @@ Then bring it up:
 docker compose up -d
 ```
 
+**Who can reach it.** `docker-compose.yml` publishes port 8080 on `127.0.0.1` only, so PerchTail answers on this host and nowhere else. Other machines reach it through a reverse proxy on this host that terminates TLS ([Deployment: reverse proxy + TLS](#deployment-reverse-proxy-nginx--tls)). To publish it on every address instead, for a test without a proxy, change the port in `docker-compose.yml` to `"8080:8000"`.
+
+**How it runs.** The container's root filesystem is read-only (PerchTail writes only under `/data` and to a `/tmp` in memory), it can't gain privileges (`no-new-privileges`), and it starts with every Linux capability dropped except the few its entrypoint needs for one step: handing `/data` over to PerchTail's user (uid 10001) when the container starts as root, before it drops them all and starts the app. The preferred way skips that step and runs as PerchTail's user from the start: uncomment `user: "10001:10001"` in `docker-compose.yml` and remove its `cap_add` list. A new volume already belongs to that user. A volume made by an older release may hold files that belong to root: fix them once, before the change, while `cap_add` is still there:
+
+```bash
+docker compose run --rm --user root --entrypoint chown perchtail -R 10001:10001 /data
+```
+
+With `docker run`, the same is `--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp`, with the volumes owned by uid 10001.
+
 This builds the image from the checkout. To run a published release
 instead, replace `build: .` in `docker-compose.yml` with the image of that
 version (amd64 and arm64), for example:
 
 ```yaml
-    image: ghcr.io/quaresma870/perchtail:0.6.4
+    image: ghcr.io/quaresma870/perchtail:0.7.0
 ```
 
-Each [GitHub release](https://github.com/quaresma870/perchtail/releases)
-also carries the push-agent binaries, their `SHA256SUMS`, and the image's
-SBOM, attached before the release is published. `latest` and `X.Y` tags
-only move when a full release is published, never with a pre-release.
+Each [GitHub release](https://github.com/quaresma870/perchtail/releases) also carries the push-agent binaries, their `SHA256SUMS`, `SHA256SUMS.sig` (its Ed25519 signature with the release key), the image's SBOM, and `perchtail-image.json` with `perchtail-image.json.sig`, which name the release's image by digest and are signed with the same key, all attached before the release is published. The image carries the same signed agent binaries, for upgrading agents from the portal. `latest` and `X.Y` tags only move when a full release is published, never with a pre-release, and `latest` only to the newest full release: a fix for an older line (for example a 0.6.x after 0.7.0) moves its own `X.Y` tag and leaves `latest` where it is.
 
-On first startup (only when the database has zero users), PerchTail creates a
-break-glass super-admin account with a randomly generated password and prints
-it once to the container logs — grab it before it scrolls away:
+On first startup (only when the database has zero users), PerchTail creates a break-glass super-admin account with a randomly generated password. The password is never logged: it is written to `initial-admin-password` in `DATA_DIR` (`/data/db` in the container), readable only by PerchTail's user, and the log says where:
 
 ```bash
-docker compose logs perchtail | grep initial_super_admin
+docker compose exec perchtail cat /data/db/initial-admin-password
 ```
 
-Open `http://localhost:8080`, sign in with that username/password (`admin` by
-default — override with `INITIAL_ADMIN_USERNAME` in `.env` before first
-startup), and you'll be forced to set your own password immediately. From
-there: **Settings → Sources → + Add source** to point PerchTail at a server
-(see [docs/source-setup.md](docs/source-setup.md) for what the source side
-needs configured first), attach a rule so something is actually visible (a
-source with zero rules shows nothing, by design), and open **Viewer** to
-browse it.
+Open `http://localhost:8080`, sign in with that username/password (`admin` by default — override with `INITIAL_ADMIN_USERNAME` in `.env` before first startup), and you'll be forced to set your own password immediately; the file is deleted when you do. Super admins and every local account whose role has a global capability must then set up two-factor authentication (TOTP) before they can do anything else. From there: **Settings → Sources → + Add source** to point PerchTail at a server (see [docs/source-setup.md](docs/source-setup.md) for what the source side needs configured first), attach a rule so something is actually visible (a source with zero rules shows nothing, by design), and open **Viewer** to browse it.
 
 State (the SQLite database, rotated application logs, and the ephemeral
 scratch cache) lives in the `perchtail-data` Docker volume, so it survives
@@ -157,21 +157,36 @@ volume (`/data` in the container), one directory per kind of data:
 
 | Directory | Setting | Contents | Back up? |
 |---|---|---|---|
-| `/data/db` | `DATA_DIR` | SQLite database, credential-encryption salt (`credential_salt`), SSH `known_hosts` | yes |
+| `/data/db` | `DATA_DIR` | SQLite database, credential-encryption salt (`credential_salt`), SSH `known_hosts`, the first super admin's temporary password (`initial-admin-password`, until it is changed) | yes |
 | `/data/logs` | `LOG_DIR` | the app's own logs, rotated by size and day | optional |
-| `/data/scratch` | `SCRATCH_DIR` | short-lived fetches, purged on close | no |
+| `/data/scratch` | `SCRATCH_DIR` | short-lived fetches, purged on close and emptied at startup | no |
+| `/data/backups` | `BACKUP_DIR` | encrypted backups made by `python -m app.backup` | copy them off the host |
 
-Each can be mounted as its own volume (for example logs on another disk),
-so a burst of DEBUG logging can't fill the database's disk. Keep `/data/db`
+Each can be mounted as its own volume, and in production they should be:
+`docker-compose.yml` has the three volumes ready to uncomment. Then a burst
+of downloads filling scratch, or of DEBUG logging, can't fill the
+database's disk. PerchTail also refuses a new fetch (HTTP 507) when scratch
+is full or its disk is down to `SCRATCH_MIN_FREE_GB` / `SCRATCH_MIN_FREE_PERCENT`
+free (1 GiB or 5%, whichever is larger). Keep `/data/db`
 on a local disk, not a network share: the database runs in SQLite's WAL
-mode, which needs one (it also leaves `perchtail.db-wal` and
-`perchtail.db-shm` next to the database; back up the whole directory, with
-PerchTail stopped). Back up the
-database and `credential_salt` together. Either one is useless without the
-other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`.
-Upgrading from a release before 0.5.0 moves the database, salt and
+mode, which needs one. Upgrading from a release before 0.5.0 moves the database, salt and
 `known_hosts` from `/data` into `/data/db` on first start; see the
 CHANGELOG's upgrade notes.
+
+Back up with `python -m app.backup` while PerchTail runs: it puts a consistent copy of the database, the salt and `known_hosts` into one file, always encrypted (with a key derived from `CREDENTIAL_ENCRYPTION_KEY`, or from an optional `BACKUP_ENCRYPTION_KEY`), checks it, and restores it with PerchTail stopped. Settings → System also makes one on a schedule: every 24 hours on a new install. The database and `credential_salt` are useless without each other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`: keep the keys somewhere you can reach without this host. Before an upgrade, make a `pre-upgrade` backup; restoring it, with the previous image, rolls the upgrade back:
+
+```bash
+docker compose exec -u perchtail perchtail python -m app.backup create --reason pre-upgrade
+docker compose stop perchtail
+# set the new image tag in docker-compose.yml, then:
+docker compose pull && docker compose up -d
+```
+
+Upgrading from a release before 0.7.0: the command doesn't exist there yet, so stop PerchTail and copy `DATA_DIR` (and, for a source install, the database and salt files if they live outside it) as before.
+
+[docs/backup-and-restore.md](docs/backup-and-restore.md) covers scheduled backups, the keys, checking and restoring a backup, rolling back an upgrade, copies off the host and testing a restore.
+
+Only one PerchTail may run per `DATA_DIR`: a second instance (or an `alembic upgrade` while one runs) refuses to start, and so does an older image on a database a newer version has already migrated (see [docs/monitoring.md](docs/monitoring.md#log-events-worth-alerting-on)).
 
 **Update check.** Once a day, PerchTail asks the GitHub releases API which
 release is the latest (one unauthenticated request; nothing about your
@@ -183,23 +198,13 @@ example on a network without internet access). `HTTPS_PROXY` is honoured.
 The source overview also shows each push agent's version, and flags agents
 older than the server.
 
+**Push-agent upgrades.** **Settings → Agents** (for roles with **Create new sources**) lists the push agents of the sources where the role holds **Manage sources**, which every action on an agent also needs, with their version, and upgrades them to the server's version: off by default, then manually (one agent, or every outdated one) or automatically inside a weekly window in the server's time zone, a few at a time. Each agent can follow that policy or have its own; after a number of failed upgrades in a row (3 by default) automatic upgrades skip an agent until it's resumed, and every attempt is kept with who asked, the versions and the result. The agent downloads the release from the server (the Docker image carries the signed agent binaries) or from GitHub, installs it only if the release signature and checksum verify and the version is newer than its own, and restarts into it; anything that fails leaves the current version running. Each host can refuse with `PERCHTAIL_REMOTE_UPGRADE=false`. Agents older than 0.7 are upgraded by hand once ([docs/agent-service.md](docs/agent-service.md#upgrading-by-hand)); until then their folders can still be browsed, but none of their files can be opened, followed or downloaded, and Settings → Agents marks them "Update required". See [agent/README.md](agent/README.md#upgrades-from-the-portal) for what the host needs (a writable binary folder, a service that restarts the agent).
+
 ## Deployment: reverse proxy (nginx) + TLS
 
-**Never expose PerchTail's admin/viewer UI to the public internet without
-TLS termination and something in front of it** — it's the entry point to
-every source's credentials and every source's log content across every
-customer configured, gated only by the session cookie. `docker-compose.yml`
-publishes the app directly on `8080` for the [Quick start](#quick-start)
-above; for anything beyond your own machine, put a reverse proxy in front
-of it and stop publishing that port to anything but `localhost`.
+**Never expose PerchTail's admin/viewer UI to the public internet without TLS termination and something in front of it** — it's the entry point to every source's credentials and every source's log content across every customer configured, gated only by the session cookie. `docker-compose.yml` publishes the app on `127.0.0.1:8080` only; for anything beyond this host, put a reverse proxy in front of it.
 
-1. Bind the published port to loopback only, so it's reachable through
-   nginx but not directly from outside the host — edit `docker-compose.yml`:
-
-   ```diff
-   -      - "8080:8000"
-   +      - "127.0.0.1:8080:8000"
-   ```
+1. Keep the published port on loopback, as `docker-compose.yml` has it (`"127.0.0.1:8080:8000"`), so it's reachable through nginx but not directly from outside the host.
 
 2. Set `PUBLIC_BASE_URL` in `.env` to the real external `https://` URL
    you're about to configure below (used to build the OIDC `redirect_uri`
@@ -250,7 +255,7 @@ of it and stop publishing that port to anything but `localhost`.
    PerchTail doesn't need `X-Forwarded-Proto` trusted to behave correctly —
    its CSRF Origin-check only ever compares `Host`, deliberately never
    scheme, precisely so it works the same whether or not a proxy sits in
-   front (see ROADMAP.md's CSRF-review notes if you're curious why). It's
+   front (see the CSRF notes in [docs/design-decisions.md](docs/design-decisions.md#sessions-and-csrf) if you're curious why). It's
    sent above anyway since it's a generally useful signal for nginx's own
    access logs.
 
@@ -264,31 +269,59 @@ way — attach it to a shared Docker network with the `perchtail` service and
 `proxy_pass` to `http://perchtail:8000` directly, and drop the host port
 publish in `docker-compose.yml` entirely rather than binding it to loopback.
 
+The audit log records each request's client address. PerchTail only believes `X-Forwarded-For` from a proxy listed in `TRUSTED_PROXIES` (loopback only by default): with nginx in its own container or on another host, set `TRUSTED_PROXIES` to its address in `.env`, or every entry records the proxy's address instead of the client's (see [docs/audit-events.md](docs/audit-events.md#client-address)).
+
 ## Documentation
 
-- [CLAUDE.md](CLAUDE.md) — full design/architecture reference and build plan
-- [ROADMAP.md](ROADMAP.md) — phased milestones and what's next
-- [docs/install-from-source.md](docs/install-from-source.md) — running
-  PerchTail on a Linux host without Docker, with a systemd unit
-- [docs/source-setup.md](docs/source-setup.md) — how to prepare a Linux or
-  Windows server so PerchTail can reach it over SSH/SFTP, SMB, or WinRM
+Installing and running PerchTail:
+
+- [docs/install-from-source.md](docs/install-from-source.md) — running PerchTail on a Linux host without Docker, with a systemd unit
+- [docs/upgrade.md](docs/upgrade.md) — upgrading PerchTail
+- [docs/verifying-releases.md](docs/verifying-releases.md) — checking a release before you run it: the image's cosign signature, the build provenance of the image and the agent binaries, the signed checksums and the SBOMs
+- [docs/configuration.md](docs/configuration.md) — configuration reference: environment variables and Settings → System
+- [docs/backup-and-restore.md](docs/backup-and-restore.md) — encrypted backups, scheduled backups, restoring, rolling back an upgrade and testing a restore
+- [docs/monitoring.md](docs/monitoring.md) — the liveness and readiness probes and who may call them, the detailed health endpoint and its token, Prometheus `/metrics`, the Zabbix 7.0 and 8.0 templates, and the log events worth alerting on
+- [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — rotating `CREDENTIAL_ENCRYPTION_KEY` without losing access to what's already encrypted
+- [docs/high-availability.md](docs/high-availability.md) — whether and how to run PerchTail behind a load balancer or on Kubernetes, and what lives in the process
+- [docs/sizing.md](docs/sizing.md) — sizing guide: the hardware profiles and how they are measured with the load-test kit in `loadtest/` (its figures are still to be measured)
+- [docs/troubleshooting.md](docs/troubleshooting.md) — troubleshooting and FAQ
+
+Security:
+
+- [docs/security-model.md](docs/security-model.md) — the trust boundaries, who can do what (capabilities, grants and the rule that administrators never widen access), sign-in, sessions and browser protections, keys and encryption, connections to sources, and what PerchTail expects from its environment
+- [docs/hardening.md](docs/hardening.md) — a production checklist: keys, reverse proxy and TLS, `TRUSTED_PROXIES`, outbound connections, file permissions, NTP, sources, emergency accounts, MFA, monitoring and backups
+- [docs/data-and-retention.md](docs/data-and-retention.md) — everything PerchTail keeps (database, files, scratch, logs, backups, the browser), how long and how it is removed, users' personal data, and every connection that leaves the installation and how to turn it off
+- [docs/audit-events.md](docs/audit-events.md) — every event the audit log records, the fields of an entry, the client address behind a proxy, retention and integrity checks
+
+Connecting sources:
+
+- [docs/source-setup.md](docs/source-setup.md) — preparing a Linux or Windows server for PerchTail over SSH/SFTP, SMB or WinRM, the push agent, and local-disk sources
 - [docs/examples/jea](docs/examples/jea/README.md) — the read-only JEA endpoint for WinRM sources without a remote shell or administrator account
-- [docs/sso-setup.md](docs/sso-setup.md) — registering PerchTail as an OIDC
-  client and setting up group-to-role mapping, with per-provider notes for
-  Azure AD/Entra ID, Okta, Google Workspace, and Keycloak/Authentik
-- [docs/monitoring.md](docs/monitoring.md) — the detailed health endpoint for
-  external monitoring (Zabbix, Prometheus), and how to generate its token
-- [docs/credential-key-rotation.md](docs/credential-key-rotation.md) — how to
-  rotate `CREDENTIAL_ENCRYPTION_KEY` without losing access to already-
-  encrypted credentials
-- [docs/high-availability.md](docs/high-availability.md) — whether/how to run
-  PerchTail behind a load balancer or in a multi-replica k3s/Kubernetes
-  deployment, broken down by solution and load-balancing type
-- [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and
-  submit changes
+- [agent/README.md](agent/README.md) — the push agent: configuration, download, upgrades from the portal and building it
+- [docs/agent-service.md](docs/agent-service.md) — running the push agent as a service
+- [docs/bulk-import.md](docs/bulk-import.md) — creating and updating customers, folders, sources and rules from a YAML file, and exporting them
+
+Administration and use:
+
+- [docs/admin-guide.md](docs/admin-guide.md) — administering PerchTail
+- [docs/redaction.md](docs/redaction.md) — redaction of secrets, card numbers and personal data in file content: the built-in and custom rules, their false positives, where content is redacted and what redaction doesn't cover
+- [docs/sso-setup.md](docs/sso-setup.md) — registering PerchTail as an OIDC client and mapping groups to roles, with notes for Entra ID, Okta, Google Workspace and Keycloak/Authentik
+- [docs/user-guide.md](docs/user-guide.md) — using the explorer and the viewer
+
+Project:
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to get a dev environment running and submit changes
+- [CLAUDE.md](CLAUDE.md) — architecture brief for contributors
+- [docs/design-decisions.md](docs/design-decisions.md) — why PerchTail is built the way it is, including decisions that were later replaced, and the open items
+- [frontend/README.md](frontend/README.md) — developing the web interface: dev server, checks, tests and build
+- [ROADMAP.md](ROADMAP.md) — milestones and what's next
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability, and how fast fixes ship
 - [CHANGELOG.md](CHANGELOG.md) — what's shipped, release by release
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+PerchTail is free software under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only), from 0.7.0 on. You can use, change and share it, including running it for others; if you change it and let people use your changed version over a network, you have to offer them its source under the same license. Releases up to 0.6.4 were published under the MIT license and stay under it.
+
+Contributions are accepted under the [Contributor License Agreement](CLA.md) (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
+The PerchTail name and logo are trademarks; [TRADEMARKS.md](TRADEMARKS.md) says how they can be used, including by forks and modified versions.

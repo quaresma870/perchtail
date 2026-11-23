@@ -42,6 +42,20 @@ describe('serverReachable', () => {
     expect(fetchMock).toHaveBeenCalledWith('/healthz', { cache: 'no-store' })
   })
 
+  it('counts the probe refusing a remote browser as PerchTail being back (#366)', async () => {
+    vi.useFakeTimers()
+    const refused = () => new Response('{"detail":"Unauthorized"}', { status: 401, headers: { 'X-PerchTail': '1' } })
+    const fromProxy = () => new Response('', { status: 401 })
+    const fetchMock = vi.fn().mockResolvedValueOnce(fromProxy()).mockImplementation(async () => refused())
+    vi.stubGlobal('fetch', fetchMock)
+    noteUnanswered()
+    noteUnanswered()
+    await vi.advanceTimersByTimeAsync(2000) // a proxy's answer isn't PerchTail
+    expect(get(serverReachable)).toBe(false)
+    await vi.advanceTimersByTimeAsync(4000) // PerchTail's own 401 is
+    expect(get(serverReachable)).toBe(true)
+  })
+
   it('counts a gateway error as no answer, any other status as an answer', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 502 })))
     await trackedFetch('/x')

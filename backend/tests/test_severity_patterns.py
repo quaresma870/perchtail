@@ -1,4 +1,5 @@
 from app.models import Customer, PatternKind, Protocol, SeverityLevel, SeverityPattern, Source
+from app.rules import parse_pattern
 from app.severity_patterns import (
     DEFAULT_GLOBAL_PATTERNS,
     effective_patterns,
@@ -6,8 +7,14 @@ from app.severity_patterns import (
 )
 
 
+def test_the_default_patterns_are_valid_re2():
+    # The same check an admin's own pattern gets when it is saved.
+    for spec in DEFAULT_GLOBAL_PATTERNS:
+        assert parse_pattern(spec["pattern"])[1] == PatternKind.regex
+
+
 def _make_source(session) -> Source:
-    customer = Customer(name="Vodacom Tanzania")
+    customer = Customer(name="Northwind Telecom")
     session.add(customer)
     session.commit()
     session.refresh(customer)

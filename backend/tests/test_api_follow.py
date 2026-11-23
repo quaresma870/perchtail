@@ -6,7 +6,7 @@ from app.api.archive import FOLLOW_HEAD_BYTES
 from app.api.archive import router as archive_router
 from app.api.auth import get_current_active_user
 from app.auth.models import AuditLog, Role, User
-from app.collectors.base import RANGE_MAX_BYTES, RangeNotSupportedError
+from app.collectors.base import RANGE_MAX_BYTES
 from app.db import get_session
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 from fastapi import FastAPI
@@ -71,6 +71,8 @@ def test_only_the_appended_bytes_come_back(follow):
     assert response.headers["x-follow-offset"] == "28"
     assert "x-follow-more" not in response.headers
     assert "x-follow-reset" not in response.headers
+    # File content is never cached by the browser or a proxy.
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_a_large_append_comes_in_pieces(follow):
@@ -93,6 +95,7 @@ def test_a_truncated_file_resets(follow):
     log.write_bytes(b"short\n")
     response = _poll(client, source, 32, head)
     assert response.headers["x-follow-reset"] == "1"
+    assert response.headers["cache-control"] == "no-store"
     assert response.content == b""
 
 
@@ -145,19 +148,6 @@ def test_compressed_files_cant_be_followed(follow, name):
     assert response.json()["detail"]["error_code"] == "follow_unsupported"
 
 
-def test_an_old_agent_falls_back_to_reloading(follow, monkeypatch):
-    client, source, log = follow
-    log.write_bytes(b"line\n")
-
-    def refuse(*args, **kwargs):
-        raise RangeNotSupportedError('unknown command type "read_range"')
-
-    monkeypatch.setattr("app.collectors.local.read_range", refuse)
-    response = _poll(client, source, 0)
-    assert response.status_code == 409
-    assert response.json()["detail"]["error_code"] == "follow_unsupported"
-
-
 def test_rules_and_paths_still_apply(follow):
     client, source, log = follow
     (log.parent / "secret.txt").write_bytes(b"not a log")
@@ -191,13 +181,110 @@ def test_each_poll_is_one_read_of_the_source(follow, monkeypatch):
     assert len(calls) == 2
 
 
-def test_a_read_from_the_start_is_always_audited(session, follow):
+def _follow_events(session) -> list[AuditLog]:
+    return list(session.exec(select(AuditLog).where(AuditLog.action == "file.follow")).all())
+
+
+def test_a_read_from_the_start_is_audited_once_per_tail(session, follow):
     client, source, log = follow
     log.write_bytes(b"line\n")
     _poll(client, source, 0)
     _poll(client, source, 0)
-    events = session.exec(select(AuditLog).where(AuditLog.action == "file.follow")).all()
-    assert len(events) == 2
+    [event] = _follow_events(session)
+    assert event.event_metadata["offset"] == 0
+
+
+@pytest.mark.parametrize("offset", [1, 3])
+def test_a_tail_from_past_the_start_is_audited_without_start(session, follow, offset):
+    """A client that never says `start` and asks from offset 1 still leaves
+    a record, with the offset it read from, once."""
+    client, source, log = follow
+    log.write_bytes(b"line one\nline two\n")
+    response = _poll(client, source, offset)
+    assert response.content == b"line one\nline two\n"[offset:]
+    _poll(client, source, int(response.headers["x-follow-offset"]))
+    [event] = _follow_events(session)
+    assert event.event_metadata["path"] == "app.log"
+    assert event.event_metadata["offset"] == offset
+
+
+def test_a_new_tail_is_audited_again(session, follow):
+    client, source, log = follow
+    log.write_bytes(b"line\n")
+    _poll(client, source, 5, start=True)
+    _poll(client, source, 5)
+    _poll(client, source, 2, start=True)
+    assert [e.event_metadata["offset"] for e in _follow_events(session)] == [5, 2]
+
+
+def test_a_read_from_before_the_audited_offset_is_audited_again(session, follow):
+    """A Tail audited from near the end that then reads from the start,
+    without `start`, leaves a record of the earlier offset; later reads
+    forward from there don't."""
+    client, source, log = follow
+    content = b"line one\nline two\n"
+    log.write_bytes(content)
+    last = len(content) - 1
+    _poll(client, source, last)
+    response = _poll(client, source, 0)
+    assert response.content == content
+    _poll(client, source, 4)
+    _poll(client, source, int(response.headers["x-follow-offset"]))
+    assert [e.event_metadata["offset"] for e in _follow_events(session)] == [last, 0]
+
+
+def test_a_tail_idle_past_the_limit_is_audited_again(session, follow, monkeypatch):
+    import app.api.archive as archive_module
+
+    client, source, log = follow
+    log.write_bytes(b"line\n")
+    now = [1000.0]
+    monkeypatch.setattr(archive_module.time, "monotonic", lambda: now[0])
+    _poll(client, source, 1)
+    now[0] += archive_module.FOLLOW_AUDIT_IDLE_SECONDS - 1
+    _poll(client, source, 5)
+    now[0] += archive_module.FOLLOW_AUDIT_IDLE_SECONDS + 1
+    _poll(client, source, 5)
+    assert [e.event_metadata["offset"] for e in _follow_events(session)] == [1, 5]
+
+
+def test_each_session_audits_its_own_tail(session, follow):
+    """The same user following the same file from two sessions: one record
+    each."""
+    from app import request_context
+
+    client, source, log = follow
+    log.write_bytes(b"line\n")
+    original = request_context.current
+    for ref in ("session-a", "session-b", "session-a"):
+        context = request_context.RequestContext(session_id=ref)
+        request_context.current = lambda context=context: context
+        try:
+            _poll(client, source, 3)
+        finally:
+            request_context.current = original
+    assert len(_follow_events(session)) == 2
+
+
+def test_a_follow_takes_a_connector_slot(session, follow):
+    """Like /open, a poll needs a free connector slot: 503 with Retry-After
+    when the source has none left."""
+    from app import system_settings
+    from app.limits import SOURCE_KEY, current_limits, get_limiter
+
+    client, source, log = follow
+    log.write_bytes(b"line\n")
+    system_settings.set_int(session, SOURCE_KEY, 1)
+    session.commit()
+    held = get_limiter().connector(current_limits(session), source.id)
+    try:
+        busy = _poll(client, source, 0)
+    finally:
+        held.release()
+    assert busy.status_code == 503
+    assert "retry-after" in busy.headers
+    assert _follow_events(session) == []
+    assert _poll(client, source, 0).status_code == 200
 
 
 def test_an_offset_an_agent_cant_take_is_refused(follow):

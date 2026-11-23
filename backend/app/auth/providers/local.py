@@ -96,12 +96,12 @@ def set_password(
     session.add(user)
 
 
-def change_password(session: Session, user: User, new_password: str) -> None:
-    """The user's own change (also the forced one at first login or after
-    expiry). Raises PasswordPolicyError, before changing anything, when the
-    password breaks the policy (#245). Doesn't commit: the caller commits
-    it together with revoking the other sessions."""
-    policy = password_policy.get_policy(session)
+def check_new_password(
+    session: Session, user: User, new_password: str, policy: password_policy.PasswordPolicy
+) -> None:
+    """The checks a password the user picks for themselves must pass: the
+    policy (#245), not the current password, and not one the history rule
+    remembers. Raises PasswordPolicyError; changes nothing."""
     password_policy.check_password(
         new_password, policy, user_identifiers=password_policy.user_identifiers(user)
     )
@@ -112,6 +112,15 @@ def change_password(session: Session, user: User, new_password: str) -> None:
             "same_as_current", "Choose a password different from the current one."
         )
     password_policy.check_history(session, user, new_password, policy)
+
+
+def change_password(session: Session, user: User, new_password: str) -> None:
+    """The user's own change (also the forced one at first login or after
+    expiry). Raises PasswordPolicyError, before changing anything, when the
+    password breaks the policy (#245). Doesn't commit: the caller commits
+    it together with revoking the other sessions."""
+    policy = password_policy.get_policy(session)
+    check_new_password(session, user, new_password, policy)
     set_password(session, user, new_password, policy)
     user.must_change_password = False
     session.add(user)
@@ -136,7 +145,15 @@ class LocalPasswordProvider:
         last_login_at or a user.login audit event here would misrepresent
         an only-half-completed attempt as a real one."""
         user = session.exec(select(User).where(User.username == username)).first()
-        if user is None or not user.active or user.password_hash is None:
+        # An SSO account never signs in locally, even with a password hash
+        # left from before that was refused: it would bypass the IdP and its
+        # MFA. Same answer and the same argon2 work as a wrong password.
+        if (
+            user is None
+            or not user.active
+            or user.auth_provider != AuthProviderType.local
+            or user.password_hash is None
+        ):
             _burn_a_verify(password)
             return None
 

@@ -1,60 +1,65 @@
 # Rotating CREDENTIAL_ENCRYPTION_KEY
 
-`CREDENTIAL_ENCRYPTION_KEY` (see [`.env.example`](../.env.example)) is used to
-derive the key that encrypts every stored credential at rest: source
-SSH/SMB/WinRM secrets (`Source.credential_ref`) and SSO client secrets
-(`SSOProviderConfig.config`). This guide covers changing that key — after a
-suspected exposure, as routine hygiene, or whenever you have a reason to —
-without losing access to what's already encrypted under the old one.
+`CREDENTIAL_ENCRYPTION_KEY` (see [`.env.example`](../.env.example)) is the root secret for everything PerchTail protects at rest. The rotation covers all of it in one transaction:
 
-Simply changing the value in `.env` and restarting does **not** work: every
-already-encrypted row still needs the *old* key to decrypt, and the app now
-only derives the *new* one (see the KDF's own startup check in
-`app/crypto.py`). You have to re-encrypt everything first.
+- source SSH/SMB/WinRM credentials (`Source.credential_ref`);
+- SSO provider settings, including client secrets (`SSOProviderConfig.config`);
+- users' MFA secrets (`User.mfa_secret_encrypted`), so MFA keeps working after the rotation;
+- the SMTP server's password (`SmtpSettings.password_encrypted`, **Settings → Email**);
+- alert webhook URLs (`Alert.webhook_url_encrypted`), so alerts keep reaching their receivers;
+- the audit log's hash chain, whose HMAC key is derived from the same secret: every row is re-signed under the new key.
+
+The audit chain is verified under the old key first. If it doesn't verify (a row was changed or removed), the rotation stops and nothing is written, because re-signing a broken chain would vouch for whatever broke it: check the audit log's integrity banner and resolve that first. After a successful rotation the audit log has a `credential_key.rotate` entry with the counts.
+
+This guide covers changing that key — after a suspected exposure, when PerchTail reports it as weak (`startup.weak_credential_encryption_key` in the log at startup and a warning at the top of **Settings → System**), as routine hygiene, or whenever you have a reason to — without losing access to what's already encrypted under the old one.
+
+Simply changing the value in `.env` and restarting does **not** work: every already-encrypted row still needs the *old* key to decrypt, and the app now only derives the *new* one (`app/crypto.py`). You have to re-encrypt everything first.
 
 ## Before you start
 
-- **Stop the app**, or at least make sure nothing else is writing to a source's
-  credential or an SSO provider's config while this runs. A live app process
-  keeps its own cached Fernet key (derived from whatever `CREDENTIAL_ENCRYPTION_KEY`
-  it started with) for the duration of the rotation window — if it re-encrypts
-  something mid-rotation, that row could end up back under the old key after
-  this script already moved past it.
-- Have a **backup of the database file** before running this, same as before
-  any operation that rewrites every credential row. `docker compose stop` and
-  copy the volume, or your usual backup process.
+- **Make a backup** while PerchTail still runs, and `verify` it ([backup-and-restore.md](backup-and-restore.md)): `docker compose exec -u perchtail perchtail python -m app.backup create`.
+- **Stop PerchTail.** A running PerchTail keeps the key it started with, so anything it encrypts during the rotation would end up under the old key after the rotation has moved past it. The rotation command takes the same lock on `DATA_DIR` as PerchTail, and refuses to run while PerchTail runs on that `DATA_DIR`.
 
 ## Running it
 
-From inside the container (or a `backend/` checkout with the same `.env`):
+Run the command as PerchTail's own user, with the same environment as PerchTail; it refuses to run as root. `CREDENTIAL_ENCRYPTION_KEY` must still be the *current* value: that's what everything is decrypted with. The new key comes from `NEW_CREDENTIAL_ENCRYPTION_KEY`, or, when that isn't set, from a prompt (it's never accepted as a command-line option, which would land in shell history and `ps` output).
+
+Docker, in the folder with `docker-compose.yml`:
 
 ```bash
-# Preview only -- decrypts everything under the current key and reports what
-# would be rotated, writes nothing:
-docker compose exec perchtail python -m app.rotate_credential_key --dry-run
+docker compose stop perchtail
 
-# The real rotation. CREDENTIAL_ENCRYPTION_KEY in the environment must still
-# be the *current* value (same as any normal startup) -- that's what it
-# decrypts everything under. NEW_CREDENTIAL_ENCRYPTION_KEY is the value
-# you're rotating to.
-docker compose exec -e NEW_CREDENTIAL_ENCRYPTION_KEY='<new-value>' \
-  perchtail python -m app.rotate_credential_key
+# Preview only: decrypts everything under the current key and reports what
+# would be rotated, writes nothing.
+docker compose run --rm --no-deps -u perchtail --entrypoint python perchtail \
+  -m app.rotate_credential_key --dry-run
+
+# The real rotation. Both commands prompt for the new key.
+docker compose run --rm --no-deps -u perchtail --entrypoint python perchtail \
+  -m app.rotate_credential_key
 ```
 
-If you'd rather not pass the new key as an environment variable in your shell
-history, omit `NEW_CREDENTIAL_ENCRYPTION_KEY` and the script prompts for it
-interactively (never accepted as a `--flag`, for the same reason).
+`--entrypoint python` keeps the container from starting PerchTail itself; `docker compose run` reads the same `.env`.
 
-Every row is decrypted under the old key and re-encrypted under the new one
-inside a single transaction — if any row fails to decrypt (wrong old key, or
-the rotation already ran), nothing is written and the script exits with an
-error explaining which row failed.
+Install from source ([install-from-source.md](install-from-source.md)):
+
+```bash
+sudo systemctl stop perchtail
+sudo systemd-run --pty --wait --uid=perchtail --gid=perchtail \
+  -p EnvironmentFile=/etc/perchtail/perchtail.env -p WorkingDirectory=/opt/perchtail/backend \
+  /opt/perchtail-venv/bin/python -m app.rotate_credential_key --dry-run
+# then the same command without --dry-run; both prompt for the new key
+```
+
+Every row is decrypted under the old key and re-encrypted under the new one inside a single transaction — if any row fails to decrypt (wrong old key, or the rotation already ran), nothing is written and the script exits with an error explaining which row failed.
 
 ## After it succeeds
 
-Update `CREDENTIAL_ENCRYPTION_KEY` in `.env` to the new value and restart the
-app. The database now only decrypts correctly under the new key — the old one
-no longer works, by design.
+Set `CREDENTIAL_ENCRYPTION_KEY` to the new value (in `.env`, or in `/etc/perchtail/perchtail.env` for an install from source) and start PerchTail again. The database now only decrypts correctly under the new key — the old one no longer works, by design.
+
+**Alerts read their files again from the top.** Alerts recognise the start of each file they watch by a keyed hash whose key is also derived from `CREDENTIAL_ENCRYPTION_KEY`, and the rotation doesn't carry those hashes over. At their first pass after the restart, every watched file looks rewritten, so it is read again from its beginning, and lines that matched before the rotation can be sent to the webhooks again.
+
+**Backups made before the rotation still need the old key.** The credentials inside them are encrypted under it, and, unless `BACKUP_ENCRYPTION_KEY` is set, so are the backup files themselves. Keep the old key, labelled with the date it was retired, for as long as you keep those backups, and make a new backup right away so the latest one uses the new key. See [backup-and-restore.md](backup-and-restore.md#the-key).
 
 ## Generating a new key
 

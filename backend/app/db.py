@@ -1,16 +1,23 @@
+from datetime import timedelta
 from pathlib import Path
 
-from sqlalchemy import event, text
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
 from app import models  # noqa: F401  registers tables on SQLModel.metadata
 from app.auth import models as auth_models  # noqa: F401  registers tables on SQLModel.metadata
 from app.config import get_settings
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # How long a write waits for another writer to finish before failing with
 # "database is locked" (#188). Writers hold the lock only briefly (the
-# search indexer commits file by file), so this is a backstop, not the fix.
+# file-name index commits in batches), so this is a backstop, not the fix.
 SQLITE_BUSY_TIMEOUT_SECONDS = 30
+# What the WAL file is cut back to after a checkpoint (#346): without a
+# limit it keeps the size of its biggest burst of writes.
+SQLITE_JOURNAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
 
 settings = get_settings()
 connect_args = {}
@@ -33,6 +40,7 @@ def configure_sqlite_connection(dbapi_connection, _record=None) -> None:
     try:
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_SECONDS * 1000}")
+        cursor.execute(f"PRAGMA journal_size_limit={SQLITE_JOURNAL_SIZE_LIMIT_BYTES}")
     finally:
         cursor.close()
 
@@ -41,48 +49,52 @@ if _sqlite_file:
     event.listen(engine, "connect", configure_sqlite_connection)
 
 
-def ensure_search_schema(target_engine=engine) -> None:
-    """Creates the Phase 3 full-text search FTS5 virtual table (see
-    app/search_index.py) if it doesn't already exist. Not a SQLModel/
-    SQLAlchemy table class — FTS5 tables aren't representable as one — so it
-    can't be created by SQLModel.metadata.create_all() and needs this
-    explicit, idempotent raw-SQL step alongside it. Called from init_db()
-    (app startup) and directly by the migration and by tests' `session`
-    fixture, so every path that provisions a fresh schema covers this too.
+def sqlite_file() -> Path | None:
+    """The SQLite database file, or None for another database or an
+    in-memory one."""
+    url = get_settings().database_url
+    if not url.startswith("sqlite:///"):
+        return None
+    path = url.removeprefix("sqlite:///")
+    return Path(path) if path and path != ":memory:" else None
 
-    A prior version declared `file_path UNINDEXED` (stored but not
-    searchable) — the path-matching addition to search needs it indexed,
-    and FTS5 virtual tables can't ALTER an existing column's UNINDEXED
-    status in place, so a table still carrying the old declaration is
-    dropped and recreated here. `search_index_state` rows are cleared
-    alongside it so previously-indexed files look "new" again and get
-    rebuilt into the new schema on the next sweep, instead of being
-    skipped as unchanged by size (see SearchIndexState's docstring)."""
-    with target_engine.begin() as conn:
-        existing_sql = conn.execute(
-            text(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' "
-                "AND name = 'search_index_fts'"
-            )
-        ).scalar()
-        if existing_sql is not None and "file_path UNINDEXED" in existing_sql:
-            conn.execute(text("DROP TABLE search_index_fts"))
-            conn.execute(text("DELETE FROM search_index_state"))
-            existing_sql = None
 
-        if existing_sql is None:
-            conn.execute(
-                text(
-                    "CREATE VIRTUAL TABLE search_index_fts "
-                    "USING fts5(source_id UNINDEXED, file_path, "
-                    "line_number UNINDEXED, snippet)"
-                )
-            )
+def run_wal_checkpoint() -> None:
+    """The hourly job (#346): copies the WAL back into the database and
+    truncates it, so the WAL file doesn't keep growing between SQLite's own
+    automatic checkpoints, which never shrink it. A checkpoint that can't
+    finish because readers are busy is tried again next hour."""
+    from app.db import engine as current  # deferred, so tests can patch app.db.engine
+
+    if current.dialect.name != "sqlite":
+        return
+    with current.connect() as connection:
+        busy, wal_pages, moved = connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)").one()
+    log = logger.warning if busy else logger.info
+    log("db.wal_checkpoint", busy=bool(busy), wal_pages=wal_pages, checkpointed=moved)
+
+
+WAL_CHECKPOINT_INTERVAL = timedelta(hours=1)
+
+
+def register_upkeep_jobs(scheduler) -> None:
+    """Database upkeep (#346), registered at startup (app/main.py)."""
+    from app.jobs import register
+
+    register(
+        scheduler,
+        "wal_checkpoint",
+        "Database WAL checkpoint",
+        run_wal_checkpoint,
+        WAL_CHECKPOINT_INTERVAL,
+    )
 
 
 def init_db() -> None:
+    from app.name_index_store import ensure_name_index_schema
+
     SQLModel.metadata.create_all(engine)
-    ensure_search_schema(engine)
+    ensure_name_index_schema(engine)
 
 
 def get_session():

@@ -4,6 +4,12 @@
   import { api, ApiError } from '../lib/api'
   import { currentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import {
+    ALL_CAPABILITIES,
+    CAPABILITY_HINTS,
+    CAPABILITY_LABELS,
+    SCOPE_TYPE_LABELS,
+  } from '../lib/capabilities'
   import type {
     Customer,
     Folder,
@@ -32,16 +38,9 @@
     { key: 'manage_system_settings', label: 'Manage system settings (feature toggles)' },
     { key: 'view_audit_log', label: 'View audit log' },
     { key: 'manage_alerts', label: 'Create and edit alerts (webhooks export log content)' },
+    { key: 'view_access_report', label: 'View access report' },
   ]
-  const ALL_CAPS: Capability[] = ['view', 'download', 'manage_rules', 'run_now']
-  // Viewing a file necessarily sends its full content to the browser, so
-  // `view` can read whole files; `download` gates bulk export on top of that.
-  const CAP_HINTS: Record<Capability, string> = {
-    view: 'Browse and open files in the viewer. Opening a file sends its full content; every open is audited.',
-    download: 'Download whole files and folders as ZIP (bulk export). Every download is audited.',
-    manage_rules: "Edit this scope's visibility rules.",
-    run_now: 'Reserved: not used by any feature yet.',
-  }
+  const SCOPE_TYPES: ScopeType[] = ['customer', 'folder', 'source']
 
   let name = ''
   let isSuperAdmin = false
@@ -86,6 +85,9 @@
   }
 
   onMount(async () => {
+    // A new role's form starts as it is now: Escape while the lists below
+    // still load mustn't count as unsaved changes.
+    savedState = formState()
     try {
       await Promise.all([loadRole(), loadScopeOptions()])
     } catch (err) {
@@ -109,20 +111,26 @@
   }
 
   function scopeLabel(grant: RoleGrant): string {
+    // A target missing from the lists (deleted, or not listable by whoever
+    // edits) falls back to the readable scope label and the id.
+    const fallback = `${SCOPE_TYPE_LABELS[grant.scope_type]} #${grant.scope_id}`
     if (grant.scope_type === 'customer') {
-      return customers.find((c) => c.id === grant.scope_id)?.name ?? `customer #${grant.scope_id}`
+      return customers.find((c) => c.id === grant.scope_id)?.name ?? fallback
     }
     if (grant.scope_type === 'folder') {
-      return folders.find((f) => f.id === grant.scope_id)?.name ?? `folder #${grant.scope_id}`
+      return folders.find((f) => f.id === grant.scope_id)?.name ?? fallback
     }
-    return sources.find((s) => s.id === grant.scope_id)?.name ?? `source #${grant.scope_id}`
+    return sources.find((s) => s.id === grant.scope_id)?.name ?? fallback
   }
 
-  function scopeOptions() {
-    if (newScopeType === 'customer') return customers.map((c) => ({ id: c.id, label: c.name }))
-    if (newScopeType === 'folder') return folders.map((f) => ({ id: f.id, label: f.name }))
-    return sources.map((s) => ({ id: s.id, label: s.name }))
-  }
+  // Reactive on the scope type and the lists, so the targets follow the
+  // scope type picked.
+  $: scopeOptions =
+    newScopeType === 'customer'
+      ? customers.map((c) => ({ id: c.id, label: c.name }))
+      : newScopeType === 'folder'
+        ? folders.map((f) => ({ id: f.id, label: f.name }))
+        : sources.map((s) => ({ id: s.id, label: s.name }))
 
   async function handleSubmit() {
     error = ''
@@ -209,7 +217,12 @@
 
       <div class="switch-row">
         <label class="switch">
-          <input type="checkbox" bind:checked={isSuperAdmin} disabled={!canEditSuperAdmin} />
+          <input
+            type="checkbox"
+            aria-label="Super-admin"
+            bind:checked={isSuperAdmin}
+            disabled={!canEditSuperAdmin}
+          />
           <span class="switch-track"></span>
         </label>
         <span>Super-admin (bypasses all grants, reaches system sources)</span>
@@ -225,6 +238,7 @@
             <label class="switch">
               <input
                 type="checkbox"
+                aria-label={cap.label}
                 checked={globalCaps.has(cap.key)}
                 on:change={() => (globalCaps = toggle(globalCaps, cap.key))}
               />
@@ -264,11 +278,13 @@
           <tbody>
             {#each grants as grant (grant.id)}
               <tr>
-                <td><span class="badge badge-muted scope-badge">{grant.scope_type}</span></td>
+                <td><span class="badge badge-muted">{SCOPE_TYPE_LABELS[grant.scope_type]}</span></td>
                 <td class="target">{scopeLabel(grant)}</td>
                 <td class="cap-list">
                   {#each grant.capabilities as cap}
-                    <span class="badge badge-accent" title={CAP_HINTS[cap]}>{cap}</span>
+                    <span class="badge badge-accent" title={CAPABILITY_HINTS[cap]}
+                      >{CAPABILITY_LABELS[cap]}</span
+                    >
                   {/each}
                   {#if grant.capabilities.length === 0}—{/if}
                 </td>
@@ -289,26 +305,32 @@
 
         {#if !isBuiltin}
         <form class="add-grant" on:submit|preventDefault={addGrant}>
-          <select class="input" bind:value={newScopeType} on:change={() => (newScopeId = null)}>
-            <option value="customer">customer</option>
-            <option value="folder">folder</option>
-            <option value="source">source</option>
+          <select
+            class="input"
+            aria-label="Grant scope type"
+            bind:value={newScopeType}
+            on:change={() => (newScopeId = null)}
+          >
+            {#each SCOPE_TYPES as scopeType}
+              <option value={scopeType}>{SCOPE_TYPE_LABELS[scopeType]}</option>
+            {/each}
           </select>
-          <select class="input" bind:value={newScopeId}>
+          <select class="input" aria-label="Grant target" bind:value={newScopeId}>
             <option value={null}>— pick —</option>
-            {#each scopeOptions() as opt (opt.id)}
+            {#each scopeOptions as opt (opt.id)}
               <option value={opt.id}>{opt.label}</option>
             {/each}
           </select>
           <div class="cap-checks">
-            {#each ALL_CAPS as cap}
-              <label class="chip" class:chip-active={newCaps.has(cap)} title={CAP_HINTS[cap]}>
+            {#each ALL_CAPABILITIES as cap}
+              <label class="chip" class:chip-active={newCaps.has(cap)} title={CAPABILITY_HINTS[cap]}>
                 <input
                   type="checkbox"
+                  aria-label={`Grant ${CAPABILITY_LABELS[cap]}`}
                   checked={newCaps.has(cap)}
                   on:change={() => (newCaps = toggle(newCaps, cap))}
                 />
-                {cap}
+                {CAPABILITY_LABELS[cap]}
               </label>
             {/each}
           </div>
@@ -414,9 +436,6 @@
   .target {
     color: var(--text);
     font-weight: 500;
-  }
-  .scope-badge {
-    text-transform: capitalize;
   }
   .cap-list {
     display: flex;

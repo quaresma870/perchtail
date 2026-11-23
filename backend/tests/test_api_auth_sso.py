@@ -2,15 +2,25 @@ import json
 import time
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 from app.api.auth import router as auth_router
-from app.auth.models import AuthProviderType, Role, SSOProtocol, SSOProviderConfig, User
+from app.auth.models import (
+    AuditLog,
+    AuthProviderType,
+    Role,
+    SSOProtocol,
+    SSOProviderConfig,
+    User,
+)
 from app.auth.providers import oidc
 from app.auth.providers.local import create_local_user
 from app.bootstrap import seed_no_access_role
 from app.config import get_settings
 from app.crypto import encrypt_secret
 from app.db import get_session
+from app.webhook_safety import UnsafeWebhookURLError
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from joserfc import jwt
@@ -71,6 +81,7 @@ def _key_set_and_token(**claim_overrides) -> tuple[KeySet, str]:
         "iat": now,
         "nonce": "placeholder",
         "email": "jdoe@example.com",
+        "email_verified": True,
     }
     claims.update(claim_overrides)
     token = jwt.encode({"alg": "RS256", "kid": key.kid}, claims, key)
@@ -126,16 +137,77 @@ def test_sso_login_redirects_to_the_idp_authorization_endpoint(client, session, 
     assert "nonce" in params
 
 
-def test_sso_login_returns_502_when_idp_is_unreachable(client, session, monkeypatch):
+def _assert_sso_error_redirect(response) -> None:
+    """The browser is sent back to the login page with the neutral SSO
+    error, as when the callback fails, not left on a JSON body."""
+    assert response.status_code == 302
+    assert response.headers["location"].endswith("/#/login?sso_error=1")
+    assert "perchtail_sso_state" not in response.cookies
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectTimeout("timed out"),
+        httpx.ConnectError("[Errno 111] Connection refused"),
+        UnsafeWebhookURLError("idp.example.com resolves to a non-public address"),
+    ],
+)
+def test_sso_login_sends_back_to_the_login_page_when_the_idp_is_unreachable(
+    client, session, monkeypatch, error
+):
     _make_enabled_provider(session)
 
     def _boom(issuer):
-        raise ConnectionError("timed out")
+        raise error
 
     monkeypatch.setattr(oidc, "fetch_discovery_document", _boom)
 
+    _assert_sso_error_redirect(client.get("/auth/sso/login"))
+
+
+def _issuer_mismatch(issuer):
+    raise oidc.IssuerMismatchError(
+        "The identity provider's discovery document names a different issuer"
+    )
+
+
+def _sso_login_failures(session) -> list[AuditLog]:
+    session.expire_all()
+    return list(
+        session.exec(select(AuditLog).where(AuditLog.action == "user.sso_login_failed")).all()
+    )
+
+
+def test_sso_login_refuses_a_discovery_document_for_another_issuer(client, session, monkeypatch):
+    _make_enabled_provider(session)
+    monkeypatch.setattr(oidc, "fetch_discovery_document", _issuer_mismatch)
+
     response = client.get("/auth/sso/login")
-    assert response.status_code == 502
+
+    _assert_sso_error_redirect(response)
+    assert ISSUER not in response.headers["location"]
+    [entry] = _sso_login_failures(session)
+    assert entry.event_metadata["reason"] == "issuer_mismatch"
+
+
+def test_callback_refuses_a_discovery_document_for_another_issuer(client, session, monkeypatch):
+    seed_no_access_role(session)
+    _make_enabled_provider(session)
+    state, _ = _get_state_and_nonce(client, session, monkeypatch)
+    monkeypatch.setattr(oidc, "fetch_discovery_document", _issuer_mismatch)
+    monkeypatch.setattr(
+        oidc, "exchange_code_for_tokens", lambda **kwargs: pytest.fail("no code exchange")
+    )
+
+    response = client.get("/auth/sso/callback", params={"code": "the-code", "state": state})
+
+    assert response.status_code == 302
+    assert response.headers["location"].endswith("/#/login?sso_error=1")
+    assert "perchtail_session" not in response.cookies
+    assert session.exec(select(User).where(User.auth_provider == AuthProviderType.oidc)).all() == []
+    [entry] = _sso_login_failures(session)
+    assert entry.event_metadata["reason"] == "issuer_mismatch"
 
 
 # --- /auth/sso/callback --------------------------------------------------------------
@@ -176,6 +248,41 @@ def test_callback_provisions_a_new_user_and_sets_a_session_cookie(client, sessio
     assert user.username == "jdoe@example.com"
     no_access = session.exec(select(Role).where(Role.name == "No Access")).first()
     assert user.role_id == no_access.id
+
+
+def test_the_flow_uses_pkce_s256_end_to_end(client, session, monkeypatch):
+    seed_no_access_role(session)
+    _make_enabled_provider(session)
+    monkeypatch.setattr(oidc, "fetch_discovery_document", lambda issuer: DISCOVERY)
+    location = client.get("/auth/sso/login").headers["location"]
+    params = parse_qs(urlparse(location).query)
+    assert params["code_challenge_method"] == ["S256"]
+    challenge = params["code_challenge"][0]
+
+    sent = {}
+
+    def exchange(**kwargs):
+        sent.update(kwargs)
+        return {"id_token": id_token}
+
+    key_set, id_token = _key_set_and_token(nonce=params["nonce"][0])
+    monkeypatch.setattr(oidc, "exchange_code_for_tokens", exchange)
+    monkeypatch.setattr(oidc, "fetch_jwks", lambda jwks_uri: key_set.as_dict())
+    response = client.get(
+        "/auth/sso/callback", params={"code": "the-code", "state": params["state"][0]}
+    )
+
+    assert response.status_code == 302
+    assert "perchtail_session" in response.cookies
+    # The token request proves it holds the verifier behind the challenge.
+    assert oidc.code_challenge_s256(sent["code_verifier"]) == challenge
+    assert sent["code_verifier"] not in location
+
+
+def test_sso_login_refuses_an_http_issuer_stored_before_https_was_required(client, session):
+    _make_enabled_provider(session, issuer="http://idp.example.com")
+
+    _assert_sso_error_redirect(client.get("/auth/sso/login"))
 
 
 def test_callback_reuses_the_same_user_on_a_second_login(client, session, monkeypatch):
@@ -239,6 +346,65 @@ def test_callback_redirects_to_login_error_on_idp_error_param(client, session):
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
     assert "perchtail_session" not in response.cookies
+
+
+def test_callback_cuts_the_idp_error_short_in_the_log(client, session):
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        response = client.get(
+            "/auth/sso/callback",
+            params={"error": "e" * 5000, "error_description": "d" * 5000, "state": "x"},
+        )
+
+    assert response.status_code == 302
+    [entry] = [e for e in logs if e["event"] == "sso.callback.idp_error"]
+    assert entry["error"] == "e" * 200
+    assert entry["error_description"] == "d" * 200
+
+
+def test_sso_login_is_limited_per_address(client, session, monkeypatch):
+    from app import login_throttle
+
+    _make_enabled_provider(session)
+    fetched = []
+
+    def fetch(issuer):
+        fetched.append(issuer)
+        return DISCOVERY
+
+    monkeypatch.setattr(oidc, "fetch_discovery_document", fetch)
+
+    for _ in range(login_throttle.SSO_LOGINS_PER_ADDRESS):
+        assert client.get("/auth/sso/login").status_code == 302
+    response = client.get("/auth/sso/login")
+
+    assert response.status_code == 429
+    assert int(response.headers["retry-after"]) >= 1
+    # One discovery for all of them (the cache).
+    assert fetched == [ISSUER]
+    [entry] = _sso_login_failures(session)
+    assert entry.event_metadata["reason"] == "rate_limited"
+
+
+def test_the_sso_login_limit_is_per_address(session, monkeypatch):
+    from app import login_throttle
+
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")
+    get_settings.cache_clear()
+    app = FastAPI()
+    app.include_router(auth_router)
+    app.dependency_overrides[get_session] = lambda: session
+    _make_enabled_provider(session)
+    monkeypatch.setattr(oidc, "fetch_discovery_document", lambda issuer: DISCOVERY)
+    first = TestClient(app, follow_redirects=False, client=("198.51.100.1", 1000))
+    second = TestClient(app, follow_redirects=False, client=("198.51.100.2", 1000))
+
+    for _ in range(login_throttle.SSO_LOGINS_PER_ADDRESS):
+        first.get("/auth/sso/login")
+    assert first.get("/auth/sso/login").status_code == 429
+    assert second.get("/auth/sso/login").status_code == 302
+    get_settings.cache_clear()
 
 
 def test_callback_redirects_to_login_error_on_missing_code(client, session):
@@ -364,6 +530,54 @@ def test_callback_redirects_to_login_error_when_sso_disabled_mid_flow(client, se
     response = client.get("/auth/sso/callback", params={"code": "the-code", "state": state})
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
+
+
+# --- provider settings that can't be decrypted with the current key ------------------
+
+
+def _foreign_ciphertext() -> str:
+    """Settings encrypted under some other key, as after losing the key or salt."""
+    return (
+        Fernet(Fernet.generate_key())
+        .encrypt(json.dumps({"issuer": ISSUER, "client_id": CLIENT_ID}).encode())
+        .decode()
+    )
+
+
+def _sso_failures(session) -> list[AuditLog]:
+    return session.exec(select(AuditLog).where(AuditLog.action == "user.sso_login_failed")).all()
+
+
+def test_sso_login_with_unreadable_settings_fails_neutrally_and_is_audited(client, session):
+    provider = _make_enabled_provider(session)
+    provider.config = _foreign_ciphertext()
+    session.add(provider)
+    session.commit()
+
+    response = client.get("/auth/sso/login")
+
+    assert response.status_code == 302
+    assert "sso_error=1" in response.headers["location"]
+    [entry] = _sso_failures(session)
+    assert entry.event_metadata["reason"] == "secret_unreadable"
+
+
+def test_callback_with_unreadable_settings_fails_neutrally_and_is_audited(
+    client, session, monkeypatch
+):
+    seed_no_access_role(session)
+    provider = _make_enabled_provider(session)
+    state, _nonce = _get_state_and_nonce(client, session, monkeypatch)
+    provider.config = _foreign_ciphertext()
+    session.add(provider)
+    session.commit()
+
+    response = client.get("/auth/sso/callback", params={"code": "the-code", "state": state})
+
+    assert response.status_code == 302
+    assert "sso_error=1" in response.headers["location"]
+    assert "perchtail_session" not in response.cookies
+    assert [e.event_metadata["reason"] for e in _sso_failures(session)] == ["secret_unreadable"]
 
 
 # --- local auth keeps working alongside SSO (Phase 1b checklist item) ---------------

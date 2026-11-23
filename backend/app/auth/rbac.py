@@ -1,13 +1,59 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from fastapi import Depends, HTTPException, status
 from sqlmodel import Session, select
 
+from app import request_context
 from app.audit import record_audit_event
 from app.auth.models import Capability, GlobalCapability, Role, RoleGrant, ScopeType, User
 from app.db import get_session
 from app.models import Folder, Source
+
+
+class PermissionDenied(HTTPException):
+    """A 403 that also says, for the audit log only, why it was refused
+    (app/api/errors.py records every 403 as `access.denied`). The detail
+    the caller sees stays neutral."""
+
+    def __init__(self, detail, *, reason: str) -> None:
+        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+        self.reason = reason
+
+
+def forbidden(detail, *, reason: str, user: User | None = None) -> PermissionDenied:
+    """The 403 to raise for a refused permission. `user`, when given, is
+    who was refused, for the access.denied entry: needed when the check
+    runs before (or without) the session cookie check that normally names
+    them."""
+    if user is not None:
+        context = request_context.current()
+        if context is not None and context.user_id is None:
+            context.user_id = user.id
+    return PermissionDenied(detail, reason=reason)
+
+
+class ConcealedDenial(HTTPException):
+    """A refusal answered as 404, as if the target didn't exist, so the
+    answer doesn't reveal that it does (a customer or folder outside the
+    caller's reach, a role beyond their authority, the audit log while it
+    is turned off). Audited like a 403 (app/api/errors.py), with the
+    reason; the caller only sees the neutral detail."""
+
+    def __init__(self, detail, *, reason: str) -> None:
+        super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+        self.reason = reason
+
+
+def concealed(detail, *, reason: str, user: User | None = None) -> ConcealedDenial:
+    """The 404 to raise for a refusal that mustn't reveal its target; `user`
+    as in `forbidden`."""
+    if user is not None:
+        context = request_context.current()
+        if context is not None and context.user_id is None:
+            context.user_id = user.id
+    return ConcealedDenial(detail, reason=reason)
 
 
 def _find_grant(session: Session, *, role_id: int, scope_type: ScopeType, scope_id: int):
@@ -20,6 +66,150 @@ def _find_grant(session: Session, *, role_id: int, scope_type: ScopeType, scope_
     ).first()
 
 
+# --- Grant resolution ------------------------------------------------------
+#
+# `resolve_access` is the one function that decides what a principal holds
+# on a source (or at a folder or customer): `resolve_capability` and the
+# access report (app/access_report.py) both use it. It reads grants and the
+# folder tree through a `GrantLookup`, so the same decision runs against
+# the database (one query at a time, `DbGrantLookup`) or against a snapshot
+# loaded once (the access report's), and it returns where the decision came
+# from (`AccessVia`) along with the capabilities.
+
+
+class GrantLookup(Protocol):
+    def find_grant(
+        self, *, role_id: int, scope_type: ScopeType, scope_id: int
+    ) -> RoleGrant | None: ...
+
+    def folder_parent(self, folder_id: int) -> int | None: ...
+
+
+class DbGrantLookup:
+    """`GrantLookup` over the database, one query per step."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def find_grant(self, *, role_id: int, scope_type: ScopeType, scope_id: int):
+        return _find_grant(self.session, role_id=role_id, scope_type=scope_type, scope_id=scope_id)
+
+    def folder_parent(self, folder_id: int) -> int | None:
+        return self.session.get(Folder, folder_id).parent_folder_id
+
+
+PRINCIPAL_ROLE = "role"
+# `AccessVia.scope_type` of a super admin's access, which no grant decides.
+VIA_SUPER_ADMIN = "super_admin"
+
+
+@dataclass(frozen=True)
+class Principal:
+    """Who access is resolved for. Today only a role (`PRINCIPAL_ROLE`):
+    every user holding a role has exactly its access."""
+
+    principal_type: str
+    principal_id: int
+    is_super_admin: bool = False
+
+
+@dataclass(frozen=True)
+class AccessVia:
+    """What decided an access: the principal, and the scope of its grant
+    that decided it, or `VIA_SUPER_ADMIN` with no scope id."""
+
+    principal_type: str
+    principal_id: int
+    scope_type: str
+    scope_id: int | None
+
+
+@dataclass(frozen=True)
+class AccessDecision:
+    capabilities: frozenset[Capability]
+    via: tuple[AccessVia, ...] = ()
+
+
+NO_ACCESS = AccessDecision(capabilities=frozenset())
+
+
+def role_principal(role: Role) -> Principal:
+    return Principal(PRINCIPAL_ROLE, role.id, is_super_admin=role.is_super_admin)
+
+
+def resolve_access(
+    lookup: GrantLookup,
+    principal: Principal,
+    *,
+    source_id: int | None = None,
+    is_system: bool = False,
+    folder_id: int | None,
+    customer_id: int | None,
+) -> AccessDecision:
+    """What `principal` holds on a source (`source_id`, placed at `folder_id`
+    and `customer_id`), or, with no `source_id`, at a folder or at the
+    customer's root, per CLAUDE.md's "Access control (RBAC + SSO)" section:
+
+    - no grant reaches a system source; only a super admin does;
+    - a super admin holds everything;
+    - otherwise the most specific grant of the principal decides alone: on
+      the source, then its folder and each folder above it, nearest first,
+      then the customer. A grant decides even when it holds nothing, so a
+      narrower grant can take away what a broader one gives;
+    - with no grant, nothing.
+
+    A folder chain that loops back on itself (which the folders API never
+    creates) holds nothing, rather than walking forever."""
+    if principal.is_super_admin:
+        return AccessDecision(
+            capabilities=frozenset(Capability),
+            via=(
+                AccessVia(principal.principal_type, principal.principal_id, VIA_SUPER_ADMIN, None),
+            ),
+        )
+    if is_system:
+        return NO_ACCESS
+
+    def decided(grant: RoleGrant) -> AccessDecision:
+        held = grant.capabilities or []
+        return AccessDecision(
+            capabilities=frozenset(c for c in Capability if c in held),
+            via=(
+                AccessVia(
+                    principal.principal_type,
+                    principal.principal_id,
+                    str(grant.scope_type),
+                    grant.scope_id,
+                ),
+            ),
+        )
+
+    role_id = principal.principal_id
+    if source_id is not None:
+        grant = lookup.find_grant(role_id=role_id, scope_type=ScopeType.source, scope_id=source_id)
+        if grant is not None:
+            return decided(grant)
+
+    walked: set[int] = set()
+    while folder_id is not None:
+        if folder_id in walked:
+            return NO_ACCESS
+        walked.add(folder_id)
+        grant = lookup.find_grant(role_id=role_id, scope_type=ScopeType.folder, scope_id=folder_id)
+        if grant is not None:
+            return decided(grant)
+        folder_id = lookup.folder_parent(folder_id)
+
+    if customer_id is not None:
+        grant = lookup.find_grant(
+            role_id=role_id, scope_type=ScopeType.customer, scope_id=customer_id
+        )
+        if grant is not None:
+            return decided(grant)
+
+    return NO_ACCESS
+
+
 def resolve_folder_or_customer_capability(
     session: Session,
     user: User,
@@ -28,29 +218,15 @@ def resolve_folder_or_customer_capability(
     customer_id: int | None,
     capability: Capability,
 ) -> bool:
-    """Shared tail of the grant-resolution walk (folder chain, nearest first,
-    then the customer) — used both by `resolve_capability` (for a source's
-    own folder/customer) and directly by the folders API (for a folder that
-    isn't attached to a source). Super-admin short-circuit and any
-    source-scoped grant are the caller's concern, not this helper's."""
-    role_id = user.role_id
-
-    while folder_id is not None:
-        grant = _find_grant(
-            session, role_id=role_id, scope_type=ScopeType.folder, scope_id=folder_id
-        )
-        if grant is not None:
-            return capability in grant.capabilities
-        folder_id = session.get(Folder, folder_id).parent_folder_id
-
-    if customer_id is not None:
-        grant = _find_grant(
-            session, role_id=role_id, scope_type=ScopeType.customer, scope_id=customer_id
-        )
-        if grant is not None:
-            return capability in grant.capabilities
-
-    return False
+    """Grant resolution at a folder (its chain, nearest first, then the
+    customer) or at a customer's root, by the role's grants alone: the
+    super-admin short-circuit is the caller's concern, not this helper's,
+    so the role is resolved as an ordinary one here (see `resolve_access`)."""
+    principal = Principal(PRINCIPAL_ROLE, user.role_id)
+    decision = resolve_access(
+        DbGrantLookup(session), principal, folder_id=folder_id, customer_id=customer_id
+    )
+    return capability in decision.capabilities
 
 
 def holds_capability_at(
@@ -66,11 +242,13 @@ def holds_capability_at(
     would get: the folder, its ancestors, then the customer. Super admins
     hold everything. Used to check both what is being moved and where it
     goes, so a move can never widen the mover's own access."""
-    if user.role.is_super_admin:
-        return True
-    return resolve_folder_or_customer_capability(
-        session, user, folder_id=folder_id, customer_id=customer_id, capability=capability
+    decision = resolve_access(
+        DbGrantLookup(session),
+        role_principal(user.role),
+        folder_id=folder_id,
+        customer_id=customer_id,
     )
+    return capability in decision.capabilities
 
 
 def _capabilities_at(
@@ -119,25 +297,19 @@ def resolve_capability(
     section: no grant can reach a system source short of super-admin; the
     most specific scope wins — a source-scoped grant beats a folder-scoped
     one, which beats a (possibly deeper) parent folder's, which beats the
-    customer-scoped one; otherwise deny."""
-    if source.is_system:
-        return user.role.is_super_admin
+    customer-scoped one; otherwise deny. Decided by `resolve_access`."""
+    return capability in resolve_source_access(session, user, source).capabilities
 
-    if user.role.is_super_admin:
-        return True
 
-    grant = _find_grant(
-        session, role_id=user.role_id, scope_type=ScopeType.source, scope_id=source.id
-    )
-    if grant is not None:
-        return capability in grant.capabilities
-
-    return resolve_folder_or_customer_capability(
-        session,
-        user,
+def resolve_source_access(session: Session, user: User, source: Source) -> AccessDecision:
+    """Everything `user` holds on `source`, and what decided it."""
+    return resolve_access(
+        DbGrantLookup(session),
+        role_principal(user.role),
+        source_id=source.id,
+        is_system=source.is_system,
         folder_id=source.folder_id,
         customer_id=source.customer_id,
-        capability=capability,
     )
 
 
@@ -157,29 +329,155 @@ def visible_source_ids(
     return ids
 
 
-def visible_customer_ids(session: Session, user: User) -> set[int] | None:
-    """Returns the set of customer ids the user has any grant reaching
-    (customer-scoped, or a folder/source grant somewhere underneath it), or
-    None for "all" (super-admin). A grant here only proves the org unit is
-    worth showing in a list — the actual capability is still checked at the
-    source/folder endpoints themselves."""
+@dataclass(frozen=True)
+class OrgReach:
+    """The customers and folders a role's grants reach (see `org_reach`)."""
+
+    customer_ids: frozenset[int]
+    folder_ids: frozenset[int]
+
+
+def org_reach(session: Session, user: User) -> OrgReach | None:
+    """The customers and folders `user` may see in the organization's
+    structure, or None for all of them (super admin). Customers and folder
+    names are information of each customer, so a role only sees those its
+    own grants reach:
+
+    - a customer with a grant on it, on one of its folders or on one of its
+      sources;
+    - every folder of a customer with a customer grant;
+    - a folder with a grant, and every folder below it;
+    - the folder holding a source with a grant, and the folders above that
+      one, for the path to it.
+
+    Any grant holding at least one capability counts: this only decides what
+    the lists show and what answers 404. What may be done there is still
+    checked by grant resolution. A grant holding nothing reaches nothing
+    (none can be saved any more, but one saved before may remain)."""
     if user.role.is_super_admin:
         return None
 
-    ids: set[int] = set()
-    grants = session.exec(select(RoleGrant).where(RoleGrant.role_id == user.role_id)).all()
+    grants = [
+        grant
+        for grant in session.exec(select(RoleGrant).where(RoleGrant.role_id == user.role_id)).all()
+        if grant.capabilities
+    ]
+    if not grants:
+        return OrgReach(customer_ids=frozenset(), folder_ids=frozenset())
+
+    folders_by_id = {f.id: f for f in session.exec(select(Folder)).all()}
+    children: dict[int, list[int]] = {}
+    for folder in folders_by_id.values():
+        if folder.parent_folder_id is not None:
+            children.setdefault(folder.parent_folder_id, []).append(folder.id)
+
+    customer_ids: set[int] = set()
+    folder_ids: set[int] = set()
+
+    def add_with_descendants(folder_id: int) -> None:
+        pending = [folder_id]
+        while pending:
+            current = pending.pop()
+            if current in folder_ids:
+                continue
+            folder_ids.add(current)
+            pending.extend(children.get(current, []))
+
+    def add_with_ancestors(folder_id: int | None) -> None:
+        # The whole chain: a folder already reached by another grant (from
+        # above it) doesn't mean the folders above it are.
+        walked: set[int] = set()
+        while folder_id is not None and folder_id not in walked:
+            folder = folders_by_id.get(folder_id)
+            if folder is None:
+                return
+            walked.add(folder_id)
+            folder_ids.add(folder_id)
+            folder_id = folder.parent_folder_id
+
+    granted_customers = {g.scope_id for g in grants if g.scope_type == ScopeType.customer}
+    for folder in folders_by_id.values():
+        if folder.customer_id in granted_customers:
+            folder_ids.add(folder.id)
+    customer_ids |= granted_customers
+
     for grant in grants:
-        if grant.scope_type == ScopeType.customer:
-            ids.add(grant.scope_id)
-        elif grant.scope_type == ScopeType.folder:
-            folder = session.get(Folder, grant.scope_id)
+        if grant.scope_type == ScopeType.folder:
+            folder = folders_by_id.get(grant.scope_id)
             if folder is not None:
-                ids.add(folder.customer_id)
+                customer_ids.add(folder.customer_id)
+                add_with_descendants(folder.id)
         elif grant.scope_type == ScopeType.source:
             source = session.get(Source, grant.scope_id)
-            if source is not None and source.customer_id is not None:
-                ids.add(source.customer_id)
-    return ids
+            if source is None or source.is_system:
+                continue
+            if source.customer_id is not None:
+                customer_ids.add(source.customer_id)
+            add_with_ancestors(source.folder_id)
+
+    return OrgReach(customer_ids=frozenset(customer_ids), folder_ids=frozenset(folder_ids))
+
+
+def source_in_reach(session: Session, user: User, source: Source) -> bool:
+    """Whether `source` is within `user`'s reach: they hold at least one
+    capability on it by grant resolution (super admins reach every source,
+    the system one included). A source outside it answers like one that
+    doesn't exist (`concealed`), as customers and folders do."""
+    return bool(resolve_source_access(session, user, source).capabilities)
+
+
+SOURCE_NOT_FOUND = "Source not found"
+
+
+def get_source_in_reach(session: Session, user: User, source_id: int) -> Source:
+    """The source, or 404: plain when there is none, audited (`concealed`)
+    when it exists outside `user`'s reach, so the answer is the same."""
+    source = session.get(Source, source_id)
+    if source is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=SOURCE_NOT_FOUND)
+    if not source_in_reach(session, user, source):
+        raise concealed(SOURCE_NOT_FOUND, reason="source_out_of_reach", user=user)
+    return source
+
+
+def record_access_denied(
+    session: Session,
+    user: User,
+    *,
+    attempted: str,
+    target_type: str | None,
+    target_id: int | None,
+    reason: str,
+) -> None:
+    """The `access.denied` entry for a refusal an endpoint answers itself
+    rather than with a 403 (one item of a batch, for example), in the same
+    shape app/api/errors.py records. Doesn't commit."""
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="access.denied",
+        target_type=target_type,
+        target_id=target_id,
+        metadata={"attempted": attempted, "reason": reason},
+    )
+
+
+def customer_in_reach(session: Session, user: User, customer_id: int) -> bool:
+    reach = org_reach(session, user)
+    return reach is None or customer_id in reach.customer_ids
+
+
+def folder_in_reach(session: Session, user: User, folder_id: int) -> bool:
+    reach = org_reach(session, user)
+    return reach is None or folder_id in reach.folder_ids
+
+
+def visible_customer_ids(session: Session, user: User) -> set[int] | None:
+    """Returns the set of customer ids the user has any grant reaching
+    (customer-scoped, or a folder/source grant somewhere underneath it), or
+    None for "all" (super-admin); see `org_reach`."""
+    reach = org_reach(session, user)
+    return None if reach is None else set(reach.customer_ids)
 
 
 @dataclass
@@ -266,11 +564,11 @@ def require_capability(capability: Capability, get_current_user: Callable[..., U
         user: User = Depends(get_current_user),
         session: Session = Depends(get_session),
     ) -> Source:
-        source = session.get(Source, source_id)
-        if source is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+        # A source outside the user's reach answers like a missing one; one
+        # they reach without `capability` is a plain refusal.
+        source = get_source_in_reach(session, user, source_id)
         if not resolve_capability(session, user, source, capability):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted")
+            raise forbidden("Not permitted", reason=f"missing_capability:{capability}", user=user)
         return source
 
     return dependency
@@ -287,7 +585,26 @@ def require_global_capability(capability: GlobalCapability, get_current_user: Ca
             return user
         if capability in user.role.global_capabilities:
             return user
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted")
+        raise forbidden(
+            "Not permitted", reason=f"missing_global_capability:{capability}", user=user
+        )
+
+    return dependency
+
+
+def require_any_global_capability(
+    capabilities: tuple[GlobalCapability, ...], get_current_user: Callable[..., User]
+):
+    """Like `require_global_capability`, passing with any one of
+    `capabilities`."""
+
+    def dependency(user: User = Depends(get_current_user)) -> User:
+        if user.role.is_super_admin:
+            return user
+        if any(capability in user.role.global_capabilities for capability in capabilities):
+            return user
+        names = "|".join(str(capability) for capability in capabilities)
+        raise forbidden("Not permitted", reason=f"missing_global_capability:{names}", user=user)
 
     return dependency
 
@@ -424,9 +741,21 @@ def role_within_authority(session: Session, actor: User, role: Role) -> bool:
     )
 
 
+def is_last_active_super_admin(session: Session, user: User) -> bool:
+    """Whether `user` is a super admin and no other active user is one."""
+    if not user.role.is_super_admin:
+        return False
+    other = session.exec(
+        select(User.id)
+        .join(Role, User.role_id == Role.id)
+        .where(Role.is_super_admin.is_(True), User.active.is_(True), User.id != user.id)
+    ).first()
+    return other is None
+
+
 def require_role_within_authority(session: Session, actor: User, role: Role) -> None:
     if not role_within_authority(session, actor, role):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ROLE_BEYOND_AUTHORITY)
+        raise forbidden(ROLE_BEYOND_AUTHORITY, reason="role_beyond_authority", user=actor)
 
 
 def require_changed_role_within_authority(session: Session, actor: User, role: Role) -> None:
@@ -440,7 +769,7 @@ def require_changed_role_within_authority(session: Session, actor: User, role: R
     session.flush()
     if not role_within_authority(session, actor, role):
         session.rollback()
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ROLE_BEYOND_AUTHORITY)
+        raise forbidden(ROLE_BEYOND_AUTHORITY, reason="role_beyond_authority", user=actor)
 
 
 def require_grant_within_authority(
@@ -460,7 +789,7 @@ def require_grant_within_authority(
         capabilities=capabilities,
         role_id=role_id,
     ):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ROLE_BEYOND_AUTHORITY)
+        raise forbidden(ROLE_BEYOND_AUTHORITY, reason="grant_beyond_authority", user=actor)
 
 
 OWN_ROLE_REFUSED = "You can't change your own role or the role you hold."
@@ -470,7 +799,7 @@ def require_not_own_role(actor: User, role: Role) -> None:
     """Only a super admin changes the role they hold: anyone else editing
     it would widen their own access."""
     if not actor.role.is_super_admin and role.id == actor.role_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=OWN_ROLE_REFUSED)
+        raise forbidden(OWN_ROLE_REFUSED, reason="own_role", user=actor)
 
 
 def require_capabilities_within_authority(
@@ -479,9 +808,10 @@ def require_capabilities_within_authority(
     if actor.role.is_super_admin:
         return
     if not set(global_capabilities) <= set(actor.role.global_capabilities):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not permitted: you can only grant global capabilities you hold yourself",
+        raise forbidden(
+            "Not permitted: you can only grant global capabilities you hold yourself",
+            reason="global_capability_beyond_authority",
+            user=actor,
         )
 
 

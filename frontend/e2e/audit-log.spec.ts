@@ -14,6 +14,28 @@ import { expect, test } from '@playwright/test'
 // reuseExistingServer setting explicitly supports.
 const marker = Date.now()
 
+type Page = import('@playwright/test').Page
+
+// Each filter is a dropdown in its own group, named by the group's label
+// ("Action", "Source", "System settings"...), with a search box on top.
+function filterGroup(page: Page, label: string) {
+  return page
+    .locator('.filter-group')
+    .filter({ has: page.locator('.filter-label', { hasText: new RegExp(`^${label}$`) }) })
+}
+
+async function pick(page: Page, group: string, option: string) {
+  const toggle = filterGroup(page, group).locator('.dropdown-toggle')
+  await toggle.click()
+  await filterGroup(page, group).locator('.dropdown-panel').getByLabel(option, { exact: true }).check()
+  await page.keyboard.press('Escape')
+  await expect(toggle).toContainText(option)
+}
+
+async function pickAction(page: Page, action: string) {
+  await pick(page, 'Action', action)
+}
+
 test('audit log: retention control writes a system_settings.update entry, filter by type finds it', async ({
   page,
 }) => {
@@ -27,11 +49,10 @@ test('audit log: retention control writes a system_settings.update entry, filter
 
   await page.goto('/#/settings/audit-log')
 
-  // "Type" is a chip-style checkbox list built from whatever target_types
-  // are actually in the table (see backend/app/api/audit.py's GET
-  // /audit/filters) -- "system_settings" is guaranteed present since the
+  // One dropdown per target type in the table (see backend/app/api/audit.py's
+  // GET /audit/filters) -- "System settings" is guaranteed present since the
   // retention save above just wrote one.
-  await page.locator('.chip', { hasText: 'system_settings' }).click()
+  await pick(page, 'System settings', 'Every system settings')
 
   const row = page.locator('tbody tr', { hasText: String(marker) })
   await expect(row).toBeVisible()
@@ -46,14 +67,13 @@ test('audit log: retention control writes a system_settings.update entry, filter
   await expect(page.locator('.retention-input')).toHaveValue(originalValue)
 })
 
-test('audit log: action multi-select and date-range filters narrow the table', async ({
+test('audit log: action dropdown and date-range filters narrow the table', async ({
   page,
 }) => {
   await page.goto('/#/settings/audit-log')
 
-  const actionSelect = page.locator('.action-select')
-  await expect(actionSelect).toBeVisible()
-  await actionSelect.selectOption('system_settings.update')
+  // The action filter is a dropdown with a checkbox per action.
+  await pickAction(page, 'system_settings.update')
   await expect(page.locator('tbody tr').first()).toBeVisible()
   await expect(
     page.locator('tbody tr td:nth-child(3)').first(),
@@ -84,12 +104,51 @@ test('audit log: integrity banner verifies the hash chain on demand', async ({ p
   await expect(page.locator('.integrity-banner')).not.toHaveClass(/broken/)
 })
 
+test.describe('audit log times and origin', () => {
+  // A zone far from UTC, with no daylight saving time, so a UTC time read as
+  // local time can't pass by accident.
+  test.use({ timezoneId: 'Asia/Tokyo' })
+
+  test('times name their zone, and each entry says where it came from', async ({ page }) => {
+    await page.goto('/#/settings/audit-log')
+    // Opening the page is itself audited (audit.view); reload to see it.
+    await page.reload()
+    await pickAction(page, 'audit.view')
+
+    await expect(page.locator('thead')).toContainText('Time (Asia/Tokyo)')
+    await expect(page.locator('thead')).toContainText('From')
+    await expect(page.locator('thead')).toContainText('Session')
+
+    const row = page.locator('tbody tr').first()
+    await expect(row.locator('td').nth(2)).toContainText('audit.view')
+    await expect(row.locator('td').first()).toContainText('GMT+9')
+    // The test browser talks to the server directly, from loopback.
+    await expect(row.locator('td.origin .client-ip')).toHaveText(/^(127\.0\.0\.1|::1)$/)
+    await expect(row.locator('td.session code')).toHaveText(/^[0-9a-f]{16}$/)
+
+    // The row was written seconds ago: its hour is Tokyo's hour now (or a
+    // couple of minutes ago, across an hour boundary), nine hours ahead of
+    // UTC, never UTC's own.
+    const tokyoHour = (msAgo: number) =>
+      String(new Date(Date.now() - msAgo + 9 * 3600 * 1000).getUTCHours()).padStart(2, '0')
+    const hours = new Set([tokyoHour(0), tokyoHour(2 * 60 * 1000)])
+    await expect(row.locator('td').first()).toContainText(
+      new RegExp(`\\b(${[...hours].join('|')}):\\d\\d:\\d\\d`),
+    )
+
+    // The API gives the time in UTC, with its zone.
+    const response = await page.request.get('/audit?action=audit.view&limit=1')
+    const [entry] = (await response.json()).items
+    expect(entry.timestamp).toMatch(/Z$/)
+  })
+})
+
 test('audit log: opening a source names it in the Target column (#239)', async ({ page }) => {
   await page.goto('/#/viewer')
   await page.locator('.explorer').getByRole('button', { name: 'PerchTail application logs' }).click()
 
   await page.goto('/#/settings/audit-log')
-  await page.locator('.action-select').selectOption('source.open')
+  await pickAction(page, 'source.open')
   const target = page.locator('tbody tr td.target').first()
   await expect(target).toContainText('PerchTail application logs')
   await expect(target).toContainText('system')

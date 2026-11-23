@@ -1,0 +1,119 @@
+{
+  "engine": 1,
+  "cut_guard_bytes": 64,
+  "detectors": [
+    {
+      "name": "card",
+      "pattern": "\\d(?:[ -]?\\d){11,}",
+      "secret_group": 0,
+      "label": "card ****{last4}",
+      "check": "luhn_iin"
+    },
+    {
+      "name": "bearer",
+      "pattern": "(?i)\\bbearer[ \\t]+([A-Za-z0-9\\-._~+/]{8,}=*)",
+      "secret_group": 1,
+      "label": "token",
+      "check": null
+    },
+    {
+      "name": "authorization",
+      "pattern": "(?i)\\b((?:proxy-)?authorization)([\"']?[ \\t]*[:=][ \\t]*[\"']?)([^\\r\\n\"']+)",
+      "secret_group": 3,
+      "label": "authorization",
+      "check": null
+    },
+    {
+      "name": "secret_kv",
+      "pattern": "(?i)\\b([\\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|client[_-]?secret|private[_-]?key)[\\w.-]*)([\"']?[ \\t]*[:=][ \\t]*[\"']?)([^\\s\"'&,;}]+)",
+      "secret_group": 3,
+      "label": "secret",
+      "check": "kv_value",
+      "key_group": 1
+    },
+    {
+      "name": "url_password",
+      "pattern": "(?i)\\b([a-z][a-z0-9+.-]{1,15}://[^\\s/:@]+:)([^\\s@/]+)@",
+      "secret_group": 2,
+      "label": "password",
+      "check": null
+    },
+    {
+      "name": "private_key",
+      "pattern": "-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----.*?-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----",
+      "secret_group": 0,
+      "label": "private key",
+      "check": null,
+      "pem_begin": "-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----",
+      "pem_end": "-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----"
+    },
+    {
+      "name": "jwt",
+      "pattern": "\\beyJ[A-Za-z0-9_-]{5,}\\.eyJ[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]*",
+      "secret_group": 0,
+      "label": "jwt",
+      "check": null
+    },
+    {
+      "name": "email",
+      "pattern": "\\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,24}\\b",
+      "secret_group": 0,
+      "label": "email",
+      "check": null
+    },
+    {
+      "name": "ipv4",
+      "pattern": "\\b(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(?:\\.(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}\\b",
+      "secret_group": 0,
+      "label": "ip",
+      "check": null
+    },
+    {
+      "name": "ipv6",
+      "pattern": "(?i)(?:^|[^0-9a-z:.])((?:[0-9a-f]{1,4}|:)(?::[0-9a-f]{0,4}){1,7}(?:%[0-9a-z_.]+)?)",
+      "secret_group": 1,
+      "label": "ip",
+      "check": "ipv6"
+    },
+    {
+      "name": "iban",
+      "pattern": "\\b[A-Z]{2}\\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,4})?\\b",
+      "secret_group": 0,
+      "label": "iban",
+      "check": "iban"
+    }
+  ],
+  "kv_ignore": ["null", "none"],
+  "key_labels": [
+    {"contains": ["private_key", "private-key", "privatekey"], "label": "private key"},
+    {"contains": ["client_secret", "client-secret", "clientsecret"], "label": "client secret"},
+    {"contains": ["access_key", "access-key", "accesskey"], "label": "access key"},
+    {"contains": ["api_key", "api-key", "apikey"], "label": "api key"},
+    {"contains": ["password", "passwd", "pwd"], "label": "password"},
+    {"contains": ["secret"], "label": "secret"},
+    {"contains": ["token"], "label": "token"}
+  ],
+  "card_brands": [
+    {"brand": "visa", "ranges": [["4", "4"]], "lengths": [13, 16, 19]},
+    {"brand": "mastercard", "ranges": [["51", "55"], ["2221", "2720"]], "lengths": [16]},
+    {"brand": "amex", "ranges": [["34", "34"], ["37", "37"]], "lengths": [15]},
+    {"brand": "discover", "ranges": [["6011", "6011"], ["644", "649"], ["65", "65"]], "lengths": [16, 17, 18, 19]},
+    {"brand": "jcb", "ranges": [["3528", "3589"]], "lengths": [16, 17, 18, 19]},
+    {"brand": "diners", "ranges": [["300", "305"], ["36", "36"], ["38", "38"]], "lengths": [14, 15, 16, 17, 18, 19]},
+    {"brand": "unionpay", "ranges": [["62", "62"]], "lengths": [16, 17, 18, 19]},
+    {"brand": "maestro", "ranges": [["50", "50"], ["56", "69"]], "lengths": [12, 13, 14, 15, 16, 17, 18, 19]}
+  ],
+  "iban_lengths": {
+    "AD": 24, "AE": 23, "AL": 28, "AT": 20, "AZ": 28, "BA": 20, "BE": 16, "BG": 22,
+    "BH": 22, "BI": 27, "BR": 29, "BY": 28, "CH": 21, "CR": 22, "CY": 28, "CZ": 24,
+    "DE": 22, "DJ": 27, "DK": 18, "DO": 28, "EE": 20, "EG": 29, "ES": 24, "FI": 18,
+    "FK": 18, "FO": 18, "FR": 27, "GB": 22, "GE": 22, "GI": 23, "GL": 18, "GR": 27,
+    "GT": 28, "HR": 21, "HU": 28, "IE": 22, "IL": 23, "IQ": 23, "IS": 26, "IT": 27,
+    "JO": 30, "KW": 30, "KZ": 20, "LB": 28, "LC": 32, "LI": 21, "LT": 20, "LU": 20,
+    "LV": 21, "LY": 25, "MC": 27, "MD": 24, "ME": 22, "MK": 19, "MN": 20, "MR": 27,
+    "MT": 31, "MU": 30, "NI": 28, "NL": 18, "NO": 15, "OM": 23, "PK": 24, "PL": 28,
+    "PS": 29, "PT": 25, "QA": 29, "RO": 24, "RS": 22, "RU": 33, "SA": 24, "SC": 31,
+    "SD": 18, "SE": 24, "SI": 19, "SK": 24, "SM": 27, "SO": 23, "ST": 25, "SV": 28,
+    "TL": 23, "TN": 24, "TR": 26, "UA": 29, "VA": 22, "VG": 24, "XK": 20, "YE": 30
+  }
+}

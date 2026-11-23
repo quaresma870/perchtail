@@ -14,6 +14,7 @@ from app import config_transfer
 from app.api.auth import require_super_admin
 from app.audit import record_audit_event
 from app.auth.models import User
+from app.collectors import ssh
 from app.db import get_session
 from app.logging_config import get_logger
 
@@ -47,6 +48,8 @@ class ImportResult(BaseModel):
     applied: bool
     items: list[PlanItemPublic]
     problems: list[ProblemPublic]
+    # Not blocking: the file still applies, but should be changed.
+    warnings: list[ProblemPublic] = []
 
 
 @router.post("/import", response_model=ImportResult)
@@ -63,6 +66,12 @@ def import_config(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Credential for {key!r} takes username plus password or private_key",
+            )
+        private_key = credential.get("private_key")
+        if private_key and ssh.is_encrypted_private_key(private_key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ssh.ENCRYPTED_PRIVATE_KEY_DETAIL,
             )
     credentials = {k: {f: v for f, v in c.items() if v} for k, c in payload.credentials.items()}
     credentials = {k: c for k, c in credentials.items() if c.get("username")}
@@ -96,6 +105,7 @@ def import_config(
         applied=apply and not problems,
         items=[PlanItemPublic(**asdict(i)) for i in items],
         problems=[ProblemPublic(**asdict(p)) for p in problems],
+        warnings=[ProblemPublic(**asdict(w)) for w in parsed.warnings],
     )
 
 

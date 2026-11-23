@@ -3,10 +3,18 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser, hasCapability } from '../lib/auth'
+  import { runStatusText, statusTone } from '../lib/agent-upgrade'
   import RuleEditor from '../lib/components/RuleEditor.svelte'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import { justCreatedSourceId } from '../lib/source-created'
-  import type { AgentTokenResult, ConnectionCheckResult, Source } from '../lib/types'
+  import { ago } from '../lib/source-status'
+  import type {
+    AgentTokenResult,
+    AgentUpgradeHistory,
+    AgentUpgradeRun,
+    ConnectionCheckResult,
+    Source,
+  } from '../lib/types'
 
   /** Read-only overview of a source -- where creating one lands (#157),
    * instead of back on its edit form. Shows what the source is, whether it
@@ -60,17 +68,51 @@
     source = null
     check = null
     agentToken = ''
+    lastUpgrade = null
     tokenError = ''
     try {
       const loaded = await api.get<Source>(`/sources/${id}`)
       if (id !== sourceId) return // a newer load took over
       source = loaded
       ruleCount = loaded.rule_count
+      if (loaded.protocol === 'agent' && !loaded.is_system && hasCapability($currentUser, 'create_source')) {
+        api
+          .get<AgentUpgradeHistory>(`/sources/${id}/agent-upgrades?limit=1`)
+          .then((history) => {
+            if (id === sourceId) lastUpgrade = history.items[0] ?? null
+          })
+          .catch(() => {})
+      }
     } catch (err) {
       if (id !== sourceId) return
       error = err instanceof ApiError ? err.detail : 'Failed to load source'
     } finally {
       if (id === sourceId) loading = false
+    }
+  }
+
+  // "Index now" for the file-name index (#304).
+  let indexing = false
+  let indexNote = ''
+  $: canIndexNow = source?.my_capabilities.includes('run_now') ?? false
+  // Without manage_rules the rules are shown, not edited.
+  $: canManageRules = source?.my_capabilities.includes('manage_rules') ?? false
+  // The connection test needs manage sources on the source.
+  $: canCheck = source?.my_capabilities.includes('manage_source') ?? false
+
+  async function indexNow() {
+    if (!source) return
+    indexing = true
+    indexNote = ''
+    try {
+      const result = await api.post<{ started: boolean }>(`/sources/${source.id}/name-index`)
+      indexNote = result.started
+        ? 'Listing the files in the background. Reload this page in a moment to see the result.'
+        : 'Already listing this source.'
+    } catch (err) {
+      indexNote = err instanceof ApiError ? err.detail : 'Failed to start the listing'
+    } finally {
+      indexing = false
     }
   }
 
@@ -99,6 +141,9 @@
     }
   }
 
+  // The last upgrade from the portal (#319); Settings -> Agents has the rest.
+  let lastUpgrade: AgentUpgradeRun | null = null
+
   onDestroy(() => {
     unsubscribe()
     justCreatedSourceId.set(null)
@@ -124,19 +169,29 @@
           <span class="badge">{source.protocol}</span>
           {#if source.is_system}<span class="badge badge-accent">system</span>{/if}
           {#if !source.enabled}<span class="badge">disabled</span>{/if}
-          {#if source.search_indexing_enabled}<span class="badge">indexed for search</span>{/if}
         </div>
       </div>
       <div class="header-actions">
         <button
           class="btn btn-primary"
-          disabled={ruleCount === 0}
-          title={ruleCount === 0 ? 'Add an include rule first: a source with no rules shows nothing' : undefined}
+          disabled={!source.enabled || ruleCount === 0}
+          title={!source.enabled
+            ? 'This source is disabled: turn it on in its settings to browse it'
+            : ruleCount === 0
+              ? 'Add an include rule first: a source with no rules shows nothing'
+              : undefined}
           on:click={() => push(`/viewer/${sourceId}`)}>Browse</button
         >
-        <button class="btn btn-ghost" disabled={checking} on:click={testConnection}>
-          {checking ? 'Testing…' : 'Test connection'}
-        </button>
+        {#if canCheck}
+          <button
+            class="btn btn-ghost"
+            disabled={checking || !source.enabled}
+            title={source.enabled ? undefined : 'This source is disabled: turn it on in its settings to test it'}
+            on:click={testConnection}
+          >
+            {checking ? 'Testing…' : 'Test connection'}
+          </button>
+        {/if}
         {#if canManage}
           <button class="btn btn-ghost" on:click={() => push(`/settings/sources/${sourceId}/edit`)}>Edit</button>
         {/if}
@@ -168,6 +223,27 @@
               authenticated. Prefer HTTPS.
             </p>
           {/if}
+          {#if source.protocol === 'winrm' && !source.winrm_configuration}
+            <p class="http-warning" data-testid="winrm-no-jea-warning">
+              No JEA endpoint: the account needs remote-shell rights, in practice an
+              administrator on the server. The read-only JEA endpoint is recommended.
+            </p>
+          {/if}
+        </dd>
+      {/if}
+      {#if source.protocol === 'smb'}
+        <dt>SMB security</dt>
+        <dd>
+          {source.smb_require_signing ? 'Signing required' : 'Signing not required'}{source.smb_encrypt
+            ? ', encrypted'
+            : ''}
+          {#if !source.smb_require_signing}
+            <p class="http-warning" data-testid="smb-signing-off-warning">
+              Signing is off: someone on the network between PerchTail and this server could
+              change what it reads. Turn on <strong>Require signing</strong> in the source's
+              settings unless the server can't sign.
+            </p>
+          {/if}
         </dd>
       {/if}
       {#if source.roots.length > 0}
@@ -185,15 +261,27 @@
       {/if}
       {#if source.protocol === 'agent'}
         <dt>Agent</dt>
-        <dd>{source.agent_connected ? 'connected' : 'not connected'}</dd>
+        <dd>
+          {source.agent_connected ? 'connected' : 'not connected'}
+          {#if source.agent_connection_replaced}
+            <p class="http-warning" role="status" data-testid="agent-connection-replaced-warning">
+              The agent's connection was taken over {ago(source.agent_connection_replaced.at, new Date())}
+              by a connection from {source.agent_connection_replaced.address ?? 'an unknown address'}
+              (it was connected from {source.agent_connection_replaced.previous_address ??
+                'an unknown address'}). Two agents may be using this source's token: if one of them
+              isn't yours, regenerate the token. This notice stays until an agent connects without
+              taking over another connection.
+            </p>
+          {/if}
+        </dd>
         <dt>Agent OS</dt>
         <dd>
           {#if source.agent_os === 'windows'}
             Windows — rules ignore case
           {:else if source.agent_os}
-            {osName(source.agent_os)} — rules are case-sensitive
+            {osName(source.agent_os)} — include rules are case-sensitive
           {:else}
-            not reported yet (agent older than 0.5.1, or never connected) — rules are case-sensitive
+            not reported yet (agent older than 0.5.1, or never connected) — include rules are case-sensitive
           {/if}
         </dd>
         <dt>Agent version</dt>
@@ -206,8 +294,38 @@
           {:else}
             not reported yet (agent older than 0.6, or never connected)
           {/if}
+          {#if canManage}
+            {#if lastUpgrade}
+              <p class="upgrade-status upgrade-{statusTone(lastUpgrade.status)}" role="status">
+                Last upgrade, {ago(lastUpgrade.started_at, new Date())}: {runStatusText(lastUpgrade)}
+              </p>
+            {/if}
+            <p class="upgrade-status">
+              <a href="#/settings/agents">{source.agent_outdated ? 'Upgrade it from Settings → Agents' : 'Agent upgrades: Settings → Agents'}</a>
+            </p>
+          {/if}
         </dd>
       {/if}
+      <dt>File names</dt>
+      <dd>
+        {#if !source.name_index_enabled}
+          not indexed (turned off for this source)
+        {:else if source.name_indexed_at}
+          {(source.name_index_files ?? 0).toLocaleString()}
+          {source.name_index_files === 1 ? 'file' : 'files'}, listed {ago(source.name_indexed_at, new Date())}
+          {#if source.name_index_message}
+            <span class="index-note">— {source.name_index_message}</span>
+          {/if}
+        {:else}
+          not listed yet
+        {/if}
+        {#if source.name_index_enabled && canIndexNow}
+          <button class="btn btn-ghost btn-sm index-now" disabled={indexing} on:click={indexNow}>Index now</button>
+        {/if}
+        {#if indexNote}
+          <p class="hint index-note" role="status">{indexNote}</p>
+        {/if}
+      </dd>
     </dl>
 
     {#if ruleCount === 0}
@@ -238,7 +356,10 @@
     {#key sourceId}
       <RuleEditor
         {sourceId}
-        readOnly={source.is_system}
+        readOnly={source.is_system || !canManageRules}
+        readOnlyNote={source.is_system
+          ? "This source's rules are managed by the system and cannot be edited."
+          : "You can't change this source's rules."}
         on:change={(e) => (ruleCount = e.detail.count)}
       />
     {/key}
@@ -248,6 +369,18 @@
 <style>
   .agent-outdated {
     color: var(--warning);
+  }
+  .upgrade-status {
+    margin: 0.3rem 0 0;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    word-break: normal;
+  }
+  .upgrade-status.upgrade-fail {
+    color: var(--danger);
+  }
+  .upgrade-status.upgrade-ok {
+    color: var(--success, #34d399);
   }
   .http-warning {
     margin: 0.3rem 0 0;
@@ -354,5 +487,11 @@
   }
   .error {
     color: var(--danger);
+  }
+  .index-now {
+    margin-left: 0.6rem;
+  }
+  .index-note {
+    color: var(--text-muted);
   }
 </style>

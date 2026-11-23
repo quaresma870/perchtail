@@ -1,40 +1,56 @@
 <script lang="ts">
   import Router, { push } from 'svelte-spa-router'
   import { onMount } from 'svelte'
-  import { authChecked, currentUser, hasCapability, logout, refreshCurrentUser } from './lib/auth'
+  import {
+    authChecked,
+    currentUser,
+    hasCapability,
+    logout,
+    mfaSetupRequired,
+    refreshCurrentUser,
+  } from './lib/auth'
   import { currentHash } from './lib/hash'
   import { serverReachable } from './lib/server-status'
   import { closeAllTabs } from './lib/viewer-tabs'
   import { refreshSystemSettings, refreshSystemSettingsIfStale, systemSettings } from './lib/settings'
   import Login from './routes/Login.svelte'
+  import ForgotPassword from './routes/ForgotPassword.svelte'
+  import ResetPassword from './routes/ResetPassword.svelte'
   import ChangePassword from './routes/ChangePassword.svelte'
+  import SetupMfa from './routes/SetupMfa.svelte'
   import Sources from './routes/Sources.svelte'
   import SourceEditorPopup from './routes/SourceEditorPopup.svelte'
   import SourceOverview from './routes/SourceOverview.svelte'
   import Folders from './routes/Folders.svelte'
   import Viewer from './routes/Viewer.svelte'
   import ImportExportSettings from './routes/ImportExportSettings.svelte'
-  import Search from './routes/Search.svelte'
   import Alerts from './routes/Alerts.svelte'
   import SettingsIndex from './routes/SettingsIndex.svelte'
   import Roles from './routes/Roles.svelte'
   import RoleEditorPopup from './routes/RoleEditorPopup.svelte'
   import Users from './routes/Users.svelte'
   import SsoSettings from './routes/SsoSettings.svelte'
+  import EmailSettings from './routes/EmailSettings.svelte'
   import SystemSettings from './routes/SystemSettings.svelte'
   import SeverityIndicatorsSettings from './routes/SeverityIndicatorsSettings.svelte'
+  import RedactionSettings from './routes/RedactionSettings.svelte'
   import Profile from './routes/Profile.svelte'
   import UserMenu from './lib/components/UserMenu.svelte'
   import ConfirmHost from './lib/components/ConfirmHost.svelte'
   import AuditLogSettings from './routes/AuditLogSettings.svelte'
+  import AgentsSettings from './routes/AgentsSettings.svelte'
+  import AccessReport from './routes/AccessReport.svelte'
 
   const routes = {
     '/login': Login,
+    '/forgot-password': ForgotPassword,
+    '/reset-password': ResetPassword,
+    '/reset-password/:token': ResetPassword,
     '/change-password': ChangePassword,
+    '/setup-mfa': SetupMfa,
     '/profile': Profile,
     '/viewer': Viewer,
     '/viewer/:sourceId': Viewer,
-    '/search': Search,
     '/alerts': Alerts,
     '/settings': SettingsIndex,
     '/settings/sources': Sources,
@@ -42,14 +58,18 @@
     '/settings/sources/:id/edit': SourceEditorPopup,
     '/settings/sources/:id': SourceOverview,
     '/settings/folders': Folders,
+    '/settings/agents': AgentsSettings,
     '/settings/roles': Roles,
     '/settings/roles/new': RoleEditorPopup,
     '/settings/roles/:id': RoleEditorPopup,
     '/settings/users': Users,
     '/settings/sso': SsoSettings,
+    '/settings/email': EmailSettings,
     '/settings/system': SystemSettings,
     '/settings/severity-indicators': SeverityIndicatorsSettings,
+    '/settings/redaction': RedactionSettings,
     '/settings/audit-log': AuditLogSettings,
+    '/settings/access-review': AccessReport,
     '/settings/import-export': ImportExportSettings,
   }
 
@@ -67,7 +87,12 @@
     if (document.visibilityState === 'visible' && $currentUser) refreshSystemSettingsIfStale()
   }
 
-  $: if ($authChecked && !$currentUser && $currentHash !== '/login') {
+  // Pages for someone who isn't signed in: the login and password recovery
+  // by email (#244). Every other page sends them to the login.
+  const PUBLIC_PATHS = ['/login', '/forgot-password', '/reset-password']
+  const isPublicPath = (path: string) =>
+    PUBLIC_PATHS.some((prefix) => path === prefix || path.startsWith(prefix + '/'))
+  $: if ($authChecked && !$currentUser && !isPublicPath($currentHash)) {
     push('/login')
   }
   $: if (
@@ -77,32 +102,47 @@
   ) {
     push('/change-password')
   }
+  // After the password: an account that must use MFA sets it up before
+  // anything else (the API refuses everything else until it does).
+  $: if (
+    $authChecked &&
+    $currentUser &&
+    !$currentUser.must_change_password &&
+    mfaSetupRequired($currentUser) &&
+    $currentHash !== '/setup-mfa'
+  ) {
+    push('/setup-mfa')
+  }
+  // The bare address has no page of its own: it opens the Viewer, as
+  // signing in does.
+  $: if ($authChecked && $currentUser && ($currentHash === '/' || $currentHash === '')) {
+    push('/viewer')
+  }
   // Settings -> Security and Sessions moved to My profile (#243); old links
   // still land there for a release.
   $: if ($currentHash === '/settings/security' || $currentHash === '/settings/sessions') {
     push('/profile')
   }
-  // The Search view can be turned off deployment-wide (Settings -> System);
+  // The audit log can be turned off deployment-wide (Settings -> System);
   // guard the route itself, not just the nav link, so it's actually off for
-  // a bookmarked/typed URL too, not merely unlinked. Alerts rides entirely
-  // on the search index (see ROADMAP.md's alerting notes), so it's gated by
-  // the same toggle -- there'd be nothing for an alert to watch otherwise.
-  $: if (
-    $authChecked &&
-    $currentUser &&
-    !$systemSettings.search_view_enabled &&
-    ($currentHash.startsWith('/search') || $currentHash.startsWith('/alerts'))
-  ) {
-    push('/viewer')
-  }
-  // Same reasoning as the search/alerts guard above, plus a capability
-  // check -- the audit log is gated by view_audit_log (see
-  // auth/models.py's GlobalCapability), not merely unlinked from the nav.
+  // a bookmarked/typed URL too. Also gated by view_audit_log (see
+  // auth/models.py's GlobalCapability).
   $: if (
     $authChecked &&
     $currentUser &&
     (!$systemSettings.audit_view_enabled || !hasCapability($currentUser, 'view_audit_log')) &&
     $currentHash.startsWith('/settings/audit-log')
+  ) {
+    push('/settings')
+  }
+
+  // Redaction (#382, #249) is configured by super admins only; the API
+  // refuses anyone else too.
+  $: if (
+    $authChecked &&
+    $currentUser &&
+    !$currentUser.is_super_admin &&
+    $currentHash.startsWith('/settings/redaction')
   ) {
     push('/settings')
   }
@@ -119,17 +159,14 @@
 <svelte:document on:visibilitychange={onVisibility} />
 
 <main>
-  {#if $authChecked && $currentUser && $currentHash !== '/login'}
+  {#if $authChecked && $currentUser && !isPublicPath($currentHash)}
     <nav>
       <div class="brand">
         <img src="/favicon.svg" alt="" width="26" height="26" />
         <span>PerchTail</span>
       </div>
       <a href="#/viewer" class:active={isActive('/viewer')}>Viewer</a>
-      {#if $systemSettings.search_view_enabled}
-        <a href="#/search" class:active={isActive('/search')}>Search</a>
-        <a href="#/alerts" class:active={isActive('/alerts')}>Alerts</a>
-      {/if}
+      <a href="#/alerts" class:active={isActive('/alerts')}>Alerts</a>
       <a href="#/settings" class:active={isActive('/settings')}>Settings</a>
       <span class="spacer"></span>
       <UserMenu

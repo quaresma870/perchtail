@@ -1,7 +1,7 @@
 import pytest
 from app.api.auth import get_current_active_user
 from app.api.customers import router as customers_router
-from app.auth.models import GlobalCapability, Role, User
+from app.auth.models import Capability, GlobalCapability, Role, RoleGrant, ScopeType, User
 from app.db import get_session
 from app.models import Customer, Folder, Protocol, Source
 from fastapi import FastAPI
@@ -36,17 +36,31 @@ def client_for(session):
     return _make
 
 
-def test_create_source_capability_can_create_and_list_customers(session, client_for):
+def test_create_source_capability_lists_only_reached_customers_and_cannot_create(
+    session, client_for
+):
     user = _make_user(session, global_capabilities=[GlobalCapability.create_source])
+    reached = Customer(name="Northwind Telecom")
+    other = Customer(name="Elsewhere")
+    session.add_all([reached, other])
+    session.commit()
+    session.add(
+        RoleGrant(
+            role_id=user.role_id,
+            scope_type=ScopeType.customer,
+            scope_id=reached.id,
+            capabilities=[Capability.view],
+        )
+    )
+    session.commit()
     client = client_for(user)
 
-    create = client.post("/customers", json={"name": "Vodacom Tanzania"})
-    assert create.status_code == 201
-    assert create.json()["name"] == "Vodacom Tanzania"
+    # Only a super admin adds customers.
+    assert client.post("/customers", json={"name": "New"}).status_code == 403
 
     listed = client.get("/customers")
     assert listed.status_code == 200
-    assert [c["name"] for c in listed.json()] == ["Vodacom Tanzania"]
+    assert [c["name"] for c in listed.json()] == ["Northwind Telecom"]
 
 
 def test_plain_user_cannot_manage_customers(session, client_for):
@@ -61,7 +75,7 @@ def test_super_admin_can_manage_customers(session, client_for):
     user = _make_user(session, is_super_admin=True)
     client = client_for(user)
 
-    create = client.post("/customers", json={"name": "Fidelidade"})
+    create = client.post("/customers", json={"name": "Globex Insurance"})
     assert create.status_code == 201
 
 
@@ -69,8 +83,8 @@ def test_duplicate_customer_name_rejected(session, client_for):
     user = _make_user(session, is_super_admin=True)
     client = client_for(user)
 
-    client.post("/customers", json={"name": "GermanCloud"})
-    dupe = client.post("/customers", json={"name": "GermanCloud"})
+    client.post("/customers", json={"name": "Initech Cloud"})
+    dupe = client.post("/customers", json={"name": "Initech Cloud"})
     assert dupe.status_code == 409
 
 

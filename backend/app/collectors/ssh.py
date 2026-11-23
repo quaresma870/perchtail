@@ -4,7 +4,6 @@ import io
 import os
 import posixpath
 import stat as stat_module
-import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,15 +11,29 @@ from pathlib import Path
 import paramiko
 
 from app.collectors import base as collector_base
-from app.collectors.base import DirEntry, PathOutsideBaseError
+from app.collectors.base import (
+    DirEntry,
+    DirListing,
+    LinkTargetHiddenError,
+    PathOutsideBaseError,
+    TargetCheck,
+    refuse_directory,
+    require_target,
+)
 from app.config import get_settings
 from app.crypto import decrypt_credential
 from app.logging_config import get_logger
 from app.models import Rule, Source
-from app.rules import is_entry_visible
+from app.rules import is_dir_visible, is_linked_entry_visible
+from app.scratch import scratch_temp_dir
+
+# Follows links inside the base path, checking the rules on their target
+# (collectors/errors.py passes it a target_check).
+FOLLOWS_LINKS = True
 
 __all__ = [
     "DirEntry",
+    "FOLLOWS_LINKS",
     "PathOutsideBaseError",
     "TrustOnFirstUsePolicy",
     "fetch_file",
@@ -40,6 +53,22 @@ logger = get_logger(__name__)
 _host_keys_lock = threading.Lock()
 
 
+def host_keys_lock() -> threading.Lock:
+    """The lock above, for other code that rewrites known_hosts
+    (app/source_pins.py)."""
+    return _host_keys_lock
+
+
+def host_key_name(host: str, port: int | None) -> str:
+    """How paramiko names a host in known_hosts."""
+    port = port or 22
+    return host if port == 22 else f"[{host}]:{port}"
+
+
+# Keeps NAT and firewalls from dropping a connection during a long transfer.
+KEEPALIVE_SECONDS = 30
+
+
 def fingerprint(key: paramiko.PKey) -> str:
     """OpenSSH-style SHA256 fingerprint, the form `ssh-keygen -lf` prints,
     so an operator can compare a logged pin against the server's own key."""
@@ -56,8 +85,13 @@ class TrustOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
     there's a record of which key was trusted and when. Set
     SSH_HOST_KEY_POLICY=strict to refuse unknown hosts instead."""
 
+    def __init__(self) -> None:
+        # What this connection pinned, for _connect to write to known_hosts.
+        self.pinned: list[tuple[str, paramiko.PKey]] = []
+
     def missing_host_key(self, client, hostname, key):
         client.get_host_keys().add(hostname, key.get_name(), key)
+        self.pinned.append((hostname, key))
         logger.warning(
             "ssh.host_key_pinned",
             host=hostname,
@@ -75,21 +109,44 @@ _KEY_CLASSES: tuple[type[paramiko.PKey], ...] = (
 )
 
 
+ENCRYPTED_PRIVATE_KEY_DETAIL = (
+    "Encrypted SSH private keys aren't supported; provide the key without a passphrase"
+)
+
+
+class PrivateKeyError(ValueError):
+    """The saved private key can't be loaded. collectors/errors.py answers it
+    with the connector's neutral credential error, never a 500."""
+
+
+class EncryptedPrivateKeyError(PrivateKeyError):
+    """The key is protected by a passphrase."""
+
+
 def load_private_key(key_text: str) -> paramiko.PKey:
     """Parses a pasted ed25519, ECDSA or RSA private key, in either OpenSSH or
     PEM format. Passphrase-protected keys aren't supported -- there's nowhere
-    to store a passphrase, and storing it next to the key would add nothing."""
+    to store a passphrase, and storing it next to the key would add nothing.
+    Saving a source refuses them up front (`is_encrypted_private_key`)."""
     for key_class in _KEY_CLASSES:
         try:
             return key_class.from_private_key(io.StringIO(key_text))
         except paramiko.PasswordRequiredException as exc:
-            raise ValueError(
-                "SSH private key is protected by a passphrase; "
-                "use a key without one (see docs/source-setup.md)"
-            ) from exc
-        except (paramiko.SSHException, ValueError):
+            raise EncryptedPrivateKeyError(ENCRYPTED_PRIVATE_KEY_DETAIL) from exc
+        # A malformed key can fail in many ways: try the next key type.
+        except Exception:  # noqa: BLE001  # nosec B112
             continue
-    raise ValueError("not a supported SSH private key (expected ed25519, ECDSA or RSA)")
+    raise PrivateKeyError("not a supported SSH private key (expected ed25519, ECDSA or RSA)")
+
+
+def is_encrypted_private_key(key_text: str) -> bool:
+    try:
+        load_private_key(key_text)
+    except EncryptedPrivateKeyError:
+        return True
+    except PrivateKeyError:
+        return False
+    return False
 
 
 def _missing_host_key_policy() -> paramiko.MissingHostKeyPolicy:
@@ -118,9 +175,18 @@ def _connect(source: Source) -> paramiko.SSHClient:
     creds = decrypt_credential(source.credential_ref)
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(_missing_host_key_policy())
+    policy = _missing_host_key_policy()
+    client.set_missing_host_key_policy(policy)
 
-    connect_kwargs: dict = {"username": creds["username"], "timeout": 10}
+    read_timeout = get_settings().remote_read_timeout_seconds
+    connect_kwargs: dict = {
+        "username": creds["username"],
+        "timeout": 10,
+        # A server that accepts TCP and then goes quiet (#343).
+        "banner_timeout": read_timeout,
+        "auth_timeout": read_timeout,
+        "channel_timeout": read_timeout,
+    }
     if "private_key" in creds:
         connect_kwargs["pkey"] = load_private_key(creds["private_key"])
     elif "password" in creds:
@@ -134,12 +200,10 @@ def _connect(source: Source) -> paramiko.SSHClient:
     # Lock only guards the file read/write, not the network round-trip in
     # connect() below -- holding it across a potentially slow SSH handshake
     # would serialize every concurrent connection in the app onto one
-    # source at a time, even to unrelated hosts. The narrow gap this
-    # leaves (two hosts discovered for the very first time in the same
-    # instant could clobber each other's freshly-saved entry) only ever
-    # costs a redo of TOFU for the host that lost the race, next time it's
-    # connected to -- an already-pinned host's entry was already on disk
-    # before either connection started, so it can't be un-pinned this way.
+    # source at a time, even to unrelated hosts. What was loaded here is
+    # never written back: only a key this connection pinned is added, to
+    # the file as it is then (_save_pinned_host_keys), so a pin removed
+    # meanwhile (app/source_pins.py) stays removed.
     with _host_keys_lock:
         if known_hosts_path.exists():
             client.load_host_keys(str(known_hosts_path))
@@ -149,13 +213,36 @@ def _connect(source: Source) -> paramiko.SSHClient:
     # MITM-detection outcome, so it's left uncaught and propagates to the
     # caller like any other connection failure.
     client.connect(source.host, port=source.port or 22, **connect_kwargs)
+    transport = client.get_transport()
+    if transport is not None:
+        transport.set_keepalive(KEEPALIVE_SECONDS)
 
-    with _host_keys_lock:
-        client.save_host_keys(str(known_hosts_path))
-        if known_hosts_path.exists():
-            os.chmod(known_hosts_path, 0o600)  # #193: which hosts are trusted
+    if isinstance(policy, TrustOnFirstUsePolicy) and policy.pinned:
+        _save_pinned_host_keys(known_hosts_path, policy.pinned)
 
     return client
+
+
+def _save_pinned_host_keys(path: Path, pinned: list[tuple[str, paramiko.PKey]]) -> None:
+    """Adds the keys a connection pinned to known_hosts, reloaded under the
+    lock: the rest of the file is kept as it is now, not as the connection
+    loaded it."""
+    with _host_keys_lock:
+        keys = paramiko.HostKeys()
+        if path.exists():
+            keys.load(str(path))
+        for hostname, key in pinned:
+            keys.add(hostname, key.get_name(), key)
+        keys.save(str(path))
+        os.chmod(path, 0o600)  # #193: which hosts are trusted
+
+
+def _open_sftp(client: paramiko.SSHClient) -> paramiko.SFTPClient:
+    """An SFTP session whose reads fail after REMOTE_READ_TIMEOUT_SECONDS of
+    silence, instead of blocking the thread forever (#343)."""
+    sftp = client.open_sftp()
+    sftp.get_channel().settimeout(get_settings().remote_read_timeout_seconds)
+    return sftp
 
 
 def _is_within(path: str, root: str) -> bool:
@@ -163,15 +250,41 @@ def _is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root if root == "/" else root + "/")
 
 
-def _resolve_contained(sftp: paramiko.SFTPClient, source: Source, relative_path: str) -> str:
+def _relative_to_root(real: str, root: str) -> str:
+    """Where `real` (inside `root`, both as the server resolved them) is,
+    relative to `root`; "" for the root itself."""
+    if real == root:
+        return ""
+    prefix = root if root.endswith("/") else root + "/"
+    return real[len(prefix) :]
+
+
+def _resolve_contained(
+    sftp: paramiko.SFTPClient,
+    source: Source,
+    relative_path: str,
+    target_check: TargetCheck = None,
+) -> str:
     """Resolves `relative_path` on the server (SSH_FXP_REALPATH, which
     follows symlinks) and returns the real path, refusing anything that
     ends up outside the resolved base path. Without this, a symlink inside
     the base path (`escape -> /etc`) would let anyone with `view` on the
     source read whatever the SSH account can read -- the base path and the
-    rules only ever saw the link's name. The caller must then use the
-    returned real path, not the joined one, so the link can't be swapped
-    between this check and the read."""
+    rules only ever saw the link's name. When a link leads somewhere else
+    inside the base path, `target_check` must allow where it leads
+    (collectors.base.require_target), so a link can't reach a file the
+    rules hide either. The caller must then use the returned real path, not
+    the joined one, so the link can't be swapped between this check and
+    the read."""
+    real, real_relative = _resolve_real(sftp, source, relative_path)
+    require_target(relative_path, real_relative, target_check)
+    return real
+
+
+def _resolve_real(sftp: paramiko.SFTPClient, source: Source, relative_path: str) -> tuple[str, str]:
+    """The real path of `relative_path` on the server and where it is
+    relative to the base path, refusing one outside the base path
+    (_resolve_contained)."""
     root = sftp.normalize(source.base_path)
     joined = posixpath.join(source.base_path, relative_path) if relative_path else source.base_path
     try:
@@ -184,8 +297,33 @@ def _resolve_contained(sftp: paramiko.SFTPClient, source: Source, relative_path:
             source_id=source.id,
             path=relative_path,
         )
-        raise PathOutsideBaseError(relative_path)
-    return real
+        raise LinkTargetHiddenError(relative_path)
+    return real, _relative_to_root(real, root)
+
+
+def _resolve_file(
+    sftp: paramiko.SFTPClient,
+    source: Source,
+    relative_path: str,
+    target_check: TargetCheck = None,
+) -> tuple[str, paramiko.SFTPAttributes]:
+    """_resolve_contained for a read, with the real path's attributes: a
+    folder, or a link to one, is refused before it is opened
+    (collectors.base.refuse_directory), with the rules checked on a link's
+    target as a folder. SFTP opens a folder without complaint and only
+    fails reading it. When the target can't be stat'ed (a dangling link),
+    the rules are checked on it before the error goes out, so a link to a
+    hidden path is still refused as one."""
+    real, real_relative = _resolve_real(sftp, source, relative_path)
+    try:
+        attributes = sftp.stat(real)
+    except OSError:
+        require_target(relative_path, real_relative, target_check)
+        raise
+    if stat_module.S_ISDIR(attributes.st_mode or 0):
+        refuse_directory(relative_path, real_relative, target_check)
+    require_target(relative_path, real_relative, target_check)
+    return real, attributes
 
 
 def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -> list[DirEntry]:
@@ -196,32 +334,48 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
 
     Symlinks are resolved on the server: one that points outside the base
     path is left out of the listing entirely, and one that points inside it
-    is shown as whatever it points to (file or directory)."""
+    is shown as whatever it points to (file or directory), only when the
+    rules show both its own path and where it leads (DirEntry.target)."""
     client = _connect(source)
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
             root = sftp.normalize(source.base_path)
-            remote_path = _resolve_contained(sftp, source, relative_path)
-            entries = []
+            remote_path = _resolve_contained(
+                sftp,
+                source,
+                relative_path,
+                lambda real: is_dir_visible(real, rules, case_insensitive=False),
+            )
+            real_dir = _relative_to_root(remote_path, root)
+            entries = DirListing()
+            if real_dir != relative_path:
+                entries.real_dir = real_dir
             for attr in sftp.listdir_attr(remote_path):
                 child_path = f"{relative_path}/{attr.filename}" if relative_path else attr.filename
                 mode = attr.st_mode or 0
                 size = attr.st_size or 0
                 mtime = getattr(attr, "st_mtime", None)
+                # The folder's real path, so a recursive walk can tell a
+                # link that loops back up (#347).
+                real_key = posixpath.join(remote_path, attr.filename)
                 if stat_module.S_ISLNK(mode):
                     try:
-                        target = sftp.normalize(posixpath.join(remote_path, attr.filename))
-                        if not _is_within(target, root):
+                        real_key = sftp.normalize(posixpath.join(remote_path, attr.filename))
+                        if not _is_within(real_key, root):
                             continue
-                        target_attr = sftp.stat(target)
+                        target_attr = sftp.stat(real_key)
                     except OSError:
                         continue  # dangling link: nothing to show
                     mode = target_attr.st_mode or 0
                     size = target_attr.st_size or 0
                     mtime = getattr(target_attr, "st_mtime", None)
+                real_path = _relative_to_root(real_key, root)
+                target = real_path if real_path != child_path else None
                 is_dir = stat_module.S_ISDIR(mode)
-                if not is_entry_visible(child_path, is_dir, rules, case_insensitive=False):
+                if not is_linked_entry_visible(
+                    child_path, is_dir, target, rules, case_insensitive=False
+                ):
                     continue
                 entries.append(
                     DirEntry(
@@ -230,6 +384,8 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
                         is_dir=is_dir,
                         size=size,
                         mtime=float(mtime) if mtime is not None else None,
+                        real_key=real_key if is_dir else None,
+                        target=target,
                     )
                 )
             return entries
@@ -239,23 +395,27 @@ def list_directory(source: Source, rules: list[Rule], relative_path: str = "") -
         client.close()
 
 
-def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
+def fetch_file(
+    source: Source, relative_path: str, destination: Path, *, target_check: TargetCheck = None
+) -> None:
     """Fetch-on-open into `destination` — always a fresh transfer, the
-    caller (scratch.py) never reuses a prior fetch's bytes."""
+    caller (scratch.py) never reuses a prior fetch's bytes. A file over
+    MAX_FETCH_MB is refused before the transfer starts, from its size, and
+    one that grows past it while it is copied stops the copy there."""
     limit = collector_base.max_fetch_bytes()
     client = _connect(source)
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
-            remote_path = _resolve_contained(sftp, source, relative_path)
-            size = sftp.stat(remote_path).st_size or 0
+            remote_path, attributes = _resolve_file(sftp, source, relative_path, target_check)
+            size = attributes.st_size or 0
             if size > limit:
                 raise collector_base.too_large(size, limit)
-            sftp.get(remote_path, str(destination))
-            # The file may have grown between stat() and the transfer.
-            if destination.stat().st_size > limit:
-                destination.unlink(missing_ok=True)
-                raise collector_base.too_large(size, limit)
+            with sftp.open(remote_path, "rb") as remote:
+                # Asks for the listed size ahead, as SFTPClient.get does;
+                # anything past it is read on demand and still counted.
+                remote.prefetch(size)
+                collector_base.copy_with_limit(remote, destination, limit)
         finally:
             sftp.close()
     finally:
@@ -263,27 +423,33 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
 
 
 @contextmanager
-def local_copy(source: Source, relative_path: str):
+def local_copy(source: Source, relative_path: str, *, target_check: TargetCheck = None):
     """Yields a local filesystem path with `relative_path`'s content, for
     callers (api/archive.py) that need to run zipfile/tarfile/gzip against
     it — remote protocols have no choice but to fetch a copy first."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with scratch_temp_dir() as tmp:
         path = Path(tmp) / "fetched"
-        fetch_file(source, relative_path, path)
+        fetch_file(source, relative_path, path, target_check=target_check)
         yield path
 
 
 def read_range(
-    source: Source, relative_path: str, offset: int, length: int, head: int = 0
+    source: Source,
+    relative_path: str,
+    offset: int,
+    length: int,
+    head: int = 0,
+    *,
+    target_check: TargetCheck = None,
 ) -> collector_base.RangeRead:
     """Incremental follow (#254): the file's size, its first `head` bytes and
     up to `length` bytes from `offset`, read with an SFTP seek -- nothing before the offset is
     transferred."""
     client = _connect(source)
     try:
-        sftp = client.open_sftp()
+        sftp = _open_sftp(client)
         try:
-            remote_path = _resolve_contained(sftp, source, relative_path)
+            remote_path, _ = _resolve_file(sftp, source, relative_path, target_check)
             with sftp.open(remote_path, "rb") as f:
                 size = f.stat().st_size or 0
                 return collector_base.read_range_from(f, size, offset, length, head)

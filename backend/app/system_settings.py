@@ -6,7 +6,6 @@ from app.models import SystemSetting
 # every existing deployment's DB row-by-row -- see SystemSetting's
 # docstring in app/models.py for why.
 BOOL_DEFAULTS: dict[str, str] = {
-    "search_view_enabled": "true",
     "audit_view_enabled": "true",
     # Whether users may switch the viewer's connections between list and
     # tree; when false, everyone sees connections_view_default only (#156).
@@ -17,7 +16,43 @@ BOOL_DEFAULTS: dict[str, str] = {
     # "password" key for a hardcoded password; these are setting names.
     "password_reject_simple": "true",  # nosec B105
     "password_reject_personal": "true",  # nosec B105
+    # The file-name index (#304, app/name_index.py): names, sizes and times
+    # of every source's rule-visible files, never content. On by default.
+    "name_index_enabled": "true",
+    # Whether listing a folder below a source's root is audited
+    # (`source.browse`); opening a source, its root, always is. On by default.
+    "audit_folder_listings": "true",
+    # Redaction (#382, #249, app/redaction_rules.py), for super admins only
+    # (REDACTION_SETTINGS). Off by default; on with no enabled rule, nothing
+    # changes. When on, it applies to everyone, super admins included.
+    "redaction_enabled": "false",
+    # Whether downloads (single files, folder ZIPs, archives and their
+    # members) are redacted too while redaction is on; off, they carry the
+    # original content and only the viewer, Tail and alerts are redacted.
+    "redaction_downloads": "true",
+    # Whether a redacted download's file name says so (`app.redacted.log`);
+    # only counts while downloads are redacted.
+    "redaction_download_suffix": "true",
+    # MFA for every local account, not only the administrators who always
+    # need it (app/auth/mfa_policy.py). Off by default; super admins only.
+    "require_mfa_local_accounts": "false",
+    # Password recovery by email for local accounts (#244,
+    # app/auth/password_reset.py). Off by default; super admins only
+    # (PASSWORD_RESET_SETTINGS). Only works while email is set up and on and
+    # PUBLIC_BASE_URL is https.
+    "password_reset_enabled": "false",
 }
+
+# The password recovery settings, which only a super admin may change
+# (app/api/system_settings.py).
+PASSWORD_RESET_SETTINGS: frozenset[str] = frozenset(
+    {"password_reset_enabled", "password_reset_minutes"}
+)
+
+# The redaction settings, which only a super admin may change (app/api/system_settings.py).
+REDACTION_SETTINGS: frozenset[str] = frozenset(
+    {"redaction_enabled", "redaction_downloads", "redaction_download_suffix"}
+)
 
 # Enumerated string settings: key -> (default, allowed values). A value
 # outside the allowed set is never stored (the API validates with a
@@ -30,6 +65,11 @@ CHOICE_DEFAULTS: dict[str, tuple[str, tuple[str, ...]]] = {
         "name_asc",
         ("name_asc", "name_desc", "mtime_desc", "mtime_asc", "size_desc"),
     ),
+    # Upgrading push agents from the portal (#319, app/agent_upgrade_policy.py),
+    # Settings -> Agents. Off by default: it replaces a binary on every host
+    # that runs an agent. Each host can still refuse with
+    # PERCHTAIL_REMOTE_UPGRADE=false.
+    "agent_upgrade_policy": ("off", ("off", "manual", "automatic")),
 }
 
 # Separate from BOOL_DEFAULTS since get_all_bool()/get_bool() would silently
@@ -39,8 +79,8 @@ CHOICE_DEFAULTS: dict[str, tuple[str, tuple[str, ...]]] = {
 INT_DEFAULTS: dict[str, str] = {
     # Admin-configurable from Settings -> System (see app/audit_purge.py's
     # scheduled sweep), not just an env var -- this was an explicit open
-    # decision in ROADMAP.md ("audit log retention -- keep forever, or
-    # expire after N months?"), resolved as: admin picks a number, default
+    # decision ("audit log retention -- keep forever, or expire after N
+    # months?", docs/design-decisions.md, "Audit log"), resolved as: admin picks a number, default
     # 365. 0 means "keep forever" (the purge sweep no-ops).
     "audit_retention_days": "365",
     # How many folders one source may read (#161): 1 turns the feature off.
@@ -63,6 +103,41 @@ INT_DEFAULTS: dict[str, str] = {
     # Background check of every source's reachability (#276), in minutes;
     # 0 turns it off. One connection per source per interval.
     "source_check_minutes": "10",
+    # How old a source's file-name index may get (#304), in minutes: each
+    # source is listed again once its index is older than this.
+    "name_index_minutes": "15",
+    # Live alerts (#305, app/alerts.py): how often a pass reads what was
+    # appended to the files alerts watch.
+    "alerts_interval_seconds": "60",
+    # Credentials older than this are flagged in the Sources list (#248);
+    # 0 turns the warning off.
+    "credential_max_age_days": "90",
+    # Server-side limits on connector work (#344, app/limits.py): listings,
+    # opens, downloads, folder ZIPs and archive listings running at once in
+    # all, and on one source; downloads and folder ZIPs one user may have in
+    # progress. Over a limit, the request is answered 503 with Retry-After.
+    "concurrency_global": "16",
+    "concurrency_per_source": "4",
+    "concurrency_user_transfers": "2",
+    # The most entries a folder or archive listing returns (#347); the
+    # explorer says when there were more.
+    "listing_max_entries": "5000",
+    # Automatic agent upgrades (#319, app/agent_upgrade_policy.py): the
+    # window's days (a bit per day, Monday first: 127 is every day), start
+    # (minutes after midnight, server time) and length in hours; how many
+    # consecutive failures suspend a source's automatic upgrades; and how
+    # many agents upgrade at once.
+    "agent_upgrade_window_days": "127",
+    "agent_upgrade_window_start_minutes": "120",
+    "agent_upgrade_window_hours": "4",
+    "agent_upgrade_failure_limit": "3",
+    "agent_upgrade_concurrency": "5",
+    # Scheduled online backup (#334, app/backup.py), in hours, 1 to 168;
+    # 0 turns it off. Every 24 hours on a new install; an install from before
+    # this default keeps its own value (migration f7a2c4e9b351 stores 0 there).
+    "backup_interval_hours": "24",
+    # How long a password-reset link works (#244), in minutes, 5 to 60.
+    "password_reset_minutes": "30",
 }
 
 

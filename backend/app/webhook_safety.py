@@ -22,6 +22,13 @@ preserved as the Host header and TLS SNI/server_hostname (so an https URL
 still gets certificate hostname verification against the real hostname,
 not the IP literal) -- nothing resolves the hostname a second time between
 validation and connection, which is what actually closes the gap.
+
+The system SMTP server (app/email_delivery.py) goes through the same
+resolution with a looser policy, resolve_validated_smtp_ips(): it's set by a
+super admin and is often an internal relay, so private addresses are
+allowed, but loopback, link-local (cloud metadata included), multicast,
+unspecified and reserved addresses are not. The caller connects to the IP it
+returns, never to the hostname, for the same rebinding reason.
 """
 
 import ipaddress
@@ -34,37 +41,102 @@ class UnsafeWebhookURLError(ValueError):
     """Raised when a webhook URL's host resolves to a disallowed address."""
 
 
-def _is_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+class UnsafeSmtpHostError(ValueError):
+    """Raised when the SMTP server's host can't be resolved or resolves to
+    an address the SMTP policy refuses."""
+
+
+Address = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+def _unmapped(ip: Address) -> Address:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
+
+
+# IPv6 prefixes that carry an IPv4 address to be reached through a
+# translator or tunnel: the address that is really contacted is the embedded
+# IPv4 one, which may well be internal, so none of them counts as global.
+_TRANSLATION_PREFIXES = tuple(
+    ipaddress.IPv6Network(prefix)
+    for prefix in (
+        "64:ff9b::/96",  # NAT64, well-known prefix (RFC 6052)
+        "64:ff9b:1::/48",  # NAT64, local use (RFC 8215)
+        "2002::/16",  # 6to4 (RFC 3056)
+        "2001::/32",  # Teredo (RFC 4380)
+        "::ffff:0:0:0/96",  # IPv4-translated (RFC 2765)
+        "::/96",  # IPv4-compatible, deprecated (RFC 4291)
+    )
+)
+
+
+def _is_translated(ip: Address) -> bool:
+    return isinstance(ip, ipaddress.IPv6Address) and any(
+        ip in prefix for prefix in _TRANSLATION_PREFIXES
+    )
+
+
+def _is_disallowed(ip: Address) -> bool:
     """Anything not publicly routable is refused -- an allowlist (is_global),
     not a list of known-bad ranges, so carrier-grade NAT, documentation and
-    benchmarking ranges and the like are covered too."""
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    return not ip.is_global or ip.is_multicast
+    benchmarking ranges and the like are covered too. IPv6 addresses that
+    embed an IPv4 one for a translator or tunnel (NAT64, 6to4, Teredo...)
+    are refused too, whatever the embedded address."""
+    ip = _unmapped(ip)
+    return not ip.is_global or ip.is_multicast or _is_translated(ip)
 
 
-def _resolve_validated_ips(hostname: str) -> list[str]:
+def _is_disallowed_for_smtp(ip: Address) -> bool:
+    """Private and global addresses are allowed (an internal relay is the
+    usual SMTP server); the host itself, link-local (which holds cloud
+    metadata services), multicast, unspecified and reserved addresses
+    aren't."""
+    ip = _unmapped(ip)
+    return (
+        ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved
+    )
+
+
+def _resolve(hostname: str, *, disallowed, error, label: str) -> list[str]:
     """Resolves hostname and returns every address it maps to, raising
-    UnsafeWebhookURLError if resolution fails or ANY resolved address is
-    disallowed -- shared by both the create/update-time check and the
-    send-time pinning below, so they can never drift into checking
-    different things."""
+    `error` if resolution fails or ANY resolved address is `disallowed` --
+    shared by the save-time checks and the send-time pinning, so they can
+    never drift into checking different things."""
     try:
         addrinfo = socket.getaddrinfo(hostname, None)
-    except socket.gaierror as exc:
-        raise UnsafeWebhookURLError(
-            f"webhook_url hostname could not be resolved: {hostname!r}"
-        ) from exc
+    except (socket.gaierror, UnicodeError, ValueError) as exc:
+        raise error(f"{label} hostname could not be resolved: {hostname!r}") from exc
 
     ips = []
     for _family, _type, _proto, _canonname, sockaddr in addrinfo:
         ip = ipaddress.ip_address(sockaddr[0])
-        if _is_disallowed(ip):
-            raise UnsafeWebhookURLError(
-                f"webhook_url {hostname!r} resolves to a disallowed address: {ip}"
-            )
+        if disallowed(ip):
+            raise error(f"{label} {hostname!r} resolves to a disallowed address: {ip}")
         ips.append(sockaddr[0])
+    if not ips:
+        raise error(f"{label} hostname could not be resolved: {hostname!r}")
     return ips
+
+
+def _resolve_validated_ips(hostname: str) -> list[str]:
+    """The webhook policy: every resolved address must be public."""
+    return _resolve(
+        hostname, disallowed=_is_disallowed, error=UnsafeWebhookURLError, label="webhook_url"
+    )
+
+
+def resolve_validated_smtp_ips(hostname: str) -> list[str]:
+    """The SMTP policy (see _is_disallowed_for_smtp): every address the host
+    resolves to, raising UnsafeSmtpHostError when it can't be resolved or
+    any address is refused. Used when the settings are saved and again
+    before every send, which then connects to the first returned IP."""
+    return _resolve(
+        hostname,
+        disallowed=_is_disallowed_for_smtp,
+        error=UnsafeSmtpHostError,
+        label="The SMTP server",
+    )
 
 
 def assert_webhook_url_is_safe(url: str) -> None:
@@ -73,7 +145,7 @@ def assert_webhook_url_is_safe(url: str) -> None:
     link-local, private, reserved, multicast, or unspecified."""
     hostname = urlparse(url).hostname
     if not hostname:
-        raise UnsafeWebhookURLError(f"webhook_url has no hostname: {url!r}")
+        raise UnsafeWebhookURLError("webhook_url has no hostname")
     _resolve_validated_ips(hostname)
 
 
@@ -100,7 +172,7 @@ def resolve_pinned_webhook_target(url: str) -> PinnedWebhookTarget:
     parsed = urlparse(url)
     hostname = parsed.hostname
     if not hostname:
-        raise UnsafeWebhookURLError(f"webhook_url has no hostname: {url!r}")
+        raise UnsafeWebhookURLError("webhook_url has no hostname")
 
     validated_ips = _resolve_validated_ips(hostname)
     pinned_ip = validated_ips[0]

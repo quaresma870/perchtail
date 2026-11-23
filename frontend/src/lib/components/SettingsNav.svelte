@@ -10,6 +10,7 @@
   <a href="#/settings/sources" class:active={isActive('/settings/sources')}>Sources</a>
   {#if hasCapability($currentUser, 'create_source')}
     <a href="#/settings/folders" class:active={isActive('/settings/folders')}>Folders</a>
+    <a href="#/settings/agents" class:active={isActive('/settings/agents')}>Agents</a>
   {/if}
   {#if hasCapability($currentUser, 'manage_roles')}
     <a href="#/settings/roles" class:active={isActive('/settings/roles')}>Roles</a>
@@ -27,12 +28,19 @@
     >
   {/if}
   {#if $currentUser?.is_super_admin}
+    <a href="#/settings/redaction" class:active={isActive('/settings/redaction')}>Redaction</a>
+    <a href="#/settings/email" class:active={isActive('/settings/email')}>Email</a>
     <a href="#/settings/import-export" class:active={isActive('/settings/import-export')}
       >Import / export</a
     >
   {/if}
   {#if hasCapability($currentUser, 'view_audit_log') && $systemSettings.audit_view_enabled}
     <a href="#/settings/audit-log" class:active={isActive('/settings/audit-log')}>Audit log</a>
+  {/if}
+  {#if hasCapability($currentUser, 'view_access_report')}
+    <a href="#/settings/access-review" class:active={isActive('/settings/access-review')}
+      >Access review</a
+    >
   {/if}
 </nav>
 

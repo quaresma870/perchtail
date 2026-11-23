@@ -11,6 +11,7 @@ from app.models import Customer, Folder, PatternKind, Protocol, Rule, RuleType, 
 from app.timeutils import utcnow
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlmodel import select
 
 
 def _make_user(session, *, is_super_admin=False, global_capabilities=None) -> User:
@@ -29,7 +30,7 @@ def _make_user(session, *, is_super_admin=False, global_capabilities=None) -> Us
     return user
 
 
-def _make_customer(session, name="Vodacom Tanzania") -> Customer:
+def _make_customer(session, name="Northwind Telecom") -> Customer:
     customer = Customer(name=name)
     session.add(customer)
     session.commit()
@@ -93,18 +94,55 @@ def test_folder_must_belong_to_given_customer(session, admin_client):
     session.commit()
     session.refresh(folder)
 
-    response = admin_client.post(
+    def create(customer_id):
+        return admin_client.post(
+            "/sources",
+            json={
+                "name": "x",
+                "customer_id": customer_id,
+                "folder_id": folder.id,
+                "protocol": "local",
+                "host": "localhost",
+                "base_path": "/tmp",
+            },
+        )
+
+    assert create(customer_b.id).status_code == 422
+    # No customer with a folder would leave the source outside the folder's
+    # customer, and its grants.
+    assert create(None).status_code == 422
+    assert session.exec(select(Source)).all() == []
+
+
+def test_a_source_moved_into_a_folder_needs_the_folder_customer(session, admin_client):
+    customer_a = _make_customer(session, "A")
+    customer_b = _make_customer(session, "B")
+    folder = Folder(name="prod", customer_id=customer_a.id)
+    session.add(folder)
+    session.commit()
+    session.refresh(folder)
+    created = admin_client.post(
         "/sources",
         json={
             "name": "x",
             "customer_id": customer_b.id,
-            "folder_id": folder.id,
-            "protocol": "local",
-            "host": "localhost",
-            "base_path": "/tmp",
+            "protocol": "ssh",
+            "host": "h",
+            "base_path": "/var/log",
         },
+    ).json()
+
+    moved = admin_client.patch(f"/sources/{created['id']}", json={"folder_id": folder.id})
+    assert moved.status_code == 422
+    loose = admin_client.patch(
+        f"/sources/{created['id']}", json={"customer_id": None, "folder_id": folder.id}
     )
-    assert response.status_code == 400
+    assert loose.status_code == 422
+    ok = admin_client.patch(
+        f"/sources/{created['id']}", json={"customer_id": customer_a.id, "folder_id": folder.id}
+    )
+    assert ok.status_code == 200
+    assert (ok.json()["customer_id"], ok.json()["folder_id"]) == (customer_a.id, folder.id)
 
 
 def test_list_sources_filtered_by_rbac(session, client_for):
@@ -263,7 +301,10 @@ def test_get_single_source_denied_without_grant(session, client_for):
 
     user = _make_user(session)
     response = client_for(user).get(f"/sources/{source.id}")
-    assert response.status_code == 403
+    missing = client_for(user).get(f"/sources/{source.id + 1000}")
+    # Answered exactly like a source that doesn't exist.
+    assert response.status_code == missing.status_code == 404
+    assert response.json() == missing.json() == {"detail": "Source not found"}
 
 
 def test_delete_source(session, admin_client):
@@ -344,26 +385,6 @@ def test_rule_count_reflects_existing_rules(session, admin_client):
     assert response.json()[0]["rule_count"] == 1
 
 
-def test_search_indexing_enabled_defaults_false_and_can_be_toggled(session, admin_client):
-    customer = _make_customer(session)
-    created = admin_client.post(
-        "/sources",
-        json={
-            "name": "app01",
-            "customer_id": customer.id,
-            "protocol": "ssh",
-            "host": "app01.example.com",
-            "base_path": "/var/log",
-        },
-    ).json()
-    assert created["search_indexing_enabled"] is False
-
-    updated = admin_client.patch(
-        f"/sources/{created['id']}", json={"search_indexing_enabled": True}
-    ).json()
-    assert updated["search_indexing_enabled"] is True
-
-
 def test_agent_connected_defaults_false_for_non_agent_source(session, admin_client):
     customer = _make_customer(session)
     created = admin_client.post(
@@ -407,6 +428,39 @@ def test_regenerate_agent_token_returns_plaintext_once(session, admin_client):
     refreshed = admin_client.get(f"/sources/{created['id']}").json()
     assert refreshed["has_agent_token"] is True
     assert source.agent_token_hash != token
+
+
+def test_the_editor_checks_an_agent_base_path_as_the_import_does(session, admin_client):
+    """An agent's base path goes through the same check as the import's
+    (config_transfer, _validate_base_path): trimmed, and refused with
+    control characters, so what the editor saves can be exported and
+    imported again."""
+    customer = _make_customer(session)
+    payload = {
+        "name": "agent01",
+        "customer_id": customer.id,
+        "protocol": "agent",
+        "host": "agent01",
+        "base_path": "/var/log\a",
+    }
+    refused = admin_client.post("/sources", json=payload)
+    assert refused.status_code == 400
+    assert "control characters" in refused.json()["detail"]
+
+    created = admin_client.post("/sources", json={**payload, "base_path": "  /var/log/app  "})
+    assert created.status_code == 201, created.text
+    assert created.json()["base_path"] == "/var/log/app"
+
+    changed = admin_client.patch(
+        f"/sources/{created.json()['id']}", json={"base_path": "/var/log/other\x1b"}
+    )
+    assert changed.status_code == 400
+    assert "control characters" in changed.json()["detail"]
+    trimmed = admin_client.patch(
+        f"/sources/{created.json()['id']}", json={"base_path": " /var/log/other "}
+    )
+    assert trimmed.status_code == 200, trimmed.text
+    assert trimmed.json()["base_path"] == "/var/log/other"
 
 
 def test_regenerate_agent_token_rejects_non_agent_protocol(session, admin_client):
@@ -838,37 +892,6 @@ def test_recent_sources_excludes_source_no_longer_visible(session, client_for):
     assert response.json() == []
 
 
-@pytest.mark.parametrize("patch", [{"search_indexing_enabled": False}, {"enabled": False}])
-def test_opting_out_or_disabling_a_source_deletes_its_search_snippets(session, admin_client, patch):
-    from app.models import SearchIndexState
-    from app.search_index import _insert_fts_rows, search
-    from app.timeutils import utcnow
-    from sqlmodel import select
-
-    customer = _make_customer(session)
-    created = admin_client.post(
-        "/sources",
-        json={
-            "name": "app01",
-            "customer_id": customer.id,
-            "protocol": "ssh",
-            "host": "app01.example.com",
-            "base_path": "/var/log",
-            "search_indexing_enabled": True,
-        },
-    ).json()
-    _insert_fts_rows(session, created["id"], "app.log", "secret token here")
-    session.add(
-        SearchIndexState(source_id=created["id"], file_path="app.log", size=1, indexed_at=utcnow())
-    )
-    session.commit()
-
-    assert admin_client.patch(f"/sources/{created['id']}", json=patch).status_code == 200
-
-    assert search(session, "secret", None) == []
-    assert session.exec(select(SearchIndexState)).all() == []
-
-
 def test_deleting_a_source_leaves_an_audit_entry_that_names_it(session, admin_client):
     """#239: the entry must still say which source it was once it's gone."""
     from app.auth.models import AuditLog
@@ -919,6 +942,15 @@ def test_an_agent_older_than_the_server_is_flagged(session, admin_client, monkey
     assert flagged("dev") == ("dev", False)  # a local build isn't compared
     assert flagged(None) == (None, False)
 
+    # Pre-releases: a beta is behind its final release, never the other way.
+    assert flagged("0.6.0-beta.3") == ("0.6.0-beta.3", True)
+    monkeypatch.setattr("app.api.sources.APP_VERSION", "0.7.0")
+    assert flagged("0.7.0-beta.2") == ("0.7.0-beta.2", True)
+    monkeypatch.setattr("app.api.sources.APP_VERSION", "0.7.0-beta.2")
+    assert flagged("0.7.0") == ("0.7.0", False)
+    assert flagged("0.7.0-beta.1") == ("0.7.0-beta.1", True)
+    assert flagged("0.7.0-rc.1") == ("0.7.0-rc.1", False)
+
 
 def test_sources_carry_their_status(session, admin_client):
     """#276: the explorer shows each source's reachability."""
@@ -944,3 +976,267 @@ def test_sources_carry_their_status(session, admin_client):
     # An agent source's status is its live connection.
     body = admin_client.get(f"/sources/{agent.id}").json()
     assert (body["status"], body["status_message"]) == ("failing", "The agent isn't connected")
+
+
+# --- bulk credential update and credential age (#248) -------------------------
+
+
+def _ssh_source(admin_client, customer, name):
+    return admin_client.post(
+        "/sources",
+        json={
+            "name": name,
+            "customer_id": customer.id,
+            "protocol": "ssh",
+            "host": f"{name}.example.com",
+            "base_path": "/var/log",
+            "credential": {"username": "svc", "password": "old-pass"},
+        },
+    ).json()
+
+
+def test_creating_with_a_credential_records_when_it_was_set(session, admin_client):
+    created = _ssh_source(admin_client, _make_customer(session), "app01")
+    assert created["credential_updated_at"] is not None
+
+
+def test_bulk_update_tests_each_source_and_applies_only_where_it_works(
+    session, admin_client, monkeypatch, tmp_path
+):
+    from app.auth.models import AuditLog
+    from app.collectors.base import SourceAuthError
+    from app.crypto import decrypt_credential
+    from sqlmodel import select
+
+    customer = _make_customer(session)
+    good = _ssh_source(admin_client, customer, "good01")
+    bad = _ssh_source(admin_client, customer, "bad01")
+    local = admin_client.post(
+        "/sources",
+        json={
+            "name": "loc",
+            "customer_id": customer.id,
+            "protocol": "local",
+            "host": "localhost",
+            "base_path": str(tmp_path),
+        },
+    ).json()
+
+    def fake_check(source, connector):
+        assert decrypt_credential(source.credential_ref)["password"] == "new-pass"
+        if source.host.startswith("bad01"):
+            return [({"label": None}, SourceAuthError("denied"))]
+        return []
+
+    monkeypatch.setattr("app.api.sources.source_status.check", fake_check)
+    response = admin_client.post(
+        "/sources/credentials",
+        json={
+            "source_ids": [good["id"], bad["id"], local["id"], 999999],
+            "credential": {"username": "svc", "password": "new-pass"},
+        },
+    )
+    assert response.status_code == 200
+    by_id = {r["source_id"]: r for r in response.json()}
+    assert by_id[good["id"]]["status"] == "updated"
+    assert by_id[bad["id"]]["status"] == "failed" and by_id[bad["id"]]["detail"]
+    assert by_id[local["id"]]["status"] == "skipped"
+    assert by_id[999999]["status"] == "skipped"
+
+    session.expire_all()
+    stored = {s.id: s for s in session.exec(select(Source)).all()}
+    assert decrypt_credential(stored[good["id"]].credential_ref)["password"] == "new-pass"
+    assert decrypt_credential(stored[bad["id"]].credential_ref)["password"] == "old-pass"
+    # Each source keeps its own encrypted copy.
+    assert stored[good["id"]].credential_ref != stored[bad["id"]].credential_ref
+    events = session.exec(
+        select(AuditLog).where(AuditLog.action == "source.credential_update")
+    ).all()
+    assert [e.target_id for e in events] == [good["id"]]
+    assert "new-pass" not in str(events[0].event_metadata)
+
+
+def test_bulk_update_without_testing_applies_to_every_credential_source(session, admin_client):
+    customer = _make_customer(session)
+    ids = [_ssh_source(admin_client, customer, n)["id"] for n in ("a01", "b01")]
+    response = admin_client.post(
+        "/sources/credentials",
+        json={
+            "source_ids": ids,
+            "credential": {"username": "svc", "private_key": "KEY"},
+            "test_first": False,
+        },
+    )
+    assert [r["status"] for r in response.json()] == ["updated", "updated"]
+
+
+def test_bulk_update_needs_a_secret_and_the_manage_capability(session, admin_client, client_for):
+    customer = _make_customer(session)
+    source_id = _ssh_source(admin_client, customer, "c01")["id"]
+    no_secret = admin_client.post(
+        "/sources/credentials",
+        json={"source_ids": [source_id], "credential": {"username": "svc"}},
+    )
+    assert no_secret.status_code == 400
+    viewer = client_for(_make_user(session, is_super_admin=False))
+    forbidden = viewer.post(
+        "/sources/credentials",
+        json={"source_ids": [source_id], "credential": {"username": "svc", "password": "x"}},
+    )
+    assert forbidden.status_code == 403
+
+
+def _encrypted_private_key() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    return (
+        ed25519.Ed25519PrivateKey.generate()
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.OpenSSH,
+            serialization.BestAvailableEncryption(b"secret"),
+        )
+        .decode()
+    )
+
+
+ENCRYPTED_KEY_DETAIL = (
+    "Encrypted SSH private keys aren't supported; provide the key without a passphrase"
+)
+
+
+def test_saving_an_encrypted_private_key_is_refused(session, admin_client):
+    customer = _make_customer(session)
+    credential = {"username": "svc", "private_key": _encrypted_private_key()}
+
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "enc01",
+            "customer_id": customer.id,
+            "protocol": "ssh",
+            "host": "enc01.example.com",
+            "base_path": "/var/log",
+            "credential": credential,
+        },
+    )
+    existing = _ssh_source(admin_client, customer, "enc02")
+    updated = admin_client.patch(f"/sources/{existing['id']}", json={"credential": credential})
+    bulk = admin_client.post(
+        "/sources/credentials",
+        json={"source_ids": [existing["id"]], "credential": credential, "test_first": False},
+    )
+
+    for response in (created, updated, bulk):
+        assert response.status_code == 400
+        assert response.json()["detail"] == ENCRYPTED_KEY_DETAIL
+    assert session.exec(select(Source).where(Source.name == "enc01")).first() is None
+
+
+def test_testing_a_new_credential_never_records_status_on_the_real_source(
+    session, admin_client, monkeypatch
+):
+    customer = _make_customer(session)
+    source = _ssh_source(admin_client, customer, "d01")
+    recorded = []
+    monkeypatch.setattr(
+        "app.source_status.record", lambda source_id, ok, message=None: recorded.append(source_id)
+    )
+
+    def fake_check(trial, connector):
+        assert trial.id is None
+        from app import source_status
+
+        source_status.record(trial.id, False, "denied")
+        return []
+
+    monkeypatch.setattr("app.api.sources.source_status.check", fake_check)
+    admin_client.post(
+        "/sources/credentials",
+        json={"source_ids": [source["id"]], "credential": {"username": "svc", "password": "x"}},
+    )
+    assert source["id"] not in recorded
+
+
+def test_a_new_smb_source_requires_signing_and_can_ask_for_encryption(session, admin_client):
+    customer = _make_customer(session)
+    base = {"customer_id": customer.id, "protocol": "smb", "host": "fs01", "base_path": "Logs"}
+
+    plain = admin_client.post("/sources", json={**base, "name": "fs01"}).json()
+    assert (plain["smb_require_signing"], plain["smb_encrypt"]) == (True, False)
+
+    encrypted = admin_client.post(
+        "/sources", json={**base, "name": "fs02", "smb_encrypt": True}
+    ).json()
+    assert encrypted["smb_encrypt"] is True
+
+
+def test_smb_options_are_refused_on_other_protocols(session, admin_client):
+    customer = _make_customer(session)
+    response = admin_client.post(
+        "/sources",
+        json={
+            "name": "web01",
+            "customer_id": customer.id,
+            "protocol": "ssh",
+            "host": "web01",
+            "base_path": "/var/log",
+            "smb_require_signing": False,
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_turning_smb_signing_off_is_audited(session, admin_client):
+    customer = _make_customer(session)
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "fs01",
+            "customer_id": customer.id,
+            "protocol": "smb",
+            "host": "fs01",
+            "base_path": "Logs",
+        },
+    ).json()
+
+    response = admin_client.patch(f"/sources/{created['id']}", json={"smb_require_signing": False})
+    assert response.status_code == 200
+    assert response.json()["smb_require_signing"] is False
+    entry = session.exec(
+        select(AuditLog).where(AuditLog.action == "source.update").order_by(AuditLog.id.desc())
+    ).first()
+    assert entry.event_metadata["changes"]["smb_require_signing"] == {"from": True, "to": False}
+
+
+def test_bulk_update_tests_an_smb_source_with_its_own_signing_options(
+    session, admin_client, monkeypatch
+):
+    customer = _make_customer(session)
+    created = admin_client.post(
+        "/sources",
+        json={
+            "name": "fs01",
+            "customer_id": customer.id,
+            "protocol": "smb",
+            "host": "fs01",
+            "base_path": "Logs",
+            "smb_require_signing": False,
+            "smb_encrypt": True,
+            "credential": {"username": "svc", "password": "old-pass"},
+        },
+    ).json()
+    seen = []
+
+    def fake_check(source, connector):
+        seen.append((source.smb_require_signing, source.smb_encrypt))
+        return []
+
+    monkeypatch.setattr("app.api.sources.source_status.check", fake_check)
+    response = admin_client.post(
+        "/sources/credentials",
+        json={"source_ids": [created["id"]], "credential": {"username": "svc", "password": "x"}},
+    )
+    assert response.json()[0]["status"] == "updated"
+    assert seen == [(False, True)]

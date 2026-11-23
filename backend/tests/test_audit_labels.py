@@ -6,7 +6,16 @@ from pathlib import Path
 from app.audit import record_audit_event
 from app.audit_labels import NAMED_TARGET_TYPES, UNNAMED_TARGET_TYPES
 from app.auth.models import Role, RoleGrant, ScopeType, SSOGroupRoleMapping, User
-from app.models import Customer, Folder, Protocol, Rule, RuleType, SeverityPattern, Source
+from app.models import (
+    Customer,
+    Folder,
+    Protocol,
+    RedactionRule,
+    Rule,
+    RuleType,
+    SeverityPattern,
+    Source,
+)
 
 
 def _add(session, row):
@@ -17,7 +26,7 @@ def _add(session, row):
 
 
 def _tree(session):
-    customer = _add(session, Customer(name="Vodacom"))
+    customer = _add(session, Customer(name="Northwind"))
     prod = _add(session, Folder(name="prod", customer_id=customer.id))
     web = _add(session, Folder(name="web", customer_id=customer.id, parent_folder_id=prod.id))
     source = _add(
@@ -44,7 +53,7 @@ def test_a_source_is_named_with_its_customer_and_folders(session):
     _, _, _, source = _tree(session)
     assert _event(session, target_type="source", target_id=source.id) == {
         "target_name": "app01",
-        "target_context": "Vodacom / prod / web",
+        "target_context": "Northwind / prod / web",
     }
 
 
@@ -52,7 +61,7 @@ def test_a_folder_is_named_with_its_customer_and_parents(session):
     _, _, web, _ = _tree(session)
     assert _event(session, target_type="folder", target_id=web.id) == {
         "target_name": "web",
-        "target_context": "Vodacom / prod",
+        "target_context": "Northwind / prod",
     }
 
 
@@ -66,13 +75,13 @@ def test_a_deleted_source_is_still_named(session):
 
 
 def test_a_deleted_customer_and_user_are_still_named(session):
-    customer = _add(session, Customer(name="Fidelidade"))
+    customer = _add(session, Customer(name="Globex Insurance"))
     role = _add(session, Role(name="viewer"))
     user = _add(session, User(username="ana@example.com", role_id=role.id))
     customer_id, user_id = customer.id, user.id
     session.delete(customer)
     assert _event(session, target_type="customer", target_id=customer_id) == {
-        "target_name": "Fidelidade"
+        "target_name": "Globex Insurance"
     }
     session.delete(user)
     assert _event(session, target_type="user", target_id=user_id) == {
@@ -111,6 +120,24 @@ def test_rules_grants_and_mappings_are_named_with_their_parent(session):
     }
 
 
+def test_redaction_rules_are_named_with_their_source_or_system(session):
+    _, _, _, source = _tree(session)
+    system = _add(session, RedactionRule(name="card", detector="card"))
+    own = _add(
+        session, RedactionRule(source_id=source.id, name="msisdn", pattern="x", max_length=1)
+    )
+    assert _event(session, target_type="redaction_rule", target_id=system.id) == {
+        "target_name": "card",
+        "target_context": "system",
+    }
+    own_id = own.id
+    session.delete(own)
+    assert _event(session, target_type="redaction_rule", target_id=own_id) == {
+        "target_name": "msisdn",
+        "target_context": "app01",
+    }
+
+
 def test_related_ids_get_their_names_and_explicit_metadata_wins(session):
     customer, prod, _, source = _tree(session)
     role = _add(session, Role(name="Tier 2"))
@@ -129,7 +156,7 @@ def test_related_ids_get_their_names_and_explicit_metadata_wins(session):
     )
     assert metadata["target_name"] == "given by the caller"
     assert (metadata["source_name"], metadata["role_name"]) == ("app01", "Tier 2")
-    assert (metadata["customer_name"], metadata["scope_name"]) == ("Vodacom", "prod")
+    assert (metadata["customer_name"], metadata["scope_name"]) == ("Northwind", "prod")
 
 
 def test_an_unknown_target_adds_nothing(session):

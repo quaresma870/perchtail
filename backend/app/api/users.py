@@ -11,11 +11,13 @@ from app.auth.models import AuthProviderType, GlobalCapability, Role, User
 from app.auth.providers.local import create_local_user, set_password
 from app.auth.rbac import (
     OWN_ROLE_REFUSED,
+    forbidden,
     require_global_capability,
     require_role_within_authority,
 )
 from app.auth.sessions import revoke_all_sessions
 from app.db import get_session
+from app.initial_admin_password import remove_initial_admin_password
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -72,6 +74,22 @@ def _get_manageable_user(session: Session, actor: User, user_id: int) -> User:
     return target
 
 
+_PEER_ADMIN_CAPABILITIES = (GlobalCapability.manage_users, GlobalCapability.manage_roles)
+
+
+def _require_not_peer_admin(actor: User, target: User) -> None:
+    """Only a super admin resets the password of, deactivates or changes the
+    role of an account whose role manages users or roles: otherwise one
+    delegated admin could take over another (a peer whose role is within
+    their authority) and act as them. Refused with a neutral 403, audited
+    as access.denied (app/api/errors.py)."""
+    if actor.role.is_super_admin:
+        return
+    held = set(target.role.global_capabilities)
+    if any(capability in held for capability in _PEER_ADMIN_CAPABILITIES):
+        raise forbidden("Not permitted", reason="peer_admin", user=actor)
+
+
 def _require_not_last_super_admin(session: Session, target: User) -> None:
     """Refuses to deactivate or demote the only remaining active
     super-admin -- the break-glass account must always exist."""
@@ -86,6 +104,22 @@ def _require_not_last_super_admin(session: Session, target: User) -> None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot remove the last active super-admin",
+        )
+
+
+def _end_sessions_of_deactivated(session: Session, *, actor: User, target: User) -> None:
+    """A deactivated account's sessions are deleted at once, so reactivating
+    it later never brings an old session back. Doesn't commit: the caller
+    commits it with the deactivation."""
+    revoked = revoke_all_sessions(session, target.id)
+    if revoked:
+        record_audit_event(
+            session,
+            user_id=actor.id,
+            action="session.revoke",
+            target_type="user",
+            target_id=target.id,
+            metadata={"count": revoked, "reason": "deactivated"},
         )
 
 
@@ -141,6 +175,10 @@ def update_user(
     session: Session = Depends(get_session),
 ):
     target = _get_manageable_user(session, user, user_id)
+    # Changing one's own role is refused below with its own message.
+    changes_role = payload.role_id is not None and payload.role_id != target.role_id
+    if (changes_role and target.id != user.id) or (payload.active is False and target.active):
+        _require_not_peer_admin(user, target)
 
     if payload.role_id is not None:
         new_role = session.get(Role, payload.role_id)
@@ -153,9 +191,13 @@ def update_user(
         require_role_within_authority(session, user, new_role)
         if not new_role.is_super_admin:
             _require_not_last_super_admin(session, target)
+        if new_role.id != target.role_id:
+            # Set by hand now, not by an IdP group mapping.
+            target.sso_role_group = None
         target.role_id = payload.role_id
     if payload.active is False:
         _require_not_last_super_admin(session, target)
+    deactivating = payload.active is False and target.active
     if payload.active is not None:
         target.active = payload.active
     profile_changes = payload.model_dump(exclude_unset=True, include={"display_name", "email"})
@@ -182,6 +224,8 @@ def update_user(
             target_id=target.id,
             metadata={"role_id": target.role_id, "active": target.active},
         )
+    if deactivating:
+        _end_sessions_of_deactivated(session, actor=user, target=target)
     session.commit()
     session.refresh(target)
     return target
@@ -197,6 +241,26 @@ def reset_password(
     same as account creation) and forces a change on next login — same
     Security-notes rule as admin-created accounts."""
     target = _get_manageable_user(session, user, user_id)
+    _require_not_peer_admin(user, target)
+    if target.auth_provider != AuthProviderType.local:
+        # A password would give an SSO account a way in that skips the
+        # identity provider and its MFA. Audited like any other refusal.
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="access.denied",
+            target_type="user",
+            target_id=target.id,
+            metadata={
+                "attempted": "POST /users/{user_id}/reset-password",
+                "reason": "sso_account",
+            },
+        )
+        session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This account signs in through the identity provider and has no password here",
+        )
 
     # Random, but within the policy (#245): long enough, every character class.
     policy = password_policy.get_policy(session)
@@ -206,7 +270,7 @@ def reset_password(
     set_password(session, target, temporary_password, policy)
     target.must_change_password = True
     session.add(target)
-    revoke_all_sessions(session, target.id)
+    revoked = revoke_all_sessions(session, target.id)
     record_audit_event(
         session,
         user_id=user.id,
@@ -214,7 +278,17 @@ def reset_password(
         target_type="user",
         target_id=target.id,
     )
+    if revoked:
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="session.revoke",
+            target_type="user",
+            target_id=target.id,
+            metadata={"count": revoked, "reason": "password_reset"},
+        )
     session.commit()
+    remove_initial_admin_password(target)
     return ResetPasswordResponse(temporary_password=temporary_password)
 
 
@@ -228,6 +302,7 @@ def deactivate_user(
     deactivation is the default way to remove access, keeping audit
     history intact."""
     target = _get_manageable_user(session, user, user_id)
+    _require_not_peer_admin(user, target)
     _require_not_last_super_admin(session, target)
 
     target.active = False
@@ -239,4 +314,5 @@ def deactivate_user(
         target_type="user",
         target_id=target.id,
     )
+    _end_sessions_of_deactivated(session, actor=user, target=target)
     session.commit()

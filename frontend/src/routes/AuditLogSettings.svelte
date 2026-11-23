@@ -1,7 +1,10 @@
 <script lang="ts">
+  import FilterDropdown from '../lib/components/FilterDropdown.svelte'
+  import SortableHeader from '../lib/components/SortableHeader.svelte'
+  import { nextSort, type SortState } from '../lib/table-view'
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
-  import { detailPairs, targetHref, targetTypeLabel } from '../lib/audit-format'
+  import { detailPairs, formatAuditTime, targetHref, targetTypeLabel } from '../lib/audit-format'
   import { currentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import { confirmAction } from '../lib/confirm'
@@ -24,10 +27,19 @@
   // GET /audit/filters), not a hardcoded action/type list -- new action
   // namespaces show up here automatically as they're written, same
   // "never a guess that goes stale" reasoning as Search's source-name
-  // matching (ROADMAP.md).
-  let filterOptions: AuditLogFilterOptions = { actions: [], target_types: [] }
+  // matching (docs/design-decisions.md, "Audit log").
+  let filterOptions: AuditLogFilterOptions = { actions: [], target_types: [], targets: {} }
   let selectedTargetTypes = new Set<string>()
   let selectedActions = new Set<string>()
+  // Click a column header to sort by it (#358); the server sorts, so every
+  // matching entry is in order, not just this page. Newest first by default.
+  let sort: SortState = { key: 'time', dir: 'desc' }
+
+  function sortBy(key: string) {
+    sort = nextSort(sort, key)
+    offset = 0
+    load()
+  }
   let since = ''
   let until = ''
 
@@ -49,7 +61,10 @@
     const params = new URLSearchParams()
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', String(offset))
+    params.set('sort', sort.key)
+    params.set('order', sort.dir)
     for (const t of selectedTargetTypes) params.append('target_type', t)
+    for (const t of selectedTargets) params.append('target', t)
     for (const a of selectedActions) params.append('action', a)
     if (since) params.set('since', new Date(since).toISOString())
     if (until) params.set('until', new Date(until).toISOString())
@@ -121,21 +136,42 @@
     }
   }
 
-  function toggleSetMember(set: Set<string>, value: string): Set<string> {
-    const next = new Set(set)
-    if (next.has(value)) next.delete(value)
-    else next.add(value)
-    return next
+  // One dropdown per target type (#358): "Every <type>" filters on the
+  // whole type, the other options on single targets ("source:5").
+  let selectedTargets = new Set<string>()
+  const EVERY = '*'
+
+  function typeOptions(kind: string, options: AuditLogFilterOptions) {
+    return [
+      { value: EVERY, label: `Every ${targetTypeLabel(kind).toLowerCase()}` },
+      ...(options.targets[kind] ?? []).map((t) => ({ value: String(t.id), label: t.name })),
+    ]
   }
 
-  function toggleTargetType(value: string) {
-    selectedTargetTypes = toggleSetMember(selectedTargetTypes, value)
+  function typeSelection(kind: string, types: Set<string>, targets: Set<string>): Set<string> {
+    const picked = new Set<string>()
+    if (types.has(kind)) picked.add(EVERY)
+    for (const t of targets) {
+      const [k, id] = t.split(':')
+      if (k === kind) picked.add(id)
+    }
+    return picked
+  }
+
+  function setTypeSelection(kind: string, picked: Set<string>) {
+    const types = new Set(selectedTargetTypes)
+    if (picked.has(EVERY)) types.add(kind)
+    else types.delete(kind)
+    const targets = new Set([...selectedTargets].filter((t) => !t.startsWith(`${kind}:`)))
+    for (const id of picked) if (id !== EVERY) targets.add(`${kind}:${id}`)
+    selectedTargetTypes = types
+    selectedTargets = targets
     offset = 0
     load()
   }
 
-  function toggleAction(value: string) {
-    selectedActions = toggleSetMember(selectedActions, value)
+  function setActions(picked: Set<string>) {
+    selectedActions = picked
     offset = 0
     load()
   }
@@ -147,6 +183,7 @@
 
   function clearFilters() {
     selectedTargetTypes = new Set()
+    selectedTargets = new Set()
     selectedActions = new Set()
     since = ''
     until = ''
@@ -168,7 +205,10 @@
     }
   }
 
-  const formatTimestamp = (iso: string) => new Date(iso).toLocaleString()
+  // Times come from the server in UTC and are shown in this browser's zone,
+  // always naming it (and the zone is in the Time header too).
+  const formatTimestamp = (iso: string) => formatAuditTime(iso)
+  const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 
   onMount(async () => {
     await Promise.all([loadFilterOptions(), loadIntegrityStatus(), load()])
@@ -180,8 +220,10 @@
 <div class="page">
   <h1>Audit log</h1>
   <p class="hint">
-    Every login, and every source/rule/role/user/customer/folder/SSO/system-settings change --
-    see Settings → System for how long entries are kept before being purged automatically.
+    Who did what, when and from where: sign-ins and sign-outs, every file opened or downloaded,
+    searches, refused requests, and every source/rule/role/user/customer/folder/SSO/system-settings
+    change. Times are shown in your time zone ({browserZone}). See Settings → System for how long
+    entries are kept before being purged automatically.
   </p>
 
   <div
@@ -218,8 +260,8 @@
       </span>
     {:else}
       <span class="integrity-text">
-        Audit log integrity has not been checked yet -- it runs automatically on its own
-        schedule (Settings → System), or verify it now.
+        Audit log integrity has not been checked yet -- it runs automatically once a day (the
+        AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS environment variable changes this), or verify it now.
       </span>
     {/if}
     <div class="integrity-actions">
@@ -240,51 +282,50 @@
   </div>
 
   <div class="filters card">
-    {#if filterOptions.target_types.length > 0}
-      <div class="filter-group">
-        <div class="filter-label">Type</div>
-        <div class="chip-list">
-          {#each filterOptions.target_types as targetType (targetType)}
-            <label class="chip" class:active={selectedTargetTypes.has(targetType)}>
-              <input
-                type="checkbox"
-                checked={selectedTargetTypes.has(targetType)}
-                on:change={() => toggleTargetType(targetType)}
-              />
-              {targetType}
-            </label>
-          {/each}
-        </div>
-      </div>
-    {/if}
-
     {#if filterOptions.actions.length > 0}
       <div class="filter-group">
         <div class="filter-label">Action</div>
-        <select
-          class="input action-select"
-          multiple
-          size={Math.min(8, filterOptions.actions.length)}
-          on:change={(e) => {
-            const picked = Array.from(e.currentTarget.selectedOptions).map((o) => o.value)
-            selectedActions = new Set(picked)
-            offset = 0
-            load()
-          }}
-        >
-          {#each filterOptions.actions as action (action)}
-            <option value={action} selected={selectedActions.has(action)}>{action}</option>
-          {/each}
-        </select>
+        <FilterDropdown
+          label="Actions"
+          noneLabel="All actions"
+          options={filterOptions.actions.map((a) => ({ value: a, label: a, mono: true }))}
+          selected={selectedActions}
+          on:change={(e) => setActions(e.detail)}
+        />
       </div>
     {/if}
+
+    {#each filterOptions.target_types as kind (kind)}
+      <div class="filter-group">
+        <div class="filter-label">{targetTypeLabel(kind)}</div>
+        <FilterDropdown
+          label={targetTypeLabel(kind)}
+          noneLabel="Any"
+          options={typeOptions(kind, filterOptions)}
+          selected={typeSelection(kind, selectedTargetTypes, selectedTargets)}
+          on:change={(e) => setTypeSelection(kind, e.detail)}
+        />
+      </div>
+    {/each}
 
     <div class="filter-group">
       <div class="filter-label">Date range</div>
       <div class="date-range">
-        <input type="datetime-local" class="input" bind:value={since} on:change={applyDateRange} />
+        <input
+          type="datetime-local"
+          class="input"
+          aria-label="From"
+          bind:value={since}
+          on:change={applyDateRange}
+        />
         <span class="hint">to</span>
-        <input type="datetime-local" class="input" bind:value={until} on:change={applyDateRange} />
+        <input
+          type="datetime-local"
+          class="input"
+          aria-label="To"
+          bind:value={until}
+          on:change={applyDateRange}
+        />
       </div>
     </div>
 
@@ -302,10 +343,17 @@
       <table>
         <thead>
           <tr>
-            <th>Time</th>
-            <th>User</th>
-            <th>Action</th>
-            <th>Target</th>
+            <SortableHeader
+              label={`Time (${browserZone})`}
+              key="time"
+              {sort}
+              on:sort={(e) => sortBy(e.detail)}
+            />
+            <SortableHeader label="User" key="user" {sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Action" key="action" {sort} on:sort={(e) => sortBy(e.detail)} />
+            <SortableHeader label="Target" key="target" {sort} on:sort={(e) => sortBy(e.detail)} />
+            <th>From</th>
+            <th>Session</th>
             <th>Details</th>
           </tr>
         </thead>
@@ -343,6 +391,17 @@
                   —
                 {/if}
               </td>
+              <td class="origin" title={entry.user_agent ?? ''}>
+                {#if entry.client_ip}
+                  <span class="client-ip">{entry.client_ip}</span>
+                  {#if entry.user_agent}
+                    <span class="user-agent">{entry.user_agent}</span>
+                  {/if}
+                {:else}
+                  —
+                {/if}
+              </td>
+              <td class="session"><code>{entry.session_id ?? '—'}</code></td>
               <td class="details">
                 {#each detailPairs(entry.metadata) as [key, value] (key)}
                   <span class="detail"><span class="detail-key">{key}</span> {value}</span>
@@ -369,9 +428,9 @@
 </div>
 
 <style>
+  /* The page and its table use the whole width (#358). */
   .page {
     padding: 1.75rem 2rem;
-    max-width: 1100px;
     display: flex;
     flex-direction: column;
     gap: 1.1rem;
@@ -434,34 +493,6 @@
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
-  .chip-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-    max-width: 320px;
-  }
-  .chip {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    padding: 0.25rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    font-size: 0.78rem;
-    color: var(--text-muted);
-    cursor: pointer;
-  }
-  .chip.active {
-    border-color: var(--accent);
-    color: var(--text);
-    background: var(--accent-soft);
-  }
-  .chip input {
-    margin: 0;
-  }
-  .action-select {
-    min-width: 220px;
-  }
   .date-range {
     display: flex;
     align-items: center;
@@ -497,7 +528,7 @@
     white-space: nowrap;
   }
   .target {
-    max-width: 320px;
+    width: 22%;
   }
   .target-type {
     display: block;
@@ -511,13 +542,36 @@
     font-size: 0.75rem;
     color: var(--text-muted);
   }
+  .origin {
+    max-width: 12rem;
+  }
+  .client-ip {
+    display: block;
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+  .user-agent {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session code {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+  }
   .target-note {
     font-size: 0.7rem;
     color: var(--text-faint);
     font-style: italic;
   }
+  /* max-width 0 with a width lets the cell take the rest of the row and
+     still cut long details with an ellipsis. */
   .details {
-    max-width: 360px;
+    width: 35%;
+    max-width: 0;
     font-size: 0.75rem;
     color: var(--text-muted);
   }

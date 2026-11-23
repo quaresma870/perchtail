@@ -29,6 +29,18 @@ test('users: create, reset password, change role, deactivate/reactivate', async 
   await expect(roleSelectAfterReload.locator('option:checked')).toHaveText('Super Admin')
   await roleSelectAfterReload.selectOption({ label: 'No Access' })
 
+  // Edit (#356): name and email in one popup, saved through the API.
+  await page.getByRole('row', { name: new RegExp(username) }).getByRole('button', { name: 'Edit', exact: true }).click()
+  const editDialog = page.getByRole('dialog', { name: `Edit ${username}` })
+  await expect(editDialog.getByLabel('Username')).toBeDisabled()
+  await editDialog.getByLabel('Display name').fill('Renamed Person')
+  await editDialog.getByRole('button', { name: 'Save' }).click()
+  await expect(editDialog).toHaveCount(0)
+  await page.reload()
+  await expect(
+    page.getByRole('row', { name: new RegExp(username) }).getByText(`Renamed Person · ${username}@example.com`),
+  ).toBeVisible()
+
   // Reset password asks first, then shows the one-time temporary password.
   await page.getByRole('row', { name: new RegExp(username) }).getByRole('button', { name: 'Reset password' }).click()
   await confirmPopup(page, 'Reset password')

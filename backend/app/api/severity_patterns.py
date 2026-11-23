@@ -15,7 +15,9 @@ require_manage_global = require_global_capability(
     GlobalCapability.manage_system_settings, get_current_active_user
 )
 require_view_source = require_capability(Capability.view, get_current_active_user)
-require_manage_source = require_capability(Capability.manage_rules, get_current_active_user)
+require_manage_rules_on_source = require_capability(
+    Capability.manage_rules, get_current_active_user
+)
 
 
 class SeverityPatternPublic(BaseModel):
@@ -33,7 +35,10 @@ class SeverityPatternPublic(BaseModel):
 
 class SeverityPatternCreate(BaseModel):
     level: SeverityLevel
-    # Same admin-facing syntax as Rule: default glob, `re:` prefix for regex.
+    # Same admin-facing syntax and limits as Rule: default glob, `re:` prefix
+    # for a regex in RE2 syntax, at most MAX_PATTERN_CHARS (parse_pattern_or_400).
+    # It runs in every viewer's browser, which also bounds its time there
+    # (frontend/src/lib/severity-highlighting.ts).
     pattern: str
     enabled: bool = True
     highlight_line: bool = False
@@ -52,9 +57,7 @@ def _apply_update(pattern: SeverityPattern, payload: SeverityPatternUpdate) -> N
     if payload.level is not None:
         pattern.level = payload.level
     if payload.pattern is not None:
-        pattern.pattern, pattern.pattern_kind = parse_pattern_or_400(
-            payload.pattern, linear_time=False
-        )
+        pattern.pattern, pattern.pattern_kind = parse_pattern_or_400(payload.pattern)
     if payload.enabled is not None:
         pattern.enabled = payload.enabled
     if payload.highlight_line is not None:
@@ -81,7 +84,7 @@ def create_global_pattern(
     user: User = Depends(require_manage_global),
     session: Session = Depends(get_session),
 ):
-    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern, linear_time=False)
+    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern)
     pattern = SeverityPattern(
         source_id=None,
         level=payload.level,
@@ -170,7 +173,8 @@ def get_effective_patterns(
 
 @source_router.get("", response_model=list[SeverityPatternPublic])
 def list_source_patterns(
-    source: Source = Depends(require_manage_source), session: Session = Depends(get_session)
+    source: Source = Depends(require_manage_rules_on_source),
+    session: Session = Depends(get_session),
 ):
     return session.exec(select(SeverityPattern).where(SeverityPattern.source_id == source.id)).all()
 
@@ -178,11 +182,11 @@ def list_source_patterns(
 @source_router.post("", response_model=SeverityPatternPublic, status_code=status.HTTP_201_CREATED)
 def create_source_pattern(
     payload: SeverityPatternCreate,
-    source: Source = Depends(require_manage_source),
+    source: Source = Depends(require_manage_rules_on_source),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
-    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern, linear_time=False)
+    pattern_value, pattern_kind = parse_pattern_or_400(payload.pattern)
     pattern = SeverityPattern(
         source_id=source.id,
         level=payload.level,
@@ -211,7 +215,7 @@ def create_source_pattern(
 def update_source_pattern(
     pattern_id: int,
     payload: SeverityPatternUpdate,
-    source: Source = Depends(require_manage_source),
+    source: Source = Depends(require_manage_rules_on_source),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):
@@ -237,7 +241,7 @@ def update_source_pattern(
 @source_router.delete("/{pattern_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_source_pattern(
     pattern_id: int,
-    source: Source = Depends(require_manage_source),
+    source: Source = Depends(require_manage_rules_on_source),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
 ):

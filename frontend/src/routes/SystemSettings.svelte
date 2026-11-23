@@ -1,13 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
-  import { currentUser } from '../lib/auth'
+  import { currentUser, refreshCurrentUser } from '../lib/auth'
   import SettingsNav from '../lib/components/SettingsNav.svelte'
   import UpdatesCard from '../lib/components/UpdatesCard.svelte'
   import { systemSettings } from '../lib/settings'
   import { EXPLORER_SORTS } from '../lib/explorer-sort'
   import { DEFAULT_TAIL_INTERVAL_SECONDS, TAIL_INTERVALS_SECONDS } from '../lib/follow'
+  import { formatSize } from '../lib/file-details'
   import type {
+    BackupInfo,
+    SystemWarning,
     ExplorerSort,
     MonitoringTokenResult,
     MonitoringTokenStatus,
@@ -18,8 +21,28 @@
   let saving = false
   let error = ''
 
-  let searchViewEnabled = true
   let auditViewEnabled = true
+  let auditFolderListings = true
+  // Turning folder listings off takes a super admin (the server refuses
+  // anyone else), so for others the switch stays put while it's on.
+  const AUDIT_FOLDER_LISTINGS_LOCKED_HINT = 'Only a super admin can turn it off.'
+  $: auditFolderListingsLocked = auditFolderListings && !$currentUser?.is_super_admin
+  // Who must use MFA is a super admin's call, both ways (the server refuses
+  // anyone else).
+  let requireMfa = false
+  const REQUIRE_MFA_LOCKED_HINT = 'Only a super admin can change it.'
+  $: requireMfaLocked = !$currentUser?.is_super_admin
+  // Password recovery by email (#244): super admins only, and only while
+  // email is set up and on and PUBLIC_BASE_URL is https (the server says why
+  // not in password_reset_unavailable).
+  let passwordResetEnabled = false
+  let passwordResetUnavailable: string | null = null
+  let passwordResetMinutesSaved = 30
+  let passwordResetMinutesInput = '30'
+  let passwordResetError = ''
+  $: passwordResetLocked = !$currentUser?.is_super_admin
+  // The shortest retention the server accepts, besides 0 (forever).
+  const AUDIT_RETENTION_MIN_DAYS = 90
   let auditRetentionDays = 365
   let retentionInput = '365'
   let connectionsViewDefault: 'list' | 'tree' = 'list'
@@ -53,6 +76,77 @@
     policyDraft !== null &&
     POLICY_KEYS.some((key) => savedPolicy?.[key] !== policyDraft?.[key])
 
+  // Server-side limits (#344, #347), saved together with one button.
+  const LIMIT_FIELDS = [
+    {
+      key: 'concurrency_global',
+      label: 'Listings and downloads at once',
+      unit: 'in all',
+      min: 1,
+      max: 256,
+      hint: 'Folder listings, file opens, downloads, folder ZIPs and archive listings running at the same time across the server.',
+    },
+    {
+      key: 'concurrency_per_source',
+      label: 'At once on one source',
+      unit: 'per source',
+      min: 1,
+      max: 64,
+      hint: 'The same, on any one source, so one busy server can\'t take every slot. At most the number above.',
+    },
+    {
+      key: 'concurrency_user_transfers',
+      label: 'Downloads per user',
+      unit: 'per user',
+      min: 1,
+      max: 32,
+      hint: 'Downloads and folder ZIPs one person may have in progress.',
+    },
+    {
+      key: 'listing_max_entries',
+      label: 'Entries per listing',
+      unit: 'entries',
+      min: 100,
+      max: 20000,
+      hint: 'The most entries a folder or archive shows in the explorer. A bigger folder shows the first ones and says so; the search finds the rest.',
+    },
+  ] as const
+  type LimitFields = Pick<SystemSettings, (typeof LIMIT_FIELDS)[number]['key']>
+  let savedLimits: LimitFields | null = null
+  let limitsDraft: LimitFields | null = null
+  let limitsSaving = false
+  let limitsError = ''
+  const pickLimits = (settings: SystemSettings): LimitFields =>
+    Object.fromEntries(LIMIT_FIELDS.map((field) => [field.key, settings[field.key]])) as LimitFields
+  $: limitsDirty =
+    savedLimits !== null &&
+    limitsDraft !== null &&
+    LIMIT_FIELDS.some((field) => Number(savedLimits?.[field.key]) !== Number(limitsDraft?.[field.key]))
+
+  async function saveLimits() {
+    if (!limitsDraft) return
+    for (const field of LIMIT_FIELDS) {
+      const value = Number(limitsDraft[field.key])
+      if (!Number.isInteger(value) || value < field.min || value > field.max) {
+        limitsError = `${field.label}: enter a whole number from ${field.min} to ${field.max}.`
+        return
+      }
+    }
+    limitsError = ''
+    limitsSaving = true
+    try {
+      const patch = Object.fromEntries(LIMIT_FIELDS.map((field) => [field.key, Number(limitsDraft?.[field.key])]))
+      const settings = await api.patch<SystemSettings>('/system-settings', patch)
+      savedLimits = pickLimits(settings)
+      limitsDraft = { ...savedLimits }
+      systemSettings.set(settings)
+    } catch (err) {
+      limitsError = err instanceof ApiError ? err.detail : 'Failed to update the limits'
+    } finally {
+      limitsSaving = false
+    }
+  }
+
   let monitoringConfigured = false
   let monitoringToken = ''
   let monitoringTokenError = ''
@@ -61,8 +155,10 @@
   onMount(async () => {
     try {
       const settings = await api.get<SystemSettings>('/system-settings')
-      searchViewEnabled = settings.search_view_enabled
       auditViewEnabled = settings.audit_view_enabled
+      auditFolderListings = settings.audit_folder_listings
+      requireMfa = settings.require_mfa_local_accounts
+      applyPasswordReset(settings)
       auditRetentionDays = settings.audit_retention_days
       retentionInput = String(settings.audit_retention_days)
       maxRoots = settings.source_max_roots
@@ -75,12 +171,35 @@
       refreshInput = String(refreshSaved)
       checkSaved = settings.source_check_minutes
       checkInput = String(checkSaved)
+      nameIndexEnabled = settings.name_index_enabled
+      nameIndexSaved = settings.name_index_minutes
+      nameIndexInput = String(nameIndexSaved)
+      alertsIntervalSaved = settings.alerts_interval_seconds
+      alertsIntervalInput = String(alertsIntervalSaved)
+      credentialAgeSaved = settings.credential_max_age_days
+      credentialAgeInput = String(credentialAgeSaved)
       savedPolicy = pickPolicy(settings)
       policyDraft = { ...savedPolicy }
+      savedLimits = pickLimits(settings)
+      limitsDraft = { ...savedLimits }
+      backupIntervalSaved = settings.backup_interval_hours
+      backupIntervalInput = String(backupIntervalSaved)
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to load system settings'
     } finally {
       loading = false
+    }
+
+    try {
+      warnings = await api.get<SystemWarning[]>('/system-settings/warnings')
+    } catch {
+      // Non-fatal: the page works without them.
+    }
+
+    try {
+      backups = await api.get<BackupInfo[]>('/system-settings/backups')
+    } catch (err) {
+      backupsError = err instanceof ApiError ? err.detail : 'Failed to list the backups'
     }
 
     try {
@@ -114,6 +233,116 @@
   let checkInput = '10'
   let checkSaved = 10
   let checkError = ''
+
+  // File-name index (#304).
+  let nameIndexEnabled = true
+  let nameIndexInput = '15'
+  let nameIndexSaved = 15
+  let nameIndexError = ''
+
+  async function patchNameIndex(patch: Partial<SystemSettings>) {
+    saving = true
+    nameIndexError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', patch)
+      nameIndexEnabled = settings.name_index_enabled
+      nameIndexSaved = settings.name_index_minutes
+      nameIndexInput = String(nameIndexSaved)
+      systemSettings.set(settings)
+    } catch (err) {
+      nameIndexError = err instanceof ApiError ? err.detail : 'Failed to update the file-name index'
+    } finally {
+      saving = false
+    }
+  }
+
+  // Live alerts (#305).
+  let alertsIntervalInput = '60'
+  let alertsIntervalSaved = 60
+  let alertsIntervalError = ''
+
+  async function saveAlertsInterval() {
+    const parsed = Number(alertsIntervalInput)
+    if (!Number.isInteger(parsed) || parsed < 15 || parsed > 3600) {
+      alertsIntervalError = 'Enter a whole number of seconds from 15 to 3600.'
+      return
+    }
+    saving = true
+    alertsIntervalError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        alerts_interval_seconds: parsed,
+      })
+      alertsIntervalSaved = settings.alerts_interval_seconds
+      alertsIntervalInput = String(alertsIntervalSaved)
+      systemSettings.set(settings)
+    } catch (err) {
+      alertsIntervalError = err instanceof ApiError ? err.detail : 'Failed to update the alert interval'
+    } finally {
+      saving = false
+    }
+  }
+
+  // Backups (#334): the scheduled backup's interval, hours (0 = off), and
+  // the backups in BACKUP_DIR, listed only -- never downloadable.
+  let backupIntervalInput = '0'
+  let backupIntervalSaved = 0
+  let backupIntervalError = ''
+  let backups: BackupInfo[] = []
+  let backupsError = ''
+  // Setup problems only the operator can fix (a weak encryption key...).
+  let warnings: SystemWarning[] = []
+
+  async function saveBackupInterval() {
+    const parsed = Number(backupIntervalInput)
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 168) {
+      backupIntervalError = 'Enter a whole number of hours from 1 to 168, or 0 for off.'
+      return
+    }
+    saving = true
+    backupIntervalError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        backup_interval_hours: parsed,
+      })
+      backupIntervalSaved = settings.backup_interval_hours
+      backupIntervalInput = String(backupIntervalSaved)
+      systemSettings.set(settings)
+    } catch (err) {
+      backupIntervalError =
+        err instanceof ApiError ? err.detail : 'Failed to update the backup interval'
+    } finally {
+      saving = false
+    }
+  }
+
+  // Credential age warning (#248), days; 0 = off.
+  let credentialAgeInput = '90'
+  let credentialAgeSaved = 90
+  let credentialAgeError = ''
+
+  async function saveCredentialAge() {
+    const parsed = Number(credentialAgeInput)
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 3650) {
+      credentialAgeError = 'Enter a whole number of days from 0 to 3650 (0 = off).'
+      return
+    }
+    saving = true
+    credentialAgeError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        credential_max_age_days: parsed,
+      })
+      credentialAgeSaved = settings.credential_max_age_days
+      credentialAgeInput = String(credentialAgeSaved)
+      systemSettings.set(settings)
+    } catch (err) {
+      credentialAgeError =
+        err instanceof ApiError ? err.detail : 'Failed to update the credential age warning'
+    } finally {
+      saving = false
+    }
+  }
 
   async function saveCheckInterval() {
     saving = true
@@ -159,23 +388,6 @@
       const settings = await api.patch<SystemSettings>('/system-settings', patch)
       connectionsViewDefault = settings.connections_view_default
       connectionsViewSwitchable = settings.connections_view_switchable
-      systemSettings.set(settings)
-    } catch (err) {
-      error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
-    } finally {
-      saving = false
-    }
-  }
-
-  async function toggleSearchView() {
-    const next = !searchViewEnabled
-    saving = true
-    error = ''
-    try {
-      const settings = await api.patch<SystemSettings>('/system-settings', {
-        search_view_enabled: next,
-      })
-      searchViewEnabled = settings.search_view_enabled
       systemSettings.set(settings)
     } catch (err) {
       error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
@@ -239,10 +451,88 @@
     }
   }
 
+  async function toggleAuditFolderListings(event: Event) {
+    const input = event.currentTarget as HTMLInputElement
+    const next = !auditFolderListings
+    saving = true
+    error = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        audit_folder_listings: next,
+      })
+      auditFolderListings = settings.audit_folder_listings
+      systemSettings.set(settings)
+    } catch (err) {
+      // The switch moved before the request: put it back where the
+      // setting still is.
+      input.checked = auditFolderListings
+      error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
+    } finally {
+      saving = false
+    }
+  }
+
+  async function toggleRequireMfa(event: Event) {
+    const input = event.currentTarget as HTMLInputElement
+    const next = !requireMfa
+    saving = true
+    error = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', {
+        require_mfa_local_accounts: next,
+      })
+      requireMfa = settings.require_mfa_local_accounts
+      systemSettings.set(settings)
+      // Turning it on may cover this account too.
+      await refreshCurrentUser()
+    } catch (err) {
+      input.checked = requireMfa
+      error = err instanceof ApiError ? err.detail : 'Failed to update system settings'
+    } finally {
+      saving = false
+    }
+  }
+
+  function applyPasswordReset(settings: SystemSettings) {
+    passwordResetEnabled = settings.password_reset_enabled
+    passwordResetUnavailable = settings.password_reset_unavailable
+    passwordResetMinutesSaved = settings.password_reset_minutes
+    passwordResetMinutesInput = String(settings.password_reset_minutes)
+  }
+
+  async function patchPasswordReset(patch: Partial<SystemSettings>, input?: HTMLInputElement) {
+    saving = true
+    passwordResetError = ''
+    try {
+      const settings = await api.patch<SystemSettings>('/system-settings', patch)
+      applyPasswordReset(settings)
+      systemSettings.set(settings)
+    } catch (err) {
+      if (input) input.checked = passwordResetEnabled
+      passwordResetError =
+        err instanceof ApiError ? err.detail : 'Failed to update password recovery'
+    } finally {
+      saving = false
+    }
+  }
+
+  function savePasswordResetMinutes() {
+    const parsed = Number(passwordResetMinutesInput)
+    if (!Number.isInteger(parsed) || parsed < 5 || parsed > 60) {
+      passwordResetError = 'Enter a whole number of minutes from 5 to 60.'
+      return
+    }
+    patchPasswordReset({ password_reset_minutes: parsed })
+  }
+
   async function saveRetention() {
     const parsed = Number(retentionInput)
-    if (!Number.isInteger(parsed) || parsed < 0) {
-      retentionError = 'Enter a whole number of days (0 = keep forever).'
+    if (
+      !Number.isInteger(parsed) ||
+      parsed < 0 ||
+      (parsed !== 0 && parsed < AUDIT_RETENTION_MIN_DAYS)
+    ) {
+      retentionError = `Enter at least ${AUDIT_RETENTION_MIN_DAYS} days, or 0 to keep entries forever.`
       return
     }
     retentionError = ''
@@ -277,49 +567,16 @@
     {#if error}
       <p class="error">{error}</p>
     {/if}
-
-    <div class="card">
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">Search</div>
-          <p class="hint">
-            Full-text search across indexed sources. Turning this off hides the Search nav entry
-            and page for everyone — it doesn't stop or clear background indexing on its own, so
-            re-enabling it later picks back up where the index already is.
-          </p>
-        </div>
-        <label class="switch">
-          <input
-            type="checkbox"
-            checked={searchViewEnabled}
-            disabled={saving}
-            on:change={toggleSearchView}
-          />
-          <span class="switch-track"></span>
-        </label>
+    {#each warnings as warning (warning.code)}
+      <div class="setup-warning card" role="alert" data-testid={`system-warning-${warning.code}`}>
+        <strong>{warning.message}</strong>
+        <p>{warning.advice}</p>
       </div>
+    {/each}
 
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">Audit log</div>
-          <p class="hint">
-            The audit log page under Settings, listing logins and every source/rule/role/user/
-            customer/folder/SSO/system-settings change. Turning this off hides the page and
-            redirects away from it for every user — it doesn't stop new events from being
-            recorded, so re-enabling it later shows the full history again.
-          </p>
-        </div>
-        <label class="switch">
-          <input
-            type="checkbox"
-            checked={auditViewEnabled}
-            disabled={saving}
-            on:change={toggleAuditView}
-          />
-          <span class="switch-track"></span>
-        </label>
-      </div>
-
+    <div class="grid">
+    <section class="card">
+      <h2 class="section-title">Explorer</h2>
       <div class="setting-row">
         <div>
           <div class="setting-name">Connections view</div>
@@ -331,6 +588,7 @@
         </div>
         <select
           class="input view-select"
+          aria-label="Connections view"
           value={connectionsViewDefault}
           disabled={saving}
           on:change={(e) =>
@@ -354,6 +612,7 @@
         <label class="switch">
           <input
             type="checkbox"
+            aria-label="Let users switch between list and tree"
             checked={connectionsViewSwitchable}
             disabled={saving}
             on:change={() =>
@@ -436,7 +695,42 @@
           {/each}
         </select>
       </div>
+    </section>
 
+    <div class="card">
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Monitoring</div>
+          <p class="hint">
+            Bearer token for external monitoring (Zabbix, Prometheus, etc.) to poll
+            <code>GET /monitoring/health</code> — separate from user login, since a monitoring
+            system can't do an interactive session. The token is shown once, right after it's
+            generated; regenerating it invalidates whatever token was issued before.
+          </p>
+        </div>
+        {#if monitoringTokenError}
+          <p class="error">{monitoringTokenError}</p>
+        {/if}
+        <button
+          type="button"
+          class="btn btn-ghost"
+          on:click={generateMonitoringToken}
+          disabled={generatingMonitoringToken}
+        >
+          {generatingMonitoringToken
+            ? 'Generating…'
+            : monitoringConfigured
+              ? 'Regenerate token'
+              : 'Generate token'}
+        </button>
+        {#if monitoringToken}
+          <code class="token-box">{monitoringToken}</code>
+        {/if}
+      </div>
+    </div>
+
+    <section class="card">
+      <h2 class="section-title">Sources</h2>
       <div class="setting-row column">
         <div>
           <div class="setting-name">Check sources in the background</div>
@@ -471,33 +765,85 @@
         </div>
       </div>
 
-      <div class="setting-row column">
+      <div class="setting-row">
         <div>
-          <div class="setting-name">Audit log retention</div>)
+          <div class="setting-name">Index file names</div>
           <p class="hint">
-            Entries older than this are purged automatically on a daily sweep. 0 keeps every entry
-            forever.
+            Lists every source's files in the background and keeps their names, sizes and times, never their content, so file names can be searched across sources without listing every server on each search. Each source can be left out in its own settings. Turning it off stops the listings; what was indexed stays until a source is changed.
           </p>
         </div>
-        {#if retentionError}
-          <p class="error">{retentionError}</p>
-        {/if}
-        <div class="retention-row">
+        <label class="switch">
           <input
-            class="input retention-input"
+            type="checkbox"
+            aria-label="Index file names"
+            checked={nameIndexEnabled}
+            disabled={saving}
+            on:change={() => patchNameIndex({ name_index_enabled: !nameIndexEnabled })}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">List each source's files every</div>
+          <p class="hint">A source is listed again once its index is older than this, a few sources at a time. From 5 minutes to a day.</p>
+        </div>
+        {#if nameIndexError}
+          <p class="error">{nameIndexError}</p>
+        {/if}
+        <div class="interval-row">
+          <input
+            class="input interval-input"
+            type="number"
+            min="5"
+            max="1440"
+            step="1"
+            aria-label="File-name index interval in minutes"
+            disabled={!nameIndexEnabled}
+            bind:value={nameIndexInput}
+          />
+          <span class="hint">minutes</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={() => patchNameIndex({ name_index_minutes: Number(nameIndexInput) })}
+            disabled={saving || !nameIndexEnabled || Number(nameIndexInput) === nameIndexSaved}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Warn when a credential is older than</div>
+          <p class="hint">
+            Settings → Sources marks the sources whose credential was set longer ago than this, so
+            passwords and keys due for rotation stand out. 0 turns the warning off.
+          </p>
+        </div>
+        {#if credentialAgeError}
+          <p class="error">{credentialAgeError}</p>
+        {/if}
+        <div class="interval-row">
+          <input
+            class="input interval-input"
             type="number"
             min="0"
+            max="3650"
             step="1"
-            bind:value={retentionInput}
+            aria-label="Credential age warning in days"
+            bind:value={credentialAgeInput}
           />
           <span class="hint">days</span>
           <button
             type="button"
             class="btn btn-ghost"
-            on:click={saveRetention}
-            disabled={retentionSaving || Number(retentionInput) === auditRetentionDays}
+            on:click={saveCredentialAge}
+            disabled={saving || Number(credentialAgeInput) === credentialAgeSaved}
           >
-            {retentionSaving ? 'Saving…' : 'Save'}
+            Save
           </button>
         </div>
       </div>
@@ -534,7 +880,319 @@
           </button>
         </div>
       </div>
-    </div>
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">Alerts</h2>
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Check alerts every</div>
+          <p class="hint">How often each alert reads the lines added to its files since the last check. From 15 seconds to an hour.</p>
+        </div>
+        {#if alertsIntervalError}
+          <p class="error">{alertsIntervalError}</p>
+        {/if}
+        <div class="interval-row">
+          <input
+            class="input interval-input"
+            type="number"
+            min="15"
+            max="3600"
+            step="1"
+            aria-label="Alert check interval in seconds"
+            bind:value={alertsIntervalInput}
+          />
+          <span class="hint">seconds</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={saveAlertsInterval}
+            disabled={saving || Number(alertsIntervalInput) === alertsIntervalSaved}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </section>
+
+    {#if limitsDraft}
+      <section class="card">
+        <h2 class="section-title">Limits</h2>
+        <p class="hint">
+          What the server takes on at once, so a few big folders or a script can't hold every worker. A request
+          over a limit is answered "busy, try again in a few seconds" instead of waiting.
+        </p>
+        {#each LIMIT_FIELDS as field (field.key)}
+          <div class="setting-row column">
+            <div>
+              <div class="setting-name">{field.label}</div>
+              <p class="hint">{field.hint}</p>
+            </div>
+            <div class="interval-row">
+              <input
+                class="input interval-input"
+                type="number"
+                min={field.min}
+                max={field.max}
+                step="1"
+                aria-label={field.label}
+                bind:value={limitsDraft[field.key]}
+              />
+              <span class="hint">{field.unit}</span>
+            </div>
+          </div>
+        {/each}
+        {#if limitsError}
+          <p class="error">{limitsError}</p>
+        {/if}
+        <div>
+          <button type="button" class="btn btn-ghost" on:click={saveLimits} disabled={limitsSaving || !limitsDirty}>
+            {limitsSaving ? 'Saving…' : 'Save limits'}
+          </button>
+        </div>
+      </section>
+    {/if}
+
+    {#if $currentUser?.is_super_admin}
+      <UpdatesCard />
+    {/if}
+
+    <section class="card">
+      <h2 class="section-title">Backups</h2>
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Back up every</div>
+          <p class="hint">
+            An encrypted backup of the database, the credential salt and SSH known_hosts, made while
+            PerchTail runs, into the server's backup folder. The last few are kept. From 1 hour to a
+            week; 0 turns it off. Backups are made, checked and restored on the server with
+            <code>python -m app.backup</code>, never downloaded from here.
+          </p>
+        </div>
+        {#if backupIntervalError}
+          <p class="error">{backupIntervalError}</p>
+        {/if}
+        <div class="interval-row">
+          <input
+            class="input interval-input"
+            type="number"
+            min="0"
+            max="168"
+            step="1"
+            aria-label="Backup interval in hours"
+            bind:value={backupIntervalInput}
+          />
+          <span class="hint">hours</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={saveBackupInterval}
+            disabled={saving || Number(backupIntervalInput) === backupIntervalSaved}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row column">
+        <div class="setting-name">Backups on the server</div>
+        {#if backupsError}
+          <p class="error">{backupsError}</p>
+        {:else if backups.length === 0}
+          <p class="hint">No backups yet.</p>
+        {:else}
+          <table class="backup-table">
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Date</th>
+                <th scope="col">Size</th>
+                <th scope="col">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each backups as item (item.name)}
+                <tr>
+                  <td class="backup-name">{item.name}</td>
+                  <td>{new Date(item.created_at).toLocaleString()}</td>
+                  <td>{formatSize(item.size_bytes)}</td>
+                  <td>{item.reason}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">Audit log</h2>
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Audit log</div>
+          <p class="hint">
+            The audit log page under Settings: who did what, when and from where. Turning this off hides the page and
+            redirects away from it for every user — it doesn't stop new events from being
+            recorded, so re-enabling it later shows the full history again.
+          </p>
+        </div>
+        <label class="switch">
+          <input
+            type="checkbox"
+            aria-label="Audit log"
+            checked={auditViewEnabled}
+            disabled={saving}
+            on:change={toggleAuditView}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Audit folder listings</div>
+          <p class="hint">
+            Records every folder someone lists below a source's root, not only the sources they
+            open and the files they open or download. Only a super admin can turn it off.
+          </p>
+        </div>
+        <label class="switch" title={auditFolderListingsLocked ? AUDIT_FOLDER_LISTINGS_LOCKED_HINT : undefined}>
+          <input
+            type="checkbox"
+            aria-label="Audit folder listings"
+            checked={auditFolderListings}
+            disabled={saving || auditFolderListingsLocked}
+            on:change={toggleAuditFolderListings}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Audit log retention</div>
+          <p class="hint">
+            Entries older than this are purged automatically on a daily sweep, and the purge is
+            itself recorded. At least {AUDIT_RETENTION_MIN_DAYS} days, or 0 to keep every entry
+            forever. Only a super admin can shorten it.
+          </p>
+        </div>
+        {#if retentionError}
+          <p class="error">{retentionError}</p>
+        {/if}
+        <div class="retention-row">
+          <input
+            class="input retention-input"
+            aria-label="Audit log retention in days"
+            type="number"
+            min="0"
+            step="1"
+            bind:value={retentionInput}
+          />
+          <span class="hint">days</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={saveRetention}
+            disabled={retentionSaving || Number(retentionInput) === auditRetentionDays}
+          >
+            {retentionSaving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">Two-factor authentication</h2>
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Require MFA for local accounts</div>
+          <p class="hint">
+            Super admins and roles with any global capability must always use two-factor
+            authentication. This asks every other local account for it too; SSO accounts use their
+            identity provider's. Anyone covered without it can only set it up until they do. Only
+            a super admin can change it.
+          </p>
+        </div>
+        <label class="switch" title={requireMfaLocked ? REQUIRE_MFA_LOCKED_HINT : undefined}>
+          <input
+            type="checkbox"
+            aria-label="Require MFA for local accounts"
+            checked={requireMfa}
+            disabled={saving || requireMfaLocked}
+            on:change={toggleRequireMfa}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 class="section-title">Password recovery</h2>
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">Password recovery by email</div>
+          <p class="hint">
+            Shows <strong>Forgot password?</strong> on the sign-in page: users of local accounts get
+            a link by email to choose a new password, which signs them out everywhere. Super admins,
+            roles with any global capability, SSO accounts and accounts without an email can't use
+            it. Needs email under Settings → Email and an https PUBLIC_BASE_URL. Only a super admin
+            can change it.
+          </p>
+          {#if passwordResetUnavailable}
+            <p class="warning" role="status">
+              {passwordResetEnabled ? "It's on but doesn't work now: " : 'Unavailable: '}
+              {passwordResetUnavailable}.
+            </p>
+          {/if}
+        </div>
+        <label class="switch" title={passwordResetLocked ? REQUIRE_MFA_LOCKED_HINT : undefined}>
+          <input
+            type="checkbox"
+            aria-label="Password recovery by email"
+            checked={passwordResetEnabled}
+            disabled={saving ||
+              passwordResetLocked ||
+              (!passwordResetEnabled && passwordResetUnavailable !== null)}
+            on:change={(e) =>
+              patchPasswordReset({ password_reset_enabled: !passwordResetEnabled }, e.currentTarget)}
+          />
+          <span class="switch-track"></span>
+        </label>
+      </div>
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">Links work for</div>
+          <p class="hint">How long a reset link works after it's sent, from 5 to 60 minutes.</p>
+        </div>
+        {#if passwordResetError}
+          <p class="error">{passwordResetError}</p>
+        {/if}
+        <div class="interval-row">
+          <input
+            class="input interval-input"
+            type="number"
+            min="5"
+            max="60"
+            step="1"
+            aria-label="Reset links work for, in minutes"
+            bind:value={passwordResetMinutesInput}
+            disabled={passwordResetLocked}
+          />
+          <span class="hint">minutes</span>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            on:click={savePasswordResetMinutes}
+            disabled={saving ||
+              passwordResetLocked ||
+              Number(passwordResetMinutesInput) === passwordResetMinutesSaved}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </section>
 
     {#if policyDraft}
       <div class="card">
@@ -620,49 +1278,13 @@
         </div>
       </div>
     {/if}
-
-    <div class="card">
-      <div class="setting-row column">
-        <div>
-          <div class="setting-name">Monitoring</div>
-          <p class="hint">
-            Bearer token for external monitoring (Zabbix, Prometheus, etc.) to poll
-            <code>GET /monitoring/health</code> — separate from user login, since a monitoring
-            system can't do an interactive session. The token is shown once, right after it's
-            generated; regenerating it invalidates whatever token was issued before.
-          </p>
-        </div>
-        {#if monitoringTokenError}
-          <p class="error">{monitoringTokenError}</p>
-        {/if}
-        <button
-          type="button"
-          class="btn btn-ghost"
-          on:click={generateMonitoringToken}
-          disabled={generatingMonitoringToken}
-        >
-          {generatingMonitoringToken
-            ? 'Generating…'
-            : monitoringConfigured
-              ? 'Regenerate token'
-              : 'Generate token'}
-        </button>
-        {#if monitoringToken}
-          <code class="token-box">{monitoringToken}</code>
-        {/if}
-      </div>
     </div>
-
-    {#if $currentUser?.is_super_admin}
-      <UpdatesCard />
-    {/if}
   {/if}
 </div>
 
 <style>
   .page {
     padding: 1.75rem 2rem;
-    max-width: 640px;
     display: flex;
     flex-direction: column;
     gap: 1.1rem;
@@ -681,6 +1303,24 @@
   .card {
     display: flex;
     flex-direction: column;
+  }
+  /* Settings are grouped in cards that fill the page width (#357): two or
+     three columns on a wide screen, one on a narrow one. */
+  .grid {
+    columns: 3 420px;
+    column-gap: 1.1rem;
+  }
+  .grid > :global(*) {
+    break-inside: avoid;
+    margin-bottom: 1.1rem;
+  }
+  .section-title {
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin: 0.9rem 1.1rem 0.2rem;
   }
   .setting-row {
     display: flex;
@@ -735,9 +1375,21 @@
     word-break: break-all;
     width: 100%;
   }
+  .setup-warning {
+    border-left: 3px solid var(--warning, #b58105);
+    margin-bottom: 1rem;
+  }
+  .setup-warning p {
+    margin: 0.4rem 0 0;
+  }
   .error {
     color: var(--danger);
     margin: 0;
+  }
+  .warning {
+    color: var(--warning);
+    margin: 0.35rem 0 0;
+    font-size: 0.85rem;
   }
   .policy-grid {
     display: grid;
@@ -761,5 +1413,27 @@
   .view-select {
     width: auto;
     min-width: 7rem;
+  }
+  .backup-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+    color: var(--text);
+  }
+  .backup-table th {
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 0.3rem 0.5rem 0.3rem 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .backup-table td {
+    padding: 0.3rem 0.5rem 0.3rem 0;
+    border-bottom: 1px solid var(--border-soft);
+    vertical-align: top;
+  }
+  .backup-name {
+    font-family: var(--font-mono);
+    word-break: break-all;
   }
 </style>

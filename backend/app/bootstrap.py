@@ -1,16 +1,18 @@
-import json
 from pathlib import Path
 
 from sqlmodel import Session, select
 
 from app import password_policy
+from app.audit import record_audit_event
 from app.auth.models import AuditLog, AuthProviderType, Role, SSOProtocol, SSOProviderConfig, User
 from app.auth.providers.local import create_local_user
+from app.auth.providers.oidc import read_provider_config
 from app.auth.rbac import create_role
 from app.config import get_settings
-from app.crypto import decrypt_secret
+from app.initial_admin_password import write_initial_admin_password
 from app.logging_config import get_logger
-from app.models import PatternKind, Protocol, Rule, RuleType, Source
+from app.models import Alert, PatternKind, Protocol, Rule, RuleType, SmtpSettings, Source
+from app.redaction_rules import seed_builtin_redaction_rules
 from app.severity_patterns import seed_default_global_patterns
 
 logger = get_logger(__name__)
@@ -29,9 +31,23 @@ def _has_salt_dependent_data(session: Session) -> bool:
         select(Source.id).where(Source.credential_ref.is_not(None)),
         select(SSOProviderConfig.id),
         select(User.id).where(User.mfa_secret_encrypted.is_not(None)),
+        select(SmtpSettings.id).where(SmtpSettings.password_encrypted.is_not(None)),
         select(AuditLog.id).where(AuditLog.row_hash.is_not(None)),
+        select(Alert.id),
     )
     return any(session.exec(query).first() is not None for query in checks)
+
+
+def credential_salt_missing_message(salt_path: Path) -> str:
+    """Shared with the migrations that encrypt or decrypt existing rows, which
+    run before the app and must refuse in the same way (f7a2c4e9b351)."""
+    return (
+        f"CREDENTIAL_SALT_PATH ({salt_path}) is missing, but the database already holds "
+        "data encrypted with a key derived from it. Starting now would generate a new "
+        "salt and make every stored credential, SSO secret and MFA secret undecryptable. "
+        "Restore the original salt file (see the CHANGELOG's upgrade note) and restart, or "
+        "set CREDENTIAL_SALT_ALLOW_REGENERATE=true if it is permanently lost."
+    )
 
 
 def assert_credential_salt_present(session: Session) -> None:
@@ -51,33 +67,50 @@ def assert_credential_salt_present(session: Session) -> None:
         logger.critical("startup.credential_salt_regenerated", salt_path=str(salt_path))
         return
     logger.critical("startup.credential_salt_missing", salt_path=str(salt_path))
-    raise CredentialSaltMissingError(
-        f"CREDENTIAL_SALT_PATH ({salt_path}) is missing, but the database already holds "
-        "data encrypted with a key derived from it. Starting now would generate a new "
-        "salt and make every stored credential, SSO secret and MFA secret undecryptable. "
-        "Restore the original salt file (see the CHANGELOG's upgrade note) and restart, or "
-        "set CREDENTIAL_SALT_ALLOW_REGENERATE=true if it is permanently lost."
-    )
+    raise CredentialSaltMissingError(credential_salt_missing_message(salt_path))
 
 
 def seed_system_log_source(session: Session) -> Source:
     """Seeds the built-in, super-admin-only log viewer on first startup —
     dogfooding the same live-browsing/viewer path as customer sources, via
-    the `local` protocol pointed at LOG_DIR (CLAUDE.md's "Built-in log
-    viewer" section). Idempotent: a no-op on every startup after the
-    first. Access is gated purely by is_system + is_super_admin in
-    auth/rbac.py's resolve_capability — no grant, however permissive, can
-    reach it.
+    the `local` protocol pointed at LOG_DIR. Idempotent: on every startup
+    after the first it only follows a changed LOG_DIR, moving the source's
+    base path to it with a system audit entry. Access is gated purely by
+    is_system + is_super_admin in auth/rbac.py's resolve_capability — no
+    grant, however permissive, can reach it.
 
     Seeds one broad include rule (LOG_DIR is a dedicated directory that
     should only ever contain this app's own rotated logs, and the source
     is already super-admin-only) rather than leaving it with zero rules,
     which would make the viewer show nothing at all."""
+    settings = get_settings()
     existing = session.exec(select(Source).where(Source.is_system.is_(True))).first()
     if existing is not None:
+        if existing.base_path != settings.log_dir:
+            old_path = existing.base_path
+            existing.base_path = settings.log_dir
+            session.add(existing)
+            record_audit_event(
+                session,
+                user_id=None,
+                action="source.update",
+                target_type="source",
+                target_id=existing.id,
+                metadata={
+                    "reason": "log_dir_changed",
+                    "changes": {"base_path": {"from": old_path, "to": settings.log_dir}},
+                },
+            )
+            session.commit()
+            session.refresh(existing)
+            logger.info(
+                "system_source.log_dir_updated",
+                source_id=existing.id,
+                old=old_path,
+                new=settings.log_dir,
+            )
         return existing
 
-    settings = get_settings()
     source = Source(
         name=SYSTEM_SOURCE_NAME,
         customer_id=None,
@@ -113,9 +146,11 @@ def seed_initial_super_admin(session: Session) -> User | None:
     is strictly a first-run bootstrap, not something that should ever touch
     an existing deployment). Generates a random password rather than
     reading one from config — same reasoning as the admin-driven
-    reset-password endpoint (api/users.py): a temporary credential logged
-    once and forced to change beats a long-lived secret sitting in a .env
-    file. Logged at WARNING so it isn't lost in routine INFO noise."""
+    reset-password endpoint (api/users.py): a temporary credential forced
+    to change beats a long-lived secret sitting in a .env file. The
+    password goes to a 0600 file in DATA_DIR, never to the log
+    (app/initial_admin_password.py); the WARNING line only says where it
+    is."""
     if session.exec(select(User)).first() is not None:
         return None
 
@@ -130,6 +165,10 @@ def seed_initial_super_admin(session: Session) -> User | None:
     temporary_password = password_policy.generate_password(
         password_policy.get_policy(session), user_identifiers=[settings.initial_admin_username]
     )
+    # Written before the account exists: if the file can't be written, the
+    # start fails and the next one tries again, instead of leaving an
+    # account nobody can sign in to.
+    password_file = write_initial_admin_password(temporary_password)
     user = create_local_user(
         session,
         actor_user_id=None,
@@ -141,8 +180,11 @@ def seed_initial_super_admin(session: Session) -> User | None:
     logger.warning(
         "initial_super_admin.seeded",
         username=user.username,
-        temporary_password=temporary_password,
-        note="Log in and change this password immediately — it will not be shown again.",
+        password_file=str(password_file),
+        note=(
+            "The temporary password is in this file, readable only by the PerchTail user. "
+            "Sign in and change it; the file is deleted when you do."
+        ),
     )
     return user
 
@@ -195,7 +237,15 @@ def backfill_sso_user_issuers(session: Session) -> int:
         )
         return 0
 
-    issuer = json.loads(decrypt_secret(candidates[0].config))["issuer"]
+    raw_config = read_provider_config(candidates[0].config)
+    if raw_config is None:
+        logger.warning(
+            "sso.issuer_backfill_skipped",
+            unbound_users=len(unbound),
+            reason="the SSO provider's settings can't be decrypted with the current key",
+        )
+        return 0
+    issuer = raw_config["issuer"]
     for user in unbound:
         user.external_issuer = issuer
         session.add(user)
@@ -210,3 +260,9 @@ def seed_severity_patterns(session: Session) -> None:
     actual idempotent seed logic is in app.severity_patterns, next to the
     effective-set resolution it's paired with."""
     seed_default_global_patterns(session)
+
+
+def seed_redaction_rules(session: Session) -> None:
+    """The built-in redaction rules (#382, #249), disabled; the idempotent
+    seed is in app.redaction_rules, next to the effective-rule resolution."""
+    seed_builtin_redaction_rules(session)

@@ -113,14 +113,20 @@ def secure_data_dir(settings: Settings | None = None) -> list[str]:
     only the app's own user should be able to read them (#193). Makes the
     directory 0700 and those files 0600, including ones created by earlier
     versions with the default 0644. SQLite gives its -wal/-shm files the
-    database's permissions. Returns what couldn't be changed (a file owned
-    by another user, say), for the caller to log."""
+    database's permissions. LOG_DIR and SCRATCH_DIR get 0700 too: the logs
+    name users, hosts and paths, and scratch holds fetched file content.
+    Returns what couldn't be changed (a file owned by another user, say),
+    for the caller to log."""
     settings = settings or get_settings()
     failed: list[str] = []
     targets: list[tuple[Path, int]] = [
         (Path(settings.data_dir), 0o700),
         # WinRM CA certificates per source (public, but kept like the rest, #206).
         (Path(settings.data_dir) / "winrm_ca", 0o700),
+        # Encrypted backups (#334, app/backup.py).
+        (Path(settings.backup_dir), 0o700),
+        (Path(settings.log_dir), 0o700),
+        (Path(settings.scratch_dir), 0o700),
     ]
     db = _sqlite_path(settings.database_url)
     files = [Path(settings.credential_salt_path), Path(settings.ssh_known_hosts_path)]

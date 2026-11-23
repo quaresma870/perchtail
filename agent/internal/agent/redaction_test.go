@@ -1,0 +1,1931 @@
+package agent
+
+import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"hash/crc32"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/quaresma870/perchtail/agent/internal/redact"
+)
+
+// Redaction on the host (#382, #249): whatever path a command with a
+// `redact` block takes, nothing of the original values leaves the agent,
+// and what it sends is what the shared engine gives (the engine's parity
+// with the server's is pinned by agent/internal/redact/testdata).
+
+var testHeadKey = bytes.Repeat([]byte{7}, headKeyBytes)
+
+var testRules = []redact.RuleSpec{
+	{"id": 1, "name": "card", "detector": "card"},
+	{"id": 2, "name": "secret_kv", "detector": "secret_kv"},
+	{"id": 3, "name": "email", "detector": "email"},
+	{"id": 4, "name": "private_key", "detector": "private_key"},
+}
+
+const secretLog = "start\n" +
+	"user alice@example.com logged in\n" +
+	"password=hunter2 ok\n" +
+	"card 4111 1111 1111 1111 paid\n" +
+	"-----BEGIN RSA PRIVATE KEY-----\n" +
+	"MIIEsecretkeybody\n" +
+	"-----END RSA PRIVATE KEY-----\n" +
+	"end\n"
+
+// The originals that must never be sent.
+var secretValues = []string{"alice@example.com", "hunter2", "4111 1111", "MIIEsecretkeybody"}
+
+func assertNoSecret(t *testing.T, what string, data []byte) {
+	t.Helper()
+	for _, secret := range secretValues {
+		if bytes.Contains(data, []byte(secret)) {
+			t.Fatalf("%s carries %q in clear: %q", what, secret, data)
+		}
+	}
+}
+
+func redactJSON(t *testing.T, rules []redact.RuleSpec, output string) json.RawMessage {
+	t.Helper()
+	digest, err := redact.RulesDigest(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := map[string]any{
+		"engine": redact.EngineVersion, "digest": digest, "rules": rules,
+		"head_key": base64.StdEncoding.EncodeToString(testHeadKey),
+	}
+	if output != "" {
+		block["output_encoding"] = output
+	}
+	raw, err := json.Marshal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func compiled(t *testing.T, rules []redact.RuleSpec) *redact.Rules {
+	t.Helper()
+	r, err := redact.Compile(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// collect runs serveCommand and returns what it sent.
+func collect(t *testing.T, base string, cmd Command) []any {
+	t.Helper()
+	var sent []any
+	if err := serveCommand(context.Background(), Config{BasePath: base}, cmd,
+		func(msg any) error { sent = append(sent, msg); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	return sent
+}
+
+// streamed splits what a fetch sent into its chunks' content (checking
+// they are numbered in order with the other messages, and no larger than
+// limit) and its last message.
+func streamed(t *testing.T, sent []any, limit int) ([]byte, any) {
+	t.Helper()
+	if len(sent) == 0 {
+		t.Fatal("nothing sent")
+	}
+	var data []byte
+	for i, msg := range sent[:len(sent)-1] {
+		chunk, ok := msg.(FetchChunk)
+		if !ok {
+			continue
+		}
+		if chunk.Seq != i {
+			t.Fatalf("message %d has seq %d", i, chunk.Seq)
+		}
+		piece, _ := base64.StdEncoding.DecodeString(chunk.DataB64)
+		if len(piece) > limit {
+			t.Fatalf("chunk of %d bytes, over %d", len(piece), limit)
+		}
+		data = append(data, piece...)
+	}
+	return data, sent[len(sent)-1]
+}
+
+func refusal(t *testing.T, sent []any, code string) ErrorResult {
+	t.Helper()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d messages, want only the refusal: %+v", len(sent), sent)
+	}
+	result, ok := sent[0].(ErrorResult)
+	if !ok || result.Type != "redaction_error" || result.Code != code {
+		t.Fatalf("answer = %+v, want a redaction_error %s", sent[0], code)
+	}
+	return result
+}
+
+func TestConnectAnnouncesRedactionLinksAndProgress(t *testing.T) {
+	got := make(chan string, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Get(FeaturesHeader)
+		if conn, err := upgrader.Upgrade(w, r, nil); err == nil {
+			conn.Close()
+		}
+	}))
+	defer server.Close()
+	cfg := Config{ServerURL: "ws" + strings.TrimPrefix(server.URL, "http"), Token: "t"}
+	_, _ = connectAndServe(context.Background(), cfg, newUpgrader(cfg))
+	if features := <-got; features != "redaction/1,links/1,progress/1" {
+		t.Fatalf("features header = %q, want redaction/1,links/1,progress/1", features)
+	}
+}
+
+func TestARedactedFetchOverTheConnection(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "app.log", []byte(secretLog))
+	fakeBackend(t, base, func(conn *websocket.Conn) {
+		_ = conn.WriteJSON(Command{
+			Type: "fetch", ID: "f", Path: "app.log", ChunkSize: minChunkSize, Redact: redactJSON(t, testRules, ""),
+		})
+		var data []byte
+		for {
+			msg := readType(t, conn)
+			if msg["type"] == "fetch_chunk" {
+				piece, _ := base64.StdEncoding.DecodeString(msg["data_b64"].(string))
+				data = append(data, piece...)
+				continue
+			}
+			assertNoSecret(t, "the fetch", data)
+			if msg["type"] != "fetch_result" || msg["redacted"] != true || msg["digest"] != compiled(t, testRules).Digest() {
+				t.Errorf("end = %v", msg)
+			}
+			return
+		}
+	})
+}
+
+func TestParseRedactionWithoutABlock(t *testing.T) {
+	for _, raw := range []string{"", "null", " null "} {
+		if red, err := parseRedaction(json.RawMessage(raw)); red != nil || err != nil {
+			t.Errorf("%q: %v %v, want nothing", raw, red, err)
+		}
+	}
+}
+
+func TestParseRedactionRefusesWhatItCantApply(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(testHeadKey)
+	digest, _ := redact.RulesDigest(testRules[:1])
+	good := func(change string) string {
+		block := `{"engine":1,"digest":"` + digest + `","rules":[{"id":1,"name":"card","detector":"card"}],"head_key":"` + key + `"` + change + `}`
+		return block
+	}
+	custom := func(maxLength string) string {
+		return `{"engine":1,"digest":"x","head_key":"` + key + `","rules":[{"id":1,"name":"card","detector":"card"},` +
+			`{"id":9,"name":"acct","pattern":"ACCT \\d+","max_length":` + maxLength + `}]}`
+	}
+	cases := []struct {
+		name, raw, code string
+		rule            any
+	}{
+		{"another engine", strings.Replace(good(""), `"engine":1`, `"engine":2`, 1), codeInvalidRedact, nil},
+		{"an unknown field", good(`,"keep_originals":true`), codeInvalidRedact, nil},
+		{"no rules", `{"engine":1,"digest":"","head_key":"` + key + `"}`, codeInvalidRedact, nil},
+		{"a short head key", strings.Replace(good(""), key, "c2hvcnQ=", 1), codeInvalidRedact, nil},
+		{"a digest of other rules", strings.Replace(good(""), digest, strings.Repeat("0", 64), 1), codeInvalidRedact, nil},
+		{"another output encoding", good(`,"output_encoding":"latin-1"`), codeInvalidRedact, nil},
+		{"lines over the engine's limit", good(`,"max_line_bytes":2097152`), codeInvalidRedact, nil},
+		{"not JSON", `{"engine":`, codeInvalidRedact, nil},
+		// The server's engine refuses these, so the agent must as well:
+		// numbers are read as written (UseNumber).
+		{"max_length 1e2", custom("1e2"), codeRuleUnsupported, json.Number("9")},
+		{"max_length 100.0", custom("100.0"), codeRuleUnsupported, json.Number("9")},
+		{"max_length over 4096", custom("4097"), codeRuleUnsupported, json.Number("9")},
+		{"a pattern RE2 can't run", strings.Replace(custom("10"), `ACCT \\d+`, `\\C`, 1), codeRuleUnsupported, json.Number("9")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := parseRedaction(json.RawMessage(c.raw))
+			result := errorResult(Command{ID: "r"}, "fetch_error", err)
+			if result.Type != "redaction_error" || result.Code != c.code || result.Rule != c.rule {
+				t.Fatalf("got %+v (%v), want %s for rule %v", result, err, c.code, c.rule)
+			}
+		})
+	}
+}
+
+func TestParseRedactionAcceptsMaxLengthAtTheLimit(t *testing.T) {
+	rules := []redact.RuleSpec{{"id": 9, "name": "acct", "pattern": `ACCT \d+`, "max_length": 4096}}
+	red, err := parseRedaction(redactJSON(t, rules, ""))
+	if err != nil || red == nil {
+		t.Fatalf("%v", err)
+	}
+	if red.rules.Digest() != compiled(t, rules).Digest() {
+		t.Error("the digest differs from the rules'")
+	}
+}
+
+func TestRedactedFetchForTheViewer(t *testing.T) {
+	base := t.TempDir()
+	// Over a few chunks, and ending with a line still being written.
+	content := []byte(strings.Repeat(secretLog, 40) + "card 4111 1111 11")
+	writeFile(t, base, "app.log", content)
+
+	sent := collect(t, base, Command{
+		Type: "fetch", ID: "f", Path: "app.log", ChunkSize: minChunkSize, Redact: redactJSON(t, testRules, ""),
+	})
+	data, last := streamed(t, sent, minChunkSize)
+	assertNoSecret(t, "the fetch", data)
+	want, result, err := redact.RedactBytes(content, compiled(t, testRules), false, redact.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Fatal("the content differs from the engine's redaction")
+	}
+	if !bytes.HasSuffix(data, []byte("[redacted: incomplete line]")) {
+		t.Errorf("the unfinished line isn't the marker: %q", data[len(data)-40:])
+	}
+	end, ok := last.(RedactedFetchEnd)
+	if !ok {
+		t.Fatalf("end = %#v", last)
+	}
+	if end.Type != "fetch_result" || !end.Streamed || !end.Redacted || end.Digest != compiled(t, testRules).Digest() ||
+		end.Size != int64(len(data)) || end.Chunks != len(sent)-1 || end.SourceSize != int64(len(content)) ||
+		end.SourceOffset != result.SourceOffset || end.SourceOffset != int64(len(content)-len("card 4111 1111 11")) ||
+		end.TrailingPartial != result.TrailingPartial || end.Counts["card"] != 40 || end.Counts["private_key"] != 40 {
+		t.Errorf("end = %+v", end)
+	}
+	if end.HeadDigest != redact.HeadDigest(testHeadKey, content, end.SourceOffset) {
+		t.Error("head digest")
+	}
+}
+
+func TestRedactedFetchForADownloadEndsTheLastLine(t *testing.T) {
+	base := t.TempDir()
+	content := []byte(secretLog + "card 4111 1111 1111 1111")
+	writeFile(t, base, "app.log", content)
+
+	sent := collect(t, base, Command{
+		Type: "fetch", ID: "f", Path: "app.log", ChunkSize: minChunkSize, Redact: redactJSON(t, testRules, "source"),
+	})
+	data, last := streamed(t, sent, minChunkSize)
+	assertNoSecret(t, "the download", data)
+	want, _, _ := redact.RedactBytes(content, compiled(t, testRules), true, redact.Options{OutputEncoding: "source"})
+	end := last.(RedactedFetchEnd)
+	if !bytes.Equal(data, want) || end.TrailingPartial != 0 || end.SourceOffset != int64(len(content)) {
+		t.Errorf("data %q, end %+v", data, end)
+	}
+}
+
+func TestRedactedFetchEncodesUTF16BackForADownload(t *testing.T) {
+	base := t.TempDir()
+	content := append([]byte{0xff, 0xfe}, utf16LE(secretLog)...) // with a BOM
+	writeFile(t, base, "app.log", content)
+
+	viewer, _ := streamed(t, collect(t, base, Command{
+		Type: "fetch", ID: "v", Path: "app.log", ChunkSize: minChunkSize, Redact: redactJSON(t, testRules, ""),
+	}), minChunkSize)
+	download, _ := streamed(t, collect(t, base, Command{
+		Type: "fetch", ID: "d", Path: "app.log", ChunkSize: minChunkSize, Redact: redactJSON(t, testRules, "source"),
+	}), minChunkSize)
+	assertNoSecret(t, "the viewer's UTF-8", viewer)
+	if !bytes.Contains(viewer, []byte("[redacted: email]")) || bytes.Contains(viewer, []byte{0}) {
+		t.Errorf("viewer = %q, want UTF-8", viewer)
+	}
+	if !bytes.HasPrefix(download, []byte{0xff, 0xfe}) || !bytes.Contains(download, utf16LE("ok\n")) {
+		t.Errorf("download = %q, want UTF-16 LE", download)
+	}
+	for _, secret := range secretValues {
+		if bytes.Contains(download, utf16LE(secret)) {
+			t.Fatalf("the download carries %q", secret)
+		}
+	}
+}
+
+func utf16LE(s string) []byte {
+	var out []byte
+	for _, r := range s {
+		out = append(out, byte(r), byte(r>>8))
+	}
+	return out
+}
+
+func TestRedactedFetchRefusesBeforeSendingAnything(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipArchive(t, map[string]string{"a.log": secretLog}))
+	writeFile(t, base, "app.log.gz", gzipped(t, secretLog))
+	writeFile(t, base, "wide.log", append([]byte{0xff, 0xfe, 0, 0}, []byte("p\x00\x00\x00")...))
+	writeFile(t, base, "app.log", []byte(secretLog))
+	block := redactJSON(t, testRules, "")
+	fetch := func(path string) Command {
+		return Command{Type: "fetch", ID: "f", Path: path, ChunkSize: minChunkSize, Redact: block}
+	}
+
+	refusal(t, collect(t, base, fetch("logs.zip")), codeNotRedactable)
+	refusal(t, collect(t, base, fetch("app.log.gz")), codeNotRedactable)
+	refusal(t, collect(t, base, fetch("wide.log")), codeUnsupportedEncoding)
+	bad := fetch("app.log")
+	bad.Redact = json.RawMessage(strings.Replace(string(block), `"detector":"email"`, `"detector":"phone"`, 1))
+	if result := refusal(t, collect(t, base, bad), codeRuleUnsupported); result.Rule != json.Number("3") {
+		t.Errorf("rule = %v, want 3", result.Rule)
+	}
+	// Never as one message with the content, even if asked so.
+	unstreamed := fetch("app.log")
+	unstreamed.ChunkSize = 0
+	data, _ := streamed(t, collect(t, base, unstreamed), minChunkSize)
+	assertNoSecret(t, "a fetch without chunk_size", data)
+	if result, ok := handleCommand(Config{BasePath: base}, unstreamed).(ErrorResult); !ok || result.Type != "fetch_error" {
+		t.Errorf("handleCommand answered %+v", result)
+	}
+}
+
+func gzipped(t *testing.T, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestRedactedFetchOfAGzipFile(t *testing.T) {
+	base := t.TempDir()
+	content := secretLog + "last 4111 1111 1111 1111"
+	writeFile(t, base, "app.log.gz", gzipped(t, content))
+	cmd := Command{
+		Type: "fetch", ID: "f", Path: "app.log.gz", ChunkSize: minChunkSize, Decompress: "gzip",
+		MaxDecompressed: 1 << 20, Redact: redactJSON(t, testRules, ""),
+	}
+	data, last := streamed(t, collect(t, base, cmd), minChunkSize)
+	assertNoSecret(t, "the .gz", data)
+	// Complete content: the last line is redacted as it is.
+	want, _, _ := redact.RedactBytes([]byte(content), compiled(t, testRules), true, redact.Options{})
+	if !bytes.Equal(data, want) || last.(RedactedFetchEnd).TrailingPartial != 0 {
+		t.Errorf("data = %q", data)
+	}
+
+	cmd.MaxDecompressed = 50
+	sent := collect(t, base, cmd)
+	if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Type != "fetch_error" || result.Code != "too_large" {
+		t.Errorf("over the limit: %+v", sent[len(sent)-1])
+	}
+	cmd.MaxDecompressed, cmd.Decompress = 0, "zstd"
+	if result := collect(t, base, cmd)[0].(ErrorResult); result.Type != "fetch_error" {
+		t.Errorf("unknown decompression: %+v", result)
+	}
+}
+
+func TestADecompressedFetchWithoutRedaction(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "app.log.gz", gzipped(t, "plain\n"))
+	data, last := streamed(t, collect(t, base, Command{
+		Type: "fetch", ID: "f", Path: "app.log.gz", ChunkSize: minChunkSize, Decompress: "gzip",
+	}), minChunkSize)
+	if string(data) != "plain\n" {
+		t.Errorf("data = %q", data)
+	}
+	if _, ok := last.(FetchEnd); !ok {
+		t.Errorf("end = %#v, want a plain FetchEnd", last)
+	}
+}
+
+type zipMember struct {
+	name      string
+	content   string
+	encrypted bool
+	nonUTF8   bool
+	modified  time.Time
+}
+
+func zipArchive(t *testing.T, members map[string]string) []byte {
+	t.Helper()
+	var list []zipMember
+	for name, content := range members {
+		list = append(list, zipMember{name: name, content: content})
+	}
+	return zipOf(t, list)
+}
+
+func zipOf(t *testing.T, members []zipMember) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	for _, m := range members {
+		header := &zip.FileHeader{Name: m.name, Method: zip.Deflate, NonUTF8: m.nonUTF8, Modified: m.modified}
+		if m.encrypted {
+			header.Flags |= 0x1
+		}
+		f, err := w.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write([]byte(m.content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+type tarMember struct {
+	name, content, link string
+	flag                byte
+	modified            time.Time
+}
+
+func tarGzOf(t *testing.T, members []tarMember) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	w := tar.NewWriter(gz)
+	for _, m := range members {
+		flag := m.flag
+		if flag == 0 {
+			flag = tar.TypeReg
+		}
+		modified := m.modified
+		if modified.IsZero() {
+			modified = time.Unix(0, 0)
+		}
+		header := &tar.Header{Name: m.name, Typeflag: flag, Linkname: m.link, Mode: 0o644, ModTime: modified}
+		if flag == tar.TypeReg {
+			header.Size = int64(len(m.content))
+		}
+		if err := w.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if flag == tar.TypeReg {
+			if _, err := w.Write([]byte(m.content)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestRedactedFetchOfArchiveMembers(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{
+		{name: "app/a.log", content: secretLog + "tail 4111 1111 1111 1111"},
+		{name: "./odd//a.log", content: secretLog + "tail 4111 1111 1111 1111"},
+		{name: "inner.zip", content: "PK"},
+		{name: "locked.log", content: "x", encrypted: true},
+	}))
+	writeFile(t, base, "logs.tgz", tarGzOf(t, []tarMember{
+		{name: "app/", flag: tar.TypeDir},
+		{name: "app/a.log", content: secretLog + "tail 4111 1111 1111 1111"},
+		{name: "./odd//a.log", content: secretLog + "tail 4111 1111 1111 1111"},
+		{name: "link.log", flag: tar.TypeSymlink, link: "app/a.log"},
+	}))
+	want, _, _ := redact.RedactBytes([]byte(secretLog+"tail 4111 1111 1111 1111"), compiled(t, testRules), true, redact.Options{})
+	member := func(path, name string) Command {
+		return Command{
+			Type: "fetch", ID: "m", Path: path, Member: name, ChunkSize: minChunkSize,
+			MaxDecompressed: 1 << 20, Redact: redactJSON(t, testRules, ""),
+		}
+	}
+	for _, archive := range []string{"logs.zip", "logs.tgz"} {
+		// The stored name, or the normalized name the tree shows.
+		for _, name := range []string{"app/a.log", "./odd//a.log", "odd/a.log"} {
+			data, last := streamed(t, collect(t, base, member(archive, name)), minChunkSize)
+			assertNoSecret(t, archive+" "+name, data)
+			if !bytes.Equal(data, want) {
+				t.Errorf("%s %s: %q", archive, name, data)
+			}
+			if end, ok := last.(RedactedFetchEnd); !ok || end.TrailingPartial != 0 {
+				t.Errorf("%s: end = %#v", archive, last)
+			}
+		}
+		for _, name := range []string{"missing.log", "app"} {
+			if result := collect(t, base, member(archive, name))[0].(ErrorResult); result.Code != "not_found" {
+				t.Errorf("%s %s: %+v", archive, name, result)
+			}
+		}
+		tooLarge := member(archive, "app/a.log")
+		tooLarge.MaxDecompressed = 10
+		sent := collect(t, base, tooLarge)
+		if result := sent[len(sent)-1].(ErrorResult); result.Code != "too_large" {
+			t.Errorf("%s over the limit: %+v", archive, result)
+		}
+	}
+	// A link would open another member under its own name.
+	if result := collect(t, base, member("logs.tgz", "link.log"))[0].(ErrorResult); result.Code != "not_found" {
+		t.Errorf("link: %+v", result)
+	}
+	refusal(t, collect(t, base, member("logs.zip", "inner.zip")), codeNotRedactable)
+	if result := collect(t, base, member("logs.zip", "locked.log"))[0].(ErrorResult); result.Type != "fetch_error" {
+		t.Errorf("encrypted: %+v", result)
+	}
+	if result := collect(t, base, member("app.log", "x"))[0].(ErrorResult); result.Type != "fetch_error" {
+		t.Errorf("not an archive: %+v", result)
+	}
+}
+
+func TestListArchive(t *testing.T) {
+	base := t.TempDir()
+	when := time.Date(2024, 5, 6, 7, 8, 10, 0, time.UTC)
+	writeFile(t, base, "logs.ZIP", zipOf(t, []zipMember{
+		{name: "app/", modified: when},
+		{name: "app/a.log", content: "hello", modified: when},
+		{name: "\x81ber.log", content: "x", nonUTF8: true}, // code page 437, as Python reads it
+	}))
+	writeFile(t, base, "logs.tar.gz", tarGzOf(t, []tarMember{
+		{name: "app/", flag: tar.TypeDir, modified: when},
+		{name: "app/a.log", content: "hello", modified: when},
+		{name: "link.log", flag: tar.TypeSymlink, link: "app/a.log"},
+		{name: "fifo", flag: tar.TypeFifo},
+	}))
+
+	zipped, truncated, err := ListArchive(base, "logs.ZIP", "", 0)
+	if err != nil || truncated {
+		t.Fatal(err, truncated)
+	}
+	wantZip := []ArchiveMemberWire{
+		{Name: "app/", IsDir: true, MTimeMs: when.UnixMilli()},
+		{Name: "app/a.log", Size: 5, MTimeMs: when.UnixMilli()},
+		{Name: "über.log", Size: 1, MTimeMs: zipped[2].MTimeMs},
+	}
+	if len(zipped) != 3 || zipped[0] != wantZip[0] || zipped[1] != wantZip[1] || zipped[2].Name != wantZip[2].Name {
+		t.Errorf("zip members = %+v", zipped)
+	}
+
+	tarred, _, err := ListArchive(base, "logs.tar.gz", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTar := []ArchiveMemberWire{
+		{Name: "app", IsDir: true, MTimeMs: when.UnixMilli()},
+		{Name: "app/a.log", Size: 5, MTimeMs: when.UnixMilli()},
+	}
+	if len(tarred) != 2 || tarred[0] != wantTar[0] || tarred[1] != wantTar[1] {
+		t.Errorf("tar members = %+v (links and FIFOs aren't listed)", tarred)
+	}
+
+	first, truncated, err := ListArchive(base, "logs.tar.gz", "", 1)
+	if err != nil || !truncated || len(first) != 1 {
+		t.Errorf("capped: %+v %v %v", first, truncated, err)
+	}
+	if _, _, err := ListArchive(base, "../logs.zip", "", 0); err == nil {
+		t.Error("an unsafe path was listed")
+	}
+	writeFile(t, base, "app.log", []byte("x"))
+	if result := handleCommand(Config{BasePath: base}, Command{Type: "list_archive", ID: "l", Path: "app.log"}); result.(ErrorResult).Type != "list_archive_error" {
+		t.Errorf("not an archive: %+v", result)
+	}
+	if result := handleCommand(Config{BasePath: base}, Command{Type: "list_archive", ID: "l", Path: "logs.ZIP"}); len(result.(ListArchiveResult).Members) != 3 {
+		t.Errorf("list_archive: %+v", result)
+	}
+}
+
+// An archive that can't be read as one (damaged, or text named .zip or
+// .tar.gz) and a .gz file that can't be decompressed are answered with codes
+// of their own, so the server refuses them as when it reads them itself,
+// rather than with the source's generic error. A missing file keeps none.
+func TestAnUnreadableArchiveOrGzHasItsOwnCode(t *testing.T) {
+	base := t.TempDir()
+	text := []byte(strings.Repeat("just some text\n", 10))
+	writeFile(t, base, "broken.zip", text)
+	writeFile(t, base, "broken.tar.gz", text)
+	writeFile(t, base, "broken.log.gz", text)
+	writeFile(t, base, "empty.tar.gz", nil)
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{{name: "old.log.gz", content: string(text)}}))
+	cfg := Config{BasePath: base}
+
+	for _, name := range []string{"broken.zip", "broken.tar.gz", "empty.tar.gz"} {
+		result, ok := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: name}).(ErrorResult)
+		if !ok || result.Type != "list_archive_error" || result.Code != "archive_unreadable" {
+			t.Errorf("list_archive %s: %#v", name, result)
+		}
+		for _, redacting := range []bool{false, true} {
+			cmd := Command{
+				Type: "fetch", ID: "f", Path: name, Member: "app.log", ChunkSize: minChunkSize,
+				MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Code != "archive_unreadable" {
+				t.Errorf("fetch %s (redacting %v) ended with %#v", name, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+
+	for _, target := range []struct{ path, member string }{{"broken.log.gz", ""}, {"logs.zip", "old.log.gz"}} {
+		for _, redacting := range []bool{false, true} {
+			cmd := Command{
+				Type: "fetch", ID: "g", Path: target.path, Member: target.member, ChunkSize: minChunkSize,
+				Decompress: "gzip", MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Code != "gzip_unreadable" {
+				t.Errorf("fetch %s %s (redacting %v) ended with %#v", target.path, target.member, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+
+	missing, ok := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: "gone.zip"}).(ErrorResult)
+	if !ok || missing.Code != "" {
+		t.Errorf("a missing archive: %#v", missing)
+	}
+}
+
+// As the server's tarfile and zipfile: a .tar.gz that ends before its first
+// header (a few bytes, or nothing at all, once decompressed) isn't a tar,
+// and a zip member whose local header is damaged can't be read, though the
+// zip's index lists it. A .tar.gz holding a tar with no members (only its
+// end-of-archive blocks) is an empty archive.
+func TestAnArchiveCutBeforeItsFirstHeaderOrAMemberWithADamagedHeaderIsUnreadable(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "short.tar.gz", gzipped(t, "just some text\n"))
+	writeFile(t, base, "nothing.tar.gz", gzipped(t, ""))
+	damaged := zipOf(t, []zipMember{{name: "app.log", content: "a line\n"}})
+	if !bytes.HasPrefix(damaged, []byte("PK\x03\x04")) {
+		t.Fatalf("the zip doesn't start with a local header: % x", damaged[:4])
+	}
+	damaged = append([]byte("PK\x00\x00"), damaged[4:]...)
+	writeFile(t, base, "damaged.zip", damaged)
+	writeFile(t, base, "empty.tgz", tarGzOf(t, nil))
+	cfg := Config{BasePath: base}
+
+	for _, name := range []string{"short.tar.gz", "nothing.tar.gz"} {
+		answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: name})
+		if result, ok := answer.(ErrorResult); !ok || result.Type != "list_archive_error" || result.Code != "archive_unreadable" {
+			t.Errorf("list_archive %s: %#v", name, answer)
+		}
+	}
+
+	answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: "damaged.zip"})
+	if listed, ok := answer.(ListArchiveResult); !ok || len(listed.Members) != 1 || listed.Members[0].Name != "app.log" {
+		t.Errorf("list_archive damaged.zip: %#v", answer)
+	}
+
+	for _, name := range []string{"short.tar.gz", "nothing.tar.gz", "damaged.zip"} {
+		for _, redacting := range []bool{false, true} {
+			cmd := Command{
+				Type: "fetch", ID: "f", Path: name, Member: "app.log", ChunkSize: minChunkSize,
+				MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Code != "archive_unreadable" {
+				t.Errorf("fetch %s (redacting %v) ended with %#v", name, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+
+	answer = handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: "empty.tgz"})
+	if empty, ok := answer.(ListArchiveResult); !ok || len(empty.Members) != 0 || empty.Truncated {
+		t.Errorf("list_archive empty.tgz: %#v", answer)
+	}
+}
+
+// longNameTar is a tar whose only member has a name too long for a ustar
+// header, so it starts with a pax ('x') or GNU ('L') long-name header and
+// its data: 1024 bytes before the member's own header.
+func longNameTar(t *testing.T, format tar.Format, flag byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	content := []byte("a line of the log\n")
+	header := &tar.Header{
+		Name: strings.Repeat("n", 150) + ".log", Mode: 0o644, Size: int64(len(content)),
+		Typeflag: tar.TypeReg, Format: format,
+	}
+	if err := tw.WriteHeader(header); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	if raw[156] != flag || len(raw) < 1536 {
+		t.Fatalf("not a tar starting with a %q header: flag %q, %d bytes", flag, raw[156], len(raw))
+	}
+	return raw
+}
+
+// storedGzip is data gzipped without compression, so a cut in the .gz
+// cuts the data at about the same offset.
+func storedGzip(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w, err := gzip.NewWriterLevel(&buf, gzip.NoCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// As the server's tarfile: a .tar.gz lists empty only when its first block
+// is all zeros (the end of an archive with no members); one that ends
+// before its first whole entry is unreadable, a pax or GNU long-name header
+// followed by nothing, or by part of the entry's header, included.
+func TestATarGzEndingBeforeItsFirstEntryIsUnreadableUnlessItStartsWithZeros(t *testing.T) {
+	base := t.TempDir()
+	pax := longNameTar(t, tar.FormatPAX, tar.TypeXHeader)
+	gnu := longNameTar(t, tar.FormatGNU, tar.TypeGNULongName)
+	global := globalHeaderTar(t, true)
+	unreadable := map[string][]byte{
+		"pax-header-then-nothing.tar.gz": gzipped(t, string(pax[:1024])),
+		"pax-cut-in-the-header.tar.gz":   gzipped(t, string(pax[:1124])),
+		"gnu-name-then-nothing.tar.gz":   gzipped(t, string(gnu[:1024])),
+		"pax-gzip-cut.tar.gz":            storedGzip(t, pax)[:1100],
+		// A global pax header (git archive writes one) isn't an entry.
+		"global-header-then-nothing.tar.gz": gzipped(t, string(global[:1024])),
+		"global-cut-in-the-header.tar.gz":   gzipped(t, string(global[:1124])),
+		"global-gzip-cut.tar.gz":            storedGzip(t, global)[:1100],
+		"global-header-then-end.tar.gz":     gzipped(t, string(globalHeaderTar(t, false))),
+	}
+	writeFile(t, base, "global-and-a-member.tar.gz", gzipped(t, string(global)))
+	for name, content := range unreadable {
+		writeFile(t, base, name, content)
+	}
+	writeFile(t, base, "one-zero-block.tar.gz", gzipped(t, string(make([]byte, 512))))
+	writeFile(t, base, "two-zero-blocks.tar.gz", gzipped(t, string(make([]byte, 1024))))
+	cfg := Config{BasePath: base}
+	member := strings.Repeat("n", 150) + ".log"
+
+	for name := range unreadable {
+		answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: name})
+		if result, ok := answer.(ErrorResult); !ok || result.Code != "archive_unreadable" {
+			t.Errorf("list_archive %s: %#v", name, answer)
+		}
+		for _, redacting := range []bool{false, true} {
+			cmd := Command{
+				Type: "fetch", ID: "f", Path: name, Member: member, ChunkSize: minChunkSize,
+				MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Code != "archive_unreadable" {
+				t.Errorf("fetch %s (redacting %v) ended with %#v", name, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+	for _, name := range []string{"one-zero-block.tar.gz", "two-zero-blocks.tar.gz"} {
+		answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: name})
+		if empty, ok := answer.(ListArchiveResult); !ok || len(empty.Members) != 0 {
+			t.Errorf("list_archive %s: %#v", name, answer)
+		}
+	}
+	// A whole member after the global header lists and opens.
+	answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: "global-and-a-member.tar.gz"})
+	if listed, ok := answer.(ListArchiveResult); !ok || len(listed.Members) != 1 || listed.Members[0].Name != "app.log" {
+		t.Errorf("list_archive global-and-a-member.tar.gz: %#v", answer)
+	}
+	data, _ := streamed(t, collect(t, base, Command{
+		Type: "fetch", ID: "f", Path: "global-and-a-member.tar.gz", Member: "app.log", ChunkSize: minChunkSize,
+		MaxDecompressed: 1 << 20,
+	}), minChunkSize)
+	if string(data) != "a line of the log\n" {
+		t.Errorf("fetch app.log after a global header: %q", data)
+	}
+}
+
+// globalHeaderTar is a tar that starts with a global pax header and its
+// data (1024 bytes), as git archive writes, then app.log when withMember is
+// set, then the end-of-archive blocks.
+func globalHeaderTar(t *testing.T, withMember bool) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	global := &tar.Header{Typeflag: tar.TypeXGlobalHeader, PAXRecords: map[string]string{"comment": strings.Repeat("c", 40)}}
+	if err := tw.WriteHeader(global); err != nil {
+		t.Fatal(err)
+	}
+	if withMember {
+		content := []byte("a line of the log\n")
+		header := &tar.Header{Name: "app.log", Mode: 0o644, Size: int64(len(content)), Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	if raw[156] != tar.TypeXGlobalHeader || len(raw) < 2048 {
+		t.Fatalf("not a tar starting with a global header: flag %q, %d bytes", raw[156], len(raw))
+	}
+	return raw
+}
+
+// zipWithHeaderAt is a zip of one member, app.log, whose index says its
+// local header is at offset (at the last bytes of the file, or past its
+// end).
+func zipWithHeaderAt(t *testing.T, offset func(size int) int) []byte {
+	t.Helper()
+	data := zipOf(t, []zipMember{{name: "app.log", content: "a line\n"}})
+	central := bytes.Index(data, []byte("PK\x01\x02"))
+	if central < 0 {
+		t.Fatal("no central directory header")
+	}
+	binary.LittleEndian.PutUint32(data[central+42:], uint32(offset(len(data))))
+	return data
+}
+
+// As the server's zipfile ("Truncated file header"): a member whose local
+// header is cut short, or past the end of the file, can't be read, though
+// the zip's index lists it.
+func TestAZipMemberWhoseLocalHeaderIsCutShortIsUnreadable(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "near-the-end.zip", zipWithHeaderAt(t, func(size int) int { return size - 10 }))
+	writeFile(t, base, "past-the-end.zip", zipWithHeaderAt(t, func(size int) int { return size + 100 }))
+	cfg := Config{BasePath: base}
+
+	for _, name := range []string{"near-the-end.zip", "past-the-end.zip"} {
+		answer := handleCommand(cfg, Command{Type: "list_archive", ID: "l", Path: name})
+		if listed, ok := answer.(ListArchiveResult); !ok || len(listed.Members) != 1 || listed.Members[0].Name != "app.log" {
+			t.Errorf("list_archive %s: %#v", name, answer)
+		}
+		for _, redacting := range []bool{false, true} {
+			cmd := Command{
+				Type: "fetch", ID: "f", Path: name, Member: "app.log", ChunkSize: minChunkSize,
+				MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Code != "archive_unreadable" {
+				t.Errorf("fetch %s (redacting %v) ended with %#v", name, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+}
+
+// An encrypted zip member is refused with a code of its own, which the
+// server answers as when it finds one itself (member_encrypted).
+func TestAnEncryptedZipMemberHasItsOwnCode(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{
+		{name: "app.log", content: "a line\n"},
+		{name: "locked.log", content: "x", encrypted: true},
+	}))
+	for _, redacting := range []bool{false, true} {
+		cmd := Command{
+			Type: "fetch", ID: "f", Path: "logs.zip", Member: "locked.log", ChunkSize: minChunkSize,
+			MaxDecompressed: 1 << 20,
+		}
+		if redacting {
+			cmd.Redact = redactJSON(t, testRules, "")
+		}
+		sent := collect(t, base, cmd)
+		if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Type != "fetch_error" || result.Code != "member_encrypted" {
+			t.Errorf("fetch locked.log (redacting %v) ended with %#v", redacting, sent[len(sent)-1])
+		}
+	}
+}
+
+func TestFetchArchiveSendsTheMembersAskedForRedacted(t *testing.T) {
+	when := time.Date(2024, 5, 6, 7, 8, 10, 0, time.UTC)
+	content := secretLog + "tail 4111 1111 1111 1111"
+	wide := string([]byte{0xff, 0xfe, 0, 0, 'p', 0, 0, 0})
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{
+		{name: "a.log", content: content, modified: when},
+		{name: "hidden.log", content: "password=hunter2\n"},
+		{name: "b.log.gz", content: string(gzipped(t, content))},
+		{name: "inner.tgz", content: "x"},
+		{name: "locked.log", content: "x", encrypted: true},
+		{name: "wide.log", content: wide},
+	}))
+	writeFile(t, base, "logs.tgz", tarGzOf(t, []tarMember{
+		{name: "a.log", content: content, modified: when},
+		{name: "hidden.log", content: "password=hunter2\n"},
+		{name: "b.log.gz", content: string(gzipped(t, content))},
+		{name: "inner.tgz", content: "x"},
+		{name: "link.log", flag: tar.TypeSymlink, link: "a.log"},
+		{name: "wide.log", content: wide},
+	}))
+	want, _, _ := redact.RedactBytes([]byte(content), compiled(t, testRules), true, redact.Options{})
+
+	for _, archive := range []string{"logs.zip", "logs.tgz"} {
+		sent := collect(t, base, Command{
+			Type: "fetch_archive", ID: "z", Path: archive, ChunkSize: minChunkSize, MaxDecompressed: 1 << 20,
+			Members: []string{"a.log", "b.log.gz", "inner.tgz", "locked.log", "link.log", "wide.log", "gone.log", "a.log"},
+			Redact:  redactJSON(t, testRules, "source"),
+		})
+		members := map[string][]byte{}
+		var order []ArchiveMember
+		current := ""
+		for i, msg := range sent[:len(sent)-1] {
+			switch m := msg.(type) {
+			case ArchiveMember:
+				if m.Seq != i || m.Type != "archive_member" || m.ID != "z" {
+					t.Fatalf("%s: message %d = %+v", archive, i, m)
+				}
+				order = append(order, m)
+				current = m.Name
+			case FetchChunk:
+				if m.Seq != i {
+					t.Fatalf("%s: chunk %d has seq %d", archive, i, m.Seq)
+				}
+				piece, _ := base64.StdEncoding.DecodeString(m.DataB64)
+				members[current] = append(members[current], piece...)
+			default:
+				t.Fatalf("%s: message %d = %#v", archive, i, msg)
+			}
+		}
+		skipped := map[string]string{}
+		for _, m := range order {
+			skipped[m.Name] = m.Skipped
+		}
+		wantSkipped := map[string]string{
+			"a.log": "", "b.log.gz": "", "inner.tgz": "nested_archive", "wide.log": "unsupported_encoding",
+			"gone.log": "not_found", "locked.log": "encrypted", "link.log": "not_found",
+		}
+		if archive == "logs.tgz" {
+			wantSkipped["locked.log"] = "not_found"
+		}
+		if len(order) != len(wantSkipped) {
+			t.Errorf("%s: members = %+v", archive, order)
+		}
+		for name, reason := range wantSkipped {
+			if got, ok := skipped[name]; !ok || got != reason {
+				t.Errorf("%s: %s skipped %q, want %q", archive, name, got, reason)
+			}
+		}
+		if order[0].Name != "a.log" || order[0].MTimeMs != when.UnixMilli() || order[1].Name != "b.log.gz" || !order[1].Gunzipped {
+			t.Errorf("%s: %+v", archive, order[:2])
+		}
+		for name, data := range members {
+			assertNoSecret(t, archive+" "+name, data)
+		}
+		if !bytes.Equal(members["a.log"], want) || !bytes.Equal(members["b.log.gz"], want) || len(members) != 2 {
+			t.Errorf("%s: contents %q", archive, members)
+		}
+		end, ok := sent[len(sent)-1].(RedactedFetchEnd)
+		if !ok || !end.Redacted || end.Counts["card"] != 4 || end.SourceSize != int64(2*len(content)) || end.Size != int64(2*len(want)) {
+			t.Errorf("%s: end = %#v", archive, sent[len(sent)-1])
+		}
+	}
+}
+
+// As the server's _redact_content: a member over max_decompressed once
+// decompressed, or a corrupt .gz member, is left out (announced again as
+// skipped when part of it was already sent) and the other members go on.
+func TestFetchArchiveLeavesOutAMemberItCantRead(t *testing.T) {
+	content := secretLog + "tail 4111 1111 1111 1111"
+	long := strings.Repeat("a line of the log\n", 300) // 5400 bytes: two chunks
+	corrupt := gzipped(t, long)
+	corrupt[len(corrupt)-8] ^= 0xff // CRC-32
+	truncated := gzipped(t, long)
+	truncated = truncated[:len(truncated)-4]
+	members := []struct{ name, content string }{
+		{"a.log", content},
+		{"big.log", strings.Repeat("a line of the log\n", 1000)},
+		{"crc.log.gz", string(corrupt)},
+		{"cut.log.gz", string(truncated)},
+		{"header.log.gz", "not gzip at all\n"},
+		{"c.log", content},
+	}
+	var zipped []zipMember
+	var tarred []tarMember
+	var names []string
+	for _, m := range members {
+		zipped = append(zipped, zipMember{name: m.name, content: m.content})
+		tarred = append(tarred, tarMember{name: m.name, content: m.content})
+		names = append(names, m.name)
+	}
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipOf(t, zipped))
+	writeFile(t, base, "logs.tgz", tarGzOf(t, tarred))
+	want, _, _ := redact.RedactBytes([]byte(content), compiled(t, testRules), true, redact.Options{})
+
+	for _, archive := range []string{"logs.zip", "logs.tgz"} {
+		sent := collect(t, base, Command{
+			Type: "fetch_archive", ID: "z", Path: archive, ChunkSize: minChunkSize, MaxDecompressed: 6000,
+			Members: names, Redact: redactJSON(t, testRules, "source"),
+		})
+		end, ok := sent[len(sent)-1].(RedactedFetchEnd)
+		if !ok {
+			t.Fatalf("%s: ended with %#v", archive, sent[len(sent)-1])
+		}
+		// The content of each member, from its last announcement on, and
+		// the reason it was left out, if it was.
+		got := map[string][]byte{}
+		skipped := map[string]string{}
+		withdrawn := map[string]bool{}
+		current := ""
+		for i, msg := range sent[:len(sent)-1] {
+			switch m := msg.(type) {
+			case ArchiveMember:
+				if m.Seq != i {
+					t.Fatalf("%s: message %d has seq %d", archive, i, m.Seq)
+				}
+				if _, seen := skipped[m.Name]; seen {
+					if current != m.Name || m.Skipped == "" {
+						t.Fatalf("%s: %s announced again out of place: %+v", archive, m.Name, m)
+					}
+					withdrawn[m.Name] = true
+				}
+				current = m.Name
+				skipped[m.Name] = m.Skipped
+				delete(got, m.Name)
+			case FetchChunk:
+				if m.Seq != i || skipped[current] != "" {
+					t.Fatalf("%s: chunk %d (seq %d) for %s", archive, i, m.Seq, current)
+				}
+				piece, _ := base64.StdEncoding.DecodeString(m.DataB64)
+				got[current] = append(got[current], piece...)
+			}
+		}
+		wantSkipped := map[string]string{
+			"a.log": "", "big.log": "too_large", "crc.log.gz": "unreadable",
+			"cut.log.gz": "unreadable", "header.log.gz": "unreadable", "c.log": "",
+		}
+		for name, reason := range wantSkipped {
+			if r, ok := skipped[name]; !ok || r != reason {
+				t.Errorf("%s: %s skipped %q, want %q", archive, name, r, reason)
+			}
+		}
+		if !withdrawn["big.log"] || !withdrawn["crc.log.gz"] {
+			t.Errorf("%s: withdrawn = %v, want big.log and crc.log.gz", archive, withdrawn)
+		}
+		if len(got) != 2 || !bytes.Equal(got["a.log"], want) || !bytes.Equal(got["c.log"], want) {
+			t.Errorf("%s: contents %q", archive, got)
+		}
+		if end.SourceSize != int64(2*len(content)) || end.Counts["card"] != 4 {
+			t.Errorf("%s: end = %#v", archive, end)
+		}
+	}
+}
+
+// A zip member whose content ends before the size its header declares is
+// unreadable, as on the server: refused when fetched, left out of a
+// fetch_archive (archive/zip reports it as io.ErrUnexpectedEOF, which the
+// readers would otherwise take for the end of the content).
+func TestATruncatedZipMemberIsUnreadable(t *testing.T) {
+	var compressed bytes.Buffer
+	fw, err := flate.NewWriter(&compressed, flate.DefaultCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte(secretLog)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	cut, err := w.CreateRaw(&zip.FileHeader{
+		Name: "cut.log", Method: zip.Deflate, CRC32: crc32.ChecksumIEEE([]byte(secretLog)),
+		CompressedSize64: uint64(compressed.Len()), UncompressedSize64: uint64(len(secretLog) + 100),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cut.Write(compressed.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	good, err := w.Create("good.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := good.Write([]byte(secretLog)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", buf.Bytes())
+
+	for _, redacting := range []bool{true, false} {
+		cmd := Command{
+			Type: "fetch", ID: "f", Path: "logs.zip", Member: "cut.log", ChunkSize: minChunkSize,
+			MaxDecompressed: 1 << 20,
+		}
+		if redacting {
+			cmd.Redact = redactJSON(t, testRules, "")
+		}
+		sent := collect(t, base, cmd)
+		if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Type != "fetch_error" ||
+			!strings.Contains(result.Error, "declared size") || result.Code != "archive_unreadable" {
+			t.Errorf("fetch (redacting %v) ended with %#v", redacting, sent[len(sent)-1])
+		}
+	}
+
+	sent := collect(t, base, Command{
+		Type: "fetch_archive", ID: "z", Path: "logs.zip", Members: []string{"cut.log", "good.log"},
+		ChunkSize: minChunkSize, MaxDecompressed: 1 << 20, Redact: redactJSON(t, testRules, "source"),
+	})
+	skipped := map[string]string{}
+	for _, msg := range sent {
+		if m, ok := msg.(ArchiveMember); ok {
+			skipped[m.Name] = m.Skipped
+		}
+	}
+	if skipped["cut.log"] != skipUnreadable || skipped["good.log"] != "" {
+		t.Errorf("skipped = %v", skipped)
+	}
+	if _, ok := sent[len(sent)-1].(RedactedFetchEnd); !ok {
+		t.Errorf("ended with %#v", sent[len(sent)-1])
+	}
+}
+
+// A tar member whose content ends before the size its header declares is
+// unreadable too, as a zip member's: archive/tar reports it as
+// io.ErrUnexpectedEOF. Nothing of it is sent, in a fetch or a fetch_archive.
+func TestATruncatedTarMemberIsUnreadable(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	w := tar.NewWriter(gz)
+	if err := w.WriteHeader(&tar.Header{
+		Name: "good.log", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(secretLog)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(secretLog)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteHeader(&tar.Header{
+		Name: "cut.log", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(secretLog) + 4096),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(secretLog)); err != nil {
+		t.Fatal(err)
+	}
+	// The tar stream ends inside cut.log (the tar writer isn't closed); the
+	// gzip stream around it is whole.
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	writeFile(t, base, "logs.tar.gz", buf.Bytes())
+
+	for _, redacting := range []bool{true, false} {
+		cmd := Command{
+			Type: "fetch", ID: "f", Path: "logs.tar.gz", Member: "cut.log", ChunkSize: minChunkSize,
+			MaxDecompressed: 1 << 20,
+		}
+		if redacting {
+			cmd.Redact = redactJSON(t, testRules, "")
+		}
+		sent := collect(t, base, cmd)
+		if result, ok := sent[len(sent)-1].(ErrorResult); !ok || result.Type != "fetch_error" ||
+			!strings.Contains(result.Error, "declared size") {
+			t.Errorf("fetch (redacting %v) ended with %#v", redacting, sent[len(sent)-1])
+		}
+		for _, msg := range sent {
+			// Unredacted, what was read is streamed before the error, as for
+			// a zip member; redacted, nothing of a value goes out in clear.
+			if chunk, ok := msg.(FetchChunk); ok && redacting {
+				piece, _ := base64.StdEncoding.DecodeString(chunk.DataB64)
+				if bytes.Contains(piece, []byte("4111")) {
+					t.Errorf("fetch sent a value in clear: %q", piece)
+				}
+			}
+		}
+	}
+
+	sent := collect(t, base, Command{
+		Type: "fetch_archive", ID: "z", Path: "logs.tar.gz", Members: []string{"good.log", "cut.log"},
+		ChunkSize: minChunkSize, MaxDecompressed: 1 << 20, Redact: redactJSON(t, testRules, "source"),
+	})
+	skipped := map[string]string{}
+	for _, msg := range sent {
+		switch m := msg.(type) {
+		case ArchiveMember:
+			skipped[m.Name] = m.Skipped
+		case FetchChunk:
+			piece, _ := base64.StdEncoding.DecodeString(m.DataB64)
+			if bytes.Contains(piece, []byte("4111")) {
+				t.Errorf("fetch_archive sent a value in clear: %q", piece)
+			}
+		}
+	}
+	if skipped["cut.log"] != skipUnreadable || skipped["good.log"] != "" {
+		t.Errorf("skipped = %v", skipped)
+	}
+	if _, ok := sent[len(sent)-1].(RedactedFetchEnd); !ok {
+		t.Errorf("ended with %#v", sent[len(sent)-1])
+	}
+}
+
+func TestFetchArchiveWithoutRedaction(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipArchive(t, map[string]string{"a.log": "one\n", "b.log": "two\n"}))
+	sent := collect(t, base, Command{Type: "fetch_archive", ID: "z", Path: "logs.zip", Members: []string{"b.log"}})
+	if len(sent) != 3 || sent[0].(ArchiveMember).Name != "b.log" {
+		t.Fatalf("sent %+v", sent)
+	}
+	if data, _ := base64.StdEncoding.DecodeString(sent[1].(FetchChunk).DataB64); string(data) != "two\n" {
+		t.Errorf("content %q", data)
+	}
+	if end, ok := sent[2].(FetchEnd); !ok || end.Size != 4 {
+		t.Errorf("end %#v", sent[2])
+	}
+	if result := collect(t, base, Command{Type: "fetch_archive", ID: "z", Path: "logs.zip", MaxBytes: 10})[0].(ErrorResult); result.Code != "too_large" {
+		t.Errorf("over max_bytes: %+v", result)
+	}
+}
+
+// readRange runs a redacted read_range and decodes its content.
+func readRange(t *testing.T, base, path string, offset int64) (RedactedReadRangeResult, []byte) {
+	t.Helper()
+	answer := handleCommand(Config{BasePath: base}, Command{
+		Type: "read_range", ID: "r", Path: path, Offset: offset, Length: maxRangeLength,
+		HeadLength: 64, Redact: redactJSON(t, testRules, ""),
+	})
+	result, ok := answer.(RedactedReadRangeResult)
+	if !ok {
+		t.Fatalf("answer = %#v", answer)
+	}
+	data, _ := base64.StdEncoding.DecodeString(result.DataB64)
+	if len(data) > maxRangeLength {
+		t.Fatalf("%d bytes, over %d", len(data), maxRangeLength)
+	}
+	return result, data
+}
+
+func TestRedactedReadRangeNeverSendsTheStartOfTheFile(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "app.log", []byte(secretLog))
+	result, data := readRange(t, base, "app.log", 0)
+	encoded, _ := json.Marshal(result)
+	if strings.Contains(string(encoded), "head_b64") {
+		t.Errorf("the answer carries the file's first bytes: %s", encoded)
+	}
+	assertNoSecret(t, "the read", data)
+	if result.Type != "read_range_result" || !result.Redacted || result.Digest != compiled(t, testRules).Digest() ||
+		result.NextOffset != int64(len(secretLog)) || result.ReadEnd != int64(len(secretLog)) || result.Aligned ||
+		result.HeadDigest != redact.HeadDigest(testHeadKey, []byte(secretLog), 0) ||
+		result.NextHeadDigest != redact.HeadDigest(testHeadKey, []byte(secretLog), int64(len(secretLog))) {
+		t.Errorf("result = %+v", result)
+	}
+}
+
+func TestRedactedReadRangeFollowsAGrowingFile(t *testing.T) {
+	// A Tail of a file written in pieces, values cut between them, gives
+	// what redacting the whole file gives.
+	base := t.TempDir()
+	parts := []string{
+		"start\ncard 4111 1111", " 1111 1111 paid\n-----BEGIN RSA PRIVATE KEY-----\nMIIEsecret",
+		"keybody\n", "-----END RSA PRIVATE KEY-----\nuser alice@exa", "mple.com in\npassword=hunter2\n",
+	}
+	var written, shown []byte
+	offset, partial := int64(0), 0
+	for _, part := range parts {
+		written = append(written, part...)
+		writeFile(t, base, "app.log", written)
+		result, data := readRange(t, base, "app.log", offset)
+		assertNoSecret(t, "a poll", data)
+		// As the viewer: the marker of the unfinished line is replaced by
+		// what the next poll sends.
+		shown = append(shown[:len(shown)-partial], data...)
+		offset, partial = result.NextOffset, result.TrailingPartial
+	}
+	want, _, _ := redact.RedactBytes(written, compiled(t, testRules), true, redact.Options{})
+	if partial != 0 || !bytes.Equal(shown, want) {
+		t.Errorf("shown %q\nwant  %q", shown, want)
+	}
+}
+
+func TestRedactedReadRangeInsideAPrivateKey(t *testing.T) {
+	base := t.TempDir()
+	content := "start\n-----BEGIN RSA PRIVATE KEY-----\nMIIEsecretkeybody\nMIIEsecretkeybody\n"
+	writeFile(t, base, "app.log", []byte(content))
+	// From the middle of a line inside the key: aligned to the next line,
+	// which the context before the offset shows is still the key.
+	offset := int64(strings.Index(content, "MIIE") + 4)
+	result, data := readRange(t, base, "app.log", offset)
+	assertNoSecret(t, "a read inside a key", data)
+	// The key's BEGIN, in the context, took the marker; its lines keep
+	// their line breaks only.
+	if !result.Aligned || result.NextOffset != int64(len(content)) || string(data) != "\n" {
+		t.Errorf("result %+v, data %q", result, data)
+	}
+}
+
+func TestRedactedReadRangeReadsLessWhenRedactingGrowsTheContent(t *testing.T) {
+	// Short emails become longer markers: the answer still fits, and the
+	// following polls go on from where it stopped.
+	base := t.TempDir()
+	content := bytes.Repeat([]byte("a@b.cd\n"), maxRangeLength/7)
+	writeFile(t, base, "app.log", content)
+	var shown []byte
+	offset, partial, polls := int64(0), 0, 0
+	for offset < int64(len(content)) {
+		result, data := readRange(t, base, "app.log", offset)
+		if result.NextOffset <= offset && result.TrailingPartial == 0 {
+			t.Fatalf("poll %d: no progress", polls)
+		}
+		shown = append(shown[:len(shown)-partial], data...)
+		offset, partial = result.NextOffset, result.TrailingPartial
+		polls++
+	}
+	want, _, _ := redact.RedactBytes(content, compiled(t, testRules), true, redact.Options{})
+	if polls < 2 || partial != 0 || !bytes.Equal(shown, want) {
+		t.Errorf("%d polls, %d bytes shown, want %d", polls, len(shown), len(want))
+	}
+}
+
+func TestRedactedReadRangeSkipsALineWithNoEnd(t *testing.T) {
+	base := t.TempDir()
+	content := append(bytes.Repeat([]byte("x"), 2*maxRangeLength), "\nok\n"...)
+	writeFile(t, base, "app.log", content)
+	result, data := readRange(t, base, "app.log", 0)
+	if string(data) != "[redacted: line over 1008 KiB]\n" || result.NextOffset != maxRangeLength || result.ReadEnd != maxRangeLength {
+		t.Errorf("result %+v, data %q", result, data)
+	}
+}
+
+// readRangeLines runs a redacted read_range for the alerts (with line
+// offsets) and returns its answer, content, and where each whole redacted
+// line starts in the original, worked out as the server does
+// (collectors/agent.py, _line_positions): from NextOffset back.
+func readRangeLines(t *testing.T, base, path string, offset int64) (RedactedReadRangeResult, []byte, []int64) {
+	t.Helper()
+	answer := handleCommand(Config{BasePath: base}, Command{
+		Type: "read_range", ID: "r", Path: path, Offset: offset, Length: maxRangeLength,
+		Redact: redactJSON(t, testRules, ""), WithLineOffsets: true,
+	})
+	result, ok := answer.(RedactedReadRangeResult)
+	if !ok {
+		t.Fatalf("answer = %#v", answer)
+	}
+	if result.ChangedLines == nil {
+		t.Fatal("no changed_lines")
+	}
+	data, _ := base64.StdEncoding.DecodeString(result.DataB64)
+	whole := data[:len(data)-result.TrailingPartial]
+	var lengths []int64
+	for len(whole) > 0 {
+		i := bytes.IndexByte(whole, '\n')
+		if i < 0 {
+			t.Fatalf("redacted lines don't end with a newline: %q", data)
+		}
+		lengths = append(lengths, int64(i+1))
+		whole = whole[i+1:]
+	}
+	previous := int64(-1)
+	for _, c := range *result.ChangedLines {
+		if c[0] <= previous || c[0] >= int64(len(lengths)) || c[1] < 1 {
+			t.Fatalf("changed_lines %v for %d lines", *result.ChangedLines, len(lengths))
+		}
+		lengths[c[0]], previous = c[1], c[0]
+	}
+	var total int64
+	for _, length := range lengths {
+		total += length
+	}
+	position := result.NextOffset - total
+	if position < offset || (!result.Aligned && position != offset) {
+		t.Fatalf("the lines start at %d, offset %d (aligned %v)", position, offset, result.Aligned)
+	}
+	positions := []int64{}
+	for _, length := range lengths {
+		positions = append(positions, position)
+		position += length
+	}
+	return result, data, positions
+}
+
+// lineStarts is where each line of content that starts in [from, to)
+// starts (a UTF-16 newline only on an even offset).
+func lineStarts(content []byte, newline string, from, to int64) []int64 {
+	starts := []int64{}
+	start := int64(0)
+	for i := 0; i <= len(content)-len(newline); i++ {
+		if string(content[i:i+len(newline)]) != newline || i%len(newline) != 0 {
+			continue
+		}
+		if start >= from && start < to {
+			starts = append(starts, start)
+		}
+		start = int64(i + len(newline))
+	}
+	return starts
+}
+
+// The alerts (#382, #249) match the redacted lines and report where each
+// one is in the original file: ChangedLines gives the server the original
+// length of each line redaction changed, so it can tell, whatever was
+// replaced, where every line starts.
+func TestRedactedReadRangeSaysWhereEachLineStarts(t *testing.T) {
+	base := t.TempDir()
+	unfinished := secretLog + "partial 4111 1111"
+	writeFile(t, base, "app.log", []byte(unfinished))
+	wide := append([]byte{0xff, 0xfe}, utf16LE(secretLog)...)
+	writeFile(t, base, "wide.log", wide)
+	for _, tc := range []struct {
+		name, path, newline string
+		content             []byte
+		offset              int64
+	}{
+		{"from the start", "app.log", "\n", []byte(unfinished), 0},
+		{"from a line", "app.log", "\n", []byte(unfinished), int64(strings.Index(secretLog, "password"))},
+		{"from the middle of a line", "app.log", "\n", []byte(unfinished), int64(strings.Index(secretLog, "hunter2"))},
+		{"UTF-16", "wide.log", "\n\x00", wide, 0},
+		{"UTF-16 from a line", "wide.log", "\n\x00", wide, int64(2 + 2*strings.Index(secretLog, "card"))},
+	} {
+		result, data, positions := readRangeLines(t, base, tc.path, tc.offset)
+		assertNoSecret(t, tc.name, data)
+		want := lineStarts(tc.content, tc.newline, tc.offset, result.NextOffset)
+		if fmt.Sprint(positions) != fmt.Sprint(want) {
+			t.Errorf("%s: lines at %v, want %v", tc.name, positions, want)
+		}
+		if len(*result.ChangedLines) == 0 {
+			t.Errorf("%s: no line changed", tc.name)
+		}
+	}
+	// A line with no end within the read stands for what was skipped.
+	writeFile(t, base, "long.log", append(bytes.Repeat([]byte("x"), 2*maxRangeLength), "\nok\n"...))
+	result, _, positions := readRangeLines(t, base, "long.log", 0)
+	if fmt.Sprint(positions) != "[0]" || fmt.Sprint(*result.ChangedLines) != fmt.Sprintf("[[0 %d]]", maxRangeLength) {
+		t.Errorf("long line: lines at %v, changed %v", positions, *result.ChangedLines)
+	}
+	// Nothing new: an empty list, still there.
+	result, data, positions := readRangeLines(t, base, "app.log", int64(len(secretLog)))
+	if len(positions) != 0 || result.TrailingPartial != len(data) {
+		t.Errorf("nothing new: %v %+v", positions, result)
+	}
+	// Not asked for: not sent.
+	plain, _ := readRange(t, base, "app.log", 0)
+	if encoded, _ := json.Marshal(plain); strings.Contains(string(encoded), "changed_lines") {
+		t.Errorf("changed_lines sent unasked: %s", encoded)
+	}
+}
+
+func TestChangedLinesRefusesLinesThatDontMatch(t *testing.T) {
+	for _, tc := range []struct {
+		output    string
+		originals []int64
+	}{
+		{"a\nb\n", []int64{2}},
+		{"a\n", []int64{2, 2}},
+		{"a\nb", []int64{2, 2}},
+	} {
+		if _, err := changedLines([]byte(tc.output), tc.originals); err == nil {
+			t.Errorf("%q against %v: no error", tc.output, tc.originals)
+		}
+	}
+}
+
+func TestRedactedReadRangeRefusesUTF32(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "wide.log", []byte{0xff, 0xfe, 0, 0, 'p', 0, 0, 0})
+	answer := handleCommand(Config{BasePath: base}, Command{
+		Type: "read_range", ID: "r", Path: "wide.log", Length: 100, Redact: redactJSON(t, testRules, ""),
+	})
+	if result, ok := answer.(ErrorResult); !ok || result.Type != "redaction_error" || result.Code != codeUnsupportedEncoding {
+		t.Errorf("answer %+v", answer)
+	}
+}
+
+// utf32LE is s in UTF-32 LE (ASCII only).
+func utf32LE(s string) []byte {
+	var out []byte
+	for _, r := range s {
+		out = append(out, byte(r), 0, 0, 0)
+	}
+	return out
+}
+
+// Content that turns UTF-32 part way: the rest is refused with the marker,
+// and the answer says where, in the original, it started.
+var (
+	midstreamStart   = "plain start of the log, long enough to be read as bytes here\n"
+	midstreamRefused = int64(len(midstreamStart) + len("then plain\n"))
+	midstream        = append(append([]byte(midstreamStart+"then plain\n"), utf32LE("password=hunter2\n")...), "card 4111 1111 1111 1111\n"...)
+)
+
+func TestRedactedFetchRefusesTheRestOfContentThatTurnsUTF32(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "app.log", midstream)
+	sent := collect(t, base, Command{
+		Type: "fetch", ID: "f", Path: "app.log", ChunkSize: minChunkSize, Redact: redactJSON(t, testRules, ""),
+	})
+	data, last := streamed(t, sent, minChunkSize)
+	assertNoSecret(t, "the fetch", data)
+	if !bytes.HasSuffix(data, []byte("[redacted: unsupported encoding]")) || bytes.Contains(data, utf32LE("hunter2")) {
+		t.Errorf("data %q", data)
+	}
+	end := last.(RedactedFetchEnd)
+	if end.RefusedEncodingAt == nil || *end.RefusedEncodingAt != midstreamRefused {
+		t.Errorf("refused at %v, want %d", end.RefusedEncodingAt, midstreamRefused)
+	}
+	// Read to its end all the same: the Tail goes on after it.
+	if end.SourceOffset != int64(len(midstream)) || end.SourceSize != int64(len(midstream)) {
+		t.Errorf("end %+v", end)
+	}
+	// Content that doesn't turn UTF-32 says nothing.
+	writeFile(t, base, "plain.log", []byte(secretLog))
+	_, last = streamed(t, collect(t, base, Command{
+		Type: "fetch", ID: "f", Path: "plain.log", ChunkSize: minChunkSize, Redact: redactJSON(t, testRules, ""),
+	}), minChunkSize)
+	if encoded, _ := json.Marshal(last); strings.Contains(string(encoded), "refused_encoding_at") {
+		t.Errorf("refused_encoding_at sent for plain content: %s", encoded)
+	}
+}
+
+func TestRedactedReadRangeRefusesTheRestOfContentThatTurnsUTF32(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "app.log", midstream)
+	for _, lines := range []bool{false, true} {
+		answer := handleCommand(Config{BasePath: base}, Command{
+			Type: "read_range", ID: "r", Path: "app.log", Length: maxRangeLength,
+			Redact: redactJSON(t, testRules, ""), WithLineOffsets: lines,
+		})
+		result, ok := answer.(RedactedReadRangeResult)
+		if !ok {
+			t.Fatalf("answer = %#v", answer)
+		}
+		if lines && (result.ChangedLines == nil || len(*result.ChangedLines) != 0) {
+			t.Errorf("changed lines %v, want an empty list", result.ChangedLines)
+		}
+		data, _ := base64.StdEncoding.DecodeString(result.DataB64)
+		assertNoSecret(t, "the read", data)
+		if !bytes.HasSuffix(data, []byte("[redacted: unsupported encoding]")) {
+			t.Errorf("data %q", data)
+		}
+		if result.RefusedEncodingAt == nil || *result.RefusedEncodingAt != midstreamRefused ||
+			result.NextOffset != int64(len(midstream)) || result.TrailingPartial != 0 {
+			t.Errorf("result %+v", result)
+		}
+	}
+}
+
+// The alerts' line offsets follow content read as UTF16Unsure from a line of
+// clear UTF-16 content with ASCII text in it: its lines end at every newline
+// byte from there.
+func TestRedactedReadRangeLinesOfUTF16ThatTurnsToBytes(t *testing.T) {
+	base := t.TempDir()
+	content := append([]byte{0xff, 0xfe}, utf16LE("first line\nsecond line\n")...)
+	content = append(content, "password=hunter2\nnext\n"...)
+	// A UTF-16 newline ends the UTF-16 line the ASCII text is in.
+	content = append(content, utf16LE("tail\n")...)
+	writeFile(t, base, "app.log", content)
+	result, data, positions := readRangeLines(t, base, "app.log", 0)
+	assertNoSecret(t, "the read", data)
+	ascii := int64(2 + 2*len("first line\nsecond line\n"))
+	password := ascii + int64(len("password=hunter2\n"))
+	want := []int64{0, 2 + 2*int64(len("first line\n")), ascii, password, password + int64(len("next\n"))}
+	if fmt.Sprint(positions) != fmt.Sprint(want) || result.RefusedEncodingAt != nil {
+		t.Errorf("lines at %v, want %v (%+v)", positions, want, result)
+	}
+}
+
+func TestFetchArchiveLeavesOutAMemberThatTurnsUTF32(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{
+		{name: "a.log", content: secretLog},
+		{name: "mixed.log", content: string(midstream)},
+	}))
+	sent := collect(t, base, Command{
+		Type: "fetch_archive", ID: "z", Path: "logs.zip", ChunkSize: minChunkSize, MaxDecompressed: 1 << 20,
+		Members: []string{"a.log", "mixed.log"}, Redact: redactJSON(t, testRules, "source"),
+	})
+	var last ArchiveMember
+	for _, msg := range sent {
+		if m, ok := msg.(ArchiveMember); ok {
+			last = m
+		}
+	}
+	// Announced again after its content, as skipped: that withdraws it.
+	if last.Name != "mixed.log" || last.Skipped != "unsupported_encoding" {
+		t.Errorf("last announcement %+v", last)
+	}
+}
+
+func TestRedactedReadRangePastTheEnd(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, base, "app.log", []byte("short\n"))
+	result, data := readRange(t, base, "app.log", 100)
+	if len(data) != 0 || result.Size != 6 || result.NextOffset != 100 {
+		t.Errorf("result %+v", result)
+	}
+}
+
+func TestAtMostTwoCommandsRedactAtOnce(t *testing.T) {
+	slots := newCommandSlots()
+	redacting := Command{Redact: json.RawMessage(`{}`)}
+	release := []func(){slots.acquire(redacting), slots.acquire(redacting)}
+
+	third := make(chan struct{})
+	go func() {
+		defer slots.acquire(redacting)()
+		close(third)
+	}()
+	select {
+	case <-third:
+		t.Fatal("a third redacting command ran")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// A command that doesn't redact isn't held up.
+	done := make(chan struct{})
+	go func() {
+		defer slots.acquire(Command{})()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a plain command waited for the redaction slots")
+	}
+	release[0]()
+	select {
+	case <-third:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the third redacting command never ran")
+	}
+	release[1]()
+}
+
+func TestRedactedFetchRefusesACompressedMemberNotAskedDecompressed(t *testing.T) {
+	// A .gz member sent as it is would carry the original, compressed.
+	base := t.TempDir()
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{{name: "app.log.gz", content: string(gzipped(t, secretLog))}}))
+	writeFile(t, base, "logs.tar.gz", tarGzOf(t, []tarMember{{name: "app.log.gz", content: string(gzipped(t, secretLog))}}))
+	want, _, _ := redact.RedactBytes([]byte(secretLog), compiled(t, testRules), true, redact.Options{})
+	for _, archive := range []string{"logs.zip", "logs.tar.gz"} {
+		cmd := Command{
+			Type: "fetch", ID: "m", Path: archive, Member: "app.log.gz", ChunkSize: minChunkSize,
+			MaxDecompressed: 1 << 20, Redact: redactJSON(t, testRules, ""),
+		}
+		refusal(t, collect(t, base, cmd), codeNotRedactable)
+		// Asked for decompressed, it is redacted.
+		cmd.Decompress = "gzip"
+		data, last := streamed(t, collect(t, base, cmd), minChunkSize)
+		assertNoSecret(t, archive+" app.log.gz", data)
+		if _, ok := last.(RedactedFetchEnd); !ok || !bytes.Equal(data, want) {
+			t.Errorf("%s: data %q, end %#v", archive, data, last)
+		}
+	}
+}
+
+// As the server's decompress_gzip: a .gz cut short, asked for
+// decompressed (the file or an archive member), is refused, redacted or
+// not, instead of passing as content up to the cut.
+func TestFetchRefusesATruncatedGzAskedDecompressed(t *testing.T) {
+	cut := gzipped(t, secretLog)
+	cut = cut[:len(cut)-4]
+	base := t.TempDir()
+	writeFile(t, base, "app.log.gz", cut)
+	writeFile(t, base, "logs.zip", zipOf(t, []zipMember{{name: "app.log.gz", content: string(cut)}}))
+	writeFile(t, base, "logs.tar.gz", tarGzOf(t, []tarMember{{name: "app.log.gz", content: string(cut)}}))
+	for _, redacting := range []bool{false, true} {
+		for _, target := range []struct{ path, member string }{
+			{"app.log.gz", ""}, {"logs.zip", "app.log.gz"}, {"logs.tar.gz", "app.log.gz"},
+		} {
+			cmd := Command{
+				Type: "fetch", ID: "g", Path: target.path, Member: target.member, ChunkSize: minChunkSize,
+				Decompress: "gzip", MaxDecompressed: 1 << 20,
+			}
+			if redacting {
+				cmd.Redact = redactJSON(t, testRules, "")
+			}
+			sent := collect(t, base, cmd)
+			result, ok := sent[len(sent)-1].(ErrorResult)
+			if !ok || result.Type != "fetch_error" || !strings.Contains(result.Error, "end-of-stream") ||
+				result.Code != "gzip_unreadable" {
+				t.Errorf("%s %s (redacting %v): ended with %#v", target.path, target.member, redacting, sent[len(sent)-1])
+			}
+		}
+	}
+}
+
+func TestRedactedFetchRefusesAnArchiveAskedDecompressed(t *testing.T) {
+	// A .tar.gz decompressed is a tar stream that starts with a member's
+	// name, so it would pass as text and carry its .gz members' originals.
+	base := t.TempDir()
+	tarGz := tarGzOf(t, []tarMember{{name: "app.log.gz", content: string(gzipped(t, secretLog))}})
+	writeFile(t, base, "logs.tar.gz", tarGz)
+	writeFile(t, base, "logs.tgz", tarGz)
+	writeFile(t, base, "outer.zip", zipOf(t, []zipMember{
+		{name: "inner.tar.gz", content: string(tarGz)},
+		{name: "inner.tgz", content: string(tarGz)},
+	}))
+	for _, decompress := range []string{"", "gzip"} {
+		for _, path := range []string{"logs.tar.gz", "logs.tgz"} {
+			cmd := Command{
+				Type: "fetch", ID: "w", Path: path, ChunkSize: minChunkSize, Decompress: decompress,
+				MaxDecompressed: 1 << 20, Redact: redactJSON(t, testRules, ""),
+			}
+			refusal(t, collect(t, base, cmd), codeNotRedactable)
+		}
+		for _, member := range []string{"inner.tar.gz", "inner.tgz"} {
+			cmd := Command{
+				Type: "fetch", ID: "m", Path: "outer.zip", Member: member, ChunkSize: minChunkSize,
+				Decompress: decompress, MaxDecompressed: 1 << 20, Redact: redactJSON(t, testRules, ""),
+			}
+			refusal(t, collect(t, base, cmd), codeNotRedactable)
+		}
+	}
+}
+
+// compressedFormats are content in each compressed format redaction
+// refuses, told by its first bytes, each holding the secrets.
+func compressedFormats(t *testing.T) map[string][]byte {
+	t.Helper()
+	return map[string][]byte{
+		"bzip2":       []byte("BZh9\x31\x41\x59\x26\x53\x59" + secretLog),
+		"bzip2-empty": []byte("BZh1\x17\x72\x45\x38\x50\x90" + secretLog),
+		"xz":          []byte("\xfd7zXZ\x00" + secretLog),
+		"zstd":        []byte("\x28\xb5\x2f\xfd" + secretLog),
+		"7z":          []byte("7z\xbc\xaf\x27\x1c" + secretLog),
+		"rar":         []byte("Rar!\x1a\x07\x01\x00" + secretLog),
+		"gzip":        gzipped(t, secretLog),
+		"zip":         zipArchive(t, map[string]string{"a.log": secretLog}),
+		"zip-empty":   []byte("PK\x05\x06" + secretLog),
+		"zip-split":   []byte("PK\x07\x08" + secretLog),
+	}
+}
+
+func TestUnsupportedCompressedFormat(t *testing.T) {
+	for name, content := range compressedFormats(t) {
+		if !unsupportedCompressedFormat(content[:min(len(content), redact.HeadBytes)]) {
+			t.Errorf("%s isn't detected", name)
+		}
+	}
+	// Text that only looks like the start of one.
+	for _, text := range []string{"BZh9 is a name\n", "BZh0\x31\x41\x59\x26\x53\x59", "PK is a name\n", "Rar\n", "7z\n", ""} {
+		if unsupportedCompressedFormat([]byte(text)) {
+			t.Errorf("%q is taken for compressed content", text)
+		}
+	}
+}
+
+func TestRedactedFetchRefusesUnsupportedCompressedFormats(t *testing.T) {
+	base := t.TempDir()
+	formats := compressedFormats(t)
+	for name, content := range formats {
+		// A name that doesn't say it is compressed (app.log.1), or one that
+		// does but isn't decompressed (.bz2).
+		writeFile(t, base, name+".log.1", content)
+		writeFile(t, base, name+".bz2", content)
+		writeFile(t, base, name+".in.gz", gzipped(t, string(content)))
+	}
+	writeFile(t, base, "members.zip", zipOf(t, []zipMember{
+		{name: "xz.log", content: string(formats["xz"])},
+		{name: "gzip.log.1", content: string(formats["gzip"])},
+		{name: "bzip2.log.gz", content: string(gzipped(t, string(formats["bzip2"])))},
+	}))
+	writeFile(t, base, "members.tgz", tarGzOf(t, []tarMember{
+		{name: "xz.log", content: string(formats["xz"])},
+		{name: "gzip.log.1", content: string(formats["gzip"])},
+		{name: "bzip2.log.gz", content: string(gzipped(t, string(formats["bzip2"])))},
+	}))
+	block := redactJSON(t, testRules, "")
+	for name := range formats {
+		for _, path := range []string{name + ".log.1", name + ".bz2"} {
+			for _, output := range []string{"", "source"} {
+				cmd := Command{Type: "fetch", ID: "f", Path: path, ChunkSize: minChunkSize, Redact: redactJSON(t, testRules, output)}
+				refusal(t, collect(t, base, cmd), codeUnsupportedFormat)
+			}
+		}
+		// The content of a .gz file.
+		refusal(t, collect(t, base, Command{
+			Type: "fetch", ID: "f", Path: name + ".in.gz", ChunkSize: minChunkSize, Decompress: "gzip",
+			MaxDecompressed: 1 << 20, Redact: block,
+		}), codeUnsupportedFormat)
+		// A redacted Tail.
+		answer := handleCommand(Config{BasePath: base}, Command{
+			Type: "read_range", ID: "r", Path: name + ".log.1", Offset: 0, Length: maxRangeLength, Redact: block,
+		})
+		if result, ok := answer.(ErrorResult); !ok || result.Type != "redaction_error" || result.Code != codeUnsupportedFormat {
+			t.Errorf("read_range of %s: %+v", name, answer)
+		}
+		// Without redaction, nothing changes.
+		data, _ := streamed(t, collect(t, base, Command{Type: "fetch", ID: "f", Path: name + ".log.1", ChunkSize: minChunkSize}), minChunkSize)
+		if !bytes.Equal(data, formats[name]) {
+			t.Errorf("%s without redaction: %q", name, data)
+		}
+	}
+	for _, archive := range []string{"members.zip", "members.tgz"} {
+		for _, member := range []string{"xz.log", "gzip.log.1"} {
+			refusal(t, collect(t, base, Command{
+				Type: "fetch", ID: "m", Path: archive, Member: member, ChunkSize: minChunkSize,
+				MaxDecompressed: 1 << 20, Redact: block,
+			}), codeUnsupportedFormat)
+		}
+		refusal(t, collect(t, base, Command{
+			Type: "fetch", ID: "m", Path: archive, Member: "bzip2.log.gz", ChunkSize: minChunkSize, Decompress: "gzip",
+			MaxDecompressed: 1 << 20, Redact: block,
+		}), codeUnsupportedFormat)
+		// In a fetch_archive, each is skipped with no content.
+		sent := collect(t, base, Command{
+			Type: "fetch_archive", ID: "z", Path: archive, ChunkSize: minChunkSize, MaxDecompressed: 1 << 20,
+			Members: []string{"xz.log", "gzip.log.1", "bzip2.log.gz"}, Redact: block,
+		})
+		if len(sent) != 4 {
+			t.Fatalf("%s: sent %+v", archive, sent)
+		}
+		for _, msg := range sent[:3] {
+			if m, ok := msg.(ArchiveMember); !ok || m.Skipped != "unsupported_format" {
+				t.Errorf("%s: %#v, want skipped unsupported_format", archive, msg)
+			}
+		}
+		if end, ok := sent[3].(RedactedFetchEnd); !ok || end.Chunks != 0 || end.Size != 0 {
+			t.Errorf("%s: end %#v", archive, sent[3])
+		}
+	}
+}
+
+func TestRedactedReadRangeWithASmallLengthNeverGoesBack(t *testing.T) {
+	base := t.TempDir()
+	line := "password=hunter2 line\n"
+	content := strings.Repeat(line, 10000)
+	writeFile(t, base, "app.log", []byte(content))
+	read := func(offset, length int64) (RedactedReadRangeResult, []byte) {
+		t.Helper()
+		answer := handleCommand(Config{BasePath: base}, Command{
+			Type: "read_range", ID: "r", Path: "app.log", Offset: offset, Length: length, Redact: redactJSON(t, testRules, ""),
+		})
+		result, ok := answer.(RedactedReadRangeResult)
+		if !ok {
+			t.Fatalf("answer = %#v", answer)
+		}
+		data, _ := base64.StdEncoding.DecodeString(result.DataB64)
+		return result, data
+	}
+	// The offset is well past the context read before it (16 KiB), the
+	// length well under it.
+	offset := int64(len(line) * 4545)
+	for _, start := range []int64{offset, offset + 5} {
+		result, data := read(start, 4096)
+		assertNoSecret(t, "a short read", data)
+		if result.NextOffset <= start || result.NextOffset > start+4096 || result.NextOffset%int64(len(line)) != 0 {
+			t.Errorf("from %d: next %d", start, result.NextOffset)
+		}
+		// The read ends inside a line, sent as the incomplete-line marker.
+		if result.TrailingPartial == 0 || !bytes.HasSuffix(data, []byte("[redacted: incomplete line]")) {
+			t.Fatalf("from %d: partial %d", start, result.TrailingPartial)
+		}
+		from := (start + int64(len(line)) - 1) / int64(len(line)) * int64(len(line))
+		want, _, _ := redact.RedactBytes([]byte(content[from:result.NextOffset]), compiled(t, testRules), true, redact.Options{})
+		if whole := data[:len(data)-result.TrailingPartial]; !bytes.Equal(whole, want) {
+			t.Errorf("from %d: %q", start, whole)
+		}
+	}
+	if result, data := read(offset, 0); result.NextOffset != offset || len(data) != 0 {
+		t.Errorf("length 0: %+v %q", result, data)
+	}
+
+	// A line with no end within the short read is skipped, forward.
+	long := strings.Repeat("ok\n", 40000) + strings.Repeat("x", 200000) + "\nok\n"
+	writeFile(t, base, "app.log", []byte(long))
+	result, data := read(120000, 4096)
+	if result.NextOffset != 120000+4096 || string(data) != "[redacted: line over 4 KiB]\n" {
+		t.Errorf("long line: next %d, data %q", result.NextOffset, data)
+	}
+}
+
+func TestOldCommandsAreUnchanged(t *testing.T) {
+	// Without a redact block, read_range still sends the head and data.
+	base := t.TempDir()
+	writeFile(t, base, "app.log", []byte(secretLog))
+	answer := handleCommand(Config{BasePath: base}, Command{Type: "read_range", ID: "r", Path: "app.log", Length: 10, HeadLength: 5})
+	if result, ok := answer.(ReadRangeResult); !ok || result.HeadB64 == "" {
+		t.Errorf("answer %#v", answer)
+	}
+}

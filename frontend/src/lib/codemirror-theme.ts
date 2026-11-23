@@ -1,7 +1,7 @@
 import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
 import { xml } from '@codemirror/lang-xml'
-import { RangeSetBuilder } from '@codemirror/state'
+import { type Line, RangeSetBuilder, StateEffect } from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
@@ -12,7 +12,13 @@ import {
 } from '@codemirror/view'
 import type { FileLanguage } from './file-language'
 import { findMarkMatches, type MarkPattern } from './mark-highlighting'
-import { findMatchesInLine, LEVEL_CLASS } from './severity-highlighting'
+import { findRedactionMarkers } from './redaction-markers'
+import {
+  LEVEL_CLASS,
+  type SeverityMatch,
+  type SeverityMatcher,
+  severityMatcher,
+} from './severity-highlighting'
 import { findCrlfLineNumbers, findWhitespaceRuns } from './whitespace-highlighting'
 import type { SeverityPattern } from './types'
 
@@ -81,91 +87,140 @@ export const darkTheme = EditorView.theme(
     '.cm-mark-3': { backgroundColor: 'rgba(192, 132, 252, 0.32)' },
     '.cm-mark-4': { backgroundColor: 'rgba(251, 146, 60, 0.32)' },
     '.cm-mark-5': { backgroundColor: 'rgba(94, 234, 212, 0.32)' },
+    // Values the server redacted (#382, #249).
+    '.cm-redacted': {
+      backgroundColor: 'rgba(148, 163, 184, 0.18)',
+      borderRadius: '3px',
+      fontStyle: 'italic',
+    },
   },
   { dark: true },
 )
 
-function buildTokenDecorations(view: EditorView, patterns: SeverityPattern[]): DecorationSet {
-  const builder = new RangeSetBuilder<Decoration>()
+/** The lines in view, each once, in document order. */
+function visibleLines(view: EditorView): Line[] {
+  const lines: Line[] = []
+  let last = 0
   for (const { from, to } of view.visibleRanges) {
     let pos = from
     while (pos <= to) {
       const line = view.state.doc.lineAt(pos)
-      const matches = findMatchesInLine(line.text, patterns).sort(
-        (a, b) => a.matchStart - b.matchStart,
-      )
-      for (const match of matches) {
-        const start = line.from + match.matchStart
-        const end = start + match.matchLength
-        builder.add(start, end, Decoration.mark({ class: LEVEL_CLASS[match.level] }))
+      if (line.number > last) {
+        lines.push(line)
+        last = line.number
       }
       pos = line.to + 1
     }
   }
-  return builder.finish()
+  return lines
 }
 
-function buildLineDecorations(view: EditorView, patterns: SeverityPattern[]): DecorationSet {
-  const builder = new RangeSetBuilder<Decoration>()
-  for (const { from, to } of view.visibleRanges) {
-    let pos = from
-    while (pos <= to) {
-      const line = view.state.doc.lineAt(pos)
-      const hasLineTint = findMatchesInLine(line.text, patterns).some((m) => m.highlightLine)
-      if (hasLineTint) {
-        builder.add(line.from, line.from, Decoration.line({ class: 'cm-line-error' }))
-      }
-      pos = line.to + 1
-    }
-  }
-  return builder.finish()
-}
+// Redraws the editor once the worker's matches have arrived.
+const severityMatchesArrived = StateEffect.define<null>()
 
-/** Admin-configurable severity highlighting (see ROADMAP.md's "Viewer:
- * toward an advanced editor" section and backend/app/api/severity_patterns.py)
+/** Admin-configurable severity highlighting (see docs/design-decisions.md,
+ * "Frontend and UI", and backend/app/api/severity_patterns.py)
  * — colors matched tokens and optionally tints the whole line, driven by
  * whatever pattern set is effective for the currently open source, rather
- * than a fixed set of regexes. Two separate ViewPlugins/builders (line
- * tints vs. token marks), not one combined builder: RangeSetBuilder
- * requires strictly ascending position order, and interleaving line-level
- * and mark-level decorations from independently-sized ranges in a single
+ * than a fixed set of regexes. The lines in view are matched in a Web
+ * Worker (severity-highlighting.ts), so the decorations arrive a moment
+ * later; until then, the previous ones stay, moved with any appended text.
+ * One request at a time: a change while one is out is matched when it
+ * returns. Line tints and token marks are two decoration sets, not one
+ * builder: RangeSetBuilder requires strictly ascending position order,
+ * and interleaving line-level and mark-level decorations in a single
  * builder would violate that. `patterns` is captured at construction time —
  * the caller (CodeMirrorPane) rebuilds the whole extension set when the
  * effective pattern list changes, same as it already does for `content`. */
-export function severityHighlighting(patterns: SeverityPattern[]) {
+export function severityHighlighting(
+  patterns: SeverityPattern[],
+  matcher: SeverityMatcher = severityMatcher,
+) {
   const enabled = patterns.filter((p) => p.enabled)
 
-  const lines = ViewPlugin.fromClass(
+  const plugin = ViewPlugin.fromClass(
     class {
-      decorations: DecorationSet
+      lines: DecorationSet = Decoration.none
+      tokens: DecorationSet = Decoration.none
+      private busy = false
+      private stale = false
+      private destroyed = false
+      private readonly view: EditorView
+
       constructor(view: EditorView) {
-        this.decorations = buildLineDecorations(view, enabled)
+        this.view = view
+        this.request()
       }
+
       update(update: ViewUpdate) {
-        if (update.docChanged || update.viewportChanged) {
-          this.decorations = buildLineDecorations(update.view, enabled)
+        if (update.docChanged) {
+          this.lines = this.lines.map(update.changes)
+          this.tokens = this.tokens.map(update.changes)
         }
+        if (update.docChanged || update.viewportChanged) this.request()
+      }
+
+      destroy() {
+        this.destroyed = true
+      }
+
+      private request() {
+        if (enabled.length === 0) return
+        if (this.busy) {
+          this.stale = true
+          return
+        }
+        this.busy = true
+        this.stale = false
+        const doc = this.view.state.doc
+        const lines = visibleLines(this.view)
+        void matcher
+          .match(
+            lines.map((line) => line.text),
+            enabled,
+          )
+          .then((matches) => {
+            this.busy = false
+            if (this.destroyed) return
+            if (this.stale || this.view.state.doc !== doc) {
+              this.request()
+              return
+            }
+            this.show(lines, matches)
+          })
+      }
+
+      private show(lines: Line[], matches: SeverityMatch[][]) {
+        const lineTints = new RangeSetBuilder<Decoration>()
+        const tokens = new RangeSetBuilder<Decoration>()
+        lines.forEach((line, index) => {
+          const found = [...matches[index]].sort((a, b) => a.matchStart - b.matchStart)
+          if (found.some((m) => m.highlightLine)) {
+            lineTints.add(line.from, line.from, Decoration.line({ class: 'cm-line-error' }))
+          }
+          for (const match of found) {
+            const start = line.from + match.matchStart
+            tokens.add(
+              start,
+              start + match.matchLength,
+              Decoration.mark({ class: LEVEL_CLASS[match.level] }),
+            )
+          }
+        })
+        this.lines = lineTints.finish()
+        this.tokens = tokens.finish()
+        this.view.dispatch({ effects: severityMatchesArrived.of(null) })
       }
     },
-    { decorations: (v) => v.decorations },
-  )
-
-  const tokens = ViewPlugin.fromClass(
-    class {
-      decorations: DecorationSet
-      constructor(view: EditorView) {
-        this.decorations = buildTokenDecorations(view, enabled)
-      }
-      update(update: ViewUpdate) {
-        if (update.docChanged || update.viewportChanged) {
-          this.decorations = buildTokenDecorations(update.view, enabled)
-        }
-      }
+    {
+      provide: (p) => [
+        EditorView.decorations.of((view) => view.plugin(p)?.lines ?? Decoration.none),
+        EditorView.decorations.of((view) => view.plugin(p)?.tokens ?? Decoration.none),
+      ],
     },
-    { decorations: (v) => v.decorations },
   )
 
-  return [lines, tokens]
+  return [plugin]
 }
 
 function buildMarkDecorations(view: EditorView, marks: MarkPattern[]): DecorationSet {
@@ -209,6 +264,40 @@ export function markHighlighting(marks: MarkPattern[]) {
     { decorations: (v) => v.decorations },
   )
 }
+
+function buildRedactionDecorations(view: EditorView): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>()
+  const mark = Decoration.mark({ class: 'cm-redacted' })
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from
+    while (pos <= to) {
+      const line = view.state.doc.lineAt(pos)
+      for (const match of findRedactionMarkers(line.text)) {
+        builder.add(line.from + match.start, line.from + match.end, mark)
+      }
+      pos = line.to + 1
+    }
+  }
+  return builder.finish()
+}
+
+/** Shows the `[redacted: ...]` markers the server put in place of
+ * redacted values (#382, #249) apart from the log's own text. Display
+ * only: the values were removed on the server. */
+export const redactionHighlighting = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet
+    constructor(view: EditorView) {
+      this.decorations = buildRedactionDecorations(view)
+    }
+    update(update: ViewUpdate) {
+      if (update.docChanged || update.viewportChanged) {
+        this.decorations = buildRedactionDecorations(update.view)
+      }
+    }
+  },
+  { decorations: (v) => v.decorations },
+)
 
 class GlyphWidget extends WidgetType {
   constructor(
@@ -312,8 +401,8 @@ function buildBookmarkDecorations(view: EditorView, bookmarks: number[]): Decora
   return builder.finish()
 }
 
-/** Pure client-side/session bookmarks (ROADMAP.md: "never written to the
- * file, doesn't need to be persisted server-side") -- `bookmarks` is a
+/** Pure client-side/session bookmarks (docs/design-decisions.md, "Scope
+ * and principles": never written to the file or persisted server-side) -- `bookmarks` is a
  * plain list of 1-indexed line numbers, owned and toggled by Viewer.svelte
  * per open tab, rendered here the same way severity line-tints are. */
 export function bookmarkHighlighting(bookmarks: number[]) {
@@ -333,8 +422,8 @@ export function bookmarkHighlighting(bookmarks: number[]) {
   )
 }
 
-/** Per-file-type syntax highlighting (ROADMAP.md's "Viewer: toward an
- * advanced editor" section), picked from the open file's own extension
+/** Per-file-type syntax highlighting (docs/design-decisions.md, "Live
+ * browsing, scratch and the viewer"), picked from the open file's own extension
  * (see file-language.ts) -- `@codemirror/lang-json`/`lang-xml`/
  * `lang-javascript` were already-installed dependencies, unused anywhere
  * in the codebase until now. Returns `[]` for anything unrecognized (most

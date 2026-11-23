@@ -1,33 +1,56 @@
-"""Login rate limiting / brute-force lockout for POST /auth/login (see
-ROADMAP.md's security hardening backlog -- "no throttling exists today
-beyond argon2id's own hashing cost").
+"""Login rate limiting / brute-force lockout for POST /auth/login and the
+password re-confirmations that share its budget.
 
 In-memory and per-process, not persisted to the DB or shared across
 instances -- an accepted trade-off for a single-container SQLite deployment
-(CLAUDE.md's own architecture: APScheduler is already in-process for the
-same reason). A restart clears all lockouts; that's a narrow, self-healing
-gap, not a security regression, since restarting the app isn't something an
-unauthenticated attacker can trigger.
+(APScheduler is already in-process for the same reason). A restart clears
+all lockouts; that's a narrow, self-healing gap, not a security regression,
+since restarting the app isn't something an unauthenticated attacker can
+trigger.
 
-Keyed by the submitted username, not by client IP -- the threat this closes
-is repeated password guessing against one account, which failure-count
-tracking must catch regardless of how many source IPs an attacker spreads
-the attempts across.
+Two limits, both counted on failures only:
 
-The dict is bounded, but a flood of other usernames must never be able to
-evict (and so reset) an account's failure count or lockout. Entries only
-leave once they're idle -- unlocked, with no failure inside the lockout
-window -- and if the table is ever full of live entries, new usernames are
-refused (fail closed) rather than tracked by evicting someone else.
+- Per account: LOGIN_MAX_ATTEMPTS failures against one username lock it for
+  LOGIN_LOCKOUT_SECONDS, however many addresses the attempts come from, so
+  guessing one account's password can't be spread across a botnet.
+  Emergency accounts (active local super admins with MFA on,
+  app/auth/mfa_policy.py) are the exception: their failures are counted per
+  username *and* client address, so an anonymous caller can't lock the
+  break-glass account out of every address. Their MFA is what stands against
+  guessing their password from many addresses; a super admin without MFA on
+  yet is counted per username like everyone else.
+- Per client address (as resolved by app/request_context.py; IPv6 grouped by
+  /64, since one host usually holds the whole prefix):
+  LOGIN_MAX_ATTEMPTS failures from one address, across every username, lock
+  that address for LOGIN_LOCKOUT_SECONDS. Other addresses keep signing in. A
+  success doesn't clear it: one valid account mustn't reset the budget an
+  address spends guessing others. Everyone behind one NAT or shared proxy
+  shares this budget, so five failures by anyone there lock the address for
+  all of them; behind a reverse proxy, TRUSTED_PROXIES must name it so each
+  client is counted by its own address.
+
+Both tables are bounded, and a flood can never evict (and so reset) a live
+entry: entries only leave once they're idle -- unlocked, with no failure
+inside the lockout window. When the account table is full of live entries,
+a new username isn't tracked and only the address limit applies to it (it
+used to refuse every new username, which let one anonymous caller lock
+everybody out). When the address table is full of live entries, a new
+address is refused (fail closed); filling it takes that many distinct
+addresses failing inside one lockout window.
 """
 
+import ipaddress
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 
 from app.config import get_settings
 
-_MAX_TRACKED_USERNAMES = 10_000
+_MAX_TRACKED_ACCOUNTS = 10_000
+_MAX_TRACKED_ADDRESSES = 50_000
+_IPV6_PREFIX = 64
+_NO_ADDRESS = "-"
 
 
 @dataclass
@@ -37,74 +60,193 @@ class _AttemptState:
     last_failure: float = 0.0
 
 
-_lock = threading.Lock()
-_state: dict[str, _AttemptState] = {}
+class _Tracker:
+    def __init__(self, capacity_name: str, *, refuse_when_full: bool):
+        # Read through the module so tests can lower the capacity.
+        self._capacity_name = capacity_name
+        self._refuse_when_full = refuse_when_full
+        self.state: dict[str, _AttemptState] = {}
 
+    def _capacity(self) -> int:
+        return globals()[self._capacity_name]
 
-def _is_idle(entry: _AttemptState, now: float, window: float) -> bool:
-    if entry.locked_until is not None:
-        return entry.locked_until <= now
-    return now - entry.last_failure >= window
+    @staticmethod
+    def _is_idle(entry: _AttemptState, now: float, window: float) -> bool:
+        if entry.locked_until is not None:
+            return entry.locked_until <= now
+        return now - entry.last_failure >= window
 
+    def _has_room(self, now: float, window: float) -> bool:
+        if len(self.state) < self._capacity():
+            return True
+        for key in [k for k, e in self.state.items() if self._is_idle(e, now, window)]:
+            del self.state[key]
+        return len(self.state) < self._capacity()
 
-def _prune(now: float, window: float) -> None:
-    for username in [u for u, e in _state.items() if _is_idle(e, now, window)]:
-        del _state[username]
-
-
-def _has_room(now: float, window: float) -> bool:
-    if len(_state) < _MAX_TRACKED_USERNAMES:
-        return True
-    _prune(now, window)
-    return len(_state) < _MAX_TRACKED_USERNAMES
-
-
-def seconds_until_unlocked(username: str) -> float | None:
-    """None if the username may attempt a login; otherwise the whole number
-    of seconds to wait, for a Retry-After header. Also non-None for an
-    untracked username while the tracker is full of live entries."""
-    window = float(get_settings().login_lockout_seconds)
-    now = time.monotonic()
-    with _lock:
-        entry = _state.get(username)
+    def seconds_locked(self, key: str, now: float, window: float) -> float | None:
+        entry = self.state.get(key)
         if entry is None:
-            return None if _has_room(now, window) else window
+            if self._refuse_when_full and not self._has_room(now, window):
+                return window
+            return None
         if entry.locked_until is None:
             return None
         remaining = entry.locked_until - now
         if remaining <= 0:
-            del _state[username]
+            del self.state[key]
             return None
         return remaining
 
-
-def record_failure(username: str) -> None:
-    settings = get_settings()
-    window = float(settings.login_lockout_seconds)
-    now = time.monotonic()
-    with _lock:
-        entry = _state.get(username)
-        if entry is not None and _is_idle(entry, now, window):
+    def record_failure(self, key: str, now: float, window: float, max_attempts: int) -> bool:
+        """True when this failure is the one that locks the key."""
+        entry = self.state.get(key)
+        if entry is not None and self._is_idle(entry, now, window):
             entry = None
-            del _state[username]
+            del self.state[key]
         if entry is None:
-            if not _has_room(now, window):
-                return  # saturated: seconds_until_unlocked already refuses it
+            if not self._has_room(now, window):
+                return False  # saturated: see the module docstring
             entry = _AttemptState()
-            _state[username] = entry
+            self.state[key] = entry
         entry.failures += 1
         entry.last_failure = now
-        if entry.failures >= settings.login_max_attempts:
-            entry.locked_until = now + settings.login_lockout_seconds
+        if entry.locked_until is None and entry.failures >= max_attempts:
+            entry.locked_until = now + window
+            return True
+        return False
+
+    def clear(self, key: str) -> None:
+        self.state.pop(key, None)
 
 
-def record_success(username: str) -> None:
+_lock = threading.Lock()
+_accounts = _Tracker("_MAX_TRACKED_ACCOUNTS", refuse_when_full=False)
+_addresses = _Tracker("_MAX_TRACKED_ADDRESSES", refuse_when_full=True)
+
+
+@dataclass(frozen=True)
+class FailureOutcome:
+    """Which limits this failure triggered, for the audit log."""
+
+    account_locked: bool = False
+    address_locked: bool = False
+
+
+def address_key(client_ip: str | None) -> str:
+    """The address-limit key for a client address: the address itself, or
+    its /64 for IPv6. Anything that isn't an address is used as it is."""
+    if not client_ip:
+        return _NO_ADDRESS
+    try:
+        address = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return client_ip
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped:
+            return str(address.ipv4_mapped)
+        return str(ipaddress.IPv6Network(f"{address}/{_IPV6_PREFIX}", strict=False))
+    return str(address)
+
+
+def _account_key(username: str, client_ip: str | None, per_address: bool) -> str:
+    if per_address:
+        return f"{username}\x00{address_key(client_ip)}"
+    return username
+
+
+def _limits() -> tuple[float, int]:
+    settings = get_settings()
+    return float(settings.login_lockout_seconds), settings.login_max_attempts
+
+
+def seconds_until_allowed(
+    username: str, client_ip: str | None, *, per_address_account: bool = False
+) -> float | None:
+    """None if this username may attempt a login from this address;
+    otherwise the seconds to wait, for a Retry-After header (the longer of
+    the two limits when both apply)."""
+    window, _ = _limits()
+    now = time.monotonic()
     with _lock:
-        _state.pop(username, None)
+        waits = [
+            _accounts.seconds_locked(
+                _account_key(username, client_ip, per_address_account), now, window
+            ),
+            _addresses.seconds_locked(address_key(client_ip), now, window),
+        ]
+    present = [w for w in waits if w is not None]
+    return max(present) if present else None
+
+
+def record_failure(
+    username: str, client_ip: str | None, *, per_address_account: bool = False
+) -> FailureOutcome:
+    window, max_attempts = _limits()
+    now = time.monotonic()
+    with _lock:
+        account_locked = _accounts.record_failure(
+            _account_key(username, client_ip, per_address_account), now, window, max_attempts
+        )
+        address_locked = _addresses.record_failure(
+            address_key(client_ip), now, window, max_attempts
+        )
+    return FailureOutcome(account_locked=account_locked, address_locked=address_locked)
+
+
+def record_success(
+    username: str, client_ip: str | None, *, per_address_account: bool = False
+) -> None:
+    """Clears the account's failures. The address's stay (module docstring)."""
+    with _lock:
+        _accounts.clear(_account_key(username, client_ip, per_address_account))
+
+
+# Starting an SSO sign-in (GET /auth/sso/login) needs no account and can
+# reach out to the identity provider, so every start counts, success or not:
+# at most SSO_LOGINS_PER_ADDRESS per client address (address_key) in
+# SSO_LOGIN_WINDOW_SECONDS. A full table refuses new addresses (fail closed).
+SSO_LOGINS_PER_ADDRESS = 20
+SSO_LOGIN_WINDOW_SECONDS = 60.0
+_sso_logins: dict[str, deque[float]] = {}
+
+
+def _trim_sso_logins(key: str, now: float) -> deque[float] | None:
+    starts = _sso_logins.get(key)
+    if starts is None:
+        return None
+    while starts and now - starts[0] >= SSO_LOGIN_WINDOW_SECONDS:
+        starts.popleft()
+    if not starts:
+        del _sso_logins[key]
+        return None
+    return starts
+
+
+def sso_login_from_address(client_ip: str | None) -> float | None:
+    """Counts one SSO sign-in start from this address. None when it's
+    allowed; otherwise the seconds to wait (and it isn't counted)."""
+    key = address_key(client_ip)
+    now = time.monotonic()
+    with _lock:
+        starts = _trim_sso_logins(key, now)
+        if starts is None:
+            if len(_sso_logins) >= _MAX_TRACKED_ADDRESSES:
+                for other in list(_sso_logins):
+                    _trim_sso_logins(other, now)
+            if len(_sso_logins) >= _MAX_TRACKED_ADDRESSES:
+                return SSO_LOGIN_WINDOW_SECONDS
+            starts = deque()
+            _sso_logins[key] = starts
+        if len(starts) >= SSO_LOGINS_PER_ADDRESS:
+            return max(1.0, SSO_LOGIN_WINDOW_SECONDS - (now - starts[0]))
+        starts.append(now)
+        return None
 
 
 def reset_for_tests() -> None:
     """Test-only: clears all tracked state between test cases so one test's
     lockout can't bleed into the next."""
     with _lock:
-        _state.clear()
+        _accounts.state.clear()
+        _addresses.state.clear()
+        _sso_logins.clear()

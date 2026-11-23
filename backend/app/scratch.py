@@ -1,6 +1,13 @@
+import glob
+import os
+import re
+import shutil
+import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -18,6 +25,11 @@ class ScratchEntry:
     # must not truncate a file an earlier response is still streaming.
     paths: list[Path] = field(default_factory=list)
     refcount: int = 0
+    # Operations under way on the entry's files (a fetch, redaction,
+    # extraction, or a response still being sent): apart from refcount,
+    # which a viewer that never closes keeps up. A busy entry is never
+    # deleted, by the idle sweep, the size guard or a release.
+    busy: int = 0
     last_accessed: float = field(default_factory=time.monotonic)
 
     def size(self) -> int:
@@ -36,34 +48,72 @@ class ScratchStore:
         self.max_bytes = max_bytes
         self._entries: dict[str, ScratchEntry] = {}
         self._lock = threading.Lock()
-        self.root.mkdir(parents=True, exist_ok=True)
+        # Readable by the app's user only, like the files in it (see acquire).
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(self.root, 0o700)
+        except OSError:
+            # A folder of another owner (a mount point, say): the files in it
+            # are still created 0600. As in app/data_layout.py, don't refuse
+            # to start over it.
+            logger.warning(
+                "startup.scratch_dir_permissions_unchanged",
+                path=str(self.root),
+                hint="couldn't make it readable by PerchTail's user only; check its owner",
+            )
 
-    def acquire(self, key: str) -> Path:
+    def acquire(self, key: str, *, busy: bool = False) -> Path:
         """Marks key as in-use (refcount += 1) and returns a new, unique
         scratch path for this fetch. Every open is a fresh fetch — the
         caller writes the file's content into this path itself. Concurrent
         opens of the same file get separate paths, so one fetch never
-        rewrites bytes another response is still serving."""
+        rewrites bytes another response is still serving.
+
+        With `busy`, the entry is also marked busy from this moment, so
+        nothing deletes it while the caller writes and serves the file; the
+        caller ends that with end_busy, however the operation ends."""
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
                 entry = ScratchEntry(key=key)
                 self._entries[key] = entry
             path = self.root / f"{key}-{uuid.uuid4().hex}"
+            # Created empty here, 0600, so the content written into it later
+            # is never readable by another user, whatever the umask.
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
             entry.paths.append(path)
             entry.refcount += 1
+            if busy:
+                entry.busy += 1
             entry.last_accessed = time.monotonic()
             return path
 
-    def release(self, key: str) -> None:
-        """Reference-counted purge — delete only when the last viewer closes
-        it."""
+    def end_busy(self, key: str) -> None:
+        """Ends one operation acquire(busy=True) started. Idleness counts
+        from now, and an entry every reference has already released is
+        deleted."""
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
+                self._delete_strays(key)
+                return
+            entry.busy = max(0, entry.busy - 1)
+            entry.last_accessed = time.monotonic()
+            if entry.refcount == 0 and entry.busy == 0:
+                self._delete(entry)
+
+    def release(self, key: str) -> None:
+        """Reference-counted purge — delete only when the last viewer closes
+        it, or, while an operation on it is under way, when that ends
+        (end_busy). A key the store no longer knows leaves no file of its
+        own behind either."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                self._delete_strays(key)
                 return
             entry.refcount = max(0, entry.refcount - 1)
-            if entry.refcount == 0:
+            if entry.refcount == 0 and entry.busy == 0:
                 self._delete(entry)
 
     def touch(self, key: str) -> None:
@@ -76,15 +126,41 @@ class ScratchStore:
         for path in entry.paths:
             path.unlink(missing_ok=True)
         del self._entries[entry.key]
+        self._delete_strays(entry.key)
         logger.info("scratch.purge", key=entry.key)
+
+    def _delete_strays(self, key: str) -> None:
+        """Deletes the files of `key` (acquire's `<key>-<hex>` and the
+        working copies named after them) that no entry tracks any more, so
+        an operation that outlived its entry leaves no orphan in scratch.
+        Called with the lock held, for a key with no entry."""
+        pattern = re.compile(re.escape(key) + r"-[0-9a-f]{32}(\..*)?")
+        try:
+            candidates = list(self.root.glob(glob.escape(key) + "-*"))
+        except OSError:
+            return
+        for path in candidates:
+            if pattern.fullmatch(path.name) and not path.is_dir():
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("scratch.stray_not_deleted", key=key, error=str(exc))
+                    continue
+                logger.warning("scratch.stray_deleted", key=key)
 
     def sweep_idle(self, idle_seconds: float) -> int:
         """Backstop for crashed/disconnected clients that never send a close
         signal — deletes anything untouched past idle_seconds, regardless of
-        refcount, since a vanished client isn't coming back to release it."""
+        refcount, since a vanished client isn't coming back to release it.
+        Never an entry an operation is still using (busy): idleness counts
+        from the end of its last operation."""
         now = time.monotonic()
         with self._lock:
-            stale = [e for e in self._entries.values() if now - e.last_accessed > idle_seconds]
+            stale = [
+                e
+                for e in self._entries.values()
+                if e.busy == 0 and now - e.last_accessed > idle_seconds
+            ]
             for entry in stale:
                 self._delete(entry)
         if stale:
@@ -92,30 +168,62 @@ class ScratchStore:
         return len(stale)
 
     def total_bytes(self) -> int:
-        """Current total scratch usage -- exposed for the detailed health
-        endpoint (app/api/monitoring.py) to report usage against
-        max_bytes, same computation enforce_size_guard already does
-        internally."""
-        with self._lock:
-            return sum(e.size() for e in self._entries.values())
+        """Current total scratch usage, for the detailed health endpoint
+        (app/api/monitoring.py): what's on disk under the scratch
+        directory, so folder ZIPs and copies being worked on count too, not
+        only the entries tracked here (#329)."""
+        return disk_bytes(self.root)
 
-    def enforce_size_guard(self) -> int:
+    def clear_leftovers(self, protected: Iterable[Path] = ()) -> int:
+        """Deletes everything in the scratch directory. Only for startup,
+        when nothing in it can be in use: whatever is there was left by a
+        crash or a killed container (#329). Refused when the directory is a
+        filesystem root or holds one of `protected` (the database, the
+        logs), in case SCRATCH_DIR points somewhere it shouldn't."""
+        root = self.root.resolve()
+        if root == Path(root.anchor) or any(
+            root == p or root in p.parents for p in (Path(p).resolve() for p in protected)
+        ):
+            logger.error("scratch.leftovers_not_cleared", scratch_dir=str(root))
+            return 0
+        removed = 0
+        with self._lock:
+            for child in root.iterdir():
+                try:
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+                    removed += 1
+                except OSError as exc:
+                    logger.warning("scratch.leftover_not_deleted", path=child.name, error=str(exc))
+        if removed:
+            logger.warning("scratch.leftovers_cleared", removed=removed)
+        return removed
+
+    def enforce_size_guard(self, reserve: int = 0) -> int:
         """A safety valve for load, not a caching strategy: evicts the
         oldest zero-reference entries first once total scratch usage passes
-        max_bytes. Never touches an entry with refcount > 0, so a file a
-        viewer currently has open is never pulled out from under them."""
+        max_bytes (less `reserve`, room wanted for a fetch about to start).
+        Never touches an entry with refcount > 0 or one an operation is
+        still using (busy), so a file a viewer currently has open is never
+        pulled out from under them."""
+        target = self.max_bytes - max(reserve, 0)
         with self._lock:
-            total = sum(e.size() for e in self._entries.values())
-            if total <= self.max_bytes:
+            # Disk usage counts what isn't tracked here (a folder ZIP's
+            # member, a remote copy), but only tracked, unreferenced entries
+            # can be evicted.
+            total = max(sum(e.size() for e in self._entries.values()), disk_bytes(self.root))
+            if total <= target:
                 return 0
 
             candidates = sorted(
-                (e for e in self._entries.values() if e.refcount == 0),
+                (e for e in self._entries.values() if e.refcount == 0 and e.busy == 0),
                 key=lambda e: e.last_accessed,
             )
             evicted = 0
             for entry in candidates:
-                if total <= self.max_bytes:
+                if total <= target:
                     break
                 size = entry.size()
                 self._delete(entry)
@@ -124,6 +232,103 @@ class ScratchStore:
         if evicted:
             logger.warning("scratch.size_guard_eviction", evicted=evicted)
         return evicted
+
+    def ensure_room(self, expected_bytes: int = 0) -> None:
+        """Called before a fetch into scratch starts (#345): makes room by
+        evicting unreferenced entries, then refuses the fetch
+        (ScratchFullError) when scratch would still go over max_bytes, or
+        when free space on its filesystem is below the minimum
+        (min_free_bytes). `expected_bytes` is the fetch's size when known,
+        0 otherwise."""
+        expected = max(expected_bytes, 0)
+        self.enforce_size_guard(reserve=expected)
+        used = disk_bytes(self.root)
+        if used + expected > self.max_bytes:
+            logger.warning(
+                "scratch.full", used_bytes=used, expected_bytes=expected, max_bytes=self.max_bytes
+            )
+            raise ScratchFullError(
+                "The server's scratch space is full (SCRATCH_MAX_GB) with files other users "
+                "have open. Try again once some are closed.",
+                reason="scratch_full",
+            )
+        try:
+            usage = shutil.disk_usage(self.root)
+        except OSError:
+            return
+        minimum = min_free_bytes(usage.total)
+        if minimum and usage.free - expected < minimum:
+            logger.warning(
+                "scratch.disk_low",
+                free_bytes=usage.free,
+                expected_bytes=expected,
+                min_free_bytes=minimum,
+            )
+            raise ScratchFullError(
+                "The server's disk is almost full (less free space than SCRATCH_MIN_FREE_GB / "
+                "SCRATCH_MIN_FREE_PERCENT), so nothing more can be fetched right now. "
+                "An administrator needs to free some space.",
+                reason="disk_low",
+            )
+
+
+class ScratchFullError(Exception):
+    """A fetch refused before it started because scratch is full or the
+    disk under it is low on space (#345); answered 507."""
+
+    def __init__(self, message: str, *, reason: str):
+        super().__init__(message)
+        self.message = message
+        self.reason = reason
+
+
+def min_free_bytes(total_bytes: int) -> int:
+    """Free space to keep on the scratch filesystem: the larger of
+    SCRATCH_MIN_FREE_GB and SCRATCH_MIN_FREE_PERCENT of its size."""
+    settings = get_settings()
+    return max(
+        int(settings.scratch_min_free_gb * 1024**3),
+        int(total_bytes * settings.scratch_min_free_percent / 100),
+        0,
+    )
+
+
+def ensure_scratch_room(expected_bytes: int = 0) -> None:
+    """ScratchStore.ensure_room on the app's store."""
+    get_scratch_store().ensure_room(expected_bytes)
+
+
+def disk_bytes(root: Path) -> int:
+    """Bytes of every file under `root`, without following links."""
+    total = 0
+    for directory, _dirs, files in os.walk(root):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_size
+            except OSError:  # deleted while walking
+                continue
+    return total
+
+
+@contextmanager
+def scratch_temp_dir(prefix: str = "perchtail-") -> Iterator[Path]:
+    """A temporary directory under SCRATCH_DIR, deleted on exit, for remote
+    copies (local_copy) and the like: it counts in scratch usage and a
+    leftover is cleared at the next startup (#329). Refused up front
+    (ScratchFullError) when scratch or its disk is full (#345)."""
+    root = Path(get_settings().scratch_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    ensure_scratch_room()
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=root) as tmp:
+        yield Path(tmp)
+
+
+def make_scratch_dir(prefix: str) -> Path:
+    """Like scratch_temp_dir, for a caller that deletes it itself."""
+    root = Path(get_settings().scratch_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    ensure_scratch_room()
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
 
 
 @lru_cache

@@ -21,7 +21,7 @@ func writeLog(t *testing.T, content []byte) string {
 
 func TestHandleReadRangeReadsFromTheOffset(t *testing.T) {
 	base := writeLog(t, []byte("line one\nline two\n"))
-	size, head, data, err := HandleReadRange(base, "app.log", 9, 100, 4)
+	size, head, data, err := HandleReadRange(base, "app.log", "", 9, 100, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestHandleReadRangeReadsFromTheOffset(t *testing.T) {
 func TestHandleReadRangeAtOrPastTheEndIsEmpty(t *testing.T) {
 	base := writeLog(t, []byte("abc"))
 	for _, offset := range []int64{3, 10} {
-		size, _, data, err := HandleReadRange(base, "app.log", offset, 100, 0)
+		size, _, data, err := HandleReadRange(base, "app.log", "", offset, 100, 0)
 		if err != nil || size != 3 || len(data) != 0 {
 			t.Fatalf("offset %d: size %d, data %q, err %v", offset, size, data, err)
 		}
@@ -42,7 +42,7 @@ func TestHandleReadRangeAtOrPastTheEndIsEmpty(t *testing.T) {
 
 func TestHandleReadRangeCapsTheLength(t *testing.T) {
 	base := writeLog(t, bytes.Repeat([]byte("x"), maxRangeLength+10))
-	size, head, data, err := HandleReadRange(base, "app.log", 0, 1<<40, 1<<40)
+	size, head, data, err := HandleReadRange(base, "app.log", "", 0, 1<<40, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestHandleReadRangeRefusesBadInput(t *testing.T) {
 		{"app.log", 0, 1, -1},
 		{".", 0, 1, 0},
 	} {
-		if _, _, _, err := HandleReadRange(base, tc.path, tc.offset, tc.length, tc.head); err == nil {
+		if _, _, _, err := HandleReadRange(base, tc.path, "", tc.offset, tc.length, tc.head); err == nil {
 			t.Errorf("%+v: expected an error", tc)
 		}
 	}
@@ -82,7 +82,7 @@ func TestHandleReadRangeDoesNotFollowALinkOutOfTheBase(t *testing.T) {
 	if err := os.Symlink(secret, filepath.Join(base, "link.log")); err != nil {
 		t.Skip("symlinks not available:", err)
 	}
-	if _, _, data, err := HandleReadRange(base, "link.log", 0, 100, 10); err == nil {
+	if _, _, data, err := HandleReadRange(base, "link.log", "link.log", 0, 100, 10); err == nil {
 		t.Fatalf("read %q through a link leaving the base", data)
 	}
 }

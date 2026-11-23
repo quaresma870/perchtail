@@ -4,6 +4,9 @@ import time
 
 import pytest
 from app.agent_registry import (
+    FEATURE_LINKS,
+    FEATURE_PROGRESS,
+    FEATURE_REDACTION,
     AgentCommandError,
     AgentError,
     AgentNotConnectedError,
@@ -192,6 +195,34 @@ def test_a_replaced_connection_closing_does_not_unregister_its_successor(loop_in
     assert not registry.is_connected(1)
 
 
+def test_a_replacement_from_another_address_is_kept_as_a_warning(loop_in_thread):
+    """Two agents may be using one token: a connection replaced by one from
+    another address leaves a warning, kept until a connection that replaces
+    none."""
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    registry.register(1, FakeWebSocket(), address="198.51.100.1")
+    assert registry.connection_replaced(1) is None
+
+    # The same agent reconnecting from where it was: no warning.
+    registry.register(1, FakeWebSocket(), address="198.51.100.1")
+    assert registry.connection_replaced(1) is None
+
+    registry.register(1, FakeWebSocket(), address="203.0.113.9")
+    warning = registry.connection_replaced(1)
+    assert (warning.previous_address, warning.address) == ("198.51.100.1", "203.0.113.9")
+    assert registry.connection_replaced(2) is None
+
+    # A replacement from the same address doesn't clear it...
+    registry.register(1, FakeWebSocket(), address="203.0.113.9")
+    assert registry.connection_replaced(1) == warning
+    # ...a connection that replaces none does.
+    registry.unregister(1)
+    registry.register(1, FakeWebSocket(), address="203.0.113.9")
+    assert registry.connection_replaced(1) is None
+    registry.unregister(1)
+
+
 def test_replacing_a_connection_fails_its_pending_commands_immediately(loop_in_thread):
     registry = AgentRegistry()
     registry.bind_loop(loop_in_thread)
@@ -316,6 +347,24 @@ def test_the_agents_too_large_error_keeps_its_code_and_size(loop_in_thread, stre
     with pytest.raises(AgentCommandError) as caught:
         _streamed_fetch(loop_in_thread, registry, ws, [refusal], limit=4000)
     assert (caught.value.code, caught.value.size) == ("too_large", 5000)
+    # An agent that doesn't say which limit was passed.
+    assert caught.value.limit is None
+
+
+@pytest.mark.parametrize("limit", ["fetch", "decompressed"])
+def test_the_agents_too_large_error_keeps_which_limit(loop_in_thread, streaming_registry, limit):
+    registry, ws = streaming_registry
+    refusal = lambda request_id: {  # noqa: E731
+        "type": "fetch_error",
+        "id": request_id,
+        "error": "file is 5000 bytes, over the 4000-byte limit",
+        "code": "too_large",
+        "size": 5000,
+        "limit": limit,
+    }
+    with pytest.raises(AgentCommandError) as caught:
+        _streamed_fetch(loop_in_thread, registry, ws, [refusal], limit=4000)
+    assert caught.value.limit == limit
 
 
 def test_chunks_out_of_order_fail_the_fetch(loop_in_thread, streaming_registry):
@@ -367,3 +416,538 @@ def test_a_completed_stream_sends_no_cancel(loop_in_thread, streaming_registry):
     registry, ws = streaming_registry
     _streamed_fetch(loop_in_thread, registry, ws, [_chunk(0, b"abcd"), _end(1, 4)])
     assert [message["type"] for message in ws.sent] == ["fetch"]
+
+
+def test_an_unknown_command_error_keeps_its_type(loop_in_thread):
+    # #319: an agent older than 0.7 answers "upgrade" with unknown_error,
+    # which the server reports as "too old to upgrade remotely".
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = FakeWebSocket()
+    registry.register(1, ws)
+
+    def responder():
+        assert _wait_until(lambda: len(ws.sent) > 0)
+        loop_in_thread.call_soon_threadsafe(
+            registry.resolve_response,
+            1,
+            {"type": "unknown_error", "id": ws.sent[0]["id"], "error": "unknown command"},
+        )
+
+    thread = threading.Thread(target=responder)
+    thread.start()
+    try:
+        with pytest.raises(AgentCommandError) as caught:
+            registry.send_command_sync(
+                1, "upgrade", timeout=2, command_id="upgrade-1", version="0.7.0"
+            )
+        assert caught.value.message_type == "unknown_error"
+        assert ws.sent[0] == {"type": "upgrade", "id": "upgrade-1", "version": "0.7.0"}
+    finally:
+        thread.join(timeout=2)
+        registry.unregister(1)
+
+
+# --- keepalive (#333) -------------------------------------------------------
+
+
+def test_the_keepalive_drops_a_silent_agent(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = FakeWebSocket()
+    registry.register(1, ws)
+    started = time.monotonic()
+    watch = asyncio.run_coroutine_threadsafe(
+        registry.watch(1, ws, interval=0.05, dead_after=0.3), loop_in_thread
+    )
+    assert watch.result(timeout=3) is True
+    assert time.monotonic() - started >= 0.3
+    assert not registry.is_connected(1)
+    # It pinged before giving up.
+    assert any(message["type"] == "ping" for message in ws.sent)
+
+
+def test_the_keepalive_keeps_an_agent_that_answers(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = FakeWebSocket()
+    registry.register(1, ws)
+    watch = asyncio.run_coroutine_threadsafe(
+        registry.watch(1, ws, interval=0.05, dead_after=0.3), loop_in_thread
+    )
+    deadline = time.monotonic() + 0.9
+    while time.monotonic() < deadline:
+        registry.touch(1, ws)  # the agent's pongs and messages
+        time.sleep(0.05)
+    assert not watch.done()
+    assert registry.is_connected(1)
+    registry.unregister(1)
+    assert watch.result(timeout=3) is False
+
+
+def test_the_keepalive_of_a_replaced_connection_just_ends(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    old, new = FakeWebSocket(), FakeWebSocket()
+    registry.register(1, old)
+    watch = asyncio.run_coroutine_threadsafe(
+        registry.watch(1, old, interval=0.05, dead_after=10), loop_in_thread
+    )
+    registry.register(1, new)
+    assert watch.result(timeout=3) is False
+    assert registry.is_connected(1)
+    registry.unregister(1)
+
+
+def test_a_failed_ping_drops_the_connection(loop_in_thread):
+    class BrokenWebSocket(FakeWebSocket):
+        async def send_json(self, data):
+            raise RuntimeError("connection reset")
+
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = BrokenWebSocket()
+    registry.register(1, ws)
+    watch = asyncio.run_coroutine_threadsafe(
+        registry.watch(1, ws, interval=0.05, dead_after=10), loop_in_thread
+    )
+    assert watch.result(timeout=3) is True
+    assert not registry.is_connected(1)
+
+
+# --- #382, #249: what an agent can do, and fetch_archive ---------------------
+
+
+def test_features_are_those_of_the_live_connection(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    assert registry.features(1) == frozenset()
+    assert not registry.redacts_on_host(1)
+
+    registry.register(1, FakeWebSocket(), frozenset({FEATURE_REDACTION}))
+    assert registry.redacts_on_host(1)
+
+    # An older agent replacing it brings no feature with it.
+    registry.register(1, FakeWebSocket())
+    assert not registry.redacts_on_host(1)
+    registry.unregister(1)
+    assert registry.features(1) == frozenset()
+
+
+def test_the_fallback_to_the_server_is_reported_once_per_connection(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    assert registry.first_redaction_fallback(1) is False  # nothing connected
+    registry.register(1, FakeWebSocket())
+    assert registry.first_redaction_fallback(1) is True
+    assert registry.first_redaction_fallback(1) is False
+    registry.register(1, FakeWebSocket())
+    assert registry.first_redaction_fallback(1) is True
+    registry.unregister(1)
+
+
+def test_a_command_that_needs_a_feature_is_never_sent_without_it(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = FakeWebSocket()
+    registry.register(1, ws)
+    with pytest.raises(AgentCommandError) as caught:
+        registry.send_command_sync(
+            1, "fetch", timeout=1, path="app.log", redact={}, require_feature=FEATURE_REDACTION
+        )
+    assert caught.value.code == "feature_missing"
+    assert ws.sent == []
+    registry.unregister(1)
+
+
+def test_a_redaction_error_keeps_its_code_and_rule(loop_in_thread):
+    registry = AgentRegistry()
+    registry.bind_loop(loop_in_thread)
+    ws = FakeWebSocket()
+    registry.register(1, ws, frozenset({FEATURE_REDACTION}))
+
+    def agent():
+        assert _wait_until(lambda: len(ws.sent) > 0)
+        message = {
+            "type": "redaction_error",
+            "id": ws.sent[0]["id"],
+            "error": "the rule can't run",
+            "code": "rule_unsupported",
+            "rule": 31,
+        }
+        loop_in_thread.call_soon_threadsafe(registry.resolve_response, 1, message)
+
+    thread = threading.Thread(target=agent)
+    thread.start()
+    try:
+        with pytest.raises(AgentCommandError) as caught:
+            registry.send_command_sync(1, "fetch", timeout=2, path="app.log")
+    finally:
+        thread.join(timeout=5)
+    assert caught.value.message_type == "redaction_error"
+    assert caught.value.code == "rule_unsupported"
+    assert caught.value.rule == 31
+    registry.unregister(1)
+
+
+class _Members:
+    """An ArchiveSink that keeps each member's content in memory."""
+
+    def __init__(self):
+        self.members: list[tuple[dict, bytearray]] = []
+
+    def start_member(self, message):
+        if message.get("name") == "refused":
+            raise ValueError("not asked for")
+        self.members.append((message, bytearray()))
+
+    def write(self, data):
+        if not self.members:
+            raise ValueError("no member")
+        self.members[-1][1].extend(data)
+        return len(data)
+
+
+def _member(seq, name, **extra):
+    return lambda request_id: {
+        "type": "archive_member",
+        "id": request_id,
+        "seq": seq,
+        "name": name,
+        **extra,
+    }
+
+
+def _fetch_archive(loop, registry, ws, messages, sink, archive=True):
+    def agent():
+        assert _wait_until(lambda: len(ws.sent) > 0)
+        request_id = ws.sent[0]["id"]
+        for build in messages:
+            message = build(request_id)
+            kind = message.get("type")
+            if kind == "fetch_chunk":
+                coroutine = registry.receive_chunk(1, message)
+            elif kind == "archive_member":
+                coroutine = registry.receive_archive_member(1, message)
+            else:
+                loop.call_soon_threadsafe(registry.resolve_response, 1, message)
+                continue
+            asyncio.run_coroutine_threadsafe(coroutine, loop).result(timeout=2)
+
+    thread = threading.Thread(target=agent)
+    thread.start()
+    try:
+        return registry.send_command_sync(
+            1, "fetch_archive", timeout=2, sink=sink, archive=archive, path="logs.zip"
+        )
+    finally:
+        thread.join(timeout=5)
+
+
+def test_a_fetch_archive_hands_each_member_to_the_sink(loop_in_thread, streaming_registry):
+    registry, ws = streaming_registry
+    sink = _Members()
+    result = _fetch_archive(
+        loop_in_thread,
+        registry,
+        ws,
+        [
+            _member(0, "a.log"),
+            _chunk(1, b"abcd"),
+            _chunk(2, b"ef"),
+            _member(3, "gone.log", skipped="not_found"),
+            _member(4, "b.log"),
+            _chunk(5, b"gh"),
+            # chunks counts the fetch_chunk messages only.
+            _end(3, 8),
+        ],
+        sink,
+    )
+    assert result["streamed"] is True
+    assert [(m["name"], bytes(data)) for m, data in sink.members] == [
+        ("a.log", b"abcdef"),
+        ("gone.log", b""),
+        ("b.log", b"gh"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        # Content before any member.
+        [_chunk(0, b"abcd"), _end(1, 4)],
+        # A member out of order.
+        [_member(1, "a.log"), _end(0, 0)],
+        # A member the sink refuses.
+        [_member(0, "refused"), _end(0, 0)],
+        # Chunks counted wrong at the end.
+        [_member(0, "a.log"), _chunk(1, b"ab"), _end(2, 2)],
+    ],
+)
+def test_a_fetch_archive_out_of_line_fails(loop_in_thread, streaming_registry, messages):
+    registry, ws = streaming_registry
+    with pytest.raises(AgentError):
+        _fetch_archive(loop_in_thread, registry, ws, messages, _Members())
+
+
+def test_an_archive_member_for_a_plain_fetch_fails_it(loop_in_thread, streaming_registry):
+    import io
+
+    registry, ws = streaming_registry
+    with pytest.raises(AgentError):
+        _fetch_archive(
+            loop_in_thread,
+            registry,
+            ws,
+            [_member(0, "a.log"), _chunk(1, b"ab"), _end(1, 2)],
+            io.BytesIO(),
+            archive=False,
+        )
+
+
+# --- F5 (rc.3): progress while a content command reads ----------------------
+#
+# The wait is scaled down: the agent sends its first chunk (or its answer)
+# after 2.5 times the wait, as an agent reading up to a member at the end of
+# a large .tar.gz does after more than the 30 seconds of the real wait.
+
+_WAIT = 0.4
+_SLOW = _WAIT * 2.5
+_PROGRESS_EVERY = _WAIT / 4
+
+
+def _slow_agent(loop, registry, ws, finish, *, progress: bool, from_ws=None):
+    """The agent's side of a slow content command: says nothing but, with
+    `progress`, a progress message every _PROGRESS_EVERY for _SLOW, then
+    sends `finish(request_id)`'s messages."""
+
+    def agent():
+        assert _wait_until(lambda: len(ws.sent) > 0)
+        request_id = ws.sent[0]["id"]
+        until = time.monotonic() + _SLOW
+        while time.monotonic() < until:
+            if progress:
+                loop.call_soon_threadsafe(
+                    registry.receive_progress, 1, {"type": "progress", "id": request_id}, from_ws
+                )
+            time.sleep(_PROGRESS_EVERY)
+        for message in finish(request_id):
+            if message.get("type") == "fetch_chunk":
+                asyncio.run_coroutine_threadsafe(registry.receive_chunk(1, message), loop).result(
+                    timeout=2
+                )
+            else:
+                loop.call_soon_threadsafe(registry.resolve_response, 1, message)
+
+    thread = threading.Thread(target=agent)
+    thread.start()
+    return thread
+
+
+def _streamed_finish(request_id):
+    return [_chunk(0, b"abcd")(request_id), _end(1, 4)(request_id)]
+
+
+def _range_finish(request_id):
+    return [{"type": "read_range_result", "id": request_id, "size": 4, "data_b64": ""}]
+
+
+def _list_archive_finish(request_id):
+    return [{"type": "list_archive_result", "id": request_id, "members": [], "truncated": False}]
+
+
+_UNSTREAMED_FINISH = {"read_range": _range_finish, "list_archive": _list_archive_finish}
+
+
+def _progress_registry(loop, features):
+    registry = AgentRegistry()
+    registry.bind_loop(loop)
+    ws = FakeWebSocket()
+    registry.register(1, ws, frozenset(features))
+    return registry, ws
+
+
+def _run_slow(loop, registry, ws, command_type, *, progress, from_ws=None):
+    import io
+
+    streamed = command_type not in _UNSTREAMED_FINISH
+    finish = _streamed_finish if streamed else _UNSTREAMED_FINISH[command_type]
+    thread = _slow_agent(loop, registry, ws, finish, progress=progress, from_ws=from_ws)
+    sink = io.BytesIO() if streamed else None
+    try:
+        return (
+            registry.send_command_sync(
+                1, command_type, timeout=_WAIT, sink=sink, path="big.tar.gz"
+            ),
+            sink,
+        )
+    finally:
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("command_type", ["fetch", "fetch_archive", "read_range", "list_archive"])
+def test_a_slow_content_command_with_progress_completes(loop_in_thread, command_type):
+    registry, ws = _progress_registry(loop_in_thread, {FEATURE_LINKS, FEATURE_PROGRESS})
+    try:
+        if command_type == "fetch_archive":
+            # The archive's members arrive as in the other tests; what
+            # matters here is the wait before the first message.
+            result, _ = _run_slow_archive(loop_in_thread, registry, ws)
+        else:
+            result, sink = _run_slow(loop_in_thread, registry, ws, command_type, progress=True)
+            if sink is not None:
+                assert sink.getvalue() == b"abcd"
+        assert result["type"] in ("fetch_result", "read_range_result", "list_archive_result")
+        # Asked for progress, since the agent announced it.
+        assert ws.sent[0]["progress"] is True
+        assert [message["type"] for message in ws.sent] == [command_type]
+    finally:
+        registry.unregister(1)
+
+
+def _run_slow_archive(loop, registry, ws):
+    def finish(request_id):
+        return [
+            _member(0, "a.log")(request_id),
+            _chunk(1, b"abcd")(request_id),
+            _end(1, 4)(request_id),
+        ]
+
+    def agent():
+        assert _wait_until(lambda: len(ws.sent) > 0)
+        request_id = ws.sent[0]["id"]
+        until = time.monotonic() + _SLOW
+        while time.monotonic() < until:
+            loop.call_soon_threadsafe(
+                registry.receive_progress, 1, {"type": "progress", "id": request_id}
+            )
+            time.sleep(_PROGRESS_EVERY)
+        for message in finish(request_id):
+            kind = message.get("type")
+            if kind == "fetch_chunk":
+                coroutine = registry.receive_chunk(1, message)
+            elif kind == "archive_member":
+                coroutine = registry.receive_archive_member(1, message)
+            else:
+                loop.call_soon_threadsafe(registry.resolve_response, 1, message)
+                continue
+            asyncio.run_coroutine_threadsafe(coroutine, loop).result(timeout=2)
+
+    thread = threading.Thread(target=agent)
+    thread.start()
+    sink = _Members()
+    try:
+        return (
+            registry.send_command_sync(
+                1, "fetch_archive", timeout=_WAIT, sink=sink, archive=True, path="big.tar.gz"
+            ),
+            sink,
+        )
+    finally:
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("command_type", ["fetch", "read_range", "list_archive"])
+def test_a_slow_content_command_without_progress_times_out(loop_in_thread, command_type):
+    """The agent says nothing for longer than the wait: it times out as
+    before (502 "The agent didn't answer in time")."""
+    registry, ws = _progress_registry(loop_in_thread, {FEATURE_LINKS, FEATURE_PROGRESS})
+    try:
+        with pytest.raises(AgentTimeoutError):
+            _run_slow(loop_in_thread, registry, ws, command_type, progress=False)
+    finally:
+        registry.unregister(1)
+
+
+@pytest.mark.parametrize("command_type", ["fetch", "fetch_archive", "read_range", "list_archive"])
+def test_a_content_command_whose_progress_stops_times_out(loop_in_thread, command_type):
+    """The agent sends progress only while its read moves: once a read is
+    stuck its progress stops, and the command times out after the wait, as
+    without progress (Decisões 2026-11-21, option b)."""
+    import io
+
+    registry, ws = _progress_registry(loop_in_thread, {FEATURE_LINKS, FEATURE_PROGRESS})
+    stop = threading.Event()
+
+    def agent():
+        assert _wait_until(lambda: len(ws.sent) > 0)
+        request_id = ws.sent[0]["id"]
+        until = time.monotonic() + _SLOW
+        while time.monotonic() < until and not stop.is_set():
+            loop_in_thread.call_soon_threadsafe(
+                registry.receive_progress, 1, {"type": "progress", "id": request_id}
+            )
+            time.sleep(_PROGRESS_EVERY)
+        # The read is stuck from here: nothing more, for longer than the wait.
+
+    thread = threading.Thread(target=agent)
+    thread.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(AgentTimeoutError):
+            registry.send_command_sync(
+                1,
+                command_type,
+                timeout=_WAIT,
+                sink={
+                    "read_range": None,
+                    "list_archive": None,
+                    "fetch": io.BytesIO(),
+                    "fetch_archive": _Members(),
+                }[command_type],
+                archive=command_type == "fetch_archive",
+                path="big.tar.gz",
+            )
+        # Kept waiting while progress came, then given up after the wait.
+        assert time.monotonic() - started >= _SLOW
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        registry.unregister(1)
+
+
+@pytest.mark.parametrize("command_type", ["fetch", "read_range", "list_archive"])
+def test_an_agent_without_progress_is_not_asked_and_times_out_as_before(
+    loop_in_thread, command_type
+):
+    """An older agent: the command doesn't ask for progress, and a progress
+    message from its connection doesn't count."""
+    registry, ws = _progress_registry(loop_in_thread, {FEATURE_LINKS})
+    try:
+        with pytest.raises(AgentTimeoutError):
+            _run_slow(loop_in_thread, registry, ws, command_type, progress=True)
+        assert "progress" not in ws.sent[0]
+    finally:
+        registry.unregister(1)
+
+
+def test_progress_from_a_replaced_connection_does_not_count(loop_in_thread):
+    registry, ws = _progress_registry(loop_in_thread, {FEATURE_LINKS, FEATURE_PROGRESS})
+    try:
+        with pytest.raises(AgentTimeoutError):
+            _run_slow(
+                loop_in_thread, registry, ws, "read_range", progress=True, from_ws=FakeWebSocket()
+            )
+    finally:
+        registry.unregister(1)
+
+
+def test_commands_that_dont_read_content_are_not_asked_for_progress(loop_in_thread):
+    registry, ws = _progress_registry(loop_in_thread, {FEATURE_LINKS, FEATURE_PROGRESS})
+
+    def responder():
+        assert _wait_until(lambda: len(ws.sent) > 0)
+        loop_in_thread.call_soon_threadsafe(
+            registry.resolve_response,
+            1,
+            {"type": "list_result", "id": ws.sent[0]["id"], "entries": []},
+        )
+
+    thread = threading.Thread(target=responder)
+    thread.start()
+    try:
+        registry.send_command_sync(1, "list", timeout=2, path="")
+    finally:
+        thread.join(timeout=2)
+        registry.unregister(1)
+    assert "progress" not in ws.sent[0]

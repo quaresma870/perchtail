@@ -7,6 +7,7 @@ import {
   covers,
   isMatcherError,
   nameMatches,
+  parseQuery,
   sourceScopesOf,
   toggleScope,
   type GroupScope,
@@ -131,5 +132,14 @@ describe('compileMatcher', () => {
   it('an invalid regex is an error, not an exception', () => {
     expect(compileMatcher('app(', { regex: true, matchCase: false })).toEqual({ error: 'Invalid regex' })
     expect(isMatcherError(compileMatcher('app(', { regex: false, matchCase: false }))).toBe(false)
+  })
+})
+
+describe('parseQuery', () => {
+  it('reads a regex between slashes, and anything else as text or glob', () => {
+    expect(parseQuery('/app\.log\.\d/')).toEqual({ text: 'app\.log\.\d', regex: true })
+    expect(parseQuery('  app-*.log ')).toEqual({ text: 'app-*.log', regex: false })
+    expect(parseQuery('var/log')).toEqual({ text: 'var/log', regex: false })
+    expect(parseQuery('/')).toEqual({ text: '/', regex: false })
   })
 })

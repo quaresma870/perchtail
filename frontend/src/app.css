@@ -8,10 +8,11 @@
 
   --text: #e7e9f3;
   --text-muted: #9099b0;
-  --text-faint: #5f6780;
+  --text-faint: #858fa6;
 
-  --accent: #6366f1;
-  --accent-hover: #7880f5;
+  --accent: #6365f0;
+  --accent-hover: #858df6;
+  --accent-strong: #5254e6;
   --accent-text: #eef0ff;
   --accent-soft: rgba(99, 102, 241, 0.16);
   --accent-border: rgba(99, 102, 241, 0.4);
@@ -72,6 +73,13 @@ select,
 textarea {
   font: inherit;
   color: inherit;
+}
+
+/* A text box only grows downwards and never wider than the card around
+   it: dragging its corner sideways used to push it out of the card. */
+textarea {
+  resize: vertical;
+  max-width: 100%;
 }
 
 a {
@@ -142,7 +150,7 @@ code,
   color: #fff;
 }
 .btn-primary:hover {
-  background: var(--accent-hover);
+  background: var(--accent-strong);
 }
 .btn-primary:disabled {
   opacity: 0.55;

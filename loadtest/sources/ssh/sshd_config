@@ -1,0 +1,16 @@
+Port 22
+HostKey /etc/ssh/keys/ssh_host_ed25519_key
+HostKey /etc/ssh/keys/ssh_host_rsa_key
+UsePAM no
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowUsers lt-src
+LogLevel ERROR
+# Many PerchTail workers connect at once during a load test; the defaults
+# (10:30:100 unauthenticated connections, 10 sessions) would make the
+# source, not PerchTail, the bottleneck.
+MaxStartups 200:30:400
+MaxSessions 100
+# The account's shell is nologin: the built-in SFTP server needs no shell.
+Subsystem sftp internal-sftp

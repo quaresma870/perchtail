@@ -10,6 +10,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # The last published release, pinned by digest, that the upgrade test in
+  # the docker-image job upgrades from. Update it at every release (see
+  # CONTRIBUTING.md, "Releasing"): docker buildx imagetools inspect
+  # ghcr.io/quaresma870/perchtail:X.Y.Z prints the digest.
+  PREVIOUS_RELEASE_IMAGE: ghcr.io/quaresma870/perchtail:0.6.4@sha256:2049768fc4db33f78558c086640b86c830bb91c03c88c56950730a878bdf3b09
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -39,6 +46,13 @@ jobs:
 
       - name: Test
         run: pytest -v
+
+      # The load-test kit (loadtest/) is standard-library Python: lint it
+      # and run its unit tests here, so it can't drift from the API.
+      - name: Load-test kit (lint and unit tests)
+        run: |
+          ruff check loadtest
+          python -m unittest discover -s loadtest/tests
 
       - name: Dependency vulnerability scan (pip-audit)
         run: |
@@ -79,8 +93,10 @@ jobs:
       - name: Build
         run: npm run build
 
+      # High and critical advisories fail, except the ones listed with a
+      # reason and an expiry date in .github/npm-audit-exceptions.json.
       - name: Dependency vulnerability scan (npm audit)
-        run: npm audit --audit-level=high
+        run: python3 ../.github/scripts/npm_audit.py --level high .
 
   e2e:
     runs-on: ubuntu-latest
@@ -194,6 +210,15 @@ jobs:
             go test ./internal/agent -run '^$' -fuzz "^${target}\$" -fuzztime 30s
           done
 
+      # Redaction engine (internal/redact/fuzz_test.go): no input may panic,
+      # the output must not depend on how the input is cut into blocks, and
+      # a custom rule never leaves its secret in the clear.
+      - name: Fuzz the redaction engine
+        run: |
+          for target in FuzzRedactBlockCuts FuzzRedactUTF16 FuzzRedactWindow FuzzCustomRule; do
+            go test ./internal/redact -run '^$' -fuzz "^${target}\$" -fuzztime 30s
+          done
+
       - name: Cross-compile
         run: |
           GOOS=linux GOARCH=amd64 go build -o dist/perchtail-agent-linux-amd64 .
@@ -255,6 +280,145 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
+      # Dynamic scan of the running image (OWASP ZAP baseline): ZAP crawls
+      # the app as an anonymous visitor and checks every response for
+      # missing security headers, cookie flags, error and information
+      # disclosure. The rules in .zap/rules.tsv marked FAIL stop the merge;
+      # the rest is reported in the artifact. The instance runs with the
+      # production defaults (Secure cookies included) and throwaway secrets.
+      - name: Start the image for the ZAP scan
+        run: |
+          set -euo pipefail
+          key="$(openssl rand -base64 32)"
+          docker run -d --name perchtail -p 127.0.0.1:8080:8000 \
+            -e CREDENTIAL_ENCRYPTION_KEY="$key" \
+            -e PUBLIC_BASE_URL=http://127.0.0.1:8080 \
+            -e UPDATE_CHECK=false \
+            perchtail:ci
+          for _ in $(seq 1 60); do
+            if docker exec perchtail python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')" 2>/dev/null; then
+              echo "PerchTail is up"; exit 0
+            fi
+            sleep 2
+          done
+          docker logs perchtail | tail -50
+          exit 1
+
+      # The ZAP image is pinned by digest (2.17.0). Exit code 1 means a FAIL
+      # rule matched; warnings (2) don't fail the job (-I).
+      - name: Scan the running image (OWASP ZAP baseline)
+        run: |
+          set -euo pipefail
+          mkdir -p zap && chmod 777 zap
+          cp .zap/rules.tsv zap/rules.tsv
+          docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy@sha256:9624669db72f54d86c4b46a7064518bd9bf79d8c61a4c31befa9923489f328af \
+            zap-baseline.py -t http://127.0.0.1:8080 -c rules.tsv -I -j \
+              -r zap-report.html -J zap-report.json -w zap-report.md
+
+      - name: Upload the ZAP report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zap-baseline-report
+          path: zap/zap-report.*
+          if-no-files-found: ignore
+
+      - name: Stop the image
+        if: always()
+        run: docker rm -f perchtail >/dev/null 2>&1 || true
+
+      # Upgrade test: the previous release (PREVIOUS_RELEASE_IMAGE) is filled
+      # through its API by .github/upgrade-test/seed.py, stopped, and
+      # perchtail:ci starts on the same volume; verify.py then checks that
+      # the migrations reached the head and that every object, secret and
+      # audit entry came through, but for the differences the CHANGELOG
+      # announces, and that the previous release refuses the upgraded
+      # database. Both versions get the same throwaway key.
+      - name: "Upgrade test: start the previous release"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/upgrade-test/report"
+          key="$(openssl rand -base64 32)"
+          echo "::add-mask::$key"
+          printf '%s\n' "CREDENTIAL_ENCRYPTION_KEY=$key" \
+            PUBLIC_BASE_URL=http://127.0.0.1:8081 SESSION_COOKIE_SECURE=false \
+            UPDATE_CHECK=false LOCAL_SOURCE_ROOTS=/data/logs > "$RUNNER_TEMP/upgrade-test/env"
+          docker volume create perchtail-upgrade >/dev/null
+          docker run -d --name perchtail-previous -p 127.0.0.1:8081:8000 \
+            --env-file "$RUNNER_TEMP/upgrade-test/env" -v perchtail-upgrade:/data \
+            "$PREVIOUS_RELEASE_IMAGE"
+          .github/upgrade-test/wait-healthy.sh perchtail-previous
+
+      # The first super admin's temporary password: in DATA_DIR from 0.7.0
+      # on, in the log before.
+      - name: "Upgrade test: fill the previous release"
+        run: |
+          set -euo pipefail
+          { docker exec perchtail-previous cat /data/db/initial-admin-password 2>/dev/null \
+              || docker logs perchtail-previous 2>&1; } \
+            | python3 .github/upgrade-test/seed.py --base-url http://127.0.0.1:8081 \
+                --out "$RUNNER_TEMP/upgrade-test/report/before.json" \
+                --secrets "$RUNNER_TEMP/upgrade-test/secrets.json"
+
+      - name: "Upgrade test: upgrade to this build"
+        run: |
+          set -euo pipefail
+          docker stop perchtail-previous
+          docker run -d --name perchtail-new -p 127.0.0.1:8081:8000 \
+            --env-file "$RUNNER_TEMP/upgrade-test/env" -v perchtail-upgrade:/data \
+            perchtail:ci
+          .github/upgrade-test/wait-healthy.sh perchtail-new
+
+      - name: "Upgrade test: verify the upgraded install"
+        run: |
+          python3 .github/upgrade-test/verify.py --base-url http://127.0.0.1:8081 \
+            --container perchtail-new \
+            --before "$RUNNER_TEMP/upgrade-test/report/before.json" \
+            --secrets "$RUNNER_TEMP/upgrade-test/secrets.json" \
+            --out "$RUNNER_TEMP/upgrade-test/report/after.json"
+
+      # The previous release must refuse the upgraded database at startup
+      # and leave it as it was: the new build then passes verify.py again.
+      - name: "Upgrade test: the previous release refuses the upgraded database"
+        run: |
+          set -euo pipefail
+          docker stop perchtail-new
+          python3 .github/upgrade-test/verify.py downgrade --volume perchtail-upgrade \
+            --previous-image "$PREVIOUS_RELEASE_IMAGE" --new-image perchtail:ci \
+            --env-file "$RUNNER_TEMP/upgrade-test/env" \
+            --log "$RUNNER_TEMP/upgrade-test/report/downgrade.log"
+          docker start perchtail-new
+          .github/upgrade-test/wait-healthy.sh perchtail-new
+          python3 .github/upgrade-test/verify.py --base-url http://127.0.0.1:8081 \
+            --container perchtail-new \
+            --before "$RUNNER_TEMP/upgrade-test/report/before.json" \
+            --secrets "$RUNNER_TEMP/upgrade-test/secrets.json" \
+            --out "$RUNNER_TEMP/upgrade-test/report/after-downgrade-attempt.json"
+
+      - name: "Upgrade test: collect the container logs"
+        if: failure()
+        run: |
+          for c in perchtail-previous perchtail-new; do
+            docker logs "$c" > "$RUNNER_TEMP/upgrade-test/report/$c.log" 2>&1 || true
+          done
+
+      # The report holds the JSON snapshots and logs, never secrets.json.
+      - name: "Upgrade test: upload the report"
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: upgrade-test-report
+          path: ${{ runner.temp }}/upgrade-test/report/
+          if-no-files-found: ignore
+
+      - name: "Upgrade test: clean up"
+        if: always()
+        run: |
+          docker rm -f perchtail-previous perchtail-new perchtail-downgrade >/dev/null 2>&1 || true
+          docker volume rm perchtail-upgrade >/dev/null 2>&1 || true
+          rm -rf "$RUNNER_TEMP/upgrade-test"
+
       # SBOM as a build artifact of every CI run. Releases get their own,
       # for the published multi-arch image (.github/workflows/release.yml).
       - name: Generate SBOM (CycloneDX)
@@ -287,3 +451,5 @@ jobs:
         run: |
           pip install zizmor==1.32.0
           zizmor --offline --min-severity low .github/workflows/
+      - name: Test the CI scripts
+        run: python3 -m unittest discover -s .github/scripts/tests -v

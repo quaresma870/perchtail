@@ -9,20 +9,29 @@ from typing import Literal
 from cryptography import x509
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import delete as sa_delete
 from sqlmodel import Session, select
 
-from app import source_roots, source_status
+from app import source_roots, source_status, system_settings
 from app.agent_registry import disconnect_after_commit, get_agent_registry
+from app.agent_upgrades import delete_runs as delete_agent_upgrade_runs
+from app.alerts import drop_scoped_alerts, forget_source
+from app.api.archive import SOURCE_DISABLED
 from app.api.auth import get_current_active_user
 from app.audit import record_audit_event
 from app.auth.models import AuditLog, Capability, GlobalCapability, ScopeType, User
 from app.auth.rbac import (
     FolderVisibilityContext,
     build_folder_visibility_context,
+    concealed,
+    customer_in_reach,
     delete_scope_grants,
+    folder_in_reach,
     folder_path_boundary,
+    get_source_in_reach,
     holds_capability_at,
     move_keeps_access_within,
+    record_access_denied,
     require_capability,
     require_global_capability,
     resolve_capability,
@@ -31,23 +40,27 @@ from app.auth.rbac import (
 from app.collectors import local as local_collector
 from app.collectors import smb as smb_collector
 from app.collectors import smb_shares
+from app.collectors import ssh as ssh_collector
 from app.collectors import winrm as winrm_collector
-from app.collectors.base import SourceError, SourceNotFoundError
+from app.collectors.base import SourceError, SourceNotFoundError, SourceUnreachableError
 from app.collectors.errors import translate_smb, translate_winrm, translated
 from app.collectors.registry import CONNECTORS
 from app.crypto import encrypt_credential
 from app.db import get_session
 from app.logging_config import get_logger
 from app.models import (
-    Alert,
     Customer,
+    FileNameEntry,
     Folder,
     Protocol,
     Rule,
     SeverityPattern,
     Source,
 )
-from app.search_index import delete_source_index
+from app.name_index import drop_source_names, index_in_background
+from app.redaction_rules import delete_source_redaction
+from app.source_pins import SourcePins, remove_unused_pins
+from app.timeutils import utcnow
 from app.version import APP_VERSION
 from app.versions import is_newer
 
@@ -72,6 +85,12 @@ class SourceRootModel(BaseModel):
     path: str
 
 
+class AgentConnectionReplaced(BaseModel):
+    previous_address: str | None
+    address: str | None
+    at: datetime
+
+
 class SourcePublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -94,10 +113,15 @@ class SourcePublic(BaseModel):
     # The JEA endpoint (#169), or null for the WinRS shell.
     winrm_configuration: str | None = None
     tls_ca_pem: str | None = None
+    # SMB: require signed messages, ask for SMB 3 encryption.
+    smb_require_signing: bool = True
+    smb_encrypt: bool = False
     enabled: bool
     is_system: bool
     rule_count: int
     has_credential: bool
+    # When the credential was last set (#248); null if unknown or none.
+    credential_updated_at: datetime | None = None
     has_agent_token: bool
     agent_connected: bool
     agent_last_seen_at: datetime | None
@@ -107,15 +131,29 @@ class SourcePublic(BaseModel):
     # files, for example).
     agent_version: str | None
     agent_outdated: bool
+    # What the agent last announced it can do (#382, #249): "redaction/1"
+    # when it redacts on its host; empty for an older agent, which leaves
+    # redaction to the server.
+    agent_features: list[str] = []
     # Reachability (#276): "ok", "failing" or "unknown"; for an agent source,
     # its live connection ("ok" connected, "failing" not). When it was last
     # known, and the public reason when failing.
     status: str
     status_checked_at: datetime | None
     status_message: str | None
-    search_indexing_enabled: bool
+    # File-name index (#304): on/off, when it last listed the source, how
+    # many files it found, and why the last pass stopped short (None = it
+    # reached every folder).
+    name_index_enabled: bool
+    name_indexed_at: datetime | None
+    name_index_files: int | None
+    name_index_message: str | None
+    # Agent sources: set when the agent's connection was replaced by one
+    # from another address (two agents may share the token), until the next
+    # connection that replaces none. Only for users with manage_source.
+    agent_connection_replaced: AgentConnectionReplaced | None = None
     # What the requesting user may do on this source (view, download,
-    # manage_rules, run_now), so the UI can hide actions it would refuse --
+    # manage_rules, run_now, manage_source), so the UI can hide actions it would refuse --
     # e.g. Download buttons for a view-only role (#174). Informational only:
     # every endpoint still checks on its own.
     my_capabilities: list[Capability] = []
@@ -135,11 +173,14 @@ class SourceCreate(BaseModel):
     winrm_scheme: Literal["https", "http"] | None = None
     winrm_configuration: str | None = None
     tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
+    # SMB only: signing required by default, encryption off.
+    smb_require_signing: bool = True
+    smb_encrypt: bool = False
     enabled: bool = True
     # Per-protocol JSON blob (SSH: username + private_key|password; SMB/WinRM:
     # username + password); omitted entirely for `local`, which needs none.
     credential: dict | None = None
-    search_indexing_enabled: bool = False
+    name_index_enabled: bool = True
 
 
 class SourceUpdate(BaseModel):
@@ -156,9 +197,11 @@ class SourceUpdate(BaseModel):
     winrm_configuration: str | None = None
     # "" removes the CA certificate.
     tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
+    smb_require_signing: bool | None = None
+    smb_encrypt: bool | None = None
     enabled: bool | None = None
     credential: dict | None = None
-    search_indexing_enabled: bool | None = None
+    name_index_enabled: bool | None = None
 
 
 class ConnectionCheckResult(BaseModel):
@@ -216,6 +259,20 @@ def _to_public(
 ) -> SourcePublic:
     rule_count = len(session.exec(select(Rule).where(Rule.source_id == source.id)).all())
     boundary = folder_path_boundary(folder_ctx, source)
+    capabilities = (
+        [c for c in Capability if resolve_capability(session, user, source, c)]
+        if user is not None
+        else []
+    )
+    replaced = None
+    if source.protocol == Protocol.agent and Capability.manage_source in capabilities:
+        warning = get_agent_registry().connection_replaced(source.id)
+        if warning is not None:
+            replaced = AgentConnectionReplaced(
+                previous_address=warning.previous_address,
+                address=warning.address,
+                at=warning.at,
+            )
     return SourcePublic(
         id=source.id,
         name=source.name,
@@ -235,10 +292,13 @@ def _to_public(
             winrm_collector.endpoint(source)[0] if source.protocol == Protocol.winrm else None
         ),
         tls_ca_pem=source.tls_ca_pem,
+        smb_require_signing=source.smb_require_signing,
+        smb_encrypt=source.smb_encrypt,
         enabled=source.enabled,
         is_system=source.is_system,
         rule_count=rule_count,
         has_credential=source.credential_ref is not None,
+        credential_updated_at=source.credential_updated_at,
         has_agent_token=source.agent_token_hash is not None,
         agent_connected=(
             source.protocol == Protocol.agent and get_agent_registry().is_connected(source.id)
@@ -247,13 +307,14 @@ def _to_public(
         agent_os=source.agent_os,
         agent_version=source.agent_version,
         agent_outdated=is_newer(APP_VERSION, source.agent_version),
+        agent_features=source.agent_features.split(",") if source.agent_features else [],
         **_status_fields(source),
-        search_indexing_enabled=source.search_indexing_enabled,
-        my_capabilities=(
-            [c for c in Capability if resolve_capability(session, user, source, c)]
-            if user is not None
-            else []
-        ),
+        name_index_enabled=source.name_index_enabled,
+        name_indexed_at=source.name_indexed_at,
+        name_index_files=source.name_index_files,
+        name_index_message=source.name_index_message,
+        agent_connection_replaced=replaced,
+        my_capabilities=capabilities,
     )
 
 
@@ -280,7 +341,7 @@ def _require_allowed_local_base_path(base_path: str) -> None:
         )
 
 
-_DRIVE_PATH = re.compile(r"^[A-Za-z]:([\\/]|$)")
+_DRIVE_PATH = winrm_collector.DRIVE_PATH
 _ADMIN_SHARE = re.compile(r"^([A-Za-z]\$|ADMIN\$|IPC\$)$", re.IGNORECASE)
 
 
@@ -323,9 +384,12 @@ def _validate_base_path(protocol: Protocol, base_path: str) -> str:
                 "(see docs/source-setup.md) so the account can't read the whole disk"
             )
     elif protocol == Protocol.winrm:
-        if not (_DRIVE_PATH.match(path) or path.startswith("\\\\")):
+        # A drive path only: a UNC path (\\server\share) or a device path
+        # (\\?\..., \\.\...) would have the WinRM host reach out to another
+        # machine with its own credentials.
+        if not _DRIVE_PATH.match(path):
             raise _bad_request(
-                "WinRM Base path must be an absolute Windows path, e.g. D:\\Logs\\App"
+                "WinRM Base path must be an absolute Windows path on a drive, e.g. D:\\Logs\\App"
             )
     elif protocol == Protocol.local:
         _require_allowed_local_base_path(path)
@@ -362,6 +426,19 @@ def _validate_roots(
     return out
 
 
+def _reject_encrypted_private_key(credential: dict | None) -> None:
+    """There's nowhere to keep a passphrase, so a passphrase-protected key
+    would only fail on every connection: refused when it's saved."""
+    private_key = (credential or {}).get("private_key")
+    if not isinstance(private_key, str) or not private_key:
+        return
+    if ssh_collector.is_encrypted_private_key(private_key):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ssh_collector.ENCRYPTED_PRIVATE_KEY_DETAIL,
+        )
+
+
 def _validate_ca_pem(protocol: Protocol, pem: str | None) -> str | None:
     """None/"" clears it; anything else must be PEM certificates (#169)."""
     if not pem or not pem.strip():
@@ -394,6 +471,14 @@ def _validate_winrm_configuration(protocol: Protocol, name: str | None) -> str |
     return name
 
 
+def _smb_options(protocol: Protocol, require_signing: bool, encrypt: bool) -> dict:
+    """The SMB signing and encryption options, refused on another protocol
+    when they differ from the defaults (signing required, no encryption)."""
+    if protocol != Protocol.smb and (not require_signing or encrypt):
+        raise _bad_request("SMB signing and encryption only apply to SMB sources")
+    return {"smb_require_signing": require_signing, "smb_encrypt": encrypt}
+
+
 def _validate_winrm_scheme(protocol: Protocol, scheme: str | None) -> str | None:
     if scheme is not None and protocol != Protocol.winrm:
         raise _bad_request("winrm_scheme only applies to WinRM sources")
@@ -409,33 +494,53 @@ def _location(source: Source) -> dict:
     }
 
 
-def _validate_scope(session: Session, *, customer_id: int | None, folder_id: int | None) -> None:
+FOLDER_CUSTOMER_MISMATCH = "folder_id must belong to customer_id"
+
+
+def _validate_scope(
+    session: Session, user: User, *, customer_id: int | None, folder_id: int | None
+) -> None:
+    """The customer or folder must exist; one outside the caller's reach
+    answers exactly like one that doesn't, so the answer can't tell which
+    ids exist. A source in a folder belongs to the folder's customer: any
+    other customer_id, or none, is refused, so the source can't sit in a
+    folder while escaping its customer's grants."""
     if folder_id is not None:
         folder = session.get(Folder, folder_id)
         if folder is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
-        if customer_id is not None and folder.customer_id != customer_id:
+        if not folder_in_reach(session, user, folder_id):
+            raise concealed("Folder not found", reason="folder_out_of_reach", user=user)
+        if folder.customer_id != customer_id:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="folder_id must belong to customer_id",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=FOLDER_CUSTOMER_MISMATCH,
             )
     elif customer_id is not None:
         if session.get(Customer, customer_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
+        if not customer_in_reach(session, user, customer_id):
+            raise concealed("Customer not found", reason="customer_out_of_reach", user=user)
 
 
 MANAGE_EXISTING_SOURCE_REFUSED = (
-    "You need manage rules on this source (and where you're moving it) to change it."
+    "You need manage sources on this source (and where you're moving it) to change it."
 )
+CREATE_SOURCE_REFUSED = "You need manage sources where you're adding this source."
 
 
-def _require_manage_existing_source(session: Session, user: User, source: Source) -> None:
+def can_manage_existing_source(session: Session, user: User, source: Source) -> bool:
+    return resolve_capability(session, user, source, Capability.manage_source)
+
+
+def require_manage_existing_source(session: Session, user: User, source: Source) -> None:
     """create_source lets a role add sources; changing an existing one
-    (editing, moving, deleting it, its agent token, or browsing with its
-    saved credential) also needs manage_rules on that source, by the usual
-    grant resolution -- otherwise create_source alone would reach every
-    source, including ones the role can't even see."""
-    if not resolve_capability(session, user, source, Capability.manage_rules):
+    (editing, moving, deleting it, its agent token or credential, upgrading
+    its agent, or browsing with its saved credential) also needs
+    manage_source on that source, by the usual grant resolution -- otherwise
+    create_source alone would reach every source, including ones the role
+    can't even see."""
+    if not can_manage_existing_source(session, user, source):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=MANAGE_EXISTING_SOURCE_REFUSED
         )
@@ -444,7 +549,7 @@ def _require_manage_existing_source(session: Session, user: User, source: Source
 def _require_manage_destination(
     session: Session, user: User, source: Source, *, customer_id: int | None, folder_id: int | None
 ) -> None:
-    """Moving a source also needs manage_rules where it goes: the grant
+    """Moving a source also needs manage_source where it goes: the grant
     resolution as if the source were already there (the destination folder,
     its ancestors, then the customer). Nor may the move give the mover more
     on the source than they have where it is now (see
@@ -454,7 +559,7 @@ def _require_manage_destination(
         user,
         folder_id=folder_id,
         customer_id=customer_id,
-        capability=Capability.manage_rules,
+        capability=Capability.manage_source,
     ) or not move_keeps_access_within(
         session,
         user,
@@ -556,15 +661,28 @@ def create_source(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    _validate_scope(session, customer_id=payload.customer_id, folder_id=payload.folder_id)
+    _validate_scope(session, user, customer_id=payload.customer_id, folder_id=payload.folder_id)
+    # Adding a source also needs manage_source where it lands, by the grant
+    # resolution it will get there: create_source alone would otherwise put
+    # a source under any customer. With no customer and no folder there is
+    # no scope to hold it at, so only a super admin adds one.
+    if not holds_capability_at(
+        session,
+        user,
+        folder_id=payload.folder_id,
+        customer_id=payload.customer_id,
+        capability=Capability.manage_source,
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=CREATE_SOURCE_REFUSED)
+    _reject_encrypted_private_key(payload.credential)
     roots = _validate_roots(payload.protocol, payload.roots or [], source_roots.max_roots(session))
     if roots:
         base_path = roots[0]["path"]
     elif payload.roots:
         base_path = _validate_base_path(payload.protocol, payload.roots[0].path)
-    elif payload.protocol == Protocol.agent:
-        base_path = payload.base_path
     else:
+        # An agent's too, as the import checks it (config_transfer): what
+        # the editor saves can be exported and imported again.
         base_path = _validate_base_path(payload.protocol, payload.base_path)
 
     source = Source(
@@ -590,9 +708,11 @@ def create_source(
             else None
         ),
         tls_ca_pem=_validate_ca_pem(payload.protocol, payload.tls_ca_pem),
+        **_smb_options(payload.protocol, payload.smb_require_signing, payload.smb_encrypt),
         enabled=payload.enabled,
         credential_ref=encrypt_credential(payload.credential) if payload.credential else None,
-        search_indexing_enabled=payload.search_indexing_enabled,
+        credential_updated_at=utcnow() if payload.credential else None,
+        name_index_enabled=payload.name_index_enabled,
     )
     session.add(source)
     session.flush()
@@ -608,6 +728,14 @@ def create_source(
             "host": source.host,
             "base_path": source.base_path,
             **({"roots": roots} if roots else {}),
+            **(
+                {
+                    "smb_require_signing": source.smb_require_signing,
+                    "smb_encrypt": source.smb_encrypt,
+                }
+                if source.protocol == Protocol.smb
+                else {}
+            ),
         },
     )
     session.commit()
@@ -622,24 +750,26 @@ def update_source(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    source = session.get(Source, source_id)
-    if source is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    source = get_source_in_reach(session, user, source_id)
     _require_not_system(source)
-    _require_manage_existing_source(session, user, source)
+    require_manage_existing_source(session, user, source)
+    _reject_encrypted_private_key(payload.credential)
 
     fields_set = payload.model_fields_set
+    old_pins = SourcePins.of(source)
     before = {
         "name": source.name,
         "enabled": source.enabled,
         "winrm_scheme": source.winrm_scheme,
         "winrm_configuration": source.winrm_configuration,
+        "smb_require_signing": source.smb_require_signing,
+        "smb_encrypt": source.smb_encrypt,
         **_location(source),
     }
     new_customer_id = payload.customer_id if "customer_id" in fields_set else source.customer_id
     new_folder_id = payload.folder_id if "folder_id" in fields_set else source.folder_id
     if "customer_id" in fields_set or "folder_id" in fields_set:
-        _validate_scope(session, customer_id=new_customer_id, folder_id=new_folder_id)
+        _validate_scope(session, user, customer_id=new_customer_id, folder_id=new_folder_id)
         if (new_customer_id, new_folder_id) != (source.customer_id, source.folder_id):
             _require_manage_destination(
                 session, user, source, customer_id=new_customer_id, folder_id=new_folder_id
@@ -674,11 +804,7 @@ def update_source(
             source.base_path = _validate_base_path(source.protocol, payload.roots[0].path)
     if payload.base_path is not None and not source_roots.is_multi_root(source):
         if not source_roots.same_path(source.protocol, payload.base_path, source.base_path):
-            source.base_path = (
-                payload.base_path
-                if source.protocol == Protocol.agent
-                else _validate_base_path(source.protocol, payload.base_path)
-            )
+            source.base_path = _validate_base_path(source.protocol, payload.base_path)
     if "winrm_scheme" in fields_set:
         source.winrm_scheme = _validate_winrm_scheme(source.protocol, payload.winrm_scheme)
     configuration_changed = False
@@ -693,28 +819,50 @@ def update_source(
         new_ca = _validate_ca_pem(source.protocol, payload.tls_ca_pem)
         tls_ca_changed = new_ca != source.tls_ca_pem
         source.tls_ca_pem = new_ca
+    smb_changed = False
+    if payload.smb_require_signing is not None or payload.smb_encrypt is not None:
+        options = _smb_options(
+            source.protocol,
+            (
+                payload.smb_require_signing
+                if payload.smb_require_signing is not None
+                else source.smb_require_signing
+            ),
+            payload.smb_encrypt if payload.smb_encrypt is not None else source.smb_encrypt,
+        )
+        smb_changed = (options["smb_require_signing"], options["smb_encrypt"]) != (
+            source.smb_require_signing,
+            source.smb_encrypt,
+        )
+        source.smb_require_signing = options["smb_require_signing"]
+        source.smb_encrypt = options["smb_encrypt"]
     if payload.enabled is not None:
         source.enabled = payload.enabled
     if source.protocol == Protocol.agent and not source.enabled:
         disconnect_after_commit(session, source.id, "source disabled")
     if payload.credential is not None:
         source.credential_ref = encrypt_credential(payload.credential)
-    if payload.search_indexing_enabled is not None:
-        source.search_indexing_enabled = payload.search_indexing_enabled
+        source.credential_updated_at = utcnow()
+    if payload.name_index_enabled is not None:
+        source.name_index_enabled = payload.name_index_enabled
     after = {
         "name": source.name,
         "enabled": source.enabled,
         "winrm_scheme": source.winrm_scheme,
         "winrm_configuration": source.winrm_configuration,
+        "smb_require_signing": source.smb_require_signing,
+        "smb_encrypt": source.smb_encrypt,
         **_location(source),
     }
     location_changed = any(before[k] != after[k] for k in _location(source))
-    if location_changed or not (source.enabled and source.search_indexing_enabled):
-        # Opting out of search (or disabling the source) means its content
-        # stops being kept: drop the stored snippets now, not never. A new
-        # host or path is a different set of files (#159), so what was
-        # indexed (and how far alerts got into each file) no longer applies.
-        delete_source_index(session, source.id)
+    if location_changed:
+        # A new host or path is a different set of files (#159): how far
+        # alerts got into each file no longer applies.
+        forget_source(session, source.id)
+    if location_changed or not (source.enabled and source.name_index_enabled):
+        # The file-name index (#304) follows the same rule: off means its
+        # names are dropped now, and another host or path is other files.
+        drop_source_names(session, source.id)
 
     changes = {k: {"from": before[k], "to": after[k]} for k in before if before[k] != after[k]}
     if payload.credential is not None:
@@ -726,10 +874,13 @@ def update_source(
         or payload.credential is not None
         or tls_ca_changed
         or configuration_changed
+        or smb_changed
     ):
         # How the source is reached changed: the old status says nothing
         # about the new settings (#276).
         source.status = source.status_checked_at = source.status_message = None
+        source.check_failures = 0
+        source.check_backoff_until = None
         source_status.forget(source.id)
     session.add(source)
     record_audit_event(
@@ -741,6 +892,10 @@ def update_source(
         metadata={"changes": changes} if changes else None,
     )
     session.commit()
+    if (old_pins.host, old_pins.port) != (source.host, source.port) or tls_ca_changed:
+        # The old host's key and the old CA file are no longer this
+        # source's; they go unless another source uses them.
+        _remove_unused_pins(session, user, source_id, old_pins)
     session.refresh(source)
     return _to_public(session, source, build_folder_visibility_context(session, user), user)
 
@@ -751,21 +906,25 @@ def delete_source(
     user: User = Depends(require_manage),
     session: Session = Depends(get_session),
 ):
-    source = session.get(Source, source_id)
-    if source is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    source = get_source_in_reach(session, user, source_id)
     _require_not_system(source)
-    _require_manage_existing_source(session, user, source)
+    require_manage_existing_source(session, user, source)
 
     # Everything that points at this source by id goes with it -- nothing may
     # outlive it and resurface under a later source (see app.models.NO_ID_REUSE).
     delete_scope_grants(session, ScopeType.source, source_id)
-    delete_source_index(session, source_id)
-    for model in (Alert, SeverityPattern):
-        for row in session.exec(select(model).where(model.source_id == source_id)).all():
-            session.delete(row)
+    forget_source(session, source_id)
+    session.execute(sa_delete(FileNameEntry).where(FileNameEntry.source_id == source_id))
+    drop_scoped_alerts(session, source_id=source_id)
+    delete_agent_upgrade_runs(session, source_id)
+    for row in session.exec(
+        select(SeverityPattern).where(SeverityPattern.source_id == source_id)
+    ).all():
+        session.delete(row)
+    delete_source_redaction(session, source_id)
     if source.protocol == Protocol.agent:
         disconnect_after_commit(session, source_id, "source deleted")
+    pins = SourcePins.of(source)
     session.delete(source)
     record_audit_event(
         session,
@@ -775,23 +934,73 @@ def delete_source(
         target_id=source_id,
     )
     session.commit()
+    # Its SSH host key and WinRM CA file go too, unless another source uses
+    # them (app/source_pins.py); only after the delete is committed.
+    _remove_unused_pins(session, user, source_id, pins)
+
+
+def _remove_unused_pins(session: Session, user: User, source_id: int, pins: SourcePins) -> None:
+    """Removes the host key and CA file a source no longer uses (deleted, or
+    pointed at another host, port or CA) when no source uses them, and
+    audits what was removed. Call it after the change is committed."""
+    removed = remove_unused_pins(session, pins)
+    if removed:
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="source.pins_removed",
+            target_type="source",
+            target_id=source_id,
+            metadata={"removed": removed},
+        )
+        session.commit()
+
+
+class NameIndexStart(BaseModel):
+    started: bool
+
+
+@router.post(
+    "/{source_id}/name-index", response_model=NameIndexStart, status_code=status.HTTP_202_ACCEPTED
+)
+def index_names_now(
+    source: Source = Depends(require_capability(Capability.run_now, get_current_active_user)),
+    session: Session = Depends(get_session),
+):
+    """'Index now' for the file-name index (#304): lists the source's files
+    again in the background, without waiting for the next pass. `started`
+    is false when a pass for this source is already running."""
+    if not system_settings.get_bool(session, "name_index_enabled"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The file-name index is off (Settings → System)",
+        )
+    if not (source.enabled and source.name_index_enabled):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The file-name index is off for this source",
+        )
+    return NameIndexStart(started=index_in_background(source.id))
 
 
 @router.post("/{source_id}/check", response_model=ConnectionCheckResult)
 def check_connection(
-    source: Source = Depends(require_capability(Capability.view, get_current_active_user)),
-    user: User = Depends(get_current_active_user),
+    source: Source = Depends(require_capability(Capability.manage_source, get_current_active_user)),
 ):
     """On-demand reachability check — lists the source's base path through
     its connector. Replaces the pre-pivot "run-now"/"last run" concept from
     CLAUDE.md's original Web UI wording: there is no scheduled sync anymore,
     so there is nothing to run, only a live connection to test (see
-    ROADMAP.md's M7 notes).
+    docs/design-decisions.md, "Scope and principles").
 
-    Anyone with `view` can run it, so the answer is the mapped, actionable
-    message (SourceError.public_message) plus the effective base path; the
-    raw library error, which can carry UNC paths, host keys or internals,
-    is added only for users who can manage sources (#170)."""
+    It needs manage_source on the source. The answer is the mapped,
+    actionable message (SourceError.public_message) plus the effective base
+    path; a closed port, a refused connection and a timeout all get the same
+    neutral message, and the raw library error, which can carry UNC paths,
+    host keys or internals, only goes to the server log (#170). A disabled
+    source is off, so it isn't contacted (409)."""
+    if not source.enabled:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=SOURCE_DISABLED)
     connector = _CONNECTORS.get(source.protocol)
     if connector is None:
         return ConnectionCheckResult(ok=False, detail=f"protocol {source.protocol} not supported")
@@ -803,14 +1012,22 @@ def check_connection(
     failed = source_status.check(source, connector)
     source_status.record_check(source.id, failed)
     if failed:
-        failures = [_check_failure_message(source, root, exc, user) for root, exc in failed]
+        # source_status.check logged each failure with its raw error.
+        failures = [_check_failure_message(source, root, exc) for root, exc in failed]
         return ConnectionCheckResult(ok=False, detail="; ".join(failures))
     if len(roots) > 1:
         return ConnectionCheckResult(ok=True, detail=f"Connected ({len(roots)} folders)")
     return ConnectionCheckResult(ok=True, detail="Connected")
 
 
-def _check_failure_message(source: Source, root: dict, exc: Exception, user: User) -> str:
+# What a caller is told when a connection couldn't be made, whatever the
+# reason (a closed port, a refused connection, a timeout, an error the
+# connector doesn't map): the same words, so the answer can't be used to
+# probe which ports answer. The reason goes to the server log.
+CONNECTION_FAILED = SourceUnreachableError.public_message
+
+
+def _check_failure_message(source: Source, root: dict, exc: Exception) -> str:
     where = f"base path: {root['path'] or '/'}"
     if root["label"]:
         where = f"folder {root['label']}: {root['path']}"
@@ -822,15 +1039,15 @@ def _check_failure_message(source: Source, root: dict, exc: Exception, user: Use
                 "chroot (usually /)."
             )
     else:
-        message = f"The connection check failed ({where})"
-    if _can_manage_sources(user):
-        message += f" — {exc}"
+        message = f"{CONNECTION_FAILED} ({where})"
     return message
 
 
-def _can_manage_sources(user: User) -> bool:
-    role = user.role
-    return role.is_super_admin or GlobalCapability.create_source in role.global_capabilities
+def _connection_failed(exc: Exception) -> SourceUnreachableError:
+    """The neutral error for a connection the folder picker couldn't make
+    (see CONNECTION_FAILED); what really happened is kept as its detail,
+    which app/api/errors.py logs and never sends."""
+    return SourceUnreachableError(f"{type(exc).__name__}: {exc}")
 
 
 class AgentTokenResult(BaseModel):
@@ -849,10 +1066,8 @@ def regenerate_agent_token(
     returned here once and never again; regenerating invalidates whatever
     token the agent config was using before, same UX as an admin resetting a
     user's password."""
-    source = session.get(Source, source_id)
-    if source is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
-    _require_manage_existing_source(session, user, source)
+    source = get_source_in_reach(session, user, source_id)
+    require_manage_existing_source(session, user, source)
     if source.protocol != Protocol.agent:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -896,6 +1111,8 @@ class FolderPickRequest(BaseModel):
     winrm_scheme: Literal["https", "http"] | None = None
     winrm_configuration: str | None = None
     tls_ca_pem: str | None = Field(default=None, max_length=_MAX_CA_PEM)
+    smb_require_signing: bool | None = None
+    smb_encrypt: bool | None = None
     path: str = ""
 
 
@@ -916,27 +1133,31 @@ class FolderPickResult(BaseModel):
 
 
 def _picker_source(session: Session, user: User, payload: FolderPickRequest) -> Source:
-    saved = session.get(Source, payload.source_id) if payload.source_id is not None else None
-    if payload.source_id is not None and saved is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
-    if saved is not None:
+    """The draft source to browse. With `source_id`, that source must be
+    within the caller's reach and they must hold manage_source on it,
+    whatever credential is used, and its host and port are always the
+    saved ones: the request's are ignored, so a saved source can't be used
+    to reach another host. Without it, the request says where to connect
+    (create_source, checked by the endpoint, is enough for that)."""
+    saved = None
+    if payload.source_id is not None:
+        saved = get_source_in_reach(session, user, payload.source_id)
         _require_not_system(saved)
+        require_manage_existing_source(session, user, saved)
     protocol = saved.protocol if saved is not None else payload.protocol
     if protocol not in _PICKER_PROTOCOLS:
         raise _bad_request("Browsing for a folder works with SSH, SMB and WinRM sources")
-    host = (payload.host or (saved.host if saved else "")).strip()
+    if saved is not None:
+        host, port = saved.host, saved.port
+    else:
+        host = (payload.host or "").strip()
+        port = payload.port
     if not host:
         raise _bad_request("Enter the host first")
-    port = payload.port if "port" in payload.model_fields_set else (saved.port if saved else None)
 
     if payload.credential is not None:
         credential_ref = encrypt_credential(payload.credential)
     elif saved is not None and saved.credential_ref is not None:
-        _require_manage_existing_source(session, user, saved)
-        # The saved credential is only ever sent to the host it was saved
-        # for -- pointing the picker somewhere else needs it typed again.
-        if (host, port) != (saved.host, saved.port):
-            raise _bad_request(CREDENTIAL_REQUIRED_FOR_NEW_HOST)
         credential_ref = saved.credential_ref
     else:
         raise _bad_request("Enter the credential first")
@@ -969,6 +1190,16 @@ def _picker_source(session: Session, user: User, payload: FolderPickRequest) -> 
         winrm_scheme=scheme if protocol == Protocol.winrm else None,
         winrm_configuration=configuration if protocol == Protocol.winrm else None,
         tls_ca_pem=ca_pem if protocol == Protocol.winrm else None,
+        smb_require_signing=(
+            payload.smb_require_signing
+            if payload.smb_require_signing is not None
+            else (saved.smb_require_signing if saved else True)
+        ),
+        smb_encrypt=(
+            payload.smb_encrypt
+            if payload.smb_encrypt is not None
+            else (saved.smb_encrypt if saved else False)
+        ),
     )
 
 
@@ -1006,7 +1237,8 @@ def _pick(source: Source, path: str) -> tuple[str, str | None, str, list[FolderP
                 "drives",
                 [FolderPickEntry(name=d, path=d.rstrip("\\") + "\\") for d in drives],
             )
-        if not _DRIVE_PATH.match(path) and not path.startswith("\\\\"):
+        # A drive only, as for the Base path: never a UNC or device path.
+        if not _DRIVE_PATH.match(path):
             raise _bad_request("Pick a drive first, e.g. D:\\")
         listed = path + "\\" if re.fullmatch(r"[A-Za-z]:", path) else path
         names = _list_folders(connector, source, listed)
@@ -1020,7 +1252,10 @@ def _pick(source: Source, path: str) -> tuple[str, str | None, str, list[FolderP
             [FolderPickEntry(name=n, path=f"{path}\\{n}") for n in names],
         )
 
-    # SMB: the top level is the server's shares.
+    # SMB: the top level is the server's shares; a path is inside one of them,
+    # never a UNC or device path of its own.
+    if path.startswith("\\\\"):
+        raise _bad_request("Pick a share first")
     if not path:
         with translated(translate_smb), smb_collector._connection(source) as kwargs:
             shares = smb_shares.list_shares(source.host, kwargs)
@@ -1038,10 +1273,21 @@ def pick_folder(
 ):
     """Lists the folders at `path` on a source's host so the Base path can
     be picked instead of typed (#159). Folders only, never file names, and
-    only for users who can manage sources; each listing is audited, since
-    it reaches outside any configured base path."""
+    only for users who can create sources (and manage the saved source,
+    when there is one); each listing is audited, since it reaches outside
+    any configured base path. A connection that can't be made is answered
+    with the same neutral error whatever the reason (CONNECTION_FAILED)."""
     source = _picker_source(session, user, payload)
-    path, parent, kind, entries = _pick(source, payload.path)
+    try:
+        path, parent, kind, entries = _pick(source, payload.path)
+    except HTTPException:
+        raise
+    except SourceError as exc:
+        if not isinstance(exc, SourceUnreachableError):
+            raise
+        raise _connection_failed(exc) from None
+    except Exception as exc:  # noqa: BLE001 - whatever it was, the caller gets the neutral error
+        raise _connection_failed(exc) from None
     record_audit_event(
         session,
         user_id=user.id,
@@ -1059,3 +1305,122 @@ def pick_folder(
         entries=entries[:_PICKER_MAX_ENTRIES],
         truncated=len(entries) > _PICKER_MAX_ENTRIES,
     )
+
+
+# --- Bulk credential update (#248) ----------------------------------------
+
+_CREDENTIAL_PROTOCOLS = (Protocol.ssh, Protocol.smb, Protocol.winrm)
+_MAX_BULK_SOURCES = 200
+# A batch item the caller can't act on, whether it doesn't exist or isn't
+# theirs: the same words, so the answer doesn't say which ids exist.
+BULK_NOT_FOUND = "Not found"
+
+
+class BulkCredentialRequest(BaseModel):
+    source_ids: list[int] = Field(min_length=1, max_length=_MAX_BULK_SOURCES)
+    credential: dict
+    # Test the new credential against each source first and update only the
+    # ones where it works.
+    test_first: bool = True
+
+
+class BulkCredentialResult(BaseModel):
+    source_id: int
+    name: str | None
+    status: Literal["updated", "failed", "skipped"]
+    detail: str | None = None
+
+
+@router.post("/credentials", response_model=list[BulkCredentialResult])
+def update_credentials(
+    payload: BulkCredentialRequest,
+    user: User = Depends(require_manage),
+    session: Session = Depends(get_session),
+):
+    """Sets one new credential on many sources at once (#248) -- e.g. a
+    service account's new password. Each source still stores its own
+    encrypted copy; nothing is shared between them. With test_first, a
+    source is only updated if the new credential reaches it. Audited per
+    source, without the secret."""
+    credential = {k: v for k, v in payload.credential.items() if v}
+    if set(credential) - {"username", "password", "private_key"} or not credential.get("username"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A credential is a username plus a password or a private_key",
+        )
+    if not (credential.get("password") or credential.get("private_key")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A credential needs a password or a private_key",
+        )
+    _reject_encrypted_private_key(credential)
+    results: list[BulkCredentialResult] = []
+    for source_id in dict.fromkeys(payload.source_ids):
+        source = session.get(Source, source_id)
+        if source is None or not can_manage_existing_source(session, user, source):
+            # Same rule as editing it one by one. A source the role can't
+            # change is answered like one that doesn't exist, without its
+            # name, since the role may not even see it; the refusal is
+            # audited.
+            if source is not None:
+                record_access_denied(
+                    session,
+                    user,
+                    attempted="POST /sources/credentials",
+                    target_type="source",
+                    target_id=source_id,
+                    reason=f"missing_capability:{Capability.manage_source}",
+                )
+            results.append(
+                BulkCredentialResult(
+                    source_id=source_id, name=None, status="skipped", detail=BULK_NOT_FOUND
+                )
+            )
+            continue
+        if source.is_system or source.protocol not in _CREDENTIAL_PROTOCOLS:
+            results.append(
+                BulkCredentialResult(
+                    source_id=source_id,
+                    name=source.name,
+                    status="skipped",
+                    detail="This source doesn't use a credential",
+                )
+            )
+            continue
+        encrypted = encrypt_credential(credential)
+        if payload.test_first:
+            trial = source_roots.with_base_path(source, source.base_path)
+            trial.roots = source.roots
+            trial.credential_ref = encrypted
+            # Not the real source: a wrong new credential mustn't mark the
+            # source failing (connectors record status by id).
+            trial.id = None
+            connector = _CONNECTORS.get(source.protocol)
+            failures = source_status.check(trial, connector) if connector else []
+            reaching = [exc for _root, exc in failures if source_status.is_connectivity_error(exc)]
+            if reaching:
+                results.append(
+                    BulkCredentialResult(
+                        source_id=source_id,
+                        name=source.name,
+                        status="failed",
+                        detail=source_status.failure_message(reaching[0]),
+                    )
+                )
+                continue
+        source.credential_ref = encrypted
+        source.credential_updated_at = utcnow()
+        session.add(source)
+        record_audit_event(
+            session,
+            user_id=user.id,
+            action="source.credential_update",
+            target_type="source",
+            target_id=source.id,
+            metadata={"via": "bulk", "tested": payload.test_first},
+        )
+        results.append(
+            BulkCredentialResult(source_id=source_id, name=source.name, status="updated")
+        )
+    session.commit()
+    return results

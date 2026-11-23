@@ -3,7 +3,7 @@ export type RuleType = 'include' | 'exclude'
 export type PatternKind = 'glob' | 'regex'
 export type ScopeType = 'customer' | 'folder' | 'source'
 export type SeverityLevel = 'error' | 'warning' | 'info' | 'debug'
-export type Capability = 'view' | 'download' | 'manage_rules' | 'run_now'
+export type Capability = 'view' | 'download' | 'manage_rules' | 'manage_source' | 'run_now'
 export type GlobalCapability =
   | 'manage_users'
   | 'manage_roles'
@@ -12,6 +12,7 @@ export type GlobalCapability =
   | 'manage_system_settings'
   | 'view_audit_log'
   | 'manage_alerts'
+  | 'view_access_report'
 
 export interface CurrentUser {
   id: number
@@ -27,6 +28,10 @@ export interface CurrentUser {
   active: boolean
   must_change_password: boolean
   mfa_enabled: boolean
+  // This account must use MFA (super admin, any global capability, or the
+  // "Require MFA for local accounts" setting): without it, it can only set
+  // it up.
+  mfa_required: boolean
   is_super_admin: boolean
   global_capabilities: GlobalCapability[]
 }
@@ -74,10 +79,15 @@ export interface Source {
   winrm_configuration: string | null
   winrm_effective_scheme: 'https' | 'http' | null
   tls_ca_pem: string | null
+  // SMB: require signed messages; ask for SMB 3 encryption.
+  smb_require_signing: boolean
+  smb_encrypt: boolean
   enabled: boolean
   is_system: boolean
   rule_count: number
   has_credential: boolean
+  // When the credential was last set (#248); null if unknown or none.
+  credential_updated_at: string | null
   has_agent_token: boolean
   agent_connected: boolean
   agent_last_seen_at: string | null
@@ -85,15 +95,33 @@ export interface Source {
   // The version the agent reported (#215), and whether it's older than the server.
   agent_version: string | null
   agent_outdated: boolean
+  // What the agent last announced it can do (#382, #249): "redaction/1"
+  // when it redacts on its own host.
+  agent_features: string[]
   // Reachability (#276): last known, shared by every user; for an agent
   // source, its live connection.
   status: 'ok' | 'failing' | 'unknown'
   status_checked_at: string | null
   status_message: string | null
-  search_indexing_enabled: boolean
+  // File-name index (#304): on/off, when it last listed the source, how many
+  // files it found, and why the last pass stopped short (null: it didn't).
+  name_index_enabled: boolean
+  name_indexed_at: string | null
+  name_index_files: number | null
+  name_index_message: string | null
+  // Agent sources: the agent's connection was taken over by one from another
+  // address (two agents may share the token), until a connection takes over
+  // none. Only sent to users with manage_source; absent from older servers.
+  agent_connection_replaced?: AgentConnectionReplaced | null
   // What the current user may do on this source (#174); the backend still
   // enforces every action on its own.
   my_capabilities: Capability[]
+}
+
+export interface AgentConnectionReplaced {
+  previous_address: string | null
+  address: string | null
+  at: string
 }
 
 export interface SourceRoot {
@@ -135,6 +163,29 @@ export interface SeverityPattern {
   include_in_navigation: boolean
 }
 
+// A redaction rule (#382, #249), system-wide (source_id null) or a source's
+// own: a built-in detector (detector set, no pattern) or a custom RE2
+// pattern. Super admins only.
+export interface RedactionRule {
+  id: number
+  source_id: number | null
+  name: string
+  detector: string | null
+  pattern: string | null
+  secret_group: number | null
+  max_length: number | null
+  enabled: boolean
+  order: number
+  notes: string | null
+}
+
+// What a custom pattern replaces in text the admin typed
+// (POST /redaction-rules/test): character offsets in the sample.
+export interface RedactionTestResult {
+  redacted: string
+  matches: { start: number; end: number }[]
+}
+
 export interface Role {
   id: number
   name: string
@@ -161,6 +212,93 @@ export interface AppUser {
   must_change_password: boolean
   auth_provider: 'local' | 'oidc' | 'saml'
   last_login_at: string | null
+}
+
+// The access report (#384, backend/app/access_report.py).
+export type AccessReportView = 'users' | 'sources'
+export type AccessReportFlag =
+  | 'super_admin'
+  | 'global_capabilities'
+  | 'local_without_mfa'
+  | 'must_change_password'
+  | 'inactive'
+  | 'reaches_all_sources'
+
+/** What decided one access. A scope above the generator's own has no id
+ * or name and `above_your_scope` set. */
+export interface AccessReportVia {
+  principal_type: string
+  principal_id: number
+  principal_name: string
+  scope_type: ScopeType | 'super_admin'
+  scope_id: number | null
+  scope_name: string | null
+  above_your_scope: boolean
+}
+
+/** A source and where it sits, cut at the generator's boundary. */
+export interface AccessReportPlace {
+  source_id: number
+  source_name: string
+  is_system: boolean
+  customer_id: number | null
+  customer_name: string | null
+  folder_path: string[]
+  folder_path_truncated: boolean
+}
+
+export interface AccessReportAccess extends AccessReportPlace {
+  capabilities: Capability[]
+  via: AccessReportVia[]
+}
+
+export interface AccessReportRoleRef {
+  id: number
+  name: string
+}
+
+export interface AccessReportUser {
+  id: number
+  username: string
+  display_name: string | null
+  role: AccessReportRoleRef
+  auth_provider: 'local' | 'oidc' | 'saml'
+  sso_role_group: string | null
+  last_login_at: string | null
+  mfa: 'enabled' | 'disabled' | 'idp'
+  global_capabilities: GlobalCapability[]
+  flags: AccessReportFlag[]
+  reaches_all_sources: { capabilities: Capability[]; customer_grant_on_every_customer: boolean }
+  access: AccessReportAccess[]
+}
+
+export interface AccessReportHolder {
+  id: number
+  username: string
+  display_name: string | null
+  role: AccessReportRoleRef
+  capabilities: Capability[]
+  via: AccessReportVia[]
+}
+
+export interface AccessReportSource extends AccessReportPlace {
+  users: AccessReportHolder[]
+}
+
+export interface AccessReportHeader {
+  generated_at: string
+  generated_by: { id: number; username: string }
+  scope: 'full' | 'delegated'
+  view: AccessReportView
+  parameters: { inactive_days: number }
+}
+
+export interface AccessReportByUser extends AccessReportHeader {
+  users: AccessReportUser[]
+}
+
+export interface AccessReportBySource extends AccessReportHeader {
+  sources: AccessReportSource[]
 }
 
 export interface BrowseEntry {
@@ -192,6 +330,24 @@ export interface SSOProvider {
   client_id: string
   scopes: string
   group_claim: string | null
+  // The saved settings can't be decrypted with the current key: issuer,
+  // client ID and scopes come back empty and the secret must be re-entered.
+  secret_unreadable: boolean
+}
+
+// Settings -> Email (GET/PUT /smtp-settings, super admins only). The
+// password is never returned: password_set says whether one is saved.
+export interface SmtpSettings {
+  host: string
+  port: number
+  security: 'starttls' | 'tls'
+  username: string | null
+  password_set: boolean
+  from_address: string
+  from_name: string | null
+  tls_ca_pem: string | null
+  enabled: boolean
+  updated_at: string
 }
 
 export interface SSOStatus {
@@ -199,28 +355,33 @@ export interface SSOStatus {
   name: string | null
 }
 
+// GET /auth/login-options: what the login page offers besides signing in.
+export interface LoginOptions {
+  password_reset: boolean
+}
+
+// POST /auth/password-reset/check (#244).
+export interface PasswordResetCheck {
+  valid: boolean
+  policy: PasswordPolicy | null
+}
+
 export interface GroupRoleMapping {
   id: number
   order: number
   group_name: string
   role_id: number
-  role_name: string
-}
-
-export type SearchMatchedField = 'content' | 'path'
-
-export interface SearchHit {
-  source_id: number
-  file_path: string
-  line_number: number
-  snippet_html: string
-  matched_field: SearchMatchedField
+  // Null, with role_outside_authority, for a delegated admin when the role
+  // is beyond their own authority: they don't see its name.
+  role_name: string | null
+  role_outside_authority: boolean
 }
 
 export interface SystemSettings {
-  search_view_enabled: boolean
   audit_view_enabled: boolean
   audit_retention_days: number
+  // Whether listing a folder below a source's root is audited.
+  audit_folder_listings: boolean
   // Folders one source may read (#161): 1 = feature off, 100 at most.
   source_max_roots: number
   connections_view_switchable: boolean
@@ -241,6 +402,51 @@ export interface SystemSettings {
   tail_interval_seconds: number
   // Background source check (#276), minutes; 0 = off.
   source_check_minutes: number
+  // File-name index (#304).
+  name_index_enabled: boolean
+  name_index_minutes: number
+  // Live alerts (#305): seconds between checks, 15..3600.
+  alerts_interval_seconds: number
+  // Warn about credentials older than this (#248), days; 0 = off.
+  credential_max_age_days: number
+  // Server-side limits (#344): listings, opens, downloads and folder ZIPs
+  // at once in all and per source; downloads and ZIPs per user.
+  concurrency_global: number
+  concurrency_per_source: number
+  concurrency_user_transfers: number
+  // Most entries a folder or archive listing returns (#347).
+  listing_max_entries: number
+  // Scheduled backup (#334), hours between backups, 1..168; 0 = off.
+  backup_interval_hours: number
+  // Redaction (#382, #249), changed by super admins only: on, whether
+  // downloads are redacted too, and whether their name says so.
+  redaction_enabled: boolean
+  redaction_downloads: boolean
+  redaction_download_suffix: boolean
+  // MFA for every local account, not only administrators; super admins only.
+  require_mfa_local_accounts: boolean
+  // Password recovery by email (#244): super admins only.
+  password_reset_enabled: boolean
+  password_reset_minutes: number
+  // Why it can't be turned on or doesn't work now, or null when it can.
+  password_reset_unavailable: string | null
+}
+
+// A problem with how the instance is set up that only its operator can fix
+// (GET /system-settings/warnings), such as a weak CREDENTIAL_ENCRYPTION_KEY.
+export interface SystemWarning {
+  code: string
+  message: string
+  advice: string
+}
+
+// GET /system-settings/backups (#334): the backups in BACKUP_DIR, newest
+// first. Listed only, never downloadable.
+export interface BackupInfo {
+  name: string
+  created_at: string
+  size_bytes: number
+  reason: 'manual' | 'scheduled' | 'pre-upgrade'
 }
 
 export type ExplorerSort = 'name_asc' | 'name_desc' | 'mtime_desc' | 'mtime_asc' | 'size_desc'
@@ -279,8 +485,13 @@ export interface AuditLogEntry {
   action: string
   target_type: string | null
   target_id: number | null
+  // UTC, ending in Z.
   timestamp: string
   metadata: Record<string, unknown> | null
+  // Where it came from; null for background jobs and entries before 0.7.0.
+  client_ip: string | null
+  user_agent: string | null
+  session_id: string | null
   // #239: the target by name, as recorded, or its current name for entries
   // older than 0.5.3 (target_name_is_current).
   target_name: string | null
@@ -297,6 +508,8 @@ export interface AuditLogPage {
 export interface AuditLogFilterOptions {
   actions: string[]
   target_types: string[]
+  /** Per named target type, the targets in the log (newest first). */
+  targets: Record<string, { id: number; name: string }[]>
 }
 
 export interface AuditIntegrityStatus {
@@ -328,30 +541,45 @@ export interface MfaBackupCodesResponse {
   backup_codes: string[]
 }
 
+// Live alerts (#305): at most one of source_id/folder_id/customer_id is set;
+// none means every source the owner can view.
 export interface Alert {
   id: number
   name: string
   query: string
+  regex: boolean
   source_id: number | null
-  webhook_url: string
+  folder_id: number | null
+  customer_id: number | null
+  file_glob: string
+  // The webhook URL is never sent back: only its scheme, host and port
+  // (`https://hooks.example.com/…`).
+  webhook_url_masked: string
   enabled: boolean
   last_checked_at: string | null
+  last_fired_at: string | null
+  failed_deliveries: number
+  last_error: string | null
 }
 
 export interface AlertCreate {
   name: string
   query: string
+  regex?: boolean
   source_id?: number | null
+  folder_id?: number | null
+  customer_id?: number | null
+  file_glob?: string
   webhook_url: string
   enabled?: boolean
 }
 
-export interface AlertUpdate {
-  name?: string
-  query?: string
-  source_id?: number | null
-  webhook_url?: string
-  enabled?: boolean
+// Sending any of the scope fields replaces the whole scope.
+export type AlertUpdate = Partial<AlertCreate>
+
+export interface AlertTestResult {
+  ok: boolean
+  error: string | null
 }
 
 export interface MonitoringTokenResult {
@@ -360,4 +588,106 @@ export interface MonitoringTokenResult {
 
 export interface MonitoringTokenStatus {
   configured: boolean
+}
+
+// Push-agent upgrades from the portal (#319), Settings -> Agents.
+export type AgentUpgradeSystemPolicy = 'off' | 'manual' | 'automatic'
+export type AgentUpgradePolicy = 'inherit' | AgentUpgradeSystemPolicy
+
+export type AgentUpgradeStatus =
+  | 'requested'
+  | 'accepted'
+  | 'downloading'
+  | 'installing'
+  | 'restarting'
+  | 'succeeded'
+  | 'failed'
+  | 'refused'
+  | 'too_old'
+  | 'timeout'
+
+// One upgrade attempt.
+export interface AgentUpgradeRun {
+  id: number
+  status: AgentUpgradeStatus
+  message: string | null
+  from_version: string | null
+  to_version: string
+  trigger: 'manual' | 'automatic'
+  // Who asked; null when the schedule did.
+  requested_by: string | null
+  started_at: string
+  finished_at: string | null
+  // This failure reached the failure limit and suspended automatic upgrades.
+  suspended_source: boolean
+}
+
+export interface AgentUpgradeWindowSummary {
+  start: string
+  end: string
+  upgraded: number
+  failed: number
+  suspended: number
+  running: number
+}
+
+// GET /agent-upgrades: the settings, the window, and what the server offers.
+export interface AgentUpgradeOverview {
+  policy: AgentUpgradeSystemPolicy
+  // 0 = Monday.
+  window_days: number[]
+  window_start: string
+  window_hours: number
+  failure_limit: number
+  concurrency: number
+  // The server's time zone, which the window is in.
+  timezone: string
+  window_open: boolean
+  next_window_start: string | null
+  last_window: AgentUpgradeWindowSummary | null
+  version: string
+  bundled: boolean
+  bundled_reason: string | null
+}
+
+// GET /agent-upgrades/agents: one row per push-agent source.
+export interface AgentRow {
+  source_id: number
+  name: string
+  customer: string | null
+  enabled: boolean
+  connected: boolean
+  agent_version: string | null
+  outdated: boolean
+  // It last connected without saying where links lead: its files can't be
+  // read until it's updated.
+  update_required: boolean
+  policy: AgentUpgradePolicy
+  effective_policy: AgentUpgradeSystemPolicy
+  failures: number
+  suspended: boolean
+  // Why Upgrade can't start now, or null.
+  blocker: string | null
+  last_run: AgentUpgradeRun | null
+  upgrading: boolean
+}
+
+export interface AgentUpgradeHistory {
+  total: number
+  items: AgentUpgradeRun[]
+}
+
+export type AgentUpgradeResult = 'accepted' | 'refused' | 'too_old' | 'failed' | 'busy'
+
+export interface AgentUpgradeStarted {
+  result: AgentUpgradeResult
+  detail: string | null
+  run: AgentUpgradeRun | null
+}
+
+export interface BulkAgentUpgradeResult {
+  source_id: number
+  name: string | null
+  result: AgentUpgradeResult | 'skipped'
+  detail: string | null
 }

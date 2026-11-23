@@ -1,6 +1,8 @@
 import json
 
 import pytest
+from app import backup, instance_lock
+from app import rotate_credential_key as rotation_module
 from app.auth.models import SSOProtocol, SSOProviderConfig
 from app.config import get_settings
 from app.crypto import build_fernet
@@ -8,7 +10,7 @@ from app.models import Protocol, Source
 from app.rotate_credential_key import rotate
 from cryptography.fernet import InvalidToken
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 
 def _configure_salt(monkeypatch, tmp_path):
@@ -64,6 +66,65 @@ def _make_sso_config(session, old_fernet, *, name="Okta", config=None) -> SSOPro
     session.commit()
     session.refresh(row)
     return row
+
+
+@pytest.fixture()
+def cli_env(monkeypatch, tmp_path):
+    """main() with its own DATA_DIR and `rotate` replaced by a recorder."""
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("NEW_CREDENTIAL_ENCRYPTION_KEY", "brand-new-key")
+    get_settings.cache_clear()
+    calls: list[dict] = []
+
+    def fake_rotate(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(rotation_module, "rotate", fake_rotate)
+    # Not root, whoever runs the tests.
+    monkeypatch.setattr(rotation_module.os, "geteuid", lambda: 1000, raising=False)
+    yield calls
+    get_settings.cache_clear()
+
+
+def test_the_cli_refuses_while_perchtail_runs(cli_env, capsys):
+    lock = instance_lock.acquire(get_settings())
+    try:
+        assert rotation_module.main([]) == 1
+    finally:
+        lock.release()
+    assert cli_env == []
+    assert "PerchTail is running on this DATA_DIR" in capsys.readouterr().err
+
+
+def test_the_cli_refuses_to_run_as_root(cli_env, capsys, monkeypatch):
+    monkeypatch.setattr(rotation_module.os, "geteuid", lambda: 0, raising=False)
+
+    assert rotation_module.main([]) == 2
+    assert cli_env == []
+    assert capsys.readouterr().err.strip() == (
+        f"ERROR: refusing to run as root: {backup.ROOT_REFUSAL}"
+    )
+
+
+def test_the_cli_holds_the_lock_while_rotating_and_releases_it(cli_env, monkeypatch):
+    def rotate_while_locked(**kwargs):
+        with pytest.raises(instance_lock.InstanceLockHeldError):
+            instance_lock.acquire(get_settings())
+        cli_env.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(rotation_module, "rotate", rotate_while_locked)
+
+    assert rotation_module.main(["--dry-run"]) == 0
+    assert cli_env == [
+        {
+            "old_key": get_settings().credential_encryption_key,
+            "new_key": "brand-new-key",
+            "dry_run": True,
+        }
+    ]
+    instance_lock.acquire(get_settings()).release()
 
 
 def test_rotate_re_encrypts_source_credentials_under_the_new_key(rotation_engine):
@@ -142,3 +203,237 @@ def test_rotate_aborts_and_writes_nothing_on_wrong_old_key(rotation_engine):
     with Session(rotation_engine) as session:
         refreshed = session.get(Source, source_id)
         assert refreshed.credential_ref == original_ciphertext
+
+
+# --- MFA secrets and the audit chain (#326) -----------------------------------
+
+
+def _audit(session, key, action):
+    from app.audit_hash_chain import chain_new_entry
+    from app.auth.models import AuditLog
+    from app.timeutils import utcnow
+
+    entry = AuditLog(user_id=None, action=action, timestamp=utcnow(), event_metadata={"n": 1})
+    chain_new_entry(key, session, entry)
+    session.add(entry)
+    session.commit()
+    return entry.id
+
+
+def _mfa_user(session, old_fernet):
+    from app.auth.models import Role, User
+
+    role = Role(name="r", is_super_admin=False)
+    session.add(role)
+    session.commit()
+    user = User(
+        username="mfa-user",
+        role_id=role.id,
+        mfa_enabled=True,
+        mfa_secret_encrypted=old_fernet.encrypt(b"JBSWY3DPEHPK3PXP").decode("utf-8"),
+    )
+    session.add(user)
+    session.commit()
+    return user.id
+
+
+def test_rotate_re_encrypts_mfa_secrets_and_re_signs_the_audit_chain(rotation_engine):
+    from app.audit_integrity import verify_chain
+    from app.auth.models import AuditLog, User
+    from app.crypto import build_audit_chain_key
+    from sqlmodel import select
+
+    old_fernet = build_fernet("old-key")
+    old_chain = build_audit_chain_key("old-key")
+    with Session(rotation_engine) as session:
+        user_id = _mfa_user(session, old_fernet)
+        for n in range(3):
+            _audit(session, old_chain, f"test.event{n}")
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 0
+
+    with Session(rotation_engine) as session:
+        secret = session.get(User, user_id).mfa_secret_encrypted
+        assert build_fernet("new-key").decrypt(secret.encode("utf-8")) == b"JBSWY3DPEHPK3PXP"
+        assert verify_chain(build_audit_chain_key("new-key"), session).ok
+        assert not verify_chain(old_chain, session).ok
+        last = session.exec(select(AuditLog).order_by(AuditLog.id.desc())).first()
+        assert last.action == "credential_key.rotate"
+        assert last.event_metadata["mfa_secrets"] == 1
+        assert last.event_metadata["audit_rows_resigned"] == 3
+
+
+def _smtp_settings(session, old_fernet):
+    from app.models import SmtpSettings
+    from app.timeutils import utcnow
+
+    row = SmtpSettings(
+        host="smtp.example.test",
+        port=587,
+        username="relay",
+        password_encrypted=old_fernet.encrypt(b"smtp-secret").decode("utf-8"),
+        from_address="perchtail@example.test",
+        updated_at=utcnow(),
+    )
+    session.add(row)
+    session.commit()
+    return row.id
+
+
+def test_rotate_re_encrypts_the_smtp_password(rotation_engine):
+    from app.auth.models import AuditLog
+    from app.models import SmtpSettings
+
+    old_fernet = build_fernet("old-key")
+    with Session(rotation_engine) as session:
+        row_id = _smtp_settings(session, old_fernet)
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 0
+
+    with Session(rotation_engine) as session:
+        secret = session.get(SmtpSettings, row_id).password_encrypted
+        assert build_fernet("new-key").decrypt(secret.encode("utf-8")) == b"smtp-secret"
+        with pytest.raises(InvalidToken):
+            old_fernet.decrypt(secret.encode("utf-8"))
+        last = session.exec(select(AuditLog).order_by(AuditLog.id.desc())).first()
+        assert last.event_metadata["smtp_passwords"] == 1
+
+
+def test_an_smtp_password_under_another_key_stops_the_rotation(rotation_engine):
+    from app.models import SmtpSettings
+
+    with Session(rotation_engine) as session:
+        source = _make_source(
+            session, build_fernet("old-key"), credential={"username": "u", "password": "p"}
+        )
+        source_id, before = source.id, source.credential_ref
+        row_id = _smtp_settings(session, build_fernet("some-other-key"))
+        smtp_before = session.get(SmtpSettings, row_id).password_encrypted
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 1
+
+    with Session(rotation_engine) as session:
+        assert session.get(Source, source_id).credential_ref == before
+        assert session.get(SmtpSettings, row_id).password_encrypted == smtp_before
+
+
+def test_a_broken_audit_chain_stops_the_rotation_with_nothing_written(rotation_engine):
+    from app.auth.models import AuditLog
+    from app.crypto import build_audit_chain_key
+
+    old_fernet = build_fernet("old-key")
+    old_chain = build_audit_chain_key("old-key")
+    with Session(rotation_engine) as session:
+        source = _make_source(session, old_fernet, credential={"username": "u", "password": "p"})
+        source_id, before = source.id, source.credential_ref
+        _audit(session, old_chain, "test.one")
+        tampered_id = _audit(session, old_chain, "test.two")
+        _audit(session, old_chain, "test.three")
+        row = session.get(AuditLog, tampered_id)
+        row.action = "test.edited"  # tampering: the row no longer matches its hash
+        session.add(row)
+        session.commit()
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 1
+
+    with Session(rotation_engine) as session:
+        assert session.get(Source, source_id).credential_ref == before
+
+
+def test_dry_run_checks_the_chain_without_writing(rotation_engine):
+    from app.auth.models import AuditLog
+    from app.crypto import build_audit_chain_key
+    from sqlmodel import select
+
+    old_chain = build_audit_chain_key("old-key")
+    with Session(rotation_engine) as session:
+        _audit(session, old_chain, "test.one")
+        before = session.exec(select(AuditLog.row_hash)).all()
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=True) == 0
+
+    with Session(rotation_engine) as session:
+        assert session.exec(select(AuditLog.row_hash)).all() == before
+
+
+def test_a_chain_with_recorded_known_breaks_can_still_be_rotated(rotation_engine, monkeypatch):
+    from app.audit_hash_chain import compute_row_hash
+    from app.audit_integrity import record_known_breaks, verify_chain
+    from app.auth.models import AuditChainState, AuditLog
+    from app.crypto import build_audit_chain_key
+    from app.timeutils import utcnow
+
+    old_chain = build_audit_chain_key("old-key")
+    # The known-break entry is chained with the configured key, as it would
+    # be; app.audit calls the cached key function, so it's replaced there.
+    monkeypatch.setattr("app.audit.audit_chain_key", lambda: old_chain)
+    with Session(rotation_engine) as session:
+        _audit(session, old_chain, "before")
+        tip_id = _audit(session, old_chain, "tip")
+        _audit(session, old_chain, "first")
+        tip = session.get(AuditLog, tip_id)
+        forked = []
+        for action in ("second", "third"):
+            # The #213 race: valid rows chained from the tip, not the newest row.
+            entry = AuditLog(user_id=None, action=action, timestamp=utcnow())
+            entry.prev_hash = tip.row_hash
+            entry.row_hash = compute_row_hash(
+                old_chain,
+                tip.row_hash,
+                user_id=None,
+                action=action,
+                target_type=None,
+                target_id=None,
+                timestamp=entry.timestamp,
+                metadata=None,
+            )
+            session.add(entry)
+            session.commit()
+            forked.append(entry.id)
+        _audit(session, old_chain, "after")
+        state = session.exec(select(AuditChainState)).first() or AuditChainState()
+        state.known_break_cutoff_row_id = forked[-1]
+        session.add(state)
+        session.commit()
+        recorded = record_known_breaks(old_chain, session, user_id=None)
+        assert recorded.ok, recorded
+        session.commit()
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 0
+    with Session(rotation_engine) as session:
+        assert verify_chain(build_audit_chain_key("new-key"), session).ok
+
+
+def test_rotate_re_encrypts_alert_webhook_urls(rotation_engine):
+    from app.auth.models import AuditLog, Role, User
+    from app.models import Alert
+    from app.timeutils import utcnow
+
+    old_fernet = build_fernet("old-key")
+    with Session(rotation_engine) as session:
+        role = Role(name="alerts")
+        session.add(role)
+        session.commit()
+        user = User(username="alerter", role_id=role.id)
+        session.add(user)
+        session.commit()
+        alert = Alert(
+            user_id=user.id,
+            name="a",
+            query="q",
+            webhook_url_encrypted=old_fernet.encrypt(b"https://hooks.example/s3cret").decode(),
+            created_at=utcnow(),
+        )
+        session.add(alert)
+        session.commit()
+        alert_id = alert.id
+
+    assert rotate(old_key="old-key", new_key="new-key", dry_run=False) == 0
+
+    with Session(rotation_engine) as session:
+        stored = session.get(Alert, alert_id).webhook_url_encrypted
+        assert build_fernet("new-key").decrypt(stored.encode()) == b"https://hooks.example/s3cret"
+        with pytest.raises(InvalidToken):
+            old_fernet.decrypt(stored.encode())
+        last = session.exec(select(AuditLog).order_by(AuditLog.id.desc())).first()
+        assert last.event_metadata["webhook_urls"] == 1

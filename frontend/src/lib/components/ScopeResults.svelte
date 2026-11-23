@@ -31,7 +31,7 @@
   const LOOP_GUARD_DEPTH = 32
 
   const dispatch = createEventDispatcher<{
-    open: { sourceId: number; sourceName: string; path: string; member: null; name: string }
+    open: { sourceId: number; sourceName: string; path: string; member: null; name: string; size?: number }
   }>()
 
   // Folder path -> its entries, for every folder listed so far.
@@ -194,6 +194,7 @@
               path: entry.path,
               member: null,
               name: entry.name,
+              size: entry.size,
             })}
         >
           <span class="path">{relative(entry.path)}</span>

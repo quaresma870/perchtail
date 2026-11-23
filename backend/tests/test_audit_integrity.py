@@ -1,3 +1,4 @@
+import pytest
 from app.audit import record_audit_event
 from app.audit_hash_chain import chain_new_entry
 from app.audit_integrity import run_audit_integrity_check, verify_chain
@@ -128,10 +129,29 @@ def test_verify_chain_respects_the_purge_anchor(session):
     session.add(surviving)
     session.commit()
     assert surviving.prev_hash == "anchor-hash"
+    # The purge's own entry, which vouches for the anchor (app/audit_purge.py).
+    record_audit_event(
+        session,
+        user_id=None,
+        action="audit.purge",
+        metadata={"anchor_row_id": 1, "anchor_hash": "anchor-hash"},
+    )
+    session.commit()
 
     result = verify_chain(KEY, session)
     session.commit()
     assert result.ok is True
+
+
+def test_an_anchor_no_purge_entry_vouches_for_is_tampering(session):
+    session.add(AuditChainState(anchor_row_id=1, anchor_hash="anchor-hash"))
+    session.commit()
+    record_audit_event(session, user_id=None, action="post-purge")
+    session.commit()
+
+    result = verify_chain(KEY, session)
+    session.commit()
+    assert result.ok is False
 
 
 def test_run_audit_integrity_check_persists_ok_status(monkeypatch):
@@ -167,6 +187,86 @@ def test_run_audit_integrity_check_persists_broken_status(monkeypatch):
         state = session.exec(select(AuditChainState)).first()
         assert state.status == "broken"
         assert state.broken_row_id == entry_id
+
+
+def test_an_unsigned_row_is_reported_as_tampering(session):
+    record_audit_event(session, user_id=None, action="a")
+    session.commit()
+    forged = AuditLog(user_id=None, action="forged")
+    session.add(forged)
+    session.commit()
+    # Written by the app after it: chained past the unsigned row.
+    record_audit_event(session, user_id=None, action="b")
+    session.commit()
+
+    result = verify_chain(KEY, session)
+    session.commit()
+    assert result.ok is False
+    assert result.broken_row_id == forged.id
+    assert result.reason == "unsigned_row"
+    assert result.checked_count == 2
+
+
+def test_a_row_without_a_hash_is_the_only_one_reported(session):
+    # The rows around it still verify: only the unsigned row is a problem.
+    from app.audit_integrity import _walk
+
+    record_audit_event(session, user_id=None, action="a")
+    session.commit()
+    forged = AuditLog(user_id=None, action="forged")
+    session.add(forged)
+    session.commit()
+    record_audit_event(session, user_id=None, action="b")
+    session.commit()
+
+    walk = _walk(KEY, session, None)
+    assert walk.tampered_ids == [forged.id]
+    assert walk.unsigned_ids == [forged.id]
+
+
+def test_startup_reports_an_unsigned_row_and_audits_the_failed_check(session):
+    from app.audit_integrity import FAILED_CHECK_ACTION, report_unsigned_audit_rows
+
+    record_audit_event(session, user_id=None, action="a")
+    session.commit()
+    forged = AuditLog(user_id=None, action="forged")
+    session.add(forged)
+    session.commit()
+
+    assert report_unsigned_audit_rows(KEY, session) is True
+
+    state = session.exec(select(AuditChainState)).one()
+    assert state.status == "broken"
+    assert state.broken_row_id == forged.id
+    entry = session.exec(select(AuditLog).where(AuditLog.action == FAILED_CHECK_ACTION)).one()
+    assert entry.user_id is None
+    assert entry.row_hash is not None
+    assert entry.event_metadata["broken_row_id"] == forged.id
+    assert entry.event_metadata["reason"] == "unsigned_row"
+    # Still not signed by anything.
+    session.refresh(forged)
+    assert forged.row_hash is None
+
+
+def test_startup_with_every_row_signed_reports_nothing(session):
+    from app.audit_integrity import report_unsigned_audit_rows
+
+    record_audit_event(session, user_id=None, action="a")
+    session.commit()
+
+    assert report_unsigned_audit_rows(KEY, session) is False
+    assert session.exec(select(AuditChainState)).first() is None
+
+
+def test_a_hash_mismatch_is_reported_with_its_reason(session):
+    entry = record_audit_event(session, user_id=None, action="a")
+    session.commit()
+    entry.action = "tampered"
+    session.add(entry)
+    session.commit()
+
+    result = verify_chain(KEY, session)
+    assert result.reason == "hash_mismatch"
 
 
 # --- #217: known breaks from the #213 race --------------------------------
@@ -382,6 +482,54 @@ def test_recorded_breaks_survive_a_retention_purge_of_their_parent(session):
     state.anchor_hash = newest_purged.row_hash
     session.add(state)
     session.exec(delete(AuditLog).where(AuditLog.id < second.id))
+    # ...and records the anchor it left (app/audit_purge.py).
+    record_audit_event(
+        session,
+        user_id=None,
+        action="audit.purge",
+        metadata={"anchor_row_id": state.anchor_row_id, "anchor_hash": state.anchor_hash},
+    )
     session.commit()
 
     assert _verify(session).ok is True
+
+
+@pytest.fixture(params=[None, 1, 2], ids=["default-block", "block-1", "block-2"], autouse=True)
+def _walk_block(request, monkeypatch):
+    """#346: every test above verifies with the default block and with
+    blocks small enough that the walk reads the chain in many queries, and
+    must give the same result."""
+    if request.param is not None:
+        monkeypatch.setattr("app.audit_integrity.WALK_BLOCK", request.param)
+
+
+def test_the_walk_reads_the_chain_in_blocks(session, monkeypatch):
+    for action in "abcde":
+        record_audit_event(session, user_id=None, action=action)
+    session.commit()
+    monkeypatch.setattr("app.audit_integrity.WALK_BLOCK", 2)
+
+    statements = []
+
+    from sqlalchemy import event
+
+    def before(conn, cursor, statement, *args):
+        table = AuditLog.__tablename__
+        # The walk's own blocks, not the lookup of the newest purge entry.
+        if (
+            f"FROM {table}" in statement
+            and f"ORDER BY {table}.id" in statement
+            and "DESC" not in statement
+        ):
+            statements.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", before)
+    try:
+        result = verify_chain(KEY, session)
+    finally:
+        event.remove(engine, "before_cursor_execute", before)
+    assert result.ok is True
+    assert result.checked_count == 5
+    # Blocks of 2, 2 and 1 rows.
+    assert len(statements) == 3
