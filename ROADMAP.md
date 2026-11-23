@@ -16,11 +16,9 @@ Which releases get fixes, and for how long, is in [SECURITY.md](SECURITY.md#supp
 - Bulk import is additive: it never deletes anything and never exports credentials.
 - Work without an issue (SAML, maintained Kubernetes manifests, a further high-availability tier) waits for a real need; see the open items in [docs/design-decisions.md](docs/design-decisions.md).
 
-## 0.7.0
+## 0.7.0 (released)
 
-The last feature release before 1.0. Done means merged on `dev` and listed under `[Unreleased]` in the CHANGELOG.
-
-Done:
+The last feature release before 1.0, released as 0.7.0 ([CHANGELOG.md](CHANGELOG.md)). It shipped:
 
 - The content index and the full-text Search page are removed, so nothing from the logs is stored (#303).
 - Alerts read new lines live, with webhook retries (#305).

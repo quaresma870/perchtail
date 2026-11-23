@@ -7,7 +7,7 @@
 > Live, rule-scoped log browsing across Linux and Windows servers — agentless by default, nothing mirrored, nothing left behind.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-v0.6.4%20%28pre--1.0%29-blue.svg)](#status)
+[![Status](https://img.shields.io/badge/status-v0.7.0%20%28pre--1.0%29-blue.svg)](#status)
 [![CI](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml/badge.svg)](https://github.com/quaresma870/perchtail/actions/workflows/ci.yml)
 
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
@@ -19,15 +19,15 @@
 
 ## Status
 
-🟢 **v0.6.4** is the current release: usable today, still pre-1.0.
+🟢 **v0.7.0** is the current release: usable today, still pre-1.0.
 
 - **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
-- **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks.
+- **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks. One search box finds sources and file names across every source, from a file-name index that stores no content. Live alerts read only what was appended and call a webhook. Redaction hides secrets, card numbers and personal data in what users open, Tail and download, on the server or on the push agent's host.
 - **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults), TOTP, required for administrators and optionally for everyone, and optional password recovery by email; OIDC single sign-on with group-to-role mapping; an access report of who holds what, where, with flags for privileged, inactive and MFA-less accounts, on its own Settings page and as JSON or CSV, for access reviews.
 - **Operations:** settings in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained, verified daily and records where each action came from, including refused requests, bulk YAML import and export, server-side limits on listings and downloads running at once (Settings → System), and a system SMTP server for email, always over verified TLS (Settings → Email).
-- **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
+- **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, encrypted online backups, push agents upgraded from the portal only to binaries signed with the release key, signed images and release files, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
 
-**What's next.** 0.7 is the last feature release before 1.0. It removes the content index and the full-text Search page, so nothing from the logs is stored, and adds a file-name index with one search across sources, folders and files, live alerts, bulk credentials, push-agent upgrades from the portal, backups, redaction of sensitive data, password recovery and an access report. 1.0 adds no features: load tests and a sizing guide, security controls in CI and releases, and an internal pentest. PostgreSQL, high availability, user groups, temporary access, notifications, API tokens and an external pentest come after 1.0. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+**What's next.** 0.7 is the last feature release before 1.0. 1.0 adds no features: load tests and a sizing guide, security controls in CI and releases, and an internal pentest. PostgreSQL, high availability, user groups, temporary access, notifications, API tokens and an external pentest come after 1.0. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
 
 **Support.** Which releases get fixes, and for how long, is in [SECURITY.md](SECURITY.md#support-and-end-of-life).
 
@@ -135,7 +135,7 @@ instead, replace `build: .` in `docker-compose.yml` with the image of that
 version (amd64 and arm64), for example:
 
 ```yaml
-    image: ghcr.io/quaresma870/perchtail:0.6.4
+    image: ghcr.io/quaresma870/perchtail:0.7.0
 ```
 
 Each [GitHub release](https://github.com/quaresma870/perchtail/releases) also carries the push-agent binaries, their `SHA256SUMS`, `SHA256SUMS.sig` (its Ed25519 signature with the release key), the image's SBOM, and `perchtail-image.json` with `perchtail-image.json.sig`, which name the release's image by digest and are signed with the same key, all attached before the release is published. The image carries the same signed agent binaries, for upgrading agents from the portal. `latest` and `X.Y` tags only move when a full release is published, never with a pre-release, and `latest` only to the newest full release: a fix for an older line (for example a 0.6.x after 0.7.0) moves its own `X.Y` tag and leaves `latest` where it is.
