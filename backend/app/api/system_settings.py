@@ -223,8 +223,8 @@ def get_system_settings(
 
 @router.get("/backups", response_model=list[BackupPublic])
 def list_system_backups(user: User = Depends(require_manage)):
-    """The backups in BACKUP_DIR, newest first, for Settings -> System
-    (#334). Read-only: there is no way to download one, by design."""
+    """The backups in BACKUP_DIR, newest first, for Settings -> Backups and
+    updates (#334). Read-only: there is no way to download one, by design."""
     return [
         BackupPublic(
             name=info.name,
@@ -245,7 +245,9 @@ class SystemWarning(BaseModel):
 @router.get("/warnings", response_model=list[SystemWarning])
 def list_system_warnings(user: User = Depends(require_manage)):
     """Problems with how this instance is set up that only its operator can
-    fix, shown at the top of Settings -> System."""
+    fix, shown at the top of each system settings page (Settings -> Source
+    defaults, Sign-in security, Explorer and limits, Alerts, Backups and
+    updates, Monitoring)."""
     warnings: list[SystemWarning] = []
     # No length or estimated bits here: manage_system_settings can be
     # delegated, and those numbers narrow the search for the root secret.

@@ -462,7 +462,7 @@ export interface PasswordPolicy {
   max_age_days: number
 }
 
-// Settings -> System -> Updates (#215), super admins only.
+// Settings -> Backups and updates -> Updates (#215), super admins only.
 export interface UpdateStatus {
   enabled: boolean
   disabled_by_env: boolean

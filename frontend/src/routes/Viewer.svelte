@@ -255,7 +255,7 @@
     pickingScopes = true
   }
 
-  // List or tree: the admin's default (Settings -> System), and -- when
+  // List or tree: the admin's default (Settings -> Explorer and limits), and -- when
   // switching is allowed -- each user's own choice, kept on the server so
   // it follows them (#156, #273).
   $: switchable = $systemSettings.connections_view_switchable
@@ -1439,8 +1439,8 @@
               Tail
             </button>
             {#if activeTab.following}
-              <!-- Only while Tail is on (#283); set under Settings -> System. -->
-              <span class="follow-interval" title="How often Tail checks for new lines (Settings → System)">
+              <!-- Only while Tail is on (#283); set under Settings -> Explorer and limits. -->
+              <span class="follow-interval" title="How often Tail checks for new lines (Settings → Explorer and limits)">
                 every {followIntervalMs / 1000} s
               </span>
             {/if}

@@ -284,7 +284,7 @@ Rules are relative to the base path. Changing the base path or a folder (or the 
 
 ### Several folders in one source
 
-A source can read several folders on the same host with the same credential, for example IIS logs on `D:` and application logs on `E:`. How many is set in **Settings → System → Folders per source**: 20 by default, 1 turns the feature off, and 100 at most. Lowering the limit doesn't affect sources that already have more folders, but they can't add any. Use **+ Add another folder** in the source editor and give each folder a label. In the viewer each folder appears at the top level under its label, and rules see the same paths, so `**/*.log` applies to every folder and `IIS/**` to one. The connection test checks each folder and names the ones that fail. Push-agent sources serve a single folder and can't have several.
+A source can read several folders on the same host with the same credential, for example IIS logs on `D:` and application logs on `E:`. How many is set in **Settings → Source defaults → Folders per source**: 20 by default, 1 turns the feature off, and 100 at most. Lowering the limit doesn't affect sources that already have more folders, but they can't add any. Use **+ Add another folder** in the source editor and give each folder a label. In the viewer each folder appears at the top level under its label, and rules see the same paths, so `**/*.log` applies to every folder and `IIS/**` to one. The connection test checks each folder and names the ones that fail. Push-agent sources serve a single folder and can't have several.
 
 ## Testing a source
 

@@ -3,7 +3,7 @@
   import { api, ApiError } from '../lib/api'
   import FolderManagerRow from '../lib/components/FolderManagerRow.svelte'
   import Modal from '../lib/components/Modal.svelte'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import { confirmAction } from '../lib/confirm'
   import { nestFoldersFlat, nestFoldersTree } from '../lib/folder-tree'
   import type { Customer, Folder, Source } from '../lib/types'
@@ -206,7 +206,7 @@
     e.kind === 'create' ? 'New folder' : e.kind === 'rename' ? 'Rename folder' : `Move "${e.name}"`
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <div class="header">
@@ -348,6 +348,7 @@
     </Modal>
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .page {

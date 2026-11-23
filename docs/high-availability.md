@@ -11,11 +11,11 @@
 | Job | Runs |
 |---|---|
 | `scratch_idle_sweep`, `scratch_size_guard` | every `SCRATCH_SWEEP_INTERVAL_SECONDS` (60) |
-| `alert_pass` | every 15 seconds; a pass runs once the interval in Settings → System has gone by |
+| `alert_pass` | every 15 seconds; a pass runs once the interval in Settings → Alerts has gone by |
 | `name_index_sweep` | every minute; lists the sources that are due |
 | `source_checks` | every minute; checks the sources that are due |
 | `agent_upgrades` | every minute; ends timed-out upgrades and runs automatic ones inside the window |
-| `backup` | every 5 minutes; backs up once the interval in Settings → System has gone by (24 hours on a new install; 0 turns it off) |
+| `backup` | every 5 minutes; backs up once the interval in Settings → Backups and updates has gone by (24 hours on a new install; 0 turns it off) |
 | `wal_checkpoint` | every hour |
 | `session_purge`, `update_check` | every hour |
 | `audit_purge` | every `AUDIT_PURGE_INTERVAL_SECONDS` (a day) |
@@ -26,7 +26,7 @@
 **In memory only**, lost on restart and not shared with any other process:
 
 - the push agents' WebSocket connections: a command for an agent can only go through the process it's connected to;
-- the connector limits (Settings → System → Limits): the slots in use per source and per user, and the count of refused requests in `/monitoring/health`;
+- the connector limits (Settings → Explorer and limits → Limits): the slots in use per source and per user, and the count of refused requests in `/monitoring/health`;
 - login throttling: failed sign-ins and lockouts per username and per client address, so a restart clears every lockout; and the other rate limits: SSO sign-in starts, password-recovery requests and token checks, webhook tests and test emails;
 - the counting of repeated failed sign-ins before they're written to the audit log;
 - which files in the scratch cache are open (the files themselves are on local disk under `SCRATCH_DIR`, and are cleared at startup);

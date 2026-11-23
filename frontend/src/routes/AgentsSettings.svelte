@@ -21,7 +21,7 @@
   import { confirmAction } from '../lib/confirm'
   import { parseUtc } from '../lib/credential-age'
   import Modal from '../lib/components/Modal.svelte'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import { ago } from '../lib/source-status'
   import type {
     AgentRow,
@@ -266,7 +266,7 @@
   })
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <h1>Agents</h1>
@@ -574,6 +574,7 @@
     {/if}
   </Modal>
 {/if}
+</SettingsLayout>
 
 <style>
   .page {

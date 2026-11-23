@@ -94,7 +94,7 @@ Each connected agent holds one WebSocket to the server; the agent pings every 25
 
 ## Settings that trade load for freshness
 
-All of these are under **Settings → System**, named here as on screen.
+The follow interval, auto-refresh, connector limits and listing cap are under **Settings → Explorer and limits**, the background check and the file-name index under **Settings → Source defaults**, and live alerts under **Settings → Alerts**.
 
 | Setting | Default | What it drives | Raising it |
 |---|---|---|---|

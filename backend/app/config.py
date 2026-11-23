@@ -147,9 +147,9 @@ class Settings(BaseSettings):
     # above keeps an old .env that still sets them starting.
 
     # Release check (#215): at most once a day, ask GitHub for the latest
-    # release and show it to super admins under Settings -> System. On by
-    # default; false means no outbound request is ever made (air-gapped
-    # installs), whatever the switch under System says.
+    # release and show it to super admins under Settings -> Backups and
+    # updates. On by default; false means no outbound request is ever made
+    # (air-gapped installs), whatever the switch on that page says.
     update_check: bool = True
     # How this instance was installed, for the upgrade steps it shows. The
     # Docker image sets PERCHTAIL_INSTALL=docker; anything else counts as an
@@ -165,7 +165,7 @@ class Settings(BaseSettings):
 
     # Full audit log viewer (app/audit_purge.py) -- how often the purge
     # sweep runs. *What* it purges (retention in days, 0 = keep forever) is
-    # admin-configurable from Settings -> System (SystemSetting), not an env
+    # admin-configurable from Settings -> Audit log (SystemSetting), not an env
     # var, per docs/design-decisions.md ("Audit log"); only the sweep cadence
     # itself is an operational/deployment concern like the other interval
     # settings above.

@@ -1,70 +1,121 @@
 <script lang="ts">
-  import { currentUser, hasCapability } from '../auth'
+  import { push } from 'svelte-spa-router'
+  import { currentUser } from '../auth'
   import { currentHash } from '../hash'
   import { systemSettings } from '../settings'
+  import { isSettingsPageActive, settingsNavGroups } from '../settings-nav'
 
-  const isActive = (prefix: string) => $currentHash === prefix || $currentHash.startsWith(prefix + '/')
+  // The Settings sidebar: a list of links per group from 768 px up, a select
+  // with a group per section below that (see SettingsLayout.svelte).
+  $: groups = settingsNavGroups($currentUser, $systemSettings.audit_view_enabled)
+  $: activePath =
+    groups
+      .flatMap((group) => group.pages)
+      .find((page) => isSettingsPageActive($currentHash, page.path))?.path ?? ''
+
+  function navigate(event: Event) {
+    const path = (event.currentTarget as HTMLSelectElement).value
+    if (path && path !== activePath) push(path)
+  }
 </script>
 
-<nav class="settings-nav">
-  <a href="#/settings/sources" class:active={isActive('/settings/sources')}>Sources</a>
-  {#if hasCapability($currentUser, 'create_source')}
-    <a href="#/settings/folders" class:active={isActive('/settings/folders')}>Folders</a>
-    <a href="#/settings/agents" class:active={isActive('/settings/agents')}>Agents</a>
-  {/if}
-  {#if hasCapability($currentUser, 'manage_roles')}
-    <a href="#/settings/roles" class:active={isActive('/settings/roles')}>Roles</a>
-  {/if}
-  {#if hasCapability($currentUser, 'manage_users')}
-    <a href="#/settings/users" class:active={isActive('/settings/users')}>Users</a>
-  {/if}
-  {#if hasCapability($currentUser, 'manage_sso')}
-    <a href="#/settings/sso" class:active={isActive('/settings/sso')}>SSO</a>
-  {/if}
-  {#if hasCapability($currentUser, 'manage_system_settings')}
-    <a href="#/settings/system" class:active={isActive('/settings/system')}>System</a>
-    <a href="#/settings/severity-indicators" class:active={isActive('/settings/severity-indicators')}
-      >Severity indicators</a
-    >
-  {/if}
-  {#if $currentUser?.is_super_admin}
-    <a href="#/settings/redaction" class:active={isActive('/settings/redaction')}>Redaction</a>
-    <a href="#/settings/email" class:active={isActive('/settings/email')}>Email</a>
-    <a href="#/settings/import-export" class:active={isActive('/settings/import-export')}
-      >Import / export</a
-    >
-  {/if}
-  {#if hasCapability($currentUser, 'view_audit_log') && $systemSettings.audit_view_enabled}
-    <a href="#/settings/audit-log" class:active={isActive('/settings/audit-log')}>Audit log</a>
-  {/if}
-  {#if hasCapability($currentUser, 'view_access_report')}
-    <a href="#/settings/access-review" class:active={isActive('/settings/access-review')}
-      >Access review</a
-    >
-  {/if}
+<nav class="settings-nav" aria-label="Settings">
+  <div class="nav-groups">
+    {#each groups as group (group.label)}
+      {@const titleId = `settings-nav-${group.label.toLowerCase()}`}
+      <div class="nav-group">
+        <div class="nav-group-title" id={titleId}>{group.label}</div>
+        <ul aria-labelledby={titleId}>
+          {#each group.pages as page (page.path)}
+            <li>
+              <a
+                href={`#${page.path}`}
+                class:active={page.path === activePath}
+                aria-current={page.path === activePath ? 'page' : undefined}>{page.label}</a
+              >
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/each}
+  </div>
+
+  <select class="input nav-select" aria-label="Settings page" value={activePath} on:change={navigate}>
+    {#if !activePath}
+      <option value="" disabled>Settings</option>
+    {/if}
+    {#each groups as group (group.label)}
+      <optgroup label={group.label}>
+        {#each group.pages as page (page.path)}
+          <option value={page.path}>{page.label}</option>
+        {/each}
+      </optgroup>
+    {/each}
+  </select>
 </nav>
 
 <style>
   .settings-nav {
-    display: flex;
-    gap: 1.25rem;
-    padding: 0 2rem;
-    border-bottom: 1px solid var(--border-soft);
     background: var(--bg-elevated);
   }
-  .settings-nav a {
+  .nav-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+    padding: 1.25rem 0.75rem;
+  }
+  .nav-group-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-faint);
+    padding: 0 0.6rem 0.35rem;
+  }
+  ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  a {
+    display: block;
     color: var(--text-muted);
     text-decoration: none;
-    font-size: 0.85rem;
+    font-size: 0.86rem;
     font-weight: 500;
-    padding: 0.65rem 0;
-    border-bottom: 2px solid transparent;
+    padding: 0.38rem 0.6rem;
+    border-radius: var(--radius-sm, 6px);
+    border-left: 2px solid transparent;
   }
-  .settings-nav a:hover {
+  a:hover {
     color: var(--text);
+    background: var(--bg-elevated-2);
   }
-  .settings-nav a.active {
+  a.active {
     color: var(--text);
-    border-bottom-color: var(--accent);
+    background: var(--bg-elevated-2);
+    border-left-color: var(--accent);
+    font-weight: 600;
+  }
+  .nav-select {
+    display: none;
+  }
+
+  /* Below 768 px the sidebar gives way to a select at the top of the page. */
+  @media (max-width: 767.98px) {
+    .settings-nav {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .nav-groups {
+      display: none;
+    }
+    .nav-select {
+      display: block;
+      width: 100%;
+    }
   }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Settings -> System -> Updates (#215), for super admins: the running
+  // Settings -> Backups and updates -> Updates (#215), for super admins: the running
   // version, the latest release, and how to upgrade the way this instance
   // was installed. No one-click upgrade: that would need the Docker socket
   // or write access to the install, which PerchTail doesn't get.
@@ -146,8 +146,8 @@
 </div>
 
 <style>
-  /* The setting-row look of routes/SystemSettings.svelte, whose styles are
-     scoped to that page. */
+  /* The setting-row look of the system settings pages (app.css,
+     .settings-blocks), kept here so the card looks the same anywhere. */
   .card {
     display: flex;
     flex-direction: column;

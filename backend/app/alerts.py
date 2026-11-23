@@ -1,7 +1,7 @@
 """Live alerts (#305): a webhook is called when lines matching an alert's
 query are written to the files it watches.
 
-A pass runs every `alerts_interval_seconds` (Settings -> System, 60 s by
+A pass runs every `alerts_interval_seconds` (Settings -> Alerts, 60 s by
 default). For each enabled alert whose owner may still alert, it resolves
 the alert's scope against the owner's current access (enabled sources
 only), takes the files the file-name index lists there that match the

@@ -4,7 +4,7 @@
   import Modal from '../lib/components/Modal.svelte'
   import PasswordRules from '../lib/components/PasswordRules.svelte'
   import { confirmAction } from '../lib/confirm'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import SortableHeader from '../lib/components/SortableHeader.svelte'
   import {
     loadViewState,
@@ -236,7 +236,7 @@
   onMount(load)
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <div class="page-head">
@@ -450,6 +450,7 @@
     {/if}
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .username-link {

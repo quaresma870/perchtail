@@ -8,6 +8,9 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Changed
+- **Settings have a sidebar with sections**: Sources (Sources, Folders, Agents, Source defaults), Access (Users, Roles, Single sign-on, Sign-in security), Content (Redaction, Severity indicators, Explorer and limits), Operations (Alerts, Email, Backups and updates, Monitoring, Import / export) and Audit (Audit log, Access review), each page shown only to those who may use it. On a phone-sized screen the sidebar is a list at the top of the page. The settings of the former System page are now on the pages of their section: Source defaults, Sign-in security, Explorer and limits, Alerts, Backups and updates, Monitoring, and the audit log's settings below the log on the Audit log page, which whoever manages system settings keeps seeing while the log is turned off. The old System address opens Explorer and limits. Nothing about the settings themselves, who may change them or how they are audited changes.
+
 ### Security
 - The push agent uses a `gorilla/websocket` commit that fixes GO-2026-6278: the mask key of each WebSocket frame the agent sent came from a weak random generator. Over `wss://`, which the agent requires unless `PERCHTAIL_ALLOW_INSECURE=true`, TLS already protects the frames. The agent now also depends on `golang.org/x/net`, through `gorilla/websocket`.
 

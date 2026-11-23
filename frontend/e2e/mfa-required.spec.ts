@@ -15,7 +15,7 @@ test('mfa required: a covered account must set up MFA before anything else', asy
   page,
   browser,
 }) => {
-  await page.goto('/#/settings/system')
+  await page.goto('/#/settings/sign-in-security')
   const toggle = page.getByLabel('Require MFA for local accounts')
   const row = page.locator('.setting-row', { has: toggle })
   await expect(toggle).not.toBeChecked()

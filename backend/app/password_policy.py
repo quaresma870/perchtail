@@ -1,5 +1,5 @@
 """Password policy (#245): what a new local password must satisfy, set under
-Settings -> System. Defaults follow NIST SP 800-63B: length over
+Settings -> Sign-in security. Defaults follow NIST SP 800-63B: length over
 composition, no composition rules or expiry unless an admin turns them on.
 
 "Too simple" is decided by rules, not by a downloaded list of common

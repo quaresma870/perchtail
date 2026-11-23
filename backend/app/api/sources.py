@@ -973,7 +973,7 @@ def index_names_now(
     if not system_settings.get_bool(session, "name_index_enabled"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="The file-name index is off (Settings → System)",
+            detail="The file-name index is off (Settings → Source defaults)",
         )
     if not (source.enabled and source.name_index_enabled):
         raise HTTPException(

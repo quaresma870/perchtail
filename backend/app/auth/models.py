@@ -135,7 +135,7 @@ class User(SQLModel, table=True):
     # cleared once the user picks their own password.
     must_change_password: bool = False
     # When the local password was last set (#245), for the optional expiry
-    # under Settings -> System. Null for SSO accounts.
+    # under Settings -> Sign-in security. Null for SSO accounts.
     password_changed_at: datetime | None = None
     # Optional TOTP second factor for local accounts (docs/design-decisions.md,
     # "Authentication and SSO") -- SSO accounts delegate MFA to the IdP instead, so

@@ -340,6 +340,12 @@ def test_index_now_needs_run_now_and_the_index_on(session, tmp_path, client_for,
         and response.json() == {"started": True}
         and started == [source.id]
     )
+    system_settings.set_bool(session, "name_index_enabled", False)
+    session.commit()
+    off = client_for(runner).post(f"/sources/{source.id}/name-index")
+    assert off.status_code == 409
+    assert off.json()["detail"] == "The file-name index is off (Settings → Source defaults)"
+    system_settings.set_bool(session, "name_index_enabled", True)
     source.name_index_enabled = False
     session.add(source)
     session.commit()

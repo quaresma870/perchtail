@@ -31,7 +31,7 @@ export function credentialAgeLabel(source: CredentialFields, now = new Date()): 
   return days === null ? 'unknown' : formatAgeDays(days)
 }
 
-/** Older than the limit in Settings -> System; never when the limit is 0
+/** Older than the limit in Settings -> Source defaults; never when the limit is 0
  * (off) or the date is unknown. */
 export function isCredentialStale(
   source: CredentialFields,

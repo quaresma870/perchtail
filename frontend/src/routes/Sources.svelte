@@ -4,7 +4,7 @@
   import { api, ApiError } from '../lib/api'
   import { currentUser, hasCapability } from '../lib/auth'
   import Modal from '../lib/components/Modal.svelte'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import SortableHeader from '../lib/components/SortableHeader.svelte'
   import {
     loadViewState,
@@ -126,7 +126,7 @@
     credential: (s) => credentialSortKey(s),
   }
 
-  // Credential age (#248): 0 in Settings -> System turns the warning off.
+  // Credential age (#248): 0 in Settings -> Source defaults turns the warning off.
   $: maxCredentialAge = $systemSettings.credential_max_age_days
   function credentialTitle(source: Source, maxAge: number): string {
     if (!source.has_credential) return ''
@@ -135,7 +135,7 @@
     }
     const when = `Set on ${parseUtc(source.credential_updated_at).toLocaleDateString()}`
     return isCredentialStale(source, maxAge)
-      ? `${when}, ${credentialAgeDays(source)} days ago: older than the ${maxAge}-day limit in Settings → System`
+      ? `${when}, ${credentialAgeDays(source)} days ago: older than the ${maxAge}-day limit in Settings → Source defaults`
       : when
   }
 
@@ -262,7 +262,7 @@
   onMount(() => load())
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <div class="header">
@@ -582,6 +582,7 @@
     </svelte:fragment>
   </Modal>
 {/if}
+</SettingsLayout>
 
 <style>
   .page {

@@ -13,7 +13,7 @@ Keep `/healthz` as the liveness probe and `/readyz` as the readiness probe: a lo
 
 ## Who may call them
 
-None of the four answers the world. The bearer token is the monitoring token generated under Settings → System → Monitoring, sent as `Authorization: Bearer <token>`.
+None of the four answers the world. The bearer token is the monitoring token generated under Settings → Monitoring, sent as `Authorization: Bearer <token>`.
 
 - **The probes** (`/healthz`, `/readyz`) answer a caller on the same machine (loopback) whose request carries no proxy header (`X-Forwarded-For`, `Forwarded`, `X-Real-IP`): that's the Docker `HEALTHCHECK`, which runs inside the container. A request from a reverse proxy on the same host carries those headers, so it's not treated as local. Anyone else needs the token, or an address in `PROBE_ALLOWED_NETWORKS` (comma-separated addresses or CIDR blocks, empty by default) for a load balancer or kubelet that can't send a header. A refused probe gets a bare `401` that says nothing about the instance's health.
 - **`/monitoring/health` and `/metrics`** always need the token. When `MONITORING_ALLOWED_NETWORKS` is set, the caller's address must be in it too; a valid token from anywhere else gets `403`.
@@ -34,7 +34,7 @@ It returns nothing else. Callers need the same authorization as `/healthz` (see 
 
 ## Generating a monitoring token
 
-`/monitoring/health` and `/metrics` need their own credential, separate from user sessions: a monitoring system can't do an interactive login. As a super admin (or any role with the `manage_system_settings` global capability), go to **Settings → System** and click **Generate token** under "Monitoring".
+`/monitoring/health` and `/metrics` need their own credential, separate from user sessions: a monitoring system can't do an interactive login. As a super admin (or any role with the `manage_system_settings` global capability), go to **Settings → Monitoring** and click **Generate token**.
 
 The token is shown once, right after it's generated; only its SHA-256 hash is stored (the same pattern as the push-agent token). Copy it somewhere safe; if you lose it, **Regenerate token**, which invalidates the previous one.
 
@@ -139,14 +139,14 @@ Timestamps are UTC, without a time zone (`next_run_at` has one). Fields that can
 | `database.size_bytes`, `database.wal_bytes` | Size of the SQLite file and of its write-ahead log (`perchtail.db-wal`; 0 when there is none). `null` for another database. The WAL is checkpointed and cut back every hour and limited to 64 MiB after each checkpoint. |
 | `scratch.used_bytes`, `scratch.max_bytes`, `scratch.used_fraction` | What's on disk under `SCRATCH_DIR`, against `SCRATCH_MAX_GB`. |
 | `scratch.min_free_bytes` | Free space kept on the scratch filesystem: the larger of `SCRATCH_MIN_FREE_GB` and `SCRATCH_MIN_FREE_PERCENT` of its size. Below it, and when scratch is at `SCRATCH_MAX_GB`, new fetches are refused with HTTP 507. |
-| `limits.global_in_use`, `limits.global_max` | Folder listings, file opens, Tail polls, downloads, folder ZIPs and archive listings talking to sources right now, and how many may at once (Settings → System). |
+| `limits.global_in_use`, `limits.global_max` | Folder listings, file opens, Tail polls, downloads, folder ZIPs and archive listings talking to sources right now, and how many may at once (Settings → Explorer and limits). |
 | `limits.per_source_max`, `limits.busiest_source_in_use`, `limits.sources_in_use` | The limit on one source, the most in use on any one source, and the slots in use per source id. |
 | `limits.per_user_transfers_max`, `limits.transfers_in_use`, `limits.busiest_user_transfers` | Downloads and folder ZIPs one user may have in progress, how many are in progress in all, and the most any one user has. |
 | `limits.rejected` | Requests answered 503 (busy, with `Retry-After`) since this process started, by the limit that was full: `global`, `source` or `user`. A count that keeps growing means the limits are too low for the load, or something is hammering the server. |
 | `disks.data`, `disks.scratch`, `disks.logs` | Free and total bytes, and the free share, of the filesystem holding `DATA_DIR`, `SCRATCH_DIR` and `LOG_DIR`. `null` values when the directory can't be read. On one disk the three are the same. |
 | `sources_by_protocol` | Enabled sources per protocol. |
 | `agent.configured`, `agent.connected` | Enabled `agent` sources, and push agents connected right now. |
-| `name_index.enabled` | The file-name index is on (Settings → System). |
+| `name_index.enabled` | The file-name index is on (Settings → Source defaults). |
 | `name_index.sources` | Enabled sources that take part in the index (not left out on their page). |
 | `name_index.never_indexed` | Of those, sources not listed yet. |
 | `name_index.oldest_indexed_at`, `name_index.oldest_age_seconds` | The oldest last pass among them, whatever its outcome. It grows when the index can't keep up, and for a source whose checks back off (the index skips it meanwhile). |
@@ -154,7 +154,7 @@ Timestamps are UTC, without a time zone (`next_run_at` has one). Fields that can
 | `source_checks.failing` | Enabled sources whose last check or operation couldn't reach them. |
 | `source_checks.backing_off` | Enabled sources whose background checks are paused after repeated failures. |
 | `alerts.last_pass_at`, `alerts.last_pass_age_seconds` | The last live alert pass. |
-| `alerts.overdue` | No pass finished in twice the interval set in Settings → System, plus 30 seconds. |
+| `alerts.overdue` | No pass finished in twice the interval set in Settings → Alerts, plus 30 seconds. |
 | `alerts.files_waiting` | Files that didn't fit in the last pass (each source gets at most 20 files and 15 seconds per alert per pass) and will be read in the next ones. |
 | `alerts.pending_deliveries` | Webhook calls that failed and are being retried with backoff for up to an hour. |
 | `alerts.failed_deliveries` | Webhook calls given up on after that, across all alerts (each alert shows its own count and last error on the Alerts page). |
@@ -211,7 +211,7 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `source.check.timed_out` | warning | A background check went past its deadline. |
 | `scratch.size_guard_eviction` | warning | Scratch use passed `SCRATCH_MAX_GB` and files were evicted. |
 | `scratch.full`, `scratch.disk_low` | warning | A fetch was refused (507): scratch was at `SCRATCH_MAX_GB` with files people have open, or its filesystem was down to the free space it keeps. |
-| `limits.busy` | warning | A request was answered 503 because a limit in Settings → System was full (`scope` says which). |
+| `limits.busy` | warning | A request was answered 503 because a limit in Settings → Explorer and limits was full (`scope` says which). |
 | `archive.zip_stream_failed` | warning | A folder ZIP failed after it had started streaming, so the client got an incomplete download. |
 | `scratch.leftovers_not_cleared` | error | `SCRATCH_DIR` is a filesystem root or holds the database or the logs, so leftovers weren't cleared at startup. Fix `SCRATCH_DIR`. |
 | `shutdown.jobs_still_running` | warning | A stop didn't wait for a running job within `SHUTDOWN_TIMEOUT_SECONDS`. |
@@ -249,7 +249,7 @@ Triggers: status error or degraded, database unreachable, health endpoint not an
 
 ### Importing into Zabbix 7.0
 
-1. In PerchTail, generate a monitoring token (Settings → System → Monitoring).
+1. In PerchTail, generate a monitoring token (Settings → Monitoring).
 2. In Zabbix, go to **Data collection → Templates**, click **Import**, choose `perchtail_zabbix_7.0.yaml` and import with the default rules.
 3. Create or open a host for PerchTail (no interface is needed), and link the template "PerchTail by HTTP".
 4. On the host's **Macros** tab, set `{$PERCHTAIL.URL}` and `{$PERCHTAIL.TOKEN}` (keep the type "Secret text"), and change any threshold you want.

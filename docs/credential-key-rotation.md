@@ -11,7 +11,7 @@
 
 The audit chain is verified under the old key first. If it doesn't verify (a row was changed or removed), the rotation stops and nothing is written, because re-signing a broken chain would vouch for whatever broke it: check the audit log's integrity banner and resolve that first. After a successful rotation the audit log has a `credential_key.rotate` entry with the counts.
 
-This guide covers changing that key — after a suspected exposure, when PerchTail reports it as weak (`startup.weak_credential_encryption_key` in the log at startup and a warning at the top of **Settings → System**), as routine hygiene, or whenever you have a reason to — without losing access to what's already encrypted under the old one.
+This guide covers changing that key — after a suspected exposure, when PerchTail reports it as weak (`startup.weak_credential_encryption_key` in the log at startup and a warning at the top of the system settings pages, for example **Settings → Explorer and limits**), as routine hygiene, or whenever you have a reason to — without losing access to what's already encrypted under the old one.
 
 Simply changing the value in `.env` and restarting does **not** work: every already-encrypted row still needs the *old* key to decrypt, and the app now only derives the *new* one (`app/crypto.py`). You have to re-encrypt everything first.
 

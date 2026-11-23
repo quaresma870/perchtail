@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
   import Modal from '../lib/components/Modal.svelte'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import { confirmAction } from '../lib/confirm'
   import { canRemoveMapping, mappingRoleLabel } from '../lib/sso-mappings'
   import type { ConnectionCheckResult, GroupRoleMapping, Role, SSOProvider } from '../lib/types'
@@ -194,7 +194,7 @@
   }
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <h1>SSO settings</h1>
@@ -376,6 +376,7 @@
     </Modal>
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .page {

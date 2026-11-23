@@ -3,7 +3,7 @@
   import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../lib/api'
   import { currentUser } from '../lib/auth'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import FolderPicker from '../lib/components/FolderPicker.svelte'
   import SeverityPatternEditor from '../lib/components/SeverityPatternEditor.svelte'
   import RedactionRuleEditor from '../lib/components/RedactionRuleEditor.svelte'
@@ -70,7 +70,7 @@
   let originalHostPort = ''
   // Index of the root whose Browse… picker is open.
   let pickerFor: number | null = null
-  // Settings -> System -> Folders per source; a source that already has
+  // Settings -> Source defaults -> Folders per source; a source that already has
   // more than the limit keeps them but can't add more.
   let hadRootsCount = 0
   $: rootsLimit = $systemSettings.source_max_roots
@@ -443,9 +443,7 @@
   }
 </script>
 
-{#if !embedded}
-  <SettingsNav />
-{/if}
+<SettingsLayout nav={!embedded}>
 
 <div class="page" class:embedded>
   {#if !embedded}
@@ -962,6 +960,7 @@
     {/if}
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .page {

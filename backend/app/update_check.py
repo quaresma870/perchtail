@@ -1,9 +1,9 @@
 """Release check (#215): at most once a day, ask GitHub which release is the
-latest, so super admins see under Settings -> System when an upgrade is
+latest, so super admins see under Settings -> Backups and updates when an upgrade is
 available and how to do it.
 
 - Off when UPDATE_CHECK=false (no outbound request, ever) or when the switch
-  under Settings -> System is off.
+  under Settings -> Backups and updates is off.
 - One unauthenticated request to the public releases API, with a generic
   User-Agent: nothing about this install is sent. The ETag is kept, so a
   check that finds nothing new is a 304 and doesn't count against GitHub's

@@ -5,7 +5,7 @@ This guide is for the people who set PerchTail up and run it day to day: it cove
 Related guides:
 
 - [User guide](user-guide.md): signing in, the explorer, the viewer, Tail, downloads and My profile.
-- [Configuration](configuration.md): environment variables and the settings under **Settings → System**.
+- [Configuration](configuration.md): environment variables and the system settings on the Settings pages.
 - [Upgrading](upgrade.md) and [Backup and restore](backup-and-restore.md).
 - [Push agent as a service](agent-service.md) and the [agent README](../agent/README.md).
 - [Troubleshooting](troubleshooting.md).
@@ -32,21 +32,25 @@ Related guides:
 
 ## The Settings pages
 
-**Settings** in the top bar opens a row of pages. Each page appears only to people whose role allows it:
+**Settings** in the top bar opens a sidebar of pages grouped in five sections; on a screen narrower than 768 pixels the sidebar is a list at the top of the page. Each page appears only to people whose role allows it, and a section with no page for them isn't shown:
 
-| Page | Shown to |
-|---|---|
-| **Sources** | everyone |
-| **Folders**, **Agents** | roles with **Create new sources** |
-| **Roles** | roles with **Manage roles** |
-| **Users** | roles with **Manage users** |
-| **SSO** | roles with **Manage SSO settings** |
-| **System**, **Severity indicators** | roles with **Manage system settings (feature toggles)** |
-| **Redaction**, **Email**, **Import / export** | super admins |
-| **Audit log** | roles with **View audit log**, while the **Audit log** switch under **Settings → System** is on |
-| **Access review** | roles with **View access report** |
+| Section | Page | Shown to |
+|---|---|---|
+| Sources | **Sources** | everyone |
+| Sources | **Folders**, **Agents** | roles with **Create new sources** |
+| Sources | **Source defaults** | roles with **Manage system settings (feature toggles)** |
+| Access | **Users** | roles with **Manage users** |
+| Access | **Roles** | roles with **Manage roles** |
+| Access | **Single sign-on** | roles with **Manage SSO settings** |
+| Access | **Sign-in security** | roles with **Manage system settings (feature toggles)** |
+| Content | **Redaction** | super admins |
+| Content | **Severity indicators**, **Explorer and limits** | roles with **Manage system settings (feature toggles)** |
+| Operations | **Alerts**, **Backups and updates**, **Monitoring** | roles with **Manage system settings (feature toggles)** |
+| Operations | **Email**, **Import / export** | super admins |
+| Audit | **Audit log** | roles with **View audit log**, while the **Audit log** switch is on; and roles with **Manage system settings (feature toggles)**, which see the audit log's settings below the log |
+| Audit | **Access review** | roles with **View access report** |
 
-A super admin sees every page (the Audit log only while its switch in **Settings → System** is on). [Configuration](configuration.md) describes each setting under **Settings → System**.
+A super admin sees every page; while the **Audit log** switch is off, the **Audit log** page shows only its settings. [Configuration](configuration.md#system-settings) describes each setting of Source defaults, Sign-in security, Redaction, Explorer and limits, Alerts, Backups and updates, Monitoring and Audit log. The address of the former System page (`#/settings/system`) opens **Settings → Explorer and limits**.
 
 ## Customers and folders
 
@@ -88,7 +92,7 @@ Changing a source's host, port, base path or folders means its rules now apply t
 
 A few limits decide what the explorer lists and what can be downloaded. The [User guide](user-guide.md#archives) describes what users see.
 
-- A folder or an archive lists at most **Entries per listing** entries (**Settings → System**, **Limits** card, 5000 by default), folders first. The explorer then says "Showing the first N entries; narrow with the search." When the source cut the folder's listing before that (a push agent lists at most 50,000 entries of a folder), it says "The source listed only part of this folder; showing the N entries it listed." instead.
+- A folder or an archive lists at most **Entries per listing** entries (**Settings → Explorer and limits**, **Limits** card, 5000 by default), folders first. The explorer then says "Showing the first N entries; narrow with the search." When the source cut the folder's listing before that (a push agent lists at most 50,000 entries of a folder), it says "The source listed only part of this folder; showing the N entries it listed." instead.
 - A `.tar.gz` or `.tgz` is read in one pass, and only its first 50,000 entries (files, folders and links together) and 8 MiB of names are read. A bigger one lists its first entries and says the listing was cut short ("This archive has more entries than were read; showing the N read.", unless they fill **Entries per listing**); its members past them can't be opened, a download of the whole archive is refused when the source has an exclude rule, and a redacted download of it is refused. Split such archives into smaller ones. An archive with more than 1 MiB of headers for one entry, or of global headers in all, can't be read.
 - A `.zip` member that is encrypted, or compressed with a method PerchTail can't read, can't be opened or downloaded: the answer is "This archive member is encrypted or compressed with a method PerchTail can't read, so it can't be opened.", audited as `file.open_denied` or `file.download_denied` with the reason `member_encrypted` or `member_unsupported_compression`. On a push agent that reads archives on its host (redaction on), an encrypted member gets the same answer; a member compressed with a method the agent can't read gets the source's generic error.
 - A `.zip` or `.tar.gz` that can't be read as one (damaged, or another kind of file) can't be expanded, and its files can't be opened or downloaded: the answer is "This archive can't be read: it is damaged, or it isn't really a .zip or .tar.gz file.", audited for a file inside it as `file.open_denied` or `file.download_denied` with the reason `archive_unreadable`. A `.gz` file that can't be decompressed answers "This compressed file can't be read: it is damaged, or it isn't really a .gz file." with the same code and audit reason. On a push agent that lists and reads archives on its host (redaction on), the agent says it can't read them, and the answer is the same. A `.tar.gz` that ends before its first whole file once decompressed (a few bytes, nothing at all, or only headers such as a long file name or a global header) can't be read either; one that holds only its end-of-archive blocks is an empty archive. A `.zip` whose index is intact but one of its files is damaged still expands, and only that file is refused.
@@ -155,13 +159,13 @@ A role with no grants can't see any source.
 | **Create new sources** | `create_source` | Shows **Settings → Folders** and **Settings → Agents**. Together with `manage_source` where it applies: add, edit, move and delete sources, add, rename, move and delete folders, rename and delete customers, change credentials in bulk, regenerate agent tokens, use **Browse…** with a saved credential, and upgrade push agents. Lists only the customers and folders the role's grants reach. |
 | **Manage users** | `manage_users` | **Settings → Users**: create users, change their role, name and email, reset passwords, deactivate and reactivate. |
 | **Manage roles** | `manage_roles` | **Settings → Roles**: create, edit, duplicate and delete roles and their grants. Short of super admin, only the roles within your own access are listed (see [Delegated administrators](#delegated-administrators)). |
-| **Manage SSO settings** | `manage_sso` | **Settings → SSO**: the OIDC provider and the group-to-role mappings. |
-| **Manage system settings (feature toggles)** | `manage_system_settings` | **Settings → System** and **Settings → Severity indicators**, the monitoring token, and the system-wide agent upgrade policy and window. |
+| **Manage SSO settings** | `manage_sso` | **Settings → Single sign-on**: the OIDC provider and the group-to-role mappings. |
+| **Manage system settings (feature toggles)** | `manage_system_settings` | **Settings → Source defaults**, **Sign-in security**, **Severity indicators**, **Explorer and limits**, **Alerts**, **Backups and updates**, **Monitoring** (the monitoring token) and the settings on **Audit log**, and the system-wide agent upgrade policy and window. |
 | **View audit log** | `view_audit_log` | **Settings → Audit log**, including **Verify now**. |
 | **Create and edit alerts (webhooks export log content)** | `manage_alerts` | Create, edit, test, turn on and off your own alerts. Alerts send log lines to an outside URL, so viewing a source doesn't imply this. |
 | **View access report** | `view_access_report` | Generate the access report, see [Access review](#access-review). It only reads, so a reviewer can review access without being able to change it; **Manage users** and **Manage roles** don't include it. |
 
-Some actions are for super admins only, whatever the capabilities: creating customers, **Settings → Redaction**, **Settings → Email** and **Settings → Import / export**, **Mark as known** on the audit log, the **Updates** card under **Settings → System**, shortening the audit log retention, turning **Audit folder listings** off, the **Two-factor authentication** and **Password recovery** cards, removing or turning off the SSO provider, the super-admin flag, and the built-in application-log source.
+Some actions are for super admins only, whatever the capabilities: creating customers, **Settings → Redaction**, **Settings → Email** and **Settings → Import / export**, **Mark as known** on the audit log, the **Updates** card under **Settings → Backups and updates**, shortening the audit log retention, turning **Audit folder listings** off, the **Two-factor authentication** and **Password recovery** cards, removing or turning off the SSO provider, the super-admin flag, and the built-in application-log source.
 
 ### Grant capabilities
 
@@ -239,7 +243,7 @@ A role can't be deleted while users hold it or while an SSO group mapping points
 
 Users are never deleted, only deactivated. The last active super admin can't be deactivated or moved to a role without super admin.
 
-Users manage their own MFA in **My profile**. There is no way to reset another user's MFA from the Settings pages. Local accounts of super admins and of roles with any global capability must use MFA; **Require MFA for local accounts** under **Settings → System** extends that to every local account ([configuration.md](configuration.md#two-factor-authentication-card)). An account that must use MFA and hasn't set it up can only set it up after signing in.
+Users manage their own MFA in **My profile**. There is no way to reset another user's MFA from the Settings pages. Local accounts of super admins and of roles with any global capability must use MFA; **Require MFA for local accounts** under **Settings → Sign-in security** extends that to every local account ([configuration.md](configuration.md#two-factor-authentication-card)). An account that must use MFA and hasn't set it up can only set it up after signing in.
 
 ## Access review
 
@@ -311,7 +315,7 @@ Every report generated, shown or downloaded, is recorded in the audit log as `ac
 
 ## Single sign-on
 
-PerchTail supports one OIDC provider at a time. [SSO setup](sso-setup.md) covers registering PerchTail with Entra ID, Okta, Google Workspace, Keycloak or Authentik, and the fields under **Settings → SSO**. When a provider is enabled, the sign-in page shows **Sign in with** and the provider's name.
+PerchTail supports one OIDC provider at a time. [SSO setup](sso-setup.md) covers registering PerchTail with Entra ID, Okta, Google Workspace, Keycloak or Authentik, and the fields under **Settings → Single sign-on**. When a provider is enabled, the sign-in page shows **Sign in with** and the provider's name.
 
 ### Auto-provisioning
 
@@ -321,7 +325,7 @@ The display name and email of an SSO account are updated from the identity provi
 
 ### Group-to-role mapping
 
-**Group → role mapping** on **Settings → SSO** assigns a role from the user's IdP groups. It needs **Group claim** set on the provider.
+**Group → role mapping** on **Settings → Single sign-on** assigns a role from the user's IdP groups. It needs **Group claim** set on the provider.
 
 - **+ Add mapping** takes an **IdP group name** and a **Role**. A new mapping is added after the existing ones. To change the order, remove mappings and add them again.
 - Mappings are evaluated in order and the last matching mapping wins, like rules.
@@ -329,7 +333,7 @@ The display name and email of an SSO account are updated from the identity provi
 - If no mapping matches, the user gets the **No Access** role, recorded as `user.sso_role_synced` with reason `no_matching_mapping`. Removing a user from a mapped group, or removing the mapping, takes the role away at their next sign-in. The last active super admin is the exception: they keep the role, and the log has `sso.role_sync_kept_last_super_admin`.
 - A role change from a mapping takes effect at the user's next SSO sign-in. Sessions already open keep the current role until then; to remove access at once, deactivate the user in **Settings → Users**.
 
-A delegated administrator can only create, change or delete a mapping whose role is within their own access, and only at a position before every mapping whose role is beyond it (the last matching mapping wins). They also can't enable a provider or change its issuer, client ID or group claim while any mapping points at a role beyond their access. Only a super admin removes the provider (**Remove** on **Settings → SSO**) or turns it off. **Settings → SSO** shows a delegated administrator every mapping, but a role beyond their access as "A role outside your access", without its name, and offers **Remove** only on the mappings they may remove.
+A delegated administrator can only create, change or delete a mapping whose role is within their own access, and only at a position before every mapping whose role is beyond it (the last matching mapping wins). They also can't enable a provider or change its issuer, client ID or group claim while any mapping points at a role beyond their access. Only a super admin removes the provider (**Remove** on **Settings → Single sign-on**) or turns it off. **Settings → Single sign-on** shows a delegated administrator every mapping, but a role beyond their access as "A role outside your access", without its name, and offers **Remove** only on the mappings they may remove.
 
 ## Email
 
@@ -356,7 +360,7 @@ Saving, removing and testing are recorded in the audit log (`smtp_settings.*`), 
 
 ### Password recovery
 
-**Password recovery by email**, in the **Password recovery** card of **Settings → System**, lets users of local accounts choose a new password when they've forgotten theirs, without an administrator. It's off by default, and only a super admin can turn it on or change how long links work (**Links work for**, 5 to 60 minutes, 30 by default). It can be turned on only while email is set up and on here and `PUBLIC_BASE_URL` starts with `https://`, since the link carries a secret; if email is later turned off or removed, recovery stops working until it's back, and the card says why.
+**Password recovery by email**, in the **Password recovery** card of **Settings → Sign-in security**, lets users of local accounts choose a new password when they've forgotten theirs, without an administrator. It's off by default, and only a super admin can turn it on or change how long links work (**Links work for**, 5 to 60 minutes, 30 by default). It can be turned on only while email is set up and on here and `PUBLIC_BASE_URL` starts with `https://`, since the link carries a secret; if email is later turned off or removed, recovery stops working until it's back, and the card says why.
 
 While it's on, the sign-in page shows **Forgot password?**. A user enters their username or email address and PerchTail answers the same way whether or not an account matches; the lookup and the email happen after the answer, so neither the answer nor its timing says whether the account exists.
 
@@ -379,7 +383,7 @@ Because the email address is where a reset link goes, users must enter their cur
 - Targets link to the object while it exists. A deleted object shows its id.
 - Pages hold 50 entries, with **Previous** and **Next**.
 
-The **Audit log** switch under **Settings → System** hides the page for everyone. Events are still recorded while it is off. The **Audit folder listings** switch records every folder listed below a source's root; only a super admin can turn it off. Every recorded event is listed in [audit-events.md](audit-events.md).
+The **Audit log** switch, on the **Settings → Audit log** page below the log, hides the log for everyone; whoever manages system settings still sees the page, with its settings, so the switch can be turned on again. Events are still recorded while it is off. The **Audit folder listings** switch records every folder listed below a source's root; only a super admin can turn it off. Every recorded event is listed in [audit-events.md](audit-events.md).
 
 ### Integrity
 
@@ -396,7 +400,7 @@ The check runs on its own every `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` days (ever
 
 ### Retention
 
-**Audit log retention** under **Settings → System** sets how many days entries are kept (365 by default; at least 90, or 0 to keep them forever). Only a super admin can shorten it. A purge runs once a day (`AUDIT_PURGE_INTERVAL_SECONDS`), removes older entries from the oldest up and is itself recorded as `audit.purge`. The chain keeps the hash of the last removed entry, so a purge doesn't count as a break.
+**Audit log retention** under **Settings → Audit log** sets how many days entries are kept (365 by default; at least 90, or 0 to keep them forever). Only a super admin can shorten it. A purge runs once a day (`AUDIT_PURGE_INTERVAL_SECONDS`), removes older entries from the oldest up and is itself recorded as `audit.purge`. The chain keeps the hash of the last removed entry, so a purge doesn't count as a break.
 
 ## Alerts
 
@@ -424,7 +428,7 @@ Each alert in the list shows its scope, query, files, the webhook's scheme, host
 
 ### How alerts read files
 
-- A pass runs at the interval set under **Settings → System** (**Check alerts every** in the **Alerts** card, 60 seconds by default, from 15 seconds to an hour).
+- A pass runs at the interval set under **Settings → Alerts** (**Check alerts every**, 60 seconds by default, from 15 seconds to an hour).
 - An alert only sees files the [file-name index](#file-name-index) lists. A new file is watched once the index has listed it, and a source left out of the index gives the alert no files.
 - A file seen for the first time is read from its end. After that, each pass reads only what was appended, up to 1 MiB per file per pass, like Tail. Only whole lines are matched.
 - A file that shrank or whose first bytes changed (rotated or rewritten) is read again from the beginning.
@@ -446,7 +450,7 @@ Deleting a source, folder or customer deletes the alerts scoped to it.
 
 The file-name index lists each source's rule-visible files in the background and keeps their names, sizes and modification times, never their content. It powers the explorer's search across sources ([User guide](user-guide.md#searching-for-sources-and-files)) and tells alerts which files exist.
 
-- **Index file names** under **Settings → System** turns it on or off for everyone. It is on by default. Turning it off stops the listings; names already indexed stay until a source changes.
+- **Index file names** under **Settings → Source defaults** turns it on or off for everyone. It is on by default. Turning it off stops the listings; names already indexed stay until a source changes.
 - **List each source's files every** sets how old a source's index may get before it's listed again: 15 minutes by default, from 5 minutes to a day.
 - **Index file names** in the source editor leaves one source out. Turning it off drops that source's names at once.
 
@@ -467,7 +471,7 @@ A rule change removes the names it now hides at once. Search also checks each so
 
 PerchTail checks in the background that each source answers, so the explorer shows which ones are down before anyone opens them.
 
-- **Check sources in the background** under **Settings → System** sets the interval: 10 minutes by default, 0 turns it off.
+- **Check sources in the background** under **Settings → Source defaults** sets the interval: 10 minutes by default, 0 turns it off.
 - Every minute, the sources whose status is older than the interval are checked, the oldest first, four at a time. Each check lists the base path (each folder, for a source with several). A check that doesn't answer in time counts as failing.
 - Push-agent sources are not checked: their status is their live connection.
 - Every real operation also updates the status: a browse, an open, a Tail poll. Only errors about reaching the source (unreachable, credentials, host key, TLS) count as failing. An error about one file changes nothing.

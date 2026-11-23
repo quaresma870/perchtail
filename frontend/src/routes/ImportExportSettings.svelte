@@ -3,7 +3,7 @@
   // (#179). Preview first (a dry run that shows every change and every
   // problem), then apply in one go. Super admins only.
   import { api, ApiError } from '../lib/api'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import { IMPORT_TEMPLATE } from '../lib/import-template'
 
   interface PlanItem {
@@ -117,7 +117,7 @@
   const actionLabel = { create: 'New', update: 'Changed', unchanged: 'Unchanged' }
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <h1>Import / export</h1>
@@ -288,6 +288,7 @@
     {/if}
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .page {

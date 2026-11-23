@@ -960,7 +960,7 @@ def run_scheduled_backup(
     settings: Settings | None = None, now: Callable[[], datetime] | None = None
 ) -> Path | None:
     """The job (every SCHEDULE_TICK): a `scheduled` backup once the
-    interval set in Settings -> System has gone by since the last one. Off
+    interval set in Settings -> Backups and updates has gone by since the last one. Off
     (None) with an interval of 0. After a failed attempt, the next one waits
     min(interval, RETRY_AFTER_FAILURE); a success clears that wait."""
     global _last_failed_attempt

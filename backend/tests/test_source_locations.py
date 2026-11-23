@@ -546,7 +546,9 @@ def test_folder_limit_is_configurable(session, client, two_roots):
         client, protocol="local", host="localhost", credential=None, roots=_roots(two_roots, 4)
     )
     assert too_many.status_code == 400
-    assert "at most 3 folders" in too_many.json()["detail"]
+    assert too_many.json()["detail"] == (
+        "A source can read at most 3 folders (Settings → Source defaults)"
+    )
     ok = _create(
         client, protocol="local", host="localhost", credential=None, roots=_roots(two_roots, 3)
     )
@@ -557,7 +559,9 @@ def test_limit_of_one_turns_several_folders_off(session, client, two_roots):
     _set_limit(session, 1)
     response = _multi(client, two_roots)
     assert response.status_code == 400
-    assert "turned off" in response.json()["detail"]
+    assert response.json()["detail"] == (
+        "Several folders per source are turned off (Settings → Source defaults)"
+    )
 
 
 def test_lowering_the_limit_keeps_existing_sources_editable(session, client, two_roots):

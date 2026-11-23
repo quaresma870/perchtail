@@ -25,7 +25,7 @@
   import { formatAuditTime } from '../lib/audit-format'
   import { CAPABILITY_HINTS, CAPABILITY_LABELS, GLOBAL_CAPABILITY_SHORT_LABELS } from '../lib/capabilities'
   import AccessReportGroup from '../lib/components/AccessReportGroup.svelte'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import type {
     AccessReportByUser,
     AccessReportBySource,
@@ -124,7 +124,7 @@
   onMount(load)
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <h1>Access review</h1>
@@ -356,6 +356,7 @@
     {/each}
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .page {

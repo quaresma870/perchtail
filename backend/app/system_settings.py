@@ -77,7 +77,7 @@ CHOICE_DEFAULTS: dict[str, tuple[str, tuple[str, ...]]] = {
 # error to catch the mistake) -- keeping the two dicts distinct by type
 # makes that a KeyError instead of a wrong answer.
 INT_DEFAULTS: dict[str, str] = {
-    # Admin-configurable from Settings -> System (see app/audit_purge.py's
+    # Admin-configurable from Settings -> Audit log (see app/audit_purge.py's
     # scheduled sweep), not just an env var -- this was an explicit open
     # decision ("audit log retention -- keep forever, or expire after N
     # months?", docs/design-decisions.md, "Audit log"), resolved as: admin picks a number, default

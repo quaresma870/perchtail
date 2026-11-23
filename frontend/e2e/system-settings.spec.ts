@@ -6,12 +6,99 @@ const saved = (page: Page) =>
     (response) => response.url().endsWith('/system-settings') && response.request().method() === 'PATCH',
   )
 
-test('system settings: alert interval, monitoring token generation', async ({ page }) => {
+/** Serves /auth/me as this browser's user with only these global capabilities. */
+async function actAs(page: Page, capabilities: string[]) {
+  await page.route(/\/auth\/me$/, async (route) => {
+    const response = await route.fetch()
+    const user = await response.json()
+    await route.fulfill({
+      response,
+      json: { ...user, is_super_admin: false, global_capabilities: capabilities },
+    })
+  })
+}
+
+test('settings sidebar: grouped sections, the current page marked, the old System address redirected', async ({
+  page,
+}) => {
   await page.goto('/#/settings/system')
+  await expect(page).toHaveURL(/#\/settings\/explorer$/)
+  await expect(page.getByRole('heading', { level: 1, name: 'Explorer and limits' })).toBeVisible()
+
+  const sidebar = page.getByRole('navigation', { name: 'Settings' })
+  for (const group of ['Sources', 'Access', 'Content', 'Operations', 'Audit']) {
+    await expect(sidebar.getByRole('list', { name: group, exact: true })).toBeVisible()
+  }
+  const current = sidebar.getByRole('link', { name: 'Explorer and limits' })
+  await expect(current).toHaveAttribute('aria-current', 'page')
+  await expect(sidebar.locator('[aria-current="page"]')).toHaveCount(1)
+
+  await sidebar.getByRole('link', { name: 'Sign-in security' }).click()
+  await expect(page).toHaveURL(/#\/settings\/sign-in-security$/)
+  await expect(page.getByRole('heading', { level: 1, name: 'Sign-in security' })).toBeVisible()
+  await expect(sidebar.getByRole('link', { name: 'Sign-in security' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  )
+  await expect(current).not.toHaveAttribute('aria-current', 'page')
+
+  // A page below a sidebar entry keeps the entry marked.
+  await page.goto('/#/settings/sources')
+  await expect(sidebar.getByRole('link', { name: 'Sources', exact: true })).toHaveAttribute(
+    'aria-current',
+    'page',
+  )
+})
+
+test('settings sidebar: below 768 px a select per section takes its place and navigates', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 375, height: 800 })
+  await page.goto('/#/settings/explorer')
+  await expect(page.getByRole('heading', { level: 1, name: 'Explorer and limits' })).toBeVisible()
+
+  const select = page.getByLabel('Settings page')
+  await expect(select).toBeVisible()
+  await expect(select).toHaveValue('/settings/explorer')
+  await expect(page.locator('.settings-nav').getByRole('link', { name: 'Sources', exact: true })).toBeHidden()
+  await expect(select.locator('optgroup')).toHaveCount(5)
+
+  await select.selectOption({ label: 'Alerts' })
+  await expect(page).toHaveURL(/#\/settings\/alerts$/)
+  await expect(page.getByRole('heading', { level: 1, name: 'Alerts' })).toBeVisible()
+
+  // Nothing wider than the phone's screen.
+  const overflow = await page.evaluate(() => {
+    const content = document.querySelector('.content') as HTMLElement
+    return {
+      page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      content: content.scrollWidth - content.clientWidth,
+    }
+  })
+  expect(overflow).toEqual({ page: 0, content: 0 })
+
+  // From 768 px the sidebar is back.
+  await page.setViewportSize({ width: 768, height: 800 })
+  await expect(select).toBeHidden()
+  await expect(page.locator('.settings-nav').getByRole('link', { name: 'Alerts' })).toBeVisible()
+})
+
+test('settings sidebar: a user with create_source only sees the Sources section', async ({ page }) => {
+  await actAs(page, ['create_source'])
+  await page.goto('/#/settings/sources')
+  const sidebar = page.getByRole('navigation', { name: 'Settings' })
+  await expect(sidebar.getByRole('link')).toHaveText(['Sources', 'Folders', 'Agents'])
+  await expect(sidebar.getByRole('list')).toHaveCount(1)
+})
+
+test('system settings: alert interval, monitoring token generation', async ({ page }) => {
+  await page.goto('/#/settings/alerts')
+  await expect(page.getByRole('heading', { level: 1, name: 'Alerts' })).toBeVisible()
 
   // Alerts no longer hang off a Search toggle (#303): the nav link is always there.
-  await expect(page.locator('nav').getByRole('link', { name: 'Search' })).toHaveCount(0)
-  await expect(page.locator('nav').getByRole('link', { name: 'Alerts' })).toBeVisible()
+  const mainNav = page.locator('main > nav')
+  await expect(mainNav.getByRole('link', { name: 'Search' })).toHaveCount(0)
+  await expect(mainNav.getByRole('link', { name: 'Alerts' })).toBeVisible()
 
   const interval = page.getByLabel('Alert check interval in seconds')
   const intervalRow = page.locator('.setting-row', { has: interval })
@@ -34,48 +121,125 @@ test('system settings: alert interval, monitoring token generation', async ({ pa
   await expect(intervalRow.getByRole('button', { name: 'Save' })).toBeDisabled()
 
   // Monitoring token: shown once, right after generation.
+  await page.goto('/#/settings/monitoring')
+  await expect(page.getByRole('heading', { level: 1, name: 'Monitoring' })).toBeVisible()
   await page.getByRole('button', { name: /Generate token|Regenerate token/ }).click()
   await expect(page.locator('.token-box')).toBeVisible()
   await expect(page.locator('.token-box')).not.toBeEmpty()
 })
 
-test('system settings: audit log toggle hides the nav link and redirects the route', async ({
+test('system settings: each page shows only its own blocks', async ({ page }) => {
+  const pages: [string, string, string[], string[]][] = [
+    [
+      'source-defaults',
+      'Source defaults',
+      ['Background check interval in minutes', 'Index file names', 'Credential age warning in days', 'Folders per source'],
+      ['Alert check interval in seconds', 'Tail interval'],
+    ],
+    [
+      'sign-in-security',
+      'Sign-in security',
+      ['Require MFA for local accounts', 'Password recovery by email', 'Minimum length'],
+      ['Folders per source', 'Backup interval in hours'],
+    ],
+    [
+      'explorer',
+      'Explorer and limits',
+      ['Connections view', 'Tail interval', 'Downloads per user'],
+      ['Alert check interval in seconds', 'Audit log retention in days'],
+    ],
+    ['alerts', 'Alerts', ['Alert check interval in seconds'], ['Tail interval', 'Backup interval in hours']],
+    [
+      'backups',
+      'Backups and updates',
+      ['Backup interval in hours', 'Check for new releases'],
+      ['Alert check interval in seconds'],
+    ],
+    ['monitoring', 'Monitoring', [], ['Alert check interval in seconds', 'Connections view']],
+  ]
+  for (const [path, title, shown, hidden] of pages) {
+    await page.goto(`/#/settings/${path}`)
+    await expect(page.getByRole('heading', { level: 1, name: title })).toBeVisible()
+    await expect(page.getByText('Loading…', { exact: true })).toHaveCount(0)
+    for (const label of shown) await expect(page.getByLabel(label, { exact: true }).first()).toBeVisible()
+    for (const label of hidden) await expect(page.getByLabel(label, { exact: true })).toHaveCount(0)
+  }
+})
+
+test('audit log page: turning the viewer off keeps the settings for whoever manages them', async ({
   page,
 }) => {
-  await page.goto('/#/settings/system')
+  await page.goto('/#/settings/audit-log')
 
-  const auditRow = page.locator('.setting-row', { hasText: 'Audit log' }).first()
-  const auditCheckbox = auditRow.locator('input[type=checkbox]')
-  // audit_view_enabled defaults to true (app/system_settings.py) -- restore
-  // it before finishing regardless of how the assertions below go.
+  const auditCheckbox = page.getByLabel('Audit log', { exact: true })
+  const auditRow = page.locator('.setting-row', { has: auditCheckbox })
+  const verify = page.getByRole('button', { name: 'Verify now' })
+  const navLink = page.locator('.settings-nav').getByRole('link', { name: 'Audit log' })
+  // audit_view_enabled defaults to true (app/system_settings.py) -- restored
+  // at the end however the assertions below go.
   await expect(auditCheckbox).toBeChecked()
-
-  await auditRow.locator('label.switch').click()
-  await expect(auditCheckbox).not.toBeChecked()
-  await expect(page.locator('.settings-nav').getByRole('link', { name: 'Audit log' })).toHaveCount(
-    0,
+  await expect(verify).toBeVisible()
+  // The switch's help says who keeps the page once it is off.
+  await expect(auditRow.locator('.hint')).toContainText(
+    'hides the log and redirects away from the page for everyone except those who manage system settings, who keep its settings',
   )
 
-  // The route itself is guarded, not just the link (see App.svelte) -- a
-  // bookmarked/typed URL should bounce away, not render a page whose own
-  // nav tab no longer exists. The guard pushes to bare /settings, which
-  // SettingsIndex.svelte immediately replaces with /settings/sources -- that
-  // second hop is the actually-settled URL this waits for.
-  await page.goto('/#/settings/audit-log')
-  await expect(page).toHaveURL(/#\/settings\/sources$/)
+  try {
+    await auditRow.locator('label.switch').click()
+    await expect(auditCheckbox).not.toBeChecked()
+    // The viewer goes; the settings and the nav link stay, so it can be
+    // turned on again.
+    await expect(verify).toHaveCount(0)
+    await expect(navLink).toBeVisible()
+    await page.reload()
+    await expect(page).toHaveURL(/#\/settings\/audit-log$/)
+    await expect(page.getByLabel('Audit log retention in days')).toBeVisible()
+    await expect(verify).toHaveCount(0)
 
-  await page.goto('/#/settings/system')
-  await page.locator('.setting-row', { hasText: 'Audit log' }).first().locator('label.switch').click()
-  await expect(auditCheckbox).toBeChecked()
-  await expect(
-    page.locator('.settings-nav').getByRole('link', { name: 'Audit log' }),
-  ).toBeVisible()
+    // Someone who only reads the audit log loses the link, and the route
+    // itself is guarded, not just the link (see App.svelte): the guard
+    // pushes to bare /settings, which SettingsIndex.svelte replaces with
+    // /settings/sources -- the settled URL this waits for.
+    await actAs(page, ['view_audit_log'])
+    await page.goto('/#/settings/sources')
+    await page.reload()
+    await expect(page.getByRole('heading', { level: 1, name: 'Sources' })).toBeVisible()
+    await expect(navLink).toHaveCount(0)
+    await page.goto('/#/settings/audit-log')
+    await expect(page).toHaveURL(/#\/settings\/sources$/)
+    await page.unroute(/\/auth\/me$/)
+    await page.reload()
+    await page.goto('/#/settings/audit-log')
+    await expect(page.getByRole('heading', { level: 1, name: 'Audit log' })).toBeVisible()
+    await page.locator('.setting-row', { has: auditCheckbox }).locator('label.switch').click()
+    await expect(auditCheckbox).toBeChecked()
+    await expect(verify).toBeVisible()
+  } finally {
+    const restored = await page.request.patch('/system-settings', { data: { audit_view_enabled: true } })
+    expect(restored.ok()).toBeTruthy()
+  }
+})
+
+test('audit log page: a reader sees only the viewer, a settings manager only the settings', async ({
+  page,
+}) => {
+  await actAs(page, ['view_audit_log'])
+  await page.goto('/#/settings/audit-log')
+  await expect(page.getByRole('heading', { level: 1, name: 'Audit log' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Verify now' })).toBeVisible()
+  await expect(page.getByLabel('Audit log retention in days')).toHaveCount(0)
+  await page.unroute(/\/auth\/me$/)
+
+  await actAs(page, ['manage_system_settings'])
+  await page.reload()
+  await expect(page.getByLabel('Audit log retention in days')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Verify now' })).toHaveCount(0)
 })
 
 test('system settings: the audit folder listings switch stays on when turning it off is refused', async ({
   page,
 }) => {
-  await page.goto('/#/settings/system')
+  await page.goto('/#/settings/audit-log')
   const checkbox = page.getByLabel('Audit folder listings')
   const row = page.locator('.setting-row', { has: checkbox })
   // audit_folder_listings defaults to true (app/system_settings.py).
@@ -123,7 +287,7 @@ test('system settings: the audit folder listings switch stays on when turning it
 })
 
 test('system settings: server limits are saved and kept within range (#344)', async ({ page }) => {
-  await page.goto('/#/settings/system')
+  await page.goto('/#/settings/explorer')
 
   const perUser = page.getByLabel('Downloads per user')
   const perSource = page.getByLabel('At once on one source')

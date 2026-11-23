@@ -5,7 +5,7 @@
   import { currentUser, hasCapability } from '../lib/auth'
   import { runStatusText, statusTone } from '../lib/agent-upgrade'
   import RuleEditor from '../lib/components/RuleEditor.svelte'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import { justCreatedSourceId } from '../lib/source-created'
   import { ago } from '../lib/source-status'
   import type {
@@ -150,7 +150,7 @@
   })
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   {#if loading}
@@ -365,6 +365,7 @@
     {/key}
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .agent-outdated {

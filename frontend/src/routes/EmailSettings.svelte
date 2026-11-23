@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { api, ApiError } from '../lib/api'
   import { currentUser } from '../lib/auth'
-  import SettingsNav from '../lib/components/SettingsNav.svelte'
+  import SettingsLayout from '../lib/components/SettingsLayout.svelte'
   import { confirmAction } from '../lib/confirm'
   import type { ConnectionCheckResult, SmtpSettings } from '../lib/types'
 
@@ -132,7 +132,7 @@
   }
 </script>
 
-<SettingsNav />
+<SettingsLayout>
 
 <div class="page">
   <h1>Email settings</h1>
@@ -276,6 +276,7 @@
     {/if}
   {/if}
 </div>
+</SettingsLayout>
 
 <style>
   .page {

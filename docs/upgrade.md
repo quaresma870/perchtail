@@ -11,7 +11,7 @@ Which releases still get fixes, and for how long, is in [Support and end of life
 ## Before you upgrade
 
 1. **Read the release notes.** Each release in [CHANGELOG.md](../CHANGELOG.md) (also on the [GitHub release page](https://github.com/quaresma870/perchtail/releases)) has an `### Upgrading` section when an upgrade needs more than replacing the version: a setting to add, a behaviour that changed, an agent to upgrade by hand. Read it for every release between yours and the target. For example, 0.7.0's notes say that `/healthz` and `/readyz` now need authorization, and that push agents older than 0.7 must be upgraded by hand once; [Upgrading to 0.7.0](#upgrading-to-070) goes through each of them.
-2. **Check which version runs.** **Settings → System**, card **Updates** (super admins), shows it under **Running**; so does the `version` field of `/monitoring/health`.
+2. **Check which version runs.** **Settings → Backups and updates**, card **Updates** (super admins), shows it under **Running**; so does the `version` field of `/monitoring/health`.
 3. **Make a backup**, while the old version still runs. From 0.7.0 on:
 
    ```bash
@@ -140,7 +140,7 @@ See [agent/README.md](../agent/README.md#upgrades-from-the-portal) for the detai
 
 ## The Updates card
 
-**Settings → System**, card **Updates**, is shown to super admins. PerchTail can't upgrade itself: the card tells you that a release is out and how to install it.
+**Settings → Backups and updates**, card **Updates**, is shown to super admins. PerchTail can't upgrade itself: the card tells you that a release is out and how to install it.
 
 Once a day (when the switch is on and `UPDATE_CHECK` isn't `false`), PerchTail asks the GitHub releases API for the latest release. Nothing about the installation is sent, and pre-releases are never offered. The card shows:
 
@@ -226,8 +226,8 @@ Push agents upgraded in between stay on the newer version: an agent never downgr
 
 ### Keys and backups
 
-- **A weak `CREDENTIAL_ENCRYPTION_KEY` is warned about** in the log and in **Settings → System**: change it with `python -m app.rotate_credential_key` ([credential-key-rotation.md](credential-key-rotation.md)). `CREDENTIAL_KEY_REFUSE_WEAK=true` refuses to start with one ([configuration.md](configuration.md#keys-security-and-sessions)).
-- **The scheduled backup is on by default for new installs**, every 24 hours. An existing install keeps it off: turn it on in **Settings → System**, card **Backups** ([configuration.md](configuration.md#backups-card)).
+- **A weak `CREDENTIAL_ENCRYPTION_KEY` is warned about** in the log and at the top of the system settings pages (for example **Settings → Explorer and limits**): change it with `python -m app.rotate_credential_key` ([credential-key-rotation.md](credential-key-rotation.md)). `CREDENTIAL_KEY_REFUSE_WEAK=true` refuses to start with one ([configuration.md](configuration.md#keys-security-and-sessions)).
+- **The scheduled backup is on by default for new installs**, every 24 hours. An existing install keeps it off: turn it on in **Settings → Backups and updates**, card **Backups** ([configuration.md](configuration.md#backups-card)).
 
 ### Sources, rules and archives
 

@@ -181,7 +181,7 @@ test('access review: a super admin sees a local user without MFA flagged and exp
 
     // Each report generated is in the audit log.
     await page.locator('.settings-nav').getByRole('link', { name: 'Audit log' }).click()
-    await expect(page.getByRole('heading', { name: 'Audit log' })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 1, name: 'Audit log' })).toBeVisible()
     await expect(page.getByRole('cell', { name: 'access_report.generate' }).first()).toBeVisible()
   } finally {
     await tearDown(page, made)

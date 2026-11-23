@@ -4,7 +4,7 @@ explorer search file names across every source without listing every server
 on every search, and lets alerts see which files grew.
 
 A background pass runs every minute and queues the sources whose index is
-older than the interval (Settings -> System, 15 minutes by default), stalest
+older than the interval (Settings -> Source defaults, 15 minutes by default), stalest
 first, for a small pool of workers. Each listing walks the source
 recursively through its rules, like the explorer does, down to MAX_DEPTH
 levels (a guard against links that loop back up). Files that are new or
