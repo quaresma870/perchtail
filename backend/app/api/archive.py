@@ -98,7 +98,7 @@ from app.redaction import (
     redact_stream,
     redact_window,
 )
-from app.redaction_rules import effective_redaction_rules, engine_rules, redaction_applies
+from app.redaction_rules import effective_redaction_rules, engine_rules
 from app.rules import (
     is_dir_visible,
     is_entry_visible,
@@ -603,10 +603,16 @@ def _materialize(
         if not member or not _visible(source, f"{path}/{member}", rules):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         try:
-            with connector.local_copy(source, path, rules=rules) as archive_local:
-                extract_member(
-                    archive_local, filename, member, destination, _max_decompressed_bytes()
-                )
+            if _lists_on_agent(source):
+                # Extracted on the agent's host, as it is stored: only the
+                # member travels, never the whole archive.
+                with _agent_unreadable(source, path, None):
+                    connector.call("fetch_member", source, path, member, destination, rules=rules)
+            else:
+                with connector.local_copy(source, path, rules=rules) as archive_local:
+                    extract_member(
+                        archive_local, filename, member, destination, _max_decompressed_bytes()
+                    )
             if check_whole_archive and is_archive(member.rsplit("/", 1)[-1]):
                 # A member that is itself an archive is served whole, so it
                 # gets the same check as any whole archive, at its virtual
@@ -827,10 +833,9 @@ def _browse(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
         listing_cut = False
         try:
-            if _lists_on_agent(session, source):
-                # Redaction applies and the agent redacts on its host: it
-                # lists the archive itself, so the archive never leaves the
-                # host only to be listed (#382, #249).
+            if _lists_on_agent(source):
+                # The agent lists the archive itself, so the archive never
+                # leaves the host only to be listed (#382, #249).
                 with _agent_unreadable(source, archive_path, None):
                     members, listing_cut = connector.call(
                         "list_archive", source, archive_path, rules=rules
@@ -962,15 +967,14 @@ def agent_redaction_rules(session: Session, source: Source) -> list[dict] | None
     return None
 
 
-def _lists_on_agent(session: Session, source: Source) -> bool:
-    """Whether an archive of `source` is listed on its agent (list_archive)
-    rather than fetched whole to be listed here: redaction applies and the
-    agent redacts on its host."""
-    return (
-        source.protocol == Protocol.agent
-        and get_agent_registry().redacts_on_host(source.id)
-        and redaction_applies(session, source)
-    )
+def _lists_on_agent(source: Source) -> bool:
+    """Whether an archive of `source` is listed (list_archive), and its
+    members read (fetch with `member`), on its agent rather than from the
+    whole archive fetched here: the agent's connection announced
+    redaction/1, with which it lists and extracts archives on its host,
+    whether redaction applies or not. The rules are still checked here,
+    member by member."""
+    return source.protocol == Protocol.agent and get_agent_registry().redacts_on_host(source.id)
 
 
 def _agent_refusal(exc: AgentRedactionError, agent_rules: list[dict]) -> Exception:

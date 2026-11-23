@@ -44,6 +44,7 @@ __all__ = [
     "agent_update_required",
     "fetch_archive",
     "fetch_file",
+    "fetch_member",
     "fetch_redacted",
     "list_archive",
     "list_directory",
@@ -590,6 +591,66 @@ def fetch_redacted(
             # A stream cut short or out of order: nothing of it is used.
             raise _unverified(str(exc)) from exc
         raise
+
+
+def fetch_member(
+    source: Source,
+    relative_path: str,
+    member: str,
+    destination: Path,
+    *,
+    target_check: TargetCheck = None,
+) -> None:
+    """Fetches the member `member` of the archive at `relative_path` into
+    `destination`, extracted on the agent, as it is stored (no redaction),
+    so the archive never leaves the host only for one of its members. The
+    agent takes the last member of that name, as app.archives does, and
+    answers one that isn't there, or isn't a regular file, as not found.
+    Past MAX_FETCH_MB (the archive as stored), FetchTooLargeError; past
+    MAX_DECOMPRESSED_MB once extracted, DecompressionLimitError. Sent only
+    to a connection that announced FEATURE_REDACTION, with which the agent
+    lists and extracts archives on its host, and, with FEATURE_PROGRESS,
+    asked for progress (PROGRESS_COMMANDS). Through a link, only when
+    `target_check` allows where it leads (_following_links)."""
+    max_decompressed = _max_decompressed_bytes()
+    fields: dict = {
+        "path": relative_path,
+        "member": member,
+        "chunk_size": FETCH_CHUNK_BYTES,
+        "max_bytes": collector_base.max_fetch_bytes(),
+        "max_decompressed": max_decompressed,
+    }
+
+    def send(expect_real: str) -> dict:
+        with destination.open("wb") as sink:
+            return get_agent_registry().send_command_sync(
+                source.id,
+                "fetch",
+                sink=sink,
+                limit=max_decompressed,
+                require_feature=(FEATURE_REDACTION, FEATURE_LINKS),
+                expect_real=expect_real,
+                **fields,
+            )
+
+    try:
+        result = _following_links(source, relative_path, target_check, send)
+    except AgentCommandError as exc:
+        destination.unlink(missing_ok=True)  # no partial member left behind
+        if exc.code == "too_large":
+            if exc.limit is None and not _LIMIT_RE.search(str(exc)):
+                # Sent more than MAX_DECOMPRESSED_MB of it: the registry
+                # stopped the stream (its `limit`), whatever the agent said.
+                raise DecompressionLimitError(str(exc)) from exc
+            _raise_command_error(exc, expanding=True)
+        raise
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+    if result.get("streamed") is not True:
+        # Every agent that extracts on its host streams the member.
+        destination.unlink(missing_ok=True)
+        raise SourceError("the agent didn't stream the archive member")
 
 
 def _is_agent_error(exc: BaseException) -> bool:

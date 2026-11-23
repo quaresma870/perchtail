@@ -288,6 +288,9 @@ def test_an_agent_without_links_is_never_asked_for_content(old_agent, tmp_path):
         lambda: connector.local_copy(source, "app-2026.log", rules=RULES).__enter__(),
         lambda: connector.call("list_archive", source, "logs.zip", rules=RULES),
         lambda: connector.call(
+            "fetch_member", source, "logs.zip", "a.log", tmp_path / "m", rules=RULES
+        ),
+        lambda: connector.call(
             "read_range_redacted", source, "app-2026.log", 0, 10, {"digest": "d"}, rules=RULES
         ),
         lambda: connector.call(
