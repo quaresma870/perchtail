@@ -755,7 +755,9 @@ def list_archive(
     (app.archives.list_members's answer), so the archive never leaves the
     host just to be listed. Returns them and whether the listing was cut.
     Through a link, only when `target_check` allows where it leads
-    (_following_links)."""
+    (_following_links). An agent with FEATURE_PROGRESS is asked for
+    progress (PROGRESS_COMMANDS), so a large archive it reads for longer than
+    the wait isn't given up on while it keeps reading."""
 
     def send(expect_real: str) -> dict:
         return get_agent_registry().send_command_sync(

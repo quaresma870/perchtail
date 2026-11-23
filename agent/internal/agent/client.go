@@ -372,7 +372,7 @@ func handleMeteredCommand(meter *readMeter, cfg Config, cmd Command) any {
 			Truncated: listing.Truncated, RealDir: listing.RealDir,
 		}
 	case "list_archive":
-		members, truncated, err := ListArchive(cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.MaxEntries)
+		members, truncated, err := listArchive(meter, cfg.BasePath, cmd.Path, cmd.ExpectReal, cmd.MaxEntries)
 		if err != nil {
 			return errorResult(cmd, "list_archive_error", err)
 		}

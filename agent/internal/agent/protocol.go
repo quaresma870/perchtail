@@ -92,10 +92,12 @@ type Command struct {
 	// when it is there, refused with a "link_target" error otherwise; a
 	// folder is refused with an "is_directory" error either way.
 	ExpectReal string `json:"expect_real,omitempty"`
-	// Set on "fetch", "read_range" and "fetch_archive" by a server that
-	// takes Progress messages (FeatureProgress): while the command runs, the
-	// agent says every progressInterval that it is still working when it
-	// read more of the file and sent nothing else meanwhile. Never sent
+	// Set on "fetch", "read_range", "fetch_archive" and "list_archive" by a
+	// server that takes Progress messages (FeatureProgress): while the
+	// command runs, the agent says every progressInterval that it is still
+	// working when it read more of the file (or of the archive it lists) and
+	// sent nothing else meanwhile. An agent that announced FeatureProgress
+	// before list_archive took it ignores it there. Never sent
 	// without it, since an older server would take the message for the
 	// command's answer.
 	Progress bool `json:"progress,omitempty"`
