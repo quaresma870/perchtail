@@ -16,6 +16,7 @@ release ships (0.x releases may include breaking changes between minors).
 
 ### Fixed
 - Switching tabs, coming back to the Viewer from another page, or highlighting patterns arriving no longer rebuilds the open file, which froze the page for seconds with large files; each tab also keeps its place and selection.
+- A push agent's old connection, closed when the agent reconnects (for example after an upgrade from the portal), no longer logs an error with a traceback.
 
 ### Security
 - The push agent uses a `gorilla/websocket` commit that fixes GO-2026-6278: the mask key of each WebSocket frame the agent sent came from a weak random generator. Over `wss://`, which the agent requires unless `PERCHTAIL_ALLOW_INSECURE=true`, TLS already protects the frames. The agent now also depends on `golang.org/x/net`, through `gorilla/websocket`.
