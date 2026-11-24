@@ -156,6 +156,86 @@ def test_quiet_third_party_caps_protocol_loggers(tmp_path, monkeypatch):
         configure_logging()
 
 
+def _third_party_debug_warnings(log_dir) -> list[dict]:
+    import json
+
+    path = log_dir / "perchtail.log"
+    if not path.exists():
+        return []
+    events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [e for e in events if e.get("event") == "logging.third_party_debug"]
+
+
+def test_quiet_third_party_is_on_by_default(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.delenv("LOG_QUIET_THIRD_PARTY", raising=False)
+    assert Settings(_env_file=None).log_quiet_third_party is True
+    monkeypatch.setenv("LOG_QUIET_THIRD_PARTY", "false")
+    assert Settings(_env_file=None).log_quiet_third_party is False
+    monkeypatch.setenv("LOG_QUIET_THIRD_PARTY", "true")
+    assert Settings(_env_file=None).log_quiet_third_party is True
+
+
+def test_protocol_loggers_stay_at_info_at_debug_by_default(tmp_path, monkeypatch):
+    # At DEBUG, smbprotocol logs every SMB read with its buffer and pypsrp
+    # every envelope: what is read from sources, before redaction.
+    from app.config import Settings, get_settings
+    from app.log_rotation import NOISY_THIRD_PARTY_LOGGERS
+    from app.logging_config import configure_logging
+
+    for name in ("pypsrp", "httpx", "httpcore", "winrm", "smbprotocol", "paramiko"):
+        assert name in NOISY_THIRD_PARTY_LOGGERS
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    monkeypatch.delenv("LOG_QUIET_THIRD_PARTY", raising=False)
+    settings = Settings(_env_file=None)
+    monkeypatch.setattr("app.logging_config.get_settings", lambda: settings)
+    try:
+        configure_logging()
+        assert logging.getLogger().level == logging.DEBUG
+        for name in NOISY_THIRD_PARTY_LOGGERS:
+            assert logging.getLogger(name).level == logging.INFO, name
+            assert not logging.getLogger(f"{name}.child").isEnabledFor(logging.DEBUG), name
+        assert _third_party_debug_warnings(tmp_path) == []
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+        configure_logging()
+
+
+def test_protocol_loggers_at_debug_only_when_asked_and_warned_once(tmp_path, monkeypatch):
+    from app.config import get_settings
+    from app.log_rotation import NOISY_THIRD_PARTY_LOGGERS
+    from app.logging_config import configure_logging
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("LOG_QUIET_THIRD_PARTY", "false")
+    get_settings.cache_clear()
+    try:
+        configure_logging()
+        for name in NOISY_THIRD_PARTY_LOGGERS:
+            assert logging.getLogger(name).level == logging.NOTSET, name
+            assert logging.getLogger(name).isEnabledFor(logging.DEBUG), name
+        warnings = _third_party_debug_warnings(tmp_path)
+        assert len(warnings) == 1
+        assert warnings[0]["level"] == "warning"
+        assert "before redaction" in warnings[0]["message"]
+        assert "LOG_QUIET_THIRD_PARTY=true" in warnings[0]["message"]
+
+        # No warning at INFO, even with the switch off.
+        monkeypatch.setenv("LOG_LEVEL", "INFO")
+        get_settings.cache_clear()
+        configure_logging()
+        assert len(_third_party_debug_warnings(tmp_path)) == 1
+    finally:
+        monkeypatch.delenv("LOG_LEVEL")
+        monkeypatch.delenv("LOG_QUIET_THIRD_PARTY")
+        get_settings.cache_clear()
+        configure_logging()
+
+
 def test_smb_and_ssh_libraries_log_warnings_only_at_info(tmp_path, monkeypatch):
     # At INFO, smbprotocol logs every SMB2 message and paramiko every closed
     # session: they stay at WARNING unless PerchTail logs at DEBUG.

@@ -8,6 +8,28 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-24
+
+A security release, the code retested in the lab as 0.7.1-rc.1. Upgrade the server, then the push agents (Settings → Agents, or as in agent/README.md). If your `.env` came from an earlier `.env.example`, read Upgrading first.
+
+### Upgrading
+- An `.env` (or `perchtail.env`) copied from an earlier `.env.example` sets `LOG_QUIET_THIRD_PARTY=false`: delete the line, or set it to `true`, so the protocol libraries stay at `INFO` when `LOG_LEVEL=DEBUG`. While it is `false`, PerchTail logs `logging.third_party_debug` at startup.
+
+### Security
+- The push agent uses a `gorilla/websocket` commit that fixes GO-2026-6278: the mask key of each WebSocket frame the agent sent came from a weak random generator. Over `wss://`, which the agent requires unless `PERCHTAIL_ALLOW_INSECURE=true`, TLS already protects the frames. The agent now also depends on `golang.org/x/net`, through `gorilla/websocket`.
+- With `LOG_LEVEL=DEBUG`, the protocol libraries (SMB, SSH, WinRM, HTTP) now stay at `INFO` unless `LOG_QUIET_THIRD_PARTY=false`: at `DEBUG` their messages can include what is read from sources, before redaction, and they slowed reads down. `LOG_QUIET_THIRD_PARTY` now defaults to `true`, and PerchTail warns at startup when it is turned off.
+
+## [0.7.1-rc.1] - 2026-11-24
+
+A security release. Upgrade the server, then the push agents (Settings → Agents, or as in agent/README.md). If your `.env` came from an earlier `.env.example`, read Upgrading first.
+
+### Upgrading
+- An `.env` (or `perchtail.env`) copied from an earlier `.env.example` sets `LOG_QUIET_THIRD_PARTY=false`: delete the line, or set it to `true`, so the protocol libraries stay at `INFO` when `LOG_LEVEL=DEBUG`. While it is `false`, PerchTail logs `logging.third_party_debug` at startup.
+
+### Security
+- The push agent uses a `gorilla/websocket` commit that fixes GO-2026-6278: the mask key of each WebSocket frame the agent sent came from a weak random generator. Over `wss://`, which the agent requires unless `PERCHTAIL_ALLOW_INSECURE=true`, TLS already protects the frames. The agent now also depends on `golang.org/x/net`, through `gorilla/websocket`.
+- With `LOG_LEVEL=DEBUG`, the protocol libraries (SMB, SSH, WinRM, HTTP) now stay at `INFO` unless `LOG_QUIET_THIRD_PARTY=false`: at `DEBUG` their messages can include what is read from sources, before redaction, and they slowed reads down. `LOG_QUIET_THIRD_PARTY` now defaults to `true`, and PerchTail warns at startup when it is turned off.
+
 ## [0.7.0] - 2026-11-23
 
 The release after 0.6.4. It carries everything from the pre-releases 0.7.0-rc.1 to rc.4, whose sections in [CHANGELOG.md](https://github.com/quaresma870/perchtail/blob/v0.7.0/CHANGELOG.md) list every change; the code is the one tested in the lab as rc.4, on Linux, Windows (SMB, WinRM, JEA) and push agent sources. PerchTail is licensed under the AGPL-3.0 from this release on (see Changed in rc.2).
@@ -2160,7 +2182,9 @@ admin/viewer UI (Vite + Svelte), packaged as a single Docker image.
 
 What comes next is in [ROADMAP.md](ROADMAP.md).
 
-[Unreleased]: https://github.com/quaresma870/perchtail/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/quaresma870/perchtail/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/quaresma870/perchtail/compare/v0.7.0...v0.7.1
+[0.7.1-rc.1]: https://github.com/quaresma870/perchtail/compare/v0.7.0...v0.7.1-rc.1
 [0.7.0]: https://github.com/quaresma870/perchtail/compare/v0.6.4...v0.7.0
 [0.7.0-rc.4]: https://github.com/quaresma870/perchtail/compare/v0.7.0-rc.3...v0.7.0-rc.4
 [0.7.0-rc.3]: https://github.com/quaresma870/perchtail/compare/v0.7.0-rc.2...v0.7.0-rc.3
