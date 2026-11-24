@@ -8,8 +8,12 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Upgrading
+- An `.env` (or `perchtail.env`) copied from an earlier `.env.example` sets `LOG_QUIET_THIRD_PARTY=false`: delete the line, or set it to `true`, so the protocol libraries stay at `INFO` when `LOG_LEVEL=DEBUG`. While it is `false`, PerchTail logs `logging.third_party_debug` at startup.
+
 ### Security
 - The push agent uses a `gorilla/websocket` commit that fixes GO-2026-6278: the mask key of each WebSocket frame the agent sent came from a weak random generator. Over `wss://`, which the agent requires unless `PERCHTAIL_ALLOW_INSECURE=true`, TLS already protects the frames. The agent now also depends on `golang.org/x/net`, through `gorilla/websocket`.
+- With `LOG_LEVEL=DEBUG`, the protocol libraries (SMB, SSH, WinRM, HTTP) now stay at `INFO` unless `LOG_QUIET_THIRD_PARTY=false`: at `DEBUG` their messages can include what is read from sources, before redaction, and they slowed reads down. `LOG_QUIET_THIRD_PARTY` now defaults to `true`, and PerchTail warns at startup when it is turned off.
 
 ## [0.7.0] - 2026-11-23
 

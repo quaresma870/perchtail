@@ -180,6 +180,12 @@ Going back to a release before 0.7.0, which has no restore command: stop PerchTa
 
 Push agents upgraded in between stay on the newer version: an agent never downgrades itself. To put an older agent back, install its binary by hand.
 
+## Upgrading to 0.7.1
+
+Upgrade the server, then the push agents (see "Upgrading push agents" above).
+
+An `.env` (or `perchtail.env`) copied from an earlier `.env.example` sets `LOG_QUIET_THIRD_PARTY=false`: delete the line, or set it to `true`. From 0.7.1 on, `true` is the default, and with `LOG_LEVEL=DEBUG` it keeps the protocol libraries (SMB, SSH, WinRM, HTTP) at `INFO`, whose `DEBUG` messages can include what is read from sources, before redaction. While it is `false`, PerchTail logs `logging.third_party_debug` at startup. See [configuration.md](configuration.md).
+
 ## Upgrading to 0.7.0
 
 0.7.0 changes more than a usual release. Each item below, except the closing note on redaction, is one entry of its `### Upgrading` notes in [CHANGELOG.md](../CHANGELOG.md), with what to do and where it is explained.

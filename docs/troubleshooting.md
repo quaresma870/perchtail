@@ -20,7 +20,7 @@ Each line has `event` (the event's name, such as `source.status_changed`), `leve
 
 What PerchTail shows in the browser is deliberately short. The library's own error (paths, host keys, internals) goes only to the log, next to the request ID, also for **Test connection** and the folder picker, which give the same message for a closed port, a refused connection and a timeout.
 
-`LOG_LEVEL` sets how much is logged (`INFO` by default; `DEBUG` for more). At `DEBUG`, the protocol libraries (SMB, SSH, WinRM, HTTP) log a lot; set `LOG_QUIET_THIRD_PARTY=true` to keep them at `INFO` while PerchTail itself logs at `DEBUG`. The file rotates at `LOG_MAX_FILE_MB` or at midnight, and old files are deleted after `LOG_RETENTION_DAYS` or past `LOG_MAX_TOTAL_MB` in all.
+`LOG_LEVEL` sets how much is logged (`INFO` by default; `DEBUG` for more). At `DEBUG`, the protocol libraries (SMB, SSH, WinRM, HTTP) stay at `INFO` while PerchTail itself logs at `DEBUG`. To see their own `DEBUG` messages while debugging a connection, set `LOG_QUIET_THIRD_PARTY=false` for a short time: those messages can include what is read from sources, before redaction, and they make reads slow and the logs large, so PerchTail logs a `logging.third_party_debug` warning at startup while it is set. The file rotates at `LOG_MAX_FILE_MB` or at midnight, and old files are deleted after `LOG_RETENTION_DAYS` or past `LOG_MAX_TOTAL_MB` in all.
 
 [monitoring.md](monitoring.md#log-events-worth-alerting-on) lists the events worth an alert.
 
