@@ -14,6 +14,7 @@ from types import ModuleType
 from app import source_roots
 from app.archives import SKIP_ENCRYPTED
 from app.collectors.base import (
+    FetchCancelledError,
     FetchTooLargeError,
     LinkTargetHiddenError,
     PathOutsideBaseError,
@@ -321,6 +322,7 @@ def translate_local(exc: BaseException) -> SourceError | None:
 # (collectors/ranged.py), answered by the archive routes.
 _PASS_THROUGH = (
     SourceError,
+    FetchCancelledError,
     FetchTooLargeError,
     PathOutsideBaseError,
     ScratchFullError,

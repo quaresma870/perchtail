@@ -225,6 +225,13 @@ class FetchTooLargeError(ValueError):
         self.limit = limit
 
 
+class FetchCancelledError(Exception):
+    """The reader cancelled an /open while its content was being copied
+    (app/fetch_control.py): the copy stopped between two blocks, after
+    closing what it opened. Not a SourceError, so it is never translated or
+    answered as a source problem: /open answers 409 `read_cancelled`."""
+
+
 def max_fetch_bytes() -> int:
     return int(get_settings().max_fetch_mb * 1024**2)
 
@@ -238,7 +245,13 @@ def too_large(size: int, limit: int) -> FetchTooLargeError:
 def copy_with_limit(src: BinaryIO, destination: Path, limit: int) -> int:
     """Streams src into destination in chunks, refusing to write more than
     `limit` bytes (the file may have grown since it was listed). Deletes the
-    partial file on any failure. Returns the number of bytes written."""
+    partial file on any failure. Returns the number of bytes written.
+
+    Each chunk counts towards the progress of the /open it serves, and a
+    Cancel stops the copy before the next one (app/fetch_control.py); the
+    caller's `with` closes the source file."""
+    from app import fetch_control
+
     written = 0
     try:
         with open(destination, "wb") as dst:
@@ -247,6 +260,7 @@ def copy_with_limit(src: BinaryIO, destination: Path, limit: int) -> int:
                 if written > limit:
                     raise too_large(written, limit)
                 dst.write(chunk)
+                fetch_control.wrote(len(chunk))
     except BaseException:
         destination.unlink(missing_ok=True)
         raise

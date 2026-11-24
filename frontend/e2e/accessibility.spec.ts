@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
 import { LARGE_FILE_NAME, largeFileSource } from './large-file'
 import { confirmPopup } from './popups'
+import { SLOW_FILE_NAME, slowSource } from './slow-open'
 
 // Runs axe-core on the main pages (#377) and fails on serious or critical
 // WCAG 2.0/2.1 A and AA violations. A new page should get a test here too.
@@ -105,6 +106,22 @@ test('accessibility: viewer with a file opened at its end', async ({ page }) => 
     await expectNoSeriousViolations(page, (axe) =>
       axe.include('html').exclude('.cm-scroller').include('.cm-scroller > *'),
     )
+  } finally {
+    await page.goto('/#/viewer')
+    await cleanUp()
+  }
+})
+
+// The progress of a slow open, with Cancel, over the fake WinRM connector.
+test('accessibility: viewer while a file opens slowly', async ({ page }) => {
+  const { sourceId, cleanUp } = await slowSource(page.request, `e2e-a11y-slow-${Date.now()}`)
+  try {
+    await page.goto(`/#/viewer/${sourceId}`)
+    await page.locator('.tree-body').getByRole('button', { name: SLOW_FILE_NAME }).click({ timeout: 20_000 })
+    await expect(page.getByRole('progressbar', { name: `Opening ${SLOW_FILE_NAME}` })).toBeVisible({ timeout: 5_000 })
+    await expectNoSeriousViolations(page)
+    await page.getByTestId('open-progress').getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(page.getByTestId('open-progress')).toHaveCount(0)
   } finally {
     await page.goto('/#/viewer')
     await cleanUp()

@@ -23,7 +23,9 @@ Source (see frontend/e2e/sources-winrm.spec.ts)."""
 
 import base64
 import json
+import os
 import re
+import time
 
 import app.collectors.winrm as winrm_module
 
@@ -31,7 +33,16 @@ FIXTURE_ROOT = "C:\\Logs\\e2e-fixture"
 FIXTURE_FILES = {
     "hello.log": b"winrm hello world log line 1\nwinrm hello world log line 2\n",
     "other.log": b"winrm other log\n",
+    # About 9 MiB (three of the read script's 3 MiB lines), read slowly
+    # (SLOW_RECEIVES answers, SLOW_SECONDS apart):
+    # long enough to watch an open's progress and cancel it.
+    "slow.log": b"".join(
+        b"slow line %07d of a file that takes a while\n" % n for n in range(205_000)
+    ),
 }
+SLOW_FILE = "slow.log"
+SLOW_RECEIVES = 40
+SLOW_SECONDS = float(os.environ.get("PERCHTAIL_FAKE_WINRM_SLOW_SECONDS", "0.25"))
 
 _LIST_RE = re.compile(r"Get-ChildItem -LiteralPath '(?P<path>.*)' \|.*ToBase64String")
 _SIZE_RE = re.compile(r"\(Get-Item -LiteralPath '(?P<path>.*)'\)\.Length")
@@ -68,6 +79,8 @@ class _FakeProtocol:
     def __init__(self):
         self.transport = _FakeTransport()
         self._output: dict[str, tuple[bytes, int]] = {}
+        # The read of SLOW_FILE, answered a piece per Receive.
+        self._pieces: list[bytes] = []
 
     def open_shell(self) -> str:
         return "shell"
@@ -87,6 +100,7 @@ class _FakeProtocol:
             # What the real script's existence check answers (#272).
             return b"PERCHTAIL_NOT_FOUND\r\n", 5
         content = content[: int(read_match.group("size"))]
+        self._slow = read_match.group("path").endswith("\\" + SLOW_FILE)
         block = int(read_match.group("block"))
         lines = [
             base64.b64encode(content[i : i + block]) + b"\r\n"
@@ -95,12 +109,23 @@ class _FakeProtocol:
         return b"".join(lines) + f"PERCHTAIL_END {len(content)}\r\n".encode(), 0
 
     def get_command_output_raw(self, shell_id: str, command_id: str):
+        if command_id in self._output and getattr(self, "_slow", False):
+            out, code = self._output.pop(command_id)
+            size = -(-len(out) // SLOW_RECEIVES)
+            self._pieces = [out[i : i + size] for i in range(0, len(out), size)]
+            self._code = code
+        if self._pieces:
+            time.sleep(SLOW_SECONDS)
+            piece = self._pieces.pop(0)
+            done = not self._pieces
+            return piece, b"", (self._code if done else -1), done
         out, code = self._output.pop(command_id, (b"", 1))
         err = b"" if code in (0, 5) else b"fake_winrm: unrecognized script"
         return out, err, code, True
 
     def cleanup_command(self, shell_id: str, command_id: str) -> None:
-        pass
+        # A read stopped part way (a cancelled open) leaves nothing behind.
+        self._pieces = []
 
     def close_shell(self, shell_id: str, close_session: bool = True) -> None:
         pass
