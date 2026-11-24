@@ -710,6 +710,9 @@ def _line_positions(
             raise _unverified("line offsets")
         lengths[index] = length
         previous = index
+    if not lines:
+        # No whole line (one longer than the window): nothing to place.
+        return ()
     position = next_offset - sum(lengths)
     if position < offset or (not aligned and position != offset):
         raise _unverified("line offsets")

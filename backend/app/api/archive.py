@@ -1692,6 +1692,7 @@ def follow_file(
     offset: int = Query(ge=0, lt=2**62),
     head: str | None = None,
     start: bool = False,
+    end: int | None = Query(default=None, gt=0, lt=2**62),
     source: Source = Depends(readable_source(Capability.view)),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
@@ -1720,7 +1721,23 @@ def follow_file(
     When redaction applies to the source (#382, #249), see _follow_redacted:
     only redacted whole lines come back, offsets stay in bytes of the
     original, and X-Follow-Aligned / X-Follow-Partial tell the viewer how
-    the answer starts and ends."""
+    the answer starts and ends; X-Follow-Start is where its first line
+    starts in the original.
+
+    `end` reads what comes before bytes the viewer already holds, for
+    "Load earlier" on a file opened at its end: only `[offset, end)`, at
+    most RANGE_MAX_BYTES (422 otherwise), or, redacted, the whole lines
+    that end by `end` (a line that runs past it isn't sent: `end` is the
+    start of a line the viewer shows). X-Follow-Offset is where the answer
+    stopped and X-Follow-More is never sent. `head` is then compared with
+    the file's first FOLLOW_HEAD_BYTES, which is what the viewer's head
+    covers once it holds that much; a file that shrank below `end` or
+    starts differently gets X-Follow-Reset."""
+    if end is not None and not (offset < end and end - offset <= RANGE_MAX_BYTES):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"end must be after offset and at most {RANGE_MAX_BYTES} bytes after it",
+        )
     _require_safe_path(source, path)
     if not path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
@@ -1738,7 +1755,7 @@ def follow_file(
     if agent_rules is not None:
         with get_limiter().connector(limits, source.id):
             answer = _follow_on_agent(
-                connector, source, path, offset, head, agent_rules, rules, user, session
+                connector, source, path, offset, head, agent_rules, rules, user, session, start, end
             )
         if isinstance(answer, Response):
             return answer
@@ -1747,11 +1764,19 @@ def follow_file(
         return Response(content=body, media_type="application/octet-stream", headers=headers)
     # Redacted, the read starts a little before the offset (context only).
     read_from = max(0, offset - FOLLOW_CONTEXT_BYTES) if redaction is not None else offset
+    window_from = offset
+    if end is not None and end - read_from > RANGE_MAX_BYTES:
+        # Redacted, the context and the window don't fit in one read: the
+        # window starts later, keeping its context, and X-Follow-Start says
+        # where the answer starts.
+        read_from = end - RANGE_MAX_BYTES
+        window_from = read_from + FOLLOW_CONTEXT_BYTES
+    length = RANGE_MAX_BYTES if end is None else end - read_from
     try:
         # One round trip: the size, the start of the file and the new bytes.
         with get_limiter().connector(limits, source.id):
             size, first, data = connector.read_range(
-                source, path, read_from, RANGE_MAX_BYTES, FOLLOW_HEAD_BYTES, rules=rules
+                source, path, read_from, length, FOLLOW_HEAD_BYTES, rules=rules
             )
     except _REFUSED_READS as exc:
         _audit_refusal(
@@ -1759,8 +1784,13 @@ def follow_file(
         )
         raise
 
-    changed = head is not None and offset > 0 and head != _head_hash(source.id, first, offset)
-    if offset > size or changed:
+    if end is None:
+        changed = head is not None and offset > 0 and head != _head_hash(source.id, first, offset)
+        shrank = offset > size
+    else:
+        changed = head is not None and head != _head_hash(source.id, first, FOLLOW_HEAD_BYTES)
+        shrank = end > size
+    if shrank or changed:
         return Response(
             content=b"",
             media_type="application/octet-stream",
@@ -1793,7 +1823,7 @@ def follow_file(
             )
             raise RedactionEncodingRefused() from exc
         body, headers, refused_at = _follow_redacted(
-            source, redaction, encoding, offset, read_from, size, first, data
+            source, redaction, encoding, window_from, read_from, size, first, data, end is not None
         )
     else:
         refused_at = None
@@ -1808,7 +1838,7 @@ def follow_file(
             "X-Follow-Offset": str(next_offset),
             "X-Follow-Head": _head_hash(source.id, start_bytes, next_offset),
         }
-        if next_offset < size:
+        if next_offset < size and end is None:
             headers["X-Follow-More"] = "1"
 
     _audit_follow(
@@ -1915,6 +1945,8 @@ def _follow_on_agent(
     rules: list[Rule],
     user: User,
     session: Session,
+    start: bool = False,
+    end: int | None = None,
 ) -> tuple[bytes, dict[str, str], int | None] | Response:
     """The redacted Tail when the agent redacts on its host (#382, #249):
     the agent reads, from a little before `offset`, only whole lines and
@@ -1922,12 +1954,27 @@ def _follow_on_agent(
     start of the file, only its digests. A refusal (UTF-32, a compressed
     format, a link the rules hide, an agent to update) is audited as when
     the server redacts; the last item is where the agent refused the rest
-    of what it read (UTF-32 part way), or None."""
+    of what it read (UTF-32 part way), or None.
+
+    The first poll of a Tail and a read up to `end` also ask where each
+    line starts, for X-Follow-Start; up to `end`, an unfinished last line
+    isn't sent (see follow_file)."""
     block = redaction_block(source.id, agent_rules, "utf-8")
+    # The agent reads its context within RANGE_MAX_BYTES too: up to `end`,
+    # the window starts later when both don't fit, as on the server.
+    read_offset = offset if end is None else max(offset, end - FOLLOW_WINDOW_BYTES)
+    length = RANGE_MAX_BYTES if end is None else end - read_offset
     try:
         with _agent_refusals(agent_rules):
             read = connector.call(
-                "read_range_redacted", source, path, offset, RANGE_MAX_BYTES, block, rules=rules
+                "read_range_redacted",
+                source,
+                path,
+                read_offset,
+                length,
+                block,
+                line_offsets=start or end is not None,
+                rules=rules,
             )
     except AuditedRefusal as exc:
         _audit_refusal(session, user, source, "file.open_denied", path, exc.reason, follow=True)
@@ -1937,26 +1984,62 @@ def _follow_on_agent(
             session, user, source, "file.open_denied", path, _refused_read_reason(exc), follow=True
         )
         raise
-    changed = head is not None and offset > 0 and head != read.head_digest
-    if offset > read.size or changed:
+    if end is None:
+        changed = head is not None and offset > 0 and head != read.head_digest
+        shrank = offset > read.size
+    else:
+        # The digest made where the head covers FOLLOW_HEAD_BYTES (see
+        # follow_file): at the offset, or else where the answer stopped.
+        if read_offset >= FOLLOW_HEAD_BYTES:
+            covering = read.head_digest
+        elif read.next_offset >= FOLLOW_HEAD_BYTES:
+            covering = read.next_head_digest
+        else:
+            covering = None
+        changed = head is not None and covering is not None and head != covering
+        shrank = end > read.size
+    if shrank or changed:
         return Response(
             content=b"",
             media_type="application/octet-stream",
             headers={"X-Follow-Reset": "1", "X-File-Size": str(read.size)},
         )
+    data, partial = read.data, read.trailing_partial
+    counts = read.counts
+    first_line = None
+    if end is not None and partial:
+        # Only whole lines up to `end`.
+        data, partial = data[: len(data) - partial], 0
+    if (
+        end is not None
+        and not data
+        and not read.lines
+        and read.refused_encoding_at is None
+        and read_offset > 0
+    ):
+        # No line starts in the window: the line that fills it is longer
+        # than a window. Fail closed, and go on before it, as
+        # _follow_redacted does when bounded.
+        data = marker(long_line_label(FOLLOW_WINDOW_BYTES)) + b"\n"
+        counts = {}
+        first_line = read_offset
     headers = {
         "X-File-Size": str(read.size),
         "X-Follow-Offset": str(read.next_offset),
         "X-Follow-Head": read.next_head_digest,
         "X-Redacted": "1",
-        "X-Redaction-Count": str(sum(read.counts.values())),
-        "X-Follow-Partial": str(read.trailing_partial),
+        "X-Redaction-Count": str(sum(counts.values())),
+        "X-Follow-Partial": str(partial),
     }
+    if first_line is not None:
+        headers["X-Follow-Start"] = str(first_line)
+    elif read.lines is not None:
+        headers["X-Follow-Start"] = str(read.lines[0][0] if read.lines else read.next_offset)
     if read.aligned:
         headers["X-Follow-Aligned"] = "1"
-    if read.read_end < read.size:
+    if read.read_end < read.size and end is None:
         headers["X-Follow-More"] = "1"
-    return read.data, headers, read.refused_encoding_at
+    return data, headers, read.refused_encoding_at
 
 
 def _follow_redacted(
@@ -1968,6 +2051,7 @@ def _follow_redacted(
     size: int,
     first: bytes,
     data: bytes,
+    bounded: bool = False,
 ) -> tuple[bytes, dict[str, str], int | None]:
     """A redacted Tail answer. `data` was read from `read_from`, up to
     FOLLOW_CONTEXT_BYTES before `offset`; that context is never sent, only
@@ -1986,7 +2070,12 @@ def _follow_redacted(
       `[redacted: unsupported encoding]` ends the answer and the Tail goes
       on after what was read. The last item returned is where that started
       in the original, or None.
-    - Offsets, X-File-Size and X-Follow-Head are about the original."""
+    - Offsets, X-File-Size and X-Follow-Head are about the original;
+      X-Follow-Start is where the first line sent starts.
+    - `bounded` (a read up to `end`, follow_file): `data` ends at `end`, an
+      unfinished last line isn't sent, and when no line starts in the
+      window, the line that fills it becomes the long-line marker and the
+      answer starts at `offset`."""
     window = redact_window(
         data,
         min(offset - read_from, len(data)),
@@ -2000,7 +2089,17 @@ def _follow_redacted(
     partial = window.trailing_partial
     read_end = read_from + len(data)
     next_offset = read_from + window.end
-    if next_offset <= offset and read_end < size:
+    first_line = read_from + window.begin
+    if bounded:
+        if partial:
+            body, partial = body[: len(body) - partial], 0
+        if not body and window.begin >= len(data) and offset > 0:
+            # No line starts after the offset: the line around it is longer
+            # than a window. Fail closed, and go on before it.
+            body = marker(long_line_label(FOLLOW_WINDOW_BYTES)) + b"\n"
+            counts = {}
+            first_line = offset
+    elif next_offset <= offset and read_end < size:
         # No line ends within what one poll can read: skip it, fail closed.
         body = marker(long_line_label(FOLLOW_WINDOW_BYTES)) + b"\n"
         counts = {}
@@ -2013,12 +2112,13 @@ def _follow_redacted(
         "X-Redacted": "1",
         "X-Redaction-Count": str(sum(counts.values())),
         "X-Follow-Partial": str(partial),
+        "X-Follow-Start": str(first_line),
     }
     if window.aligned:
         headers["X-Follow-Aligned"] = "1"
     # More is waiting only when something wasn't read yet: an unfinished
     # last line is read again on the next poll, not right away.
-    if read_end < size:
+    if read_end < size and not bounded:
         headers["X-Follow-More"] = "1"
     refused_at = None if window.refused_at is None else read_from + window.refused_at
     return body, headers, refused_at

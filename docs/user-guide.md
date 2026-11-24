@@ -121,9 +121,18 @@ The viewer is a read-only editor: nothing you do in it changes the file on the s
 
 ### Opening files
 
-Click a file in the explorer or in search results. A file over 200 MB opens only after a warning, which offers:
+Click a file in the explorer or in search results.
 
-- **Tail the end**: loads the last 1 MiB and starts Tail. The toolbar shows **End of the file only**. Not offered for `.gz` files or files inside archives.
+A file bigger than **Open from the end above** (Settings → Explorer and limits, 50 MB unless an administrator changed it) opens at its end: the last 1 MB is shown at once, without copying the whole file from the source first, and Tail is off. A bar above the file says how much of it is shown, for example "Showing the last 1 MB of 300 MB", and offers:
+
+- **Load earlier**: adds the 1 MB before what is shown at the top, keeping the lines on screen where they are. It is off while Tail is on ("Stop Tail to load earlier lines"), because Tail drops the oldest lines, and once 32 MB are loaded ("Load the whole file to see more"). When the start of the file is reached, the bar goes.
+- **Load whole file**: opens the whole file in the same tab, as any other file, with the warning below when it is over 200 MB.
+
+Until the start of the file is loaded, the line numbers are hidden, and **Go to line** and the toolbar's Copy lines are off ("Line numbers need the whole file"), because the lines aren't counted from the start of the file. Find, Find all, highlights, bookmarks and the next and previous problem work on what is loaded; Find all and Compare say "In the loaded part only". Tail goes on from the end. **Reload** reads the end again. `.gz` files and files inside archives always open whole.
+
+Opened whole, a file over 200 MB opens only after a warning, which offers:
+
+- **Tail the end**: loads the last 1 MB and starts Tail, with the same bar. Not offered for `.gz` files or files inside archives.
 - **Download**, if your role can download.
 - **Open anyway**: loads the whole file into the browser tab, which can be slow.
 
@@ -145,7 +154,7 @@ On a push-agent source whose agent is older than 0.7, folders still list, but no
 | **Beautify** and **Minify** | For JSON and XML files: reformat for reading, or collapse to one line. Display only. |
 | **Highlight** | Colours every occurrence of a text, or of a regular expression written as `re:…`, ignoring case. Add several, each in its own colour; **×** removes one and **Clear highlights** removes all. |
 | **Tail** | Shows new lines as they're written, see [Tail](#tail). |
-| Copy lines | Copies the selected lines with their line numbers. |
+| Copy lines | Copies the selected lines with their line numbers. Off while only the end of a file is loaded. |
 | Bookmark | Toggles a bookmark on the current line; the arrows next to it jump between bookmarks. |
 | Previous and next problem | Jump between lines the severity indicators mark. |
 | Reload | Reads the file again from the source. |
@@ -203,7 +212,7 @@ Find and Find all work on what the tab holds, in your browser; they don't read t
 
 Some files can't be read from where Tail left off: `.gz` files and files inside archives. For those, Tail reloads the whole file at each check.
 
-For files over 200 MB, use **Tail the end** in the warning shown when you open them, see [Opening files](#opening-files).
+A large file opens at its end, and Tail goes on from there; with files opened whole, use **Tail the end** in the warning shown for files over 200 MB. See [Opening files](#opening-files).
 
 ## Downloads
 

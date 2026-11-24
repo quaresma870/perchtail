@@ -87,3 +87,39 @@ describe('planSync', () => {
     ).toEqual({ action: 'reconfigure', reconfigure: ['language', 'wrap', 'whitespace', 'bookmarks', 'marks'] })
   })
 })
+
+describe('planSync with text added at the start ("Load earlier")', () => {
+  it('prepends text that ends with the text shown', () => {
+    const shown = inputs()
+    expect(planSync(shown, { ...shown, content: 'zero\none\ntwo\n' })).toEqual({
+      action: 'prepend',
+      reconfigure: [],
+    })
+  })
+
+  it('prepends and reconfigures what changed with it', () => {
+    const shown = inputs({ showWhitespace: true })
+    const bookmarks = [3]
+    expect(planSync(shown, { ...shown, content: 'zero\none\ntwo\n', bookmarks })).toEqual({
+      action: 'prepend',
+      reconfigure: ['whitespace', 'bookmarks'],
+    })
+  })
+
+  it('appends rather than prepends when the text was added at the end', () => {
+    // 'a\na\n' -> 'a\na\na\n' both starts and ends with the old text.
+    const shown = inputs({ content: 'a\na\n' })
+    expect(planSync(shown, { ...shown, content: 'a\na\na\n' }).action).toBe('append')
+  })
+
+  it('rebuilds when the text changed at both ends or in the middle', () => {
+    const shown = inputs()
+    expect(planSync(shown, { ...shown, content: 'zero\none\ntwo\nthree\n' }).action).toBe('rebuild')
+    expect(planSync(shown, { ...shown, content: 'one\nand\ntwo\n' }).action).toBe('rebuild')
+  })
+
+  it('rebuilds a prepend when the format changed too', () => {
+    const shown = inputs()
+    expect(planSync(shown, { ...shown, content: 'zero\none\ntwo\n', format: 'pretty' }).action).toBe('rebuild')
+  })
+})

@@ -416,6 +416,7 @@ export interface SystemSettings {
   concurrency_user_transfers: number
   // Most entries a folder or archive listing returns (#347).
   listing_max_entries: number
+  open_from_end_mb: number
   // Scheduled backup (#334), hours between backups, 1..168; 0 = off.
   backup_interval_hours: number
   // Redaction (#382, #249), changed by super admins only: on, whether

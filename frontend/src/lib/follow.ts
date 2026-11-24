@@ -18,11 +18,22 @@ export function followUrl(
   offset: number,
   head: string | null,
   start: boolean,
+  end?: number,
 ): string {
   const params = new URLSearchParams({ path, offset: String(offset) })
   if (head) params.set('head', head)
   if (start) params.set('start', 'true')
+  // Only what comes before `end` ("Load earlier").
+  if (end !== undefined) params.set('end', String(end))
   return `/sources/${sourceId}/follow?${params}`
+}
+
+/** Where a redacted Follow answer's first line starts in the original
+ * (X-Follow-Start), or null when the server didn't say. */
+export function readFollowStart(headers: Headers): number | null {
+  if (!headers.has('x-follow-start')) return null
+  const value = Number(headers.get('x-follow-start'))
+  return Number.isFinite(value) && value >= 0 ? value : null
 }
 
 export interface FollowAnswer {

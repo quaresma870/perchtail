@@ -122,6 +122,10 @@ INT_DEFAULTS: dict[str, str] = {
     # The most entries a folder or archive listing returns (#347); the
     # explorer says when there were more.
     "listing_max_entries": "5000",
+    # Files bigger than this, in MB, open at their end in the viewer (the
+    # last MiB, read through /follow) instead of being copied whole first;
+    # 0 opens every file whole.
+    "open_from_end_mb": "50",
     # Automatic agent upgrades (#319, app/agent_upgrade_policy.py): the
     # window's days (a bit per day, Monday first: 127 is every day), start
     # (minutes after midnight, server time) and length in hours; how many

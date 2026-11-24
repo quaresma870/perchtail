@@ -21,28 +21,31 @@ export type EditorPart = 'severity' | 'language' | 'wrap' | 'whitespace' | 'book
 
 export interface SyncPlan {
   /** `none`: nothing to do. `append`: text was added at the end only, one
-   * transaction. `reconfigure`: only compartments change. `rebuild`: a new
-   * editor state from the whole text. */
-  action: 'none' | 'append' | 'reconfigure' | 'rebuild'
-  /** The compartments to reconfigure, with `append` or `reconfigure`. */
+   * transaction. `prepend`: text was added at the start only ("Load
+   * earlier"), one transaction. `reconfigure`: only compartments change.
+   * `rebuild`: a new editor state from the whole text. */
+  action: 'none' | 'append' | 'prepend' | 'reconfigure' | 'rebuild'
+  /** The compartments to reconfigure, with `append`, `prepend` or
+   * `reconfigure`. */
   reconfigure: EditorPart[]
 }
 
 const REBUILD: SyncPlan = { action: 'rebuild', reconfigure: [] }
 
 /** Decides how the editor goes from `applied` (null: nothing yet) to
- * `next`. Only a change of the text that isn't text appended at the end,
- * or of the format, rebuilds the state; anything else keeps the document,
- * its selection and its place. */
+ * `next`. Only a change of the text that isn't text added at the end or at
+ * the start, or of the format, rebuilds the state; anything else keeps the
+ * document, its selection and its place. */
 export function planSync(applied: EditorInputs | null, next: EditorInputs): SyncPlan {
   if (applied === null || applied.format !== next.format) return REBUILD
-  let appended = false
+  let added: 'append' | 'prepend' | null = null
   if (next.content !== applied.content) {
-    if (next.content.length <= applied.content.length || !next.content.startsWith(applied.content)) {
-      return REBUILD
-    }
-    appended = true
+    if (next.content.length <= applied.content.length) return REBUILD
+    if (next.content.startsWith(applied.content)) added = 'append'
+    else if (next.content.endsWith(applied.content)) added = 'prepend'
+    else return REBUILD
   }
+  const appended = added !== null
   const reconfigure: EditorPart[] = []
   if (next.severityPatterns !== applied.severityPatterns) reconfigure.push('severity')
   if (next.filename !== applied.filename) reconfigure.push('language')
@@ -52,6 +55,6 @@ export function planSync(applied: EditorInputs | null, next: EditorInputs): Sync
   }
   if (next.bookmarks !== applied.bookmarks) reconfigure.push('bookmarks')
   if (next.markPatterns !== applied.markPatterns) reconfigure.push('marks')
-  if (appended) return { action: 'append', reconfigure }
+  if (added !== null) return { action: added, reconfigure }
   return { action: reconfigure.length > 0 ? 'reconfigure' : 'none', reconfigure }
 }

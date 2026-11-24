@@ -46,6 +46,11 @@ export interface Tab {
   // Opened at its end only (a large file, #347): Reload reads the end
   // again rather than the whole file.
   endOnly?: boolean
+  // Where `content` starts in the file, in bytes of the original, for a
+  // tab opened at its end: above 0, the start isn't loaded ("Load
+  // earlier" reads the window before it, and line numbers aren't the
+  // file's).
+  startOffset?: number
   // Redaction (#382, #249): the server redacted the content, how many
   // values it replaced in what the tab holds, and how many characters at
   // the end of `content` stand for an unfinished last line that the next
@@ -125,6 +130,19 @@ export function closeTabs(keys: Iterable<string>): Tab[] {
     })
   }
   return closed
+}
+
+/** Forgets a source's severity patterns when no tab of it is open: an
+ * open that failed before its tab was made leaves none, and the next file
+ * opened from that source asks for them again. */
+export function forgetSeverityWithoutTabs(sourceId: number): void {
+  if (get(viewerState).tabs.some((t) => t.sourceId === sourceId)) return
+  severityBySource.update((all) => {
+    if (!(sourceId in all)) return all
+    const next = { ...all }
+    delete next[sourceId]
+    return next
+  })
 }
 
 /** Closes the tabs of every source not in `shown` (disabled, deleted or no

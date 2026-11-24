@@ -5,6 +5,7 @@ import {
   decodeWithPartial,
   DEFAULT_TAIL_INTERVAL_SECONDS,
   followUrl,
+  readFollowStart,
   readFollowHeaders,
   readRedactionHeaders,
   tailIntervalMs,
@@ -130,5 +131,19 @@ describe('the Tail interval', () => {
     expect(tailIntervalMs(undefined)).toBe(DEFAULT_TAIL_INTERVAL_SECONDS * 1000)
     expect(tailIntervalMs(30)).toBe(DEFAULT_TAIL_INTERVAL_SECONDS * 1000)
     expect(tailIntervalMs(0)).toBe(DEFAULT_TAIL_INTERVAL_SECONDS * 1000)
+  })
+})
+
+describe('Load earlier through Follow', () => {
+  it('asks only for what comes before `end`', () => {
+    expect(followUrl(3, 'x.log', 100, 'abc', false, 500)).toBe(
+      '/sources/3/follow?path=x.log&offset=100&head=abc&end=500',
+    )
+  })
+
+  it('reads where a redacted answer starts', () => {
+    expect(readFollowStart(new Headers({ 'x-follow-start': '1234' }))).toBe(1234)
+    expect(readFollowStart(new Headers())).toBeNull()
+    expect(readFollowStart(new Headers({ 'x-follow-start': 'nope' }))).toBeNull()
   })
 })

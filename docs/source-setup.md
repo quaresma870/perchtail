@@ -209,7 +209,7 @@ Allow TCP 5986 (HTTPS), or 5985 only if HTTPS genuinely isn't an option, inbound
 
 ### 4. Large files
 
-WinRM has no file transfer of its own: PerchTail reads a file through PowerShell, which sends it as base64 text inside WS-Management responses, one response at a time. Opening or downloading a large file is therefore much slower than over SMB or the agent: minutes rather than seconds for a file of a few hundred MB. Use an SMB source or the agent for hosts with large logs; **Tail the end** in the viewer opens only the last part of a file.
+WinRM has no file transfer of its own: PerchTail reads a file through PowerShell, which sends it as base64 text inside WS-Management responses, one response at a time. Opening or downloading a large file is therefore much slower than over SMB or the agent: minutes rather than seconds for a file of a few hundred MB. Use an SMB source or the agent for hosts with large logs. A file bigger than **Open from the end above** (Settings → Explorer and limits, 50 MB by default) opens at its end by itself, reading only its last 1 MB, with **Load earlier** and **Load whole file** in the viewer; with that setting at 0, **Tail the end** in the warning for files over 200 MB opens only the last part of a file.
 
 A `.zip` is read in place: expanding it reads only its index at its end, and opening one of its files only that file's compressed bytes, a few PowerShell requests rather than the whole archive. A large `.zip` is therefore quick to expand and its small files quick to open; a large file inside it still takes as long as its compressed size. A `.tar.gz` is still read whole.
 
