@@ -28,6 +28,7 @@ from starlette.types import Receive, Scope, Send
 from app import request_context, source_roots, system_settings
 from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
+from app.api.errors import PathNotFound
 from app.archives import (
     SKIP_ENCRYPTED,
     SKIP_LINK,
@@ -38,6 +39,7 @@ from app.archives import (
     MemberUnreadableError,
     decompress_gzip,
     extract_member,
+    has_folder,
     is_archive,
     is_transparent_gzip,
     is_zip,
@@ -612,7 +614,7 @@ def _materialize(
         # Rules gate which files are reachable independent of RBAC — a user
         # may have view/download on the source overall but not on this
         # specific path.
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        raise PathNotFound()
 
     connector = _connector(source)
     filename = path.rsplit("/", 1)[-1]
@@ -627,7 +629,7 @@ def _materialize(
         # listing filtered out, so this has to be checked again here.
         member = normalize_member_name(member)
         if not member or not _visible(source, f"{path}/{member}", rules):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+            raise PathNotFound()
         try:
             if _lists_on_agent(source):
                 # Extracted on the agent's host, as it is stored: only the
@@ -661,7 +663,7 @@ def _materialize(
         except KeyError as exc:
             # Not in the archive, or not a regular file (a link, a device):
             # either way there's nothing to open under that name.
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found") from exc
+            raise PathNotFound() from exc
         return member.rsplit("/", 1)[-1]
 
     if is_transparent_gzip(filename):
@@ -859,9 +861,9 @@ def _browse(
         archive_path, member_dir = split
         archive_name = archive_path.rsplit("/", 1)[-1]
         if not _visible(source, archive_path, rules):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+            raise PathNotFound()
         if member_dir and not _dir_visible(source, path, rules):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+            raise PathNotFound()
         listing_cut = False
         try:
             if _lists_on_agent(source):
@@ -904,6 +906,11 @@ def _browse(
                 _archive_flat_entries(source, archive_path, members, rules), limit, flat=True
             )
             return flat, *_cut(capped, listing_cut, "archive")
+        if member_dir and not listing_cut and not has_folder(members, member_dir):
+            # Not a folder of the archive: answered as a folder that isn't
+            # on the source, and as one the rules hide. A listing cut short
+            # can't tell, so it lists nothing, as before.
+            raise PathNotFound()
         children = tree_children(members, member_dir)
         listed, capped = _capped(
             [
@@ -933,7 +940,7 @@ def _browse(
     if path and not _dir_visible(source, path, rules):
         # A folder the rules hide is not browsable at all -- otherwise its
         # sub-folder names could still be enumerated by calling the API.
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        raise PathNotFound()
 
     entries = connector.list_directory(source, rules, path)
     listed, capped = _capped(
@@ -1133,7 +1140,7 @@ def _resolve_redacted(
     if member is not None:
         member = normalize_member_name(member)
         if not member or not _visible(source, f"{path}/{member}", rules):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+            raise PathNotFound()
         whole_archive = is_archive(member.rsplit("/", 1)[-1])
     else:
         whole_archive = is_archive(filename)
@@ -1322,7 +1329,7 @@ def _resolve_content(
         # Browsing the root is "", but opening or downloading needs a file.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
     if not _visible(source, path, rules):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        raise PathNotFound()
     if redaction is not None:
         return _resolve_redacted(source, path, member, rules, limits, redaction, owner, agent_rules)
 
@@ -1719,7 +1726,7 @@ def follow_file(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
     rules = _rules_for(session, source.id)
     if not _visible(source, path, rules):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        raise PathNotFound()
     filename = path.rsplit("/", 1)[-1]
     if is_transparent_gzip(filename) or is_archive(filename):
         raise _follow_unsupported("Compressed files and archives can only be reloaded whole")
@@ -2557,12 +2564,12 @@ def _prepare_redacted_download(
     if not path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
     if not _visible(source, path, rules):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        raise PathNotFound()
     filename = path.rsplit("/", 1)[-1]
     if member is not None:
         member = normalize_member_name(member)
         if not member or not _visible(source, f"{path}/{member}", rules):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+            raise PathNotFound()
         target, virtual_path = member.rsplit("/", 1)[-1], f"{path}/{member}"
     else:
         target, virtual_path = filename, path
@@ -3549,7 +3556,7 @@ def download_folder_zip(
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     if path and not _dir_visible(source, path, rules):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        raise PathNotFound()
     if source.protocol == Protocol.agent:
         # Refused before anything is listed or sent (audited as
         # access.denied), not cut short once the ZIP has started.

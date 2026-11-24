@@ -7,8 +7,8 @@ export interface FetchProblem {
   message: string
   /** Worth offering a "Try again" button: the cause may be transient. */
   retryable: boolean
-  /** The file isn't on the source any more (#272) -- as opposed to hidden
-   * by the rules, which looks the same as never having existed. */
+  /** The path isn't there to read (#272): gone from the source or hidden
+   * by its rules, which the server answers alike. */
   missing?: boolean
 }
 
@@ -44,10 +44,14 @@ export function describeFetchFailure(status: number, body: ErrorBody | null, nam
     case 413:
       return { message: serverMessage ? `${name}: ${serverMessage}` : `${name} is too large to open.`, retryable: false }
     case 404:
-      if (body?.error_code === 'not_found_on_source') {
-        return { message: `${name} no longer exists on the source.`, retryable: false, missing: true }
+      // Missing, hidden by the rules, a link to something hidden or a folder
+      // asked for as a file: the server answers them all alike, and so does
+      // the viewer.
+      return {
+        message: `${name} wasn't found, or is hidden by this source's rules.`,
+        retryable: false,
+        ...(body?.error_code === 'not_found_on_source' ? { missing: true } : {}),
       }
-      return { message: `${name} wasn't found, or is hidden by this source's rules.`, retryable: false }
     case 403:
       return {
         message: serverMessage && serverMessage !== 'Forbidden'

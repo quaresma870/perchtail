@@ -1,3 +1,4 @@
+import errno
 import os
 import shutil
 from contextlib import contextmanager
@@ -176,8 +177,13 @@ def fetch_file(
 @contextmanager
 def local_copy(source: Source, relative_path: str, *, target_check: TargetCheck = None):
     """No fetch needed — the file is already local, so this yields the real
-    path directly rather than copying it anywhere first."""
-    yield resolve_file(source, relative_path, target_check)
+    path directly rather than copying it anywhere first. A file that isn't
+    there is refused here, as a fetch refuses it on the other connectors,
+    not where it is read (an archive opened for a member)."""
+    path = resolve_file(source, relative_path, target_check)
+    if not path.exists():
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory", relative_path)
+    yield path
 
 
 def read_range(

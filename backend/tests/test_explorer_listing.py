@@ -196,5 +196,6 @@ def test_a_file_gone_from_the_source_says_so():
         "detail": "Not found on the source",
         "error_code": "not_found_on_source",
     }
-    # A path outside the base still looks like a hidden one.
-    assert client.get("/outside").json() == {"detail": "not found"}
+    # A path outside the base gets the same answer.
+    refused = client.get("/outside")
+    assert (refused.status_code, refused.json()) == (response.status_code, response.json())

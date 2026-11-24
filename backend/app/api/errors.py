@@ -22,12 +22,39 @@ from app.collectors.base import (
     FetchTooLargeError,
     PathOutsideBaseError,
     SourceError,
+    SourceNotFoundError,
 )
 from app.db import get_session
 from app.logging_config import get_logger
 from app.scratch import ScratchFullError
 
 logger = get_logger(__name__)
+
+
+def not_found_content() -> dict:
+    """The body of every 404 about a path of a source that can't be read:
+    the one a path that isn't on the source gets (SourceNotFoundError). A
+    path the rules hide, a link to a hidden target or out of the base path,
+    a folder asked for as a file and an archive member that is hidden or
+    missing all get it, so the answer says nothing about what is there."""
+    return {
+        "detail": SourceNotFoundError.public_message,
+        "error_code": SourceNotFoundError.error_code,
+    }
+
+
+def _not_found() -> JSONResponse:
+    return JSONResponse(status_code=404, content=not_found_content())
+
+
+class PathNotFound(StarletteHTTPException):
+    """A path the rules hide, or an archive member that is hidden or isn't
+    in the archive: answered exactly as a path that isn't on the source
+    (not_found_content). Not audited, as a path that isn't there."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=404, detail=SourceNotFoundError.public_message)
+
 
 # Path parameters that name what a refused request was about, most specific
 # first: /sources/{source_id}/rules/{rule_id} is about the rule.
@@ -127,6 +154,8 @@ async def access_denied(request: Request, exc: StarletteHTTPException):
     it doesn't reveal its target (ConcealedDenial) is recorded the same
     way; a plain 404 isn't. If recording fails, the refusal still goes
     out."""
+    if isinstance(exc, PathNotFound):
+        return _not_found()
     if exc.status_code == 403 or isinstance(exc, ConcealedDenial):
         context = request_context.current()
         if context is not None and context.user_id is not None and not context.denial_handled:
@@ -159,12 +188,13 @@ async def source_error_handler(request: Request, exc: SourceError) -> JSONRespon
 
 
 async def path_outside_base(request: Request, exc: PathOutsideBaseError) -> JSONResponse:
-    """Same answer as a rule-hidden path, so nothing about the target leaks;
-    audited as `access.denied` (`link_target_hidden`, with the path asked
-    for) unless the endpoint already recorded it (the file.*_denied events
-    of open, follow and download)."""
+    """Same answer as a path that isn't there (not_found_content), so
+    nothing about the target leaks; audited as `access.denied`
+    (`link_target_hidden`, with the path asked for) unless the endpoint
+    already recorded it (the file.*_denied events of open, follow and
+    download)."""
     await _audit_refused_path(request, LINK_TARGET_HIDDEN)
-    return JSONResponse(status_code=404, content={"detail": "not found"})
+    return _not_found()
 
 
 async def _audit_refused_path(request: Request, reason: str) -> None:

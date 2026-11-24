@@ -17,14 +17,14 @@ describe('describeFetchFailure', () => {
     expect(describeFetchFailure(404, { detail: 'not found' }, 'x.log').message).toMatch(/hidden by this source's rules/)
   })
 
-  it('says a file that left the source no longer exists (#272)', () => {
+  it('marks a path that is not on the source as missing, with the same message (#272)', () => {
     const problem = describeFetchFailure(
       404,
       { detail: 'Not found on the source', error_code: 'not_found_on_source' },
       'app.log',
     )
     expect(problem).toEqual({
-      message: 'app.log no longer exists on the source.',
+      message: "app.log wasn't found, or is hidden by this source's rules.",
       retryable: false,
       missing: true,
     })

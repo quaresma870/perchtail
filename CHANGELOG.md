@@ -18,9 +18,11 @@ release ships (0.x releases may include breaking changes between minors).
 ### Fixed
 - Switching tabs, coming back to the Viewer from another page, or highlighting patterns arriving no longer rebuilds the open file, which froze the page for seconds with large files; each tab also keeps its place and selection.
 - A push agent's old connection, closed when the agent reconnects (for example after an upgrade from the portal), no longer logs an error with a traceback.
+- Listing, opening or downloading from an archive that doesn't exist on a local-disk source answers 404 instead of a server error.
 
 ### Security
 - Expanding a `.zip` on an SSH, SMB or WinRM source, and opening, following or downloading a file inside it, now read only the bytes they need instead of copying the whole archive to scratch first, every time: listing reads the archive's end (its index), and a file inside it only its own header and compressed data. A large `.zip` over WinRM took as long to list, and as long again to open each file, as copying it whole; it now takes a few requests. `MAX_FETCH_MB` counts what such an operation transfers, so a `.zip` larger than it can be expanded and its files opened, and an operation that would transfer more than it is refused with the same 413. A `.zip` that changes size while it is read, or whose file fails its CRC check, is refused as unreadable (409 `archive_unreadable`, audited). `.tar.gz` files, whole-archive downloads, folder ZIPs and local sources read archives as before, and push agents on their host (above). Each such read logs `archive.ranged_read` (DEBUG) with its requests, bytes and seconds.
+- Every read of a path that can't be read (missing, hidden by the rules, a link to a hidden target, or a folder asked for as a file) now gets the same 404 response.
 
 ## [0.7.1] - 2026-11-24
 
