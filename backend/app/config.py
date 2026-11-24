@@ -36,9 +36,11 @@ class Settings(BaseSettings):
     # either limit.
     log_max_file_mb: float = 100
     log_max_total_mb: float = 2048
-    # Caps protocol libraries (smbprotocol, paramiko, ...) at INFO while the
-    # app itself logs at DEBUG; their packet dumps are most of DEBUG's volume.
-    log_quiet_third_party: bool = False
+    # Caps protocol libraries (smbprotocol, paramiko, pypsrp, ...) at INFO
+    # while the app itself logs at DEBUG: at DEBUG their messages can carry
+    # what is read from sources, before redaction, and slow reads down. Only
+    # an explicit false lets them log at DEBUG, with a warning at startup.
+    log_quiet_third_party: bool = True
     # The state that must be backed up: the database, the credential salt
     # and SSH known_hosts, unless DATABASE_URL / CREDENTIAL_SALT_PATH /
     # SSH_KNOWN_HOSTS_PATH point elsewhere. Kept apart from LOG_DIR and

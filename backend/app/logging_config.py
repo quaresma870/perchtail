@@ -61,6 +61,18 @@ def configure_logging() -> None:
     for name in NOISY_THIRD_PARTY_LOGGERS:
         logging.getLogger(name).setLevel(third_party_level(name, level, settings))
     file_handler.enforce_retention()
+    if level < logging.INFO and not settings.log_quiet_third_party:
+        get_logger(__name__).warning(
+            "logging.third_party_debug",
+            message=THIRD_PARTY_DEBUG_WARNING,
+        )
+
+
+THIRD_PARTY_DEBUG_WARNING = (
+    "the protocol libraries log at DEBUG: their messages can include what is read from "
+    "sources, before redaction, and slow down reads; set LOG_QUIET_THIRD_PARTY=true unless "
+    "you are debugging a connection"
+)
 
 
 # At INFO these log every SMB message and every SSH session they close, most
@@ -70,8 +82,9 @@ QUIET_AT_INFO_LOGGERS = frozenset({"smbprotocol", "spnego", "paramiko"})
 
 def third_party_level(name: str, level: int, settings) -> int:
     """The level of one of NOISY_THIRD_PARTY_LOGGERS for the app's `level`.
-    At DEBUG, LOG_QUIET_THIRD_PARTY keeps the app's own DEBUG detail while
-    capping the protocol libraries' packet dumps at INFO."""
+    At DEBUG, LOG_QUIET_THIRD_PARTY (true by default) keeps the app's own
+    DEBUG detail while capping the protocol libraries at INFO: their DEBUG
+    messages can carry what is read from sources, before redaction."""
     if level < logging.INFO:
         return logging.INFO if settings.log_quiet_third_party else logging.NOTSET
     if name in QUIET_AT_INFO_LOGGERS:

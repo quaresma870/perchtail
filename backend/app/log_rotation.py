@@ -178,6 +178,10 @@ class SizeAndTimeRotatingFileHandler(logging.handlers.BaseRotatingHandler):
             )
 
 
+# The network libraries PerchTail uses whose DEBUG messages carry protocol
+# traffic (an SMB read's buffer, a WS-Man or PSRP envelope, request headers,
+# WebSocket frames). Parent loggers: "pypsrp" covers pypsrp.wsman and the
+# rest, "httpcore" covers httpcore.connection, httpcore.http11 and so on.
 NOISY_THIRD_PARTY_LOGGERS = (
     "smbprotocol",
     "spnego",
@@ -185,4 +189,8 @@ NOISY_THIRD_PARTY_LOGGERS = (
     "urllib3",
     "requests_ntlm",
     "winrm",
+    "pypsrp",
+    "httpx",
+    "httpcore",
+    "websockets",
 )

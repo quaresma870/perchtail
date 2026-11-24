@@ -86,7 +86,7 @@ PerchTail logs JSON lines to standard output and to `LOG_DIR/perchtail.log`. The
 | `LOG_RETENTION_DAYS` | `30` | A whole number of days; `0` keeps archives regardless of age | Rotated archives older than this are deleted. |
 | `LOG_MAX_FILE_MB` | `100` | A number of MB; `0` rotates at midnight only | The size at which the active file rotates. |
 | `LOG_MAX_TOTAL_MB` | `2048` | A number of MB; `0` for no limit | The most all logs together may take. The oldest archives are deleted first; when this deletes archives `LOG_RETENTION_DAYS` would still have kept, PerchTail logs `logs.retention.size_limit` and reports it in `/monitoring/health`. |
-| `LOG_QUIET_THIRD_PARTY` | `false` | `true`, `false` | With `LOG_LEVEL=DEBUG`, `true` keeps PerchTail's own DEBUG lines and caps the protocol libraries (SMB, SSH and the like) at `INFO`. No effect at `INFO` and above. |
+| `LOG_QUIET_THIRD_PARTY` | `true` | `true`, `false` | With `LOG_LEVEL=DEBUG`, `true` keeps PerchTail's own DEBUG lines and caps the protocol libraries (SMB, SSH, WinRM, HTTP) at `INFO`. `false` lets them log at `DEBUG`: their messages can include what is read from sources, before redaction, and they make reads slow and the logs large. Use `false` only to debug a connection, for a short time; PerchTail logs a `logging.third_party_debug` warning at startup while it is set. No effect at `INFO` and above. |
 
 ## Audit log
 
