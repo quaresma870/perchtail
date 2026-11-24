@@ -25,6 +25,17 @@
     type Scope,
   } from '../lib/explorer-scope'
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
+  import ContextMenu from '../lib/components/ContextMenu.svelte'
+  import {
+    contextMenuIntent,
+    isMenuKey,
+    lineLink,
+    logLineMenu,
+    tabMenu,
+    tabPathText,
+    type LineMenuRequest,
+    type MenuEntry,
+  } from '../lib/context-menu'
   import DiffPane from '../lib/components/DiffPane.svelte'
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
   import FindBar from '../lib/components/FindBar.svelte'
@@ -87,6 +98,7 @@
     cutToFirstLine,
     earlierWindow,
     isLargeFile,
+    lineNumbersNotFiles,
     loadEarlierBlocked,
     opensFromEnd,
     shiftBookmarks,
@@ -225,7 +237,7 @@
   let markInputOpen = false
   let markInputValue = ''
   let markInput: HTMLInputElement | null = null
-  let copyStatus: '' | 'copied' | 'empty' = ''
+  let copyStatus: '' | 'copied' | 'empty' | 'failed' = ''
   let copyStatusTimer: ReturnType<typeof setTimeout> | null = null
   let formatError = ''
   let compareArmed = false
@@ -984,9 +996,10 @@
     if (activeTab) updateActiveTab({ showWhitespace: !activeTab.showWhitespace })
   }
 
-  function toggleBookmark() {
+  /** On `line`, or the cursor's line. */
+  function toggleBookmark(at?: number) {
     if (!activeTab || !paneRef) return
-    const line = paneRef.currentLine()
+    const line = at ?? paneRef.currentLine()
     const bookmarks = activeTab.bookmarks.includes(line)
       ? activeTab.bookmarks.filter((l) => l !== line)
       : [...activeTab.bookmarks, line].sort((a, b) => a - b)
@@ -1068,7 +1081,7 @@
           markMissing(tab)
           return
         }
-        const retry = whole ? () => retryLoadWhole(tab.key) : reloadActiveTab
+        const retry = whole ? () => retryLoadWhole(tab.key) : () => retryReload(tab.key)
         notice = { ...problem, retry: problem.retryable ? retry : undefined }
         return
       }
@@ -1107,7 +1120,7 @@
       notice = {
         message: `${tab.name}: the server could not be reached.`,
         retryable: true,
-        retry: whole ? () => retryLoadWhole(tab.key) : reloadActiveTab,
+        retry: whole ? () => retryLoadWhole(tab.key) : () => retryReload(tab.key),
       }
     }
   }
@@ -1115,6 +1128,13 @@
   function retryLoadWhole(key: string) {
     const tab = tabs.find((t) => t.key === key)
     if (tab) reloadTab(tab, true)
+  }
+
+  // Try again reloads the tab that failed (a tab's menu reloads any tab),
+  // as it is now.
+  function retryReload(key: string) {
+    const tab = tabs.find((t) => t.key === key)
+    if (tab) reloadTab(tab)
   }
 
   /** Reload of a tab that holds only the end of its file: the end again,
@@ -1146,7 +1166,11 @@
         partialChars: read.partialChars,
       })
     } catch {
-      notice = { message: `${tab.name}: the server could not be reached.`, retryable: true, retry: reloadActiveTab }
+      notice = {
+        message: `${tab.name}: the server could not be reached.`,
+        retryable: true,
+        retry: () => retryReload(tab.key),
+      }
     }
   }
 
@@ -1330,18 +1354,191 @@
     if (activeTab && activeTab.newLines > 0) updateActiveTab({ newLines: 0 })
   }
 
-  async function doCopySelectedLines() {
-    // Line numbers aren't the file's while its start isn't loaded.
-    if (!paneRef || startNotLoaded(activeTab)) return
-    const copied = await paneRef.copySelectedLines()
-    copyStatus = copied ? 'copied' : 'empty'
+  function showCopyStatus(status: typeof copyStatus) {
+    copyStatus = status
     if (copyStatusTimer) clearTimeout(copyStatusTimer)
     copyStatusTimer = setTimeout(() => (copyStatus = ''), 1500)
   }
 
+  async function doCopySelectedLines() {
+    // Line numbers aren't the file's while its start isn't loaded or once
+    // Tail dropped older lines.
+    if (!paneRef || lineNumbersNotFiles(activeTab)) return
+    try {
+      const copied = await paneRef.copySelectedLines()
+      showCopyStatus(copied ? 'copied' : 'empty')
+    } catch {
+      showCopyStatus('failed')
+    }
+  }
+
+  async function copyToClipboard(write: () => Promise<void>) {
+    try {
+      await write()
+      showCopyStatus('copied')
+    } catch {
+      showCopyStatus('failed')
+    }
+  }
+
+  // Right-click menus (#287): one menu at a time, on a log line or a tab.
+  // Each entry does what its button or shortcut does.
+  type OpenMenu =
+    | { kind: 'line'; x: number; y: number; opener: HTMLElement; entries: MenuEntry[]; line: number; selection: string }
+    | { kind: 'tab'; x: number; y: number; opener: HTMLElement; entries: MenuEntry[]; tabKey: string }
+  let contextMenu: OpenMenu | null = null
+  let lastTabKeyMenu: number | null = null
+
+  function openLineMenu(request: LineMenuRequest) {
+    if (!activeTab) return
+    const entries = logLineMenu({
+      hasSelection: request.selection !== '',
+      singleLineSelection: request.selection !== '' && !request.selection.includes('\n'),
+      startLoaded: !startNotLoaded(activeTab),
+      archiveMember: activeTab.member !== null,
+      droppedLines: activeTab.droppedLines ?? 0,
+    })
+    contextMenu = { kind: 'line', ...request, entries }
+  }
+
+  function tabMenuEntries(tab: Tab): MenuEntry[] {
+    const index = tabs.findIndex((t) => t.key === tab.key)
+    const source = allSources.find((s) => s.id === tab.sourceId)
+    return tabMenu({
+      active: tab.key === activeKey,
+      tabsLeft: index,
+      tabsRight: tabs.length - index - 1,
+      canDownload: source?.my_capabilities?.includes('download') ?? false,
+      redactedDownload: !!tab.redacted && $systemSettings.redaction_downloads,
+    })
+  }
+
+  function onTabContextMenu(tab: Tab, event: MouseEvent) {
+    const intent = contextMenuIntent(event, lastTabKeyMenu, Date.now())
+    if (intent === 'browser') return
+    event.preventDefault()
+    if (intent === 'ignore') return
+    const opener = (event.currentTarget as HTMLElement).querySelector<HTMLElement>('.tab-label')
+    if (!opener) return
+    contextMenu = { kind: 'tab', x: event.clientX, y: event.clientY, opener, entries: tabMenuEntries(tab), tabKey: tab.key }
+  }
+
+  function onTabKeydown(tab: Tab, event: KeyboardEvent) {
+    if (!isMenuKey(event)) return
+    event.preventDefault()
+    lastTabKeyMenu = Date.now()
+    const opener = event.currentTarget as HTMLElement
+    const rect = opener.getBoundingClientRect()
+    contextMenu = { kind: 'tab', x: rect.left, y: rect.bottom, opener, entries: tabMenuEntries(tab), tabKey: tab.key }
+  }
+
+  // A middle-click closes a tab; its mousedown would start the browser's
+  // autoscroll.
+  function onTabMouseDown(event: MouseEvent) {
+    if (event.button === 1) event.preventDefault()
+  }
+
+  function onTabAuxClick(tab: Tab, event: MouseEvent) {
+    if (event.button !== 1) return
+    event.preventDefault()
+    closeTab(tab)
+  }
+
+  async function runLineMenu(id: string, line: number, selection: string) {
+    if (!activeTab || !paneRef) return
+    switch (id) {
+      case 'copy':
+        return copyToClipboard(() => paneRef!.copySelectionOrLine())
+      case 'copy-with-numbers':
+        return doCopySelectedLines()
+      case 'find-all-selection':
+        findSpec = { ...findSpec, query: selection, useRegex: false, wholeWord: false }
+        findOpen = true
+        findAllSpec = { ...findSpec }
+        return
+      case 'highlight-selection': {
+        // Literal text: a plain (glob-kind) mark matches it as written.
+        const mark: MarkPattern = {
+          id: crypto.randomUUID(),
+          pattern: selection,
+          pattern_kind: 'glob',
+          colorIndex: nextMarkColorIndex(activeTab.markPatterns),
+        }
+        updateActiveTab({ markPatterns: [...activeTab.markPatterns, mark] })
+        return
+      }
+      case 'toggle-bookmark':
+        return toggleBookmark(line)
+      case 'go-to-line':
+        return openGoToLine()
+      case 'copy-link': {
+        const link = lineLink(window.location.href, activeTab.sourceId, activeTab.path, line)
+        return copyToClipboard(() => navigator.clipboard.writeText(link))
+      }
+    }
+  }
+
+  function closeTabKeys(keys: string[]) {
+    const closing = tabs.filter((t) => keys.includes(t.key))
+    for (const tab of closing) {
+      followDecoders.delete(tab.key)
+      followStarted.delete(tab.key)
+    }
+    closeTabs(keys)
+    for (const tab of closing) if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
+  }
+
+  function runTabMenu(id: string, key: string) {
+    const index = tabs.findIndex((t) => t.key === key)
+    const tab = tabs[index]
+    if (!tab) return
+    switch (id) {
+      case 'close':
+        return closeTab(tab)
+      case 'close-others':
+        return closeTabKeys(tabs.filter((t) => t.key !== key).map((t) => t.key))
+      case 'close-left':
+        return closeTabKeys(tabs.slice(0, index).map((t) => t.key))
+      case 'close-right':
+        return closeTabKeys(tabs.slice(index + 1).map((t) => t.key))
+      case 'close-all':
+        return closeTabKeys(tabs.map((t) => t.key))
+      case 'reload':
+        return void reloadTab(tab)
+      case 'download':
+        window.open(downloadHref(tab), '_blank', 'noreferrer')
+        return
+      case 'compare':
+        if (key !== activeKey && activeTab) {
+          compareArmed = false
+          compareWith = { name: `${tab.sourceName} › ${tab.name}`, content: tab.content, partial: startNotLoaded(tab) }
+          compareKey += 1
+        }
+        return
+      case 'copy-path': {
+        const text = tabPathText(tab.path, tab.member)
+        return copyToClipboard(() => navigator.clipboard.writeText(text))
+      }
+    }
+  }
+
+  function chooseFromMenu(id: string) {
+    const menu = contextMenu
+    contextMenu = null
+    if (!menu) return
+    if (menu.kind === 'line') void runLineMenu(id, menu.line, menu.selection)
+    else runTabMenu(id, menu.tabKey)
+  }
+
+  function downloadHref(tab: Tab): string {
+    const query = new URLSearchParams({ path: tab.path, ...(tab.member ? { member: tab.member } : {}) })
+    return `/sources/${tab.sourceId}/download?${query.toString()}`
+  }
+
   async function openGoToLine() {
-    // Line numbers are the file's only once its start is loaded.
-    if (startNotLoaded(activeTab)) return
+    // Line numbers are the file's only once its start is loaded and while
+    // Tail hasn't dropped older lines.
+    if (lineNumbersNotFiles(activeTab)) return
     goToLineOpen = true
     goToLineValue = ''
     await tick()
@@ -1555,8 +1752,21 @@
     {#if tabs.length > 0}
       <div class="tabs">
         {#each tabs as tab (tab.key)}
-          <div class="tab" class:active={tab.key === activeKey} title={`${tab.sourceName} › ${tab.member ? `${tab.path} › ${tab.member}` : tab.path}`}>
-            <button class="tab-label" class:missing={tab.missing} on:click={() => handleTabClick(tab)}>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="tab"
+            class:active={tab.key === activeKey}
+            title={`${tab.sourceName} › ${tabPathText(tab.path, tab.member)}`}
+            on:contextmenu={(e) => onTabContextMenu(tab, e)}
+            on:mousedown={onTabMouseDown}
+            on:auxclick={(e) => onTabAuxClick(tab, e)}
+          >
+            <button
+              class="tab-label"
+              class:missing={tab.missing}
+              on:click={() => handleTabClick(tab)}
+              on:keydown={(e) => onTabKeydown(tab, e)}
+            >
               <span class="source-dot" style="background: hsl({sourceHue(tab.sourceId)} 65% 55%)"></span>
               {#if sourceNames}
                 <span class="tab-source">{tab.sourceName} ›</span>
@@ -1671,8 +1881,8 @@
             {:else}
               <button
                 class="btn-toggle"
-                title={startNotLoaded(activeTab) ? 'Line numbers need the whole file' : 'Go to a line (Ctrl/Cmd+G)'}
-                disabled={startNotLoaded(activeTab)}
+                title={lineNumbersNotFiles(activeTab) ? 'Line numbers need the whole file' : 'Go to a line (Ctrl/Cmd+G)'}
+                disabled={lineNumbersNotFiles(activeTab)}
                 on:click={openGoToLine}>Go to line</button
               >
             {/if}
@@ -1794,15 +2004,21 @@
           </div>
           <div class="toolbar-right">
             {#if copyStatus}
-              <span class="hint copy-status">{copyStatus === 'copied' ? 'Copied' : 'Nothing selected'}</span>
+              <span class="hint copy-status" role="status"
+                >{copyStatus === 'copied'
+                  ? 'Copied'
+                  : copyStatus === 'failed'
+                    ? 'Copy needs a secure page (HTTPS or localhost)'
+                    : 'Nothing selected'}</span
+              >
             {/if}
             <button
               class="icon-btn"
-              title={startNotLoaded(activeTab)
+              title={lineNumbersNotFiles(activeTab)
                 ? 'Line numbers need the whole file'
                 : 'Copy selected lines with line numbers'}
               aria-label="Copy lines"
-              disabled={startNotLoaded(activeTab)}
+              disabled={lineNumbersNotFiles(activeTab)}
               on:click={doCopySelectedLines}
             >
               <ToolbarIcon name="copy" />
@@ -1812,7 +2028,7 @@
               class:active={activeTab.bookmarks.length > 0}
               title="Toggle bookmark on current line"
               aria-label="Bookmark"
-              on:click={toggleBookmark}
+              on:click={() => toggleBookmark()}
             >
               <ToolbarIcon name="bookmark" />
             </button>
@@ -1865,7 +2081,7 @@
                 class="icon-btn"
                 title={downloadLabel}
                 aria-label={downloadLabel}
-                href={`/sources/${activeTab.sourceId}/download?${new URLSearchParams({ path: activeTab.path, ...(activeTab.member ? { member: activeTab.member } : {}) }).toString()}`}
+                href={downloadHref(activeTab)}
                 target="_blank"
                 rel="noreferrer"
               >
@@ -1930,6 +2146,7 @@
             lineNumbers={!startNotLoaded(activeTab)}
             on:bottom={onReachedBottom}
             on:findclosed={closeFind}
+            on:menu={(e) => openLineMenu(e.detail)}
           />
           {#if activeTab.newLines > 0}
             <button class="jump-to-end" on:click={jumpToEnd}>
@@ -1962,6 +2179,19 @@
           {/if}
         </div>
       </div>
+    {/if}
+    {#if contextMenu}
+      {#key contextMenu}
+        <ContextMenu
+          entries={contextMenu.entries}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          label={contextMenu.kind === 'line' ? 'Line actions' : 'Tab actions'}
+          opener={contextMenu.opener}
+          on:select={(e) => chooseFromMenu(e.detail)}
+          on:close={() => (contextMenu = null)}
+        />
+      {/key}
     {/if}
   </section>
 </div>

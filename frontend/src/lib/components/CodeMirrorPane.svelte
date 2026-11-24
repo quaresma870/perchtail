@@ -72,6 +72,7 @@
   import { findProblemLines, nextProblemLine, previousProblemLine } from '../severity-highlighting'
   import type { SeverityPattern } from '../types'
   import { compileFind, type FindSpec } from '../find-in-document'
+  import { contextMenuIntent, isMenuKey, type LineMenuRequest } from '../context-menu'
 
   export let content = ''
   /** The tab whose file this is: its editor state is kept under this key
@@ -98,7 +99,70 @@
   // `bottom`: the reader scrolled back to the end (the viewer clears its
   // "N new lines" count, #254).
   // `findclosed`: the editor closed its search (Escape in the editor).
-  const dispatch = createEventDispatcher<{ bottom: void; findclosed: void }>()
+  // `menu`: a right-click, the Menu key or Shift+F10 in the editor (#287):
+  // where to open the menu and the line it is for.
+  const dispatch = createEventDispatcher<{ bottom: void; findclosed: void; menu: LineMenuRequest }>()
+
+  let lastKeyMenu: number | null = null
+
+  // A right-click on a line outside the selection puts the cursor on that
+  // line first, so the menu's actions are for the line clicked.
+  function onContextMenu(event: MouseEvent) {
+    if (!view) return
+    const intent = contextMenuIntent(event, lastKeyMenu, Date.now())
+    if (intent === 'browser') return
+    event.preventDefault()
+    if (intent === 'ignore') return
+    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY })
+    const at = pos === null ? view.state.selection.main.head : pos
+    const line = view.state.doc.lineAt(at)
+    const { from, to } = view.state.selection.main
+    const covers = from !== to && from <= line.to && to >= line.from
+    if (!covers) view.dispatch({ selection: { anchor: line.from } })
+    view.scrollDOM.focus({ preventScroll: true })
+    dispatch('menu', menuRequest(event.clientX, event.clientY, line.number))
+  }
+
+  // The browser's right mousedown would move the text caret to the click,
+  // and the read-only editor takes the selection from it: the selection a
+  // menu action is for would be gone. Shift+right-click is the browser's.
+  function onMouseDown(event: MouseEvent) {
+    if (event.button === 2 && !event.shiftKey) event.preventDefault()
+  }
+
+  // The read-only content can't take the focus, and CodeMirror takes it
+  // from what had it on a click: the scroller gets it, so the Menu key and
+  // Shift+F10 reach the editor.
+  function onMouseUp(event: MouseEvent) {
+    if (!view || event.button !== 0) return
+    if (!view.dom.contains(document.activeElement)) view.scrollDOM.focus({ preventScroll: true })
+  }
+
+  function onKeydown(event: KeyboardEvent) {
+    if (!view || !isMenuKey(event)) return
+    event.preventDefault()
+    lastKeyMenu = Date.now()
+    const head = view.state.selection.main.head
+    const coords = view.coordsAtPos(head)
+    const box = view.contentDOM.getBoundingClientRect()
+    const x = coords ? coords.left : box.left
+    const y = coords ? coords.bottom : box.top
+    dispatch('menu', menuRequest(x, y, view.state.doc.lineAt(head).number))
+  }
+
+  function menuRequest(x: number, y: number, line: number): LineMenuRequest {
+    const { from, to } = view!.state.selection.main
+    const text = view!.state.sliceDoc(from, to)
+    return {
+      x,
+      y,
+      line,
+      selection: text,
+      // The read-only content can't take the focus; its scroller does
+      // (clicking the text focuses it).
+      opener: view!.scrollDOM,
+    }
+  }
 
   let applyingFind = false
   const panelOwner: PanelOwner = {
@@ -481,6 +545,15 @@
   // own Ctrl+C already handles a plain-text copy of an actual selection,
   // so this is specifically for the "with line numbers" case, not a
   // general-purpose copy replacement.
+  /** The menu's Copy: the selection, or the cursor's line when nothing is
+   * selected. */
+  export async function copySelectionOrLine(): Promise<void> {
+    if (!view) return
+    const { from, to, head } = view.state.selection.main
+    const text = from === to ? view.state.doc.lineAt(head).text : view.state.sliceDoc(from, to)
+    await navigator.clipboard.writeText(text)
+  }
+
   export async function copySelectedLines(): Promise<boolean> {
     if (!view) return false
     const { from, to } = view.state.selection.main
@@ -508,7 +581,16 @@
   })
 </script>
 
-<div class="cm-host" class:no-line-numbers={!lineNumbers} bind:this={host}></div>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="cm-host"
+  class:no-line-numbers={!lineNumbers}
+  bind:this={host}
+  on:contextmenu={onContextMenu}
+  on:mousedown={onMouseDown}
+  on:mouseup={onMouseUp}
+  on:keydown={onKeydown}
+></div>
 
 <style>
   .cm-host {
