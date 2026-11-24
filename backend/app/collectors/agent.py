@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, NoReturn
 
+from app import fetch_control
 from app.agent_registry import (
     FEATURE_LINKS,
     FEATURE_REDACTION,
@@ -16,6 +17,7 @@ from app.collectors import base as collector_base
 from app.collectors.base import (
     DirEntry,
     DirListing,
+    FetchCancelledError,
     LinkTargetHiddenError,
     SourceError,
     TargetCheck,
@@ -267,7 +269,7 @@ def fetch_file(
                 expect_real=expect_real,
                 chunk_size=FETCH_CHUNK_BYTES,
                 max_bytes=limit,
-                sink=sink,
+                sink=fetch_control.counting(sink),
                 limit=limit,
                 require_feature=FEATURE_LINKS,
             )
@@ -276,6 +278,7 @@ def fetch_file(
         result = _following_links(source, relative_path, target_check, send)
     except BaseException as exc:
         destination.unlink(missing_ok=True)  # no partial file left behind
+        fetch_control.raise_if_cancelled(exc)
         if isinstance(exc, AgentCommandError) and exc.code == "too_large":
             raise collector_base.too_large(exc.size or limit + 1, limit) from exc
         raise
@@ -569,7 +572,7 @@ def fetch_redacted(
             return get_agent_registry().send_command_sync(
                 source.id,
                 "fetch",
-                sink=sink,
+                sink=fetch_control.counting(sink),
                 limit=sink_limit,
                 require_feature=(FEATURE_REDACTION, FEATURE_LINKS),
                 expect_real=expect_real,
@@ -579,6 +582,9 @@ def fetch_redacted(
     try:
         result = _following_links(source, relative_path, target_check, send)
         return _verified(result, block)
+    except FetchCancelledError:
+        destination.unlink(missing_ok=True)
+        raise
     except AgentCommandError as exc:
         destination.unlink(missing_ok=True)
         _raise_command_error(exc, expanding=expanding)
@@ -587,6 +593,7 @@ def fetch_redacted(
         raise
     except BaseException as exc:
         destination.unlink(missing_ok=True)
+        fetch_control.raise_if_cancelled(exc)
         if _is_agent_error(exc):
             # A stream cut short or out of order: nothing of it is used.
             raise _unverified(str(exc)) from exc

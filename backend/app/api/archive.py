@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, NamedTuple
+from typing import BinaryIO, Literal, NamedTuple
 from urllib.parse import quote
 
 import anyio
@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 from starlette.types import Receive, Scope, Send
 
-from app import request_context, source_roots, system_settings
+from app import fetch_control, request_context, source_roots, system_settings
 from app.agent_registry import get_agent_registry
 from app.api.auth import get_current_active_user
 from app.api.errors import PathNotFound
@@ -118,7 +118,7 @@ from app.scratch import get_scratch_store, make_scratch_dir
 # Cache-Control: no-store, so neither the browser nor a proxy in front keeps
 # a copy after the viewer closes it. Set here, on the route, so every
 # response those routes build (plain, redacted, streamed) carries it.
-_FILE_CONTENT_ROUTES = {"open", "follow", "download", "download-zip"}
+_FILE_CONTENT_ROUTES = {"open", "follow", "download", "download-zip", "open-progress"}
 
 
 class _FileContentRoute(APIRoute):
@@ -1092,8 +1092,12 @@ class _Resolved(NamedTuple):
 
 def _redact_file(original: Path, destination: Path, rules: CompiledRules, final: bool):
     """Redacts `original` into `destination`, in the encoding detect_encoding
-    finds in its first bytes, for the viewer (UTF-8 out)."""
-    with original.open("rb") as src:
+    finds in its first bytes, for the viewer (UTF-8 out). For an /open with
+    progress (app/fetch_control.py), the phase becomes `redacting`, and a
+    Cancel stops the redaction between two reads."""
+    control = fetch_control.redacting()
+    with original.open("rb") as opened:
+        src = opened if control is None else fetch_control.CancellableReader(opened, control)
         head = src.read(HEAD_BYTES)
         if unsupported_compressed_format(head):
             raise RedactionFormatRefused()
@@ -1568,6 +1572,8 @@ class _FinishingStreamingResponse(_FinishingMixin, StreamingResponse):
 def open_file(
     path: str,
     member: str | None = None,
+    # Names this open for GET /open-progress and POST /open-cancel.
+    request_id: str | None = Query(default=None, pattern=fetch_control.REQUEST_ID_PATTERN),
     source: Source = Depends(readable_source(Capability.view)),
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
@@ -1584,23 +1590,29 @@ def open_file(
     redacted on the server before it is stored in scratch or sent, for
     every user, and the redaction headers (_redaction_headers) say so; the
     viewer then follows from X-Source-Offset, not from the length of what
-    it received."""
+    it received.
+
+    With `request_id` (app/fetch_control.py), the copy from the source can
+    be followed (GET /open-progress) and stopped (POST /open-cancel): a
+    cancelled open answers 409 `read_cancelled`, isn't audited as
+    file.open, and leaves nothing in scratch."""
     _require_safe_path(source, path)
     rules = _rules_for(session, source.id)
     redaction = redaction_rules_for(session, source)
     agent_rules = agent_redaction_rules(session, source) if redaction is not None else None
-    served_path, filename, key, redacted = _resolve_content_audited(
-        source,
-        path,
-        member,
-        rules,
-        current_limits(session),
-        user,
-        session,
-        "file.open_denied",
-        redaction,
-        agent_rules,
-    )
+    with fetch_control.controlling(user.id, source.id, request_id):
+        served_path, filename, key, redacted = _resolve_content_audited(
+            source,
+            path,
+            member,
+            rules,
+            current_limits(session),
+            user,
+            session,
+            "file.open_denied",
+            redaction,
+            agent_rules,
+        )
     try:
         metadata: dict = {"path": path, "member": member} if member else {"path": path}
         record_audit_event(
@@ -1654,6 +1666,51 @@ def open_file(
         if key is not None:
             get_scratch_store().end_busy(key)
         raise
+
+
+class OpenProgress(BaseModel):
+    """How far an /open with a request id has got: the bytes it expects
+    (when the source said its size), the bytes copied so far, and whether
+    it is still copying or redacting what it copied."""
+
+    expected: int | None
+    written: int
+    phase: Literal["copying", "redacting"]
+
+
+def _open_control(user: User, source: Source, request_id: str) -> fetch_control.FetchControl:
+    """The user's /open in progress on this source, or the same 404 for an
+    id that isn't there, finished, or someone else's."""
+    control = fetch_control.find(user.id, source.id, request_id)
+    if control is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return control
+
+
+@router.get("/open-progress", response_model=OpenProgress)
+def open_progress(
+    request_id: str = Query(pattern=fetch_control.REQUEST_ID_PATTERN),
+    source: Source = Depends(readable_source(Capability.view)),
+    user: User = Depends(get_current_active_user),
+) -> OpenProgress:
+    """The progress of the user's own /open named `request_id`. Reads only
+    what that open recorded: no connector slot, nothing asked of the
+    source, not audited."""
+    control = _open_control(user, source, request_id)
+    return OpenProgress(expected=control.expected, written=control.written, phase=control.phase)
+
+
+@router.post("/open-cancel", status_code=status.HTTP_204_NO_CONTENT)
+def open_cancel(
+    request_id: str = Query(pattern=fetch_control.REQUEST_ID_PATTERN),
+    source: Source = Depends(readable_source(Capability.view)),
+    user: User = Depends(get_current_active_user),
+) -> Response:
+    """Stops the user's own /open named `request_id` at its next block: it
+    then answers 409 `read_cancelled`. Not audited by itself; the open it
+    stops isn't audited as file.open."""
+    _open_control(user, source, request_id).cancel.set()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # Incremental follow (#254). The start of the file identifies it: a rotated

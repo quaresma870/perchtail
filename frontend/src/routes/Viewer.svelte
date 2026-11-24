@@ -28,6 +28,14 @@
   import DiffPane from '../lib/components/DiffPane.svelte'
   import FindInDocumentPanel from '../lib/components/FindInDocumentPanel.svelte'
   import FindBar from '../lib/components/FindBar.svelte'
+  import OpenProgress from '../lib/components/OpenProgress.svelte'
+  import {
+    newRequestId,
+    PROGRESS_DELAY_MS,
+    PROGRESS_POLL_MS,
+    withRequestId,
+    type OpenProgressInfo,
+  } from '../lib/open-progress'
   import { compileFind, type FindSpec } from '../lib/find-in-document'
   import { countAppended, countMatches, matchIndexAt, type MatchCount } from '../lib/find-count'
   import ToolbarIcon from '../lib/components/ToolbarIcon.svelte'
@@ -387,6 +395,83 @@
     api.post(`/sources/${sourceId}/close`, { path, member }).catch(() => {})
   }
 
+  // Files being opened whole (lib/open-progress.ts): each /open carries a
+  // request id; after a second its progress is asked for every second and
+  // shown with Cancel.
+  interface PendingOpen {
+    requestId: string
+    sourceId: number
+    name: string
+    shown: boolean
+    progress: OpenProgressInfo | null
+    controller: AbortController
+    cancelled: boolean
+    timer: ReturnType<typeof setTimeout> | null
+  }
+  let pendingOpens: PendingOpen[] = []
+  $: shownOpens = pendingOpens.filter((p) => p.shown)
+
+  /** GET of an /open URL with progress and Cancel; null when the reader
+   * cancelled it (nothing to say about it). */
+  async function fetchOpen(url: string, sourceId: number, name: string): Promise<Response | null> {
+    const pending: PendingOpen = {
+      requestId: newRequestId(),
+      sourceId,
+      name,
+      shown: false,
+      progress: null,
+      controller: new AbortController(),
+      cancelled: false,
+      timer: null,
+    }
+    const touch = () => (pendingOpens = pendingOpens.map((p) => (p === pending ? pending : p)))
+    const poll = async () => {
+      pending.shown = true
+      touch()
+      try {
+        const answer = await fetch(
+          `/sources/${sourceId}/open-progress?${new URLSearchParams({ request_id: pending.requestId })}`,
+          { credentials: 'include' },
+        )
+        if (answer.ok) pending.progress = (await answer.json()) as OpenProgressInfo
+      } catch {
+        // the next tick asks again; the open itself says if the server is gone
+      }
+      if (pendingOpens.includes(pending) && !pending.cancelled) {
+        touch()
+        pending.timer = setTimeout(poll, PROGRESS_POLL_MS)
+      }
+    }
+    pending.timer = setTimeout(poll, PROGRESS_DELAY_MS)
+    pendingOpens = [...pendingOpens, pending]
+    try {
+      const response = await trackedFetch(withRequestId(url, pending.requestId), {
+        credentials: 'include',
+        signal: pending.controller.signal,
+      })
+      return pending.cancelled ? null : response
+    } catch (error) {
+      if (pending.cancelled) return null
+      throw error
+    } finally {
+      if (pending.timer) clearTimeout(pending.timer)
+      pendingOpens = pendingOpens.filter((p) => p !== pending)
+    }
+  }
+
+  /** Cancel: the server stops reading the source and frees what it held;
+   * the open ends here at once, without a message. */
+  function cancelOpen(pending: PendingOpen) {
+    pending.cancelled = true
+    if (pending.timer) clearTimeout(pending.timer)
+    fetch(`/sources/${pending.sourceId}/open-cancel?${new URLSearchParams({ request_id: pending.requestId })}`, {
+      method: 'POST',
+      credentials: 'include',
+    }).catch(() => undefined)
+    pending.controller.abort()
+    pendingOpens = pendingOpens.filter((p) => p !== pending)
+  }
+
   async function openFile(
     sourceId: number,
     sourceName: string,
@@ -423,7 +508,12 @@
     largeFile = null
     ensureSeverityPatterns(sourceId)
     try {
-      const response = await trackedFetch(openUrl(sourceId, path, member), { credentials: 'include' })
+      const response = await fetchOpen(openUrl(sourceId, path, member), sourceId, name)
+      if (response === null) {
+        // Cancelled: no tab, and nothing to say.
+        forgetSeverityWithoutTabs(sourceId)
+        return false
+      }
       if (!response.ok) {
         const problem = await readFetchFailure(response, name)
         // Gone from the source (#272): its folder is listed again, so it
@@ -965,9 +1055,13 @@
       return
     }
     try {
-      const response = await trackedFetch(openUrl(tab.sourceId, tab.path, tab.member), {
-        credentials: 'include',
-      })
+      const url = openUrl(tab.sourceId, tab.path, tab.member)
+      // Load whole file shows its progress, with Cancel, which keeps what
+      // the tab had.
+      const response = whole
+        ? await fetchOpen(url, tab.sourceId, tab.name)
+        : await trackedFetch(url, { credentials: 'include' })
+      if (response === null) return
       if (!response.ok) {
         const problem = await readFetchFailure(response, tab.name)
         if (problem.missing) {
@@ -1292,7 +1386,10 @@
   })
 
   onDestroy(() => {
-    // Tabs stay open in viewerState; only this view's timers stop.
+    // Tabs stay open in viewerState; only this view's timers stop. An open
+    // still in progress ends on its own, without asking for its progress.
+    for (const pending of pendingOpens) if (pending.timer) clearTimeout(pending.timer)
+    pendingOpens = []
     window.removeEventListener('keydown', handleKeydown)
     stopCount?.()
     if (countTimer) clearTimeout(countTimer)
@@ -1473,6 +1570,9 @@
         {/each}
       </div>
     {/if}
+    {#each shownOpens as pending (pending.requestId)}
+      <OpenProgress name={pending.name} progress={pending.progress} on:cancel={() => cancelOpen(pending)} />
+    {/each}
     {#if notice}
       <div class="notice" role="alert">
         <span>{notice.message}</span>

@@ -11,6 +11,7 @@ import winrm
 from winrm import exceptions as winrm_exc
 from winrm.protocol import Protocol as WinRMProtocol
 
+from app import fetch_control
 from app.collectors import base as collector_base
 from app.collectors import winrm_jea
 from app.collectors.base import DirEntry, PathOutsideBaseError, SourceNotAFileError
@@ -429,6 +430,7 @@ class _ReadStream:
             raise _UnexpectedOutput("more bytes than the file's size")
         self.dst.write(block)
         self.written += len(block)
+        fetch_control.wrote(len(block))
 
 
 def _close_quietly(call, *args, **kwargs) -> None:
@@ -450,6 +452,9 @@ def _command_output(session, shell_id: str, script: str, feed) -> tuple[int, int
     try:
         done, code = False, -1
         while not done:
+            # A Cancel of the /open this reads for stops it here, between two
+            # Receives; the cleanup below ends the command as on an error.
+            fetch_control.check()
             try:
                 out, err, code, done = protocol.get_command_output_raw(shell_id, command_id)
             except winrm_exc.WinRMOperationTimeoutError:
@@ -537,6 +542,7 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
     size = int(size_text.strip() or 0)
     if size > limit:
         raise collector_base.too_large(size, limit)
+    fetch_control.expect(size)
 
     try:
         with_envelope_fallback(

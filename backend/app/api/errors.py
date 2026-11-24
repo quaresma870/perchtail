@@ -19,6 +19,7 @@ from app.audit import record_audit_event
 from app.auth.rbac import ConcealedDenial, PermissionDenied
 from app.collectors.base import (
     LINK_TARGET_HIDDEN,
+    FetchCancelledError,
     FetchTooLargeError,
     PathOutsideBaseError,
     SourceError,
@@ -237,6 +238,18 @@ async def scratch_full(request: Request, exc: ScratchFullError) -> JSONResponse:
     )
 
 
+READ_CANCELLED = "read_cancelled"
+
+
+async def read_cancelled(request: Request, exc: FetchCancelledError) -> JSONResponse:
+    # The reader cancelled an /open (app/fetch_control.py): nothing was
+    # served, and the viewer, which asked for it, closes what it was opening.
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "The read was cancelled", "error_code": READ_CANCELLED},
+    )
+
+
 _SQLITE_INTEGER_OVERFLOW = "too large to convert to SQLite INTEGER"
 
 
@@ -265,4 +278,5 @@ def install(app: FastAPI) -> None:
     app.add_exception_handler(FetchTooLargeError, fetch_too_large)
     app.add_exception_handler(DecompressionLimitError, decompression_too_large)
     app.add_exception_handler(ScratchFullError, scratch_full)
+    app.add_exception_handler(FetchCancelledError, read_cancelled)
     app.add_exception_handler(OverflowError, integer_out_of_range)

@@ -27,6 +27,7 @@ from pathlib import Path
 from pypsrp.powershell import PowerShell, RunspacePool
 from pypsrp.wsman import WSMan
 
+from app import fetch_control
 from app.collectors import base as collector_base
 from app.collectors.base import DirEntry, PathOutsideBaseError
 from app.collectors.ranged import check_length, check_size
@@ -138,9 +139,13 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
         size = int(_call(pool, "Get-PerchTailSize", Path=path) or 0)
         if size > limit:
             raise collector_base.too_large(size, limit)
+        fetch_control.expect(size)
         written = 0
         with open(destination, "wb") as dst:
             while written < size:
+                # A Cancel of the /open stops the read between two blocks;
+                # _run closes the runspace pool as on an error.
+                fetch_control.check()
                 block = base64.b64decode(
                     _call(
                         pool,
@@ -154,6 +159,7 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
                     break  # the file shrank (rotated) while being read
                 dst.write(block)
                 written += len(block)
+                fetch_control.wrote(len(block))
 
     try:
         _run(source, read)

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import smbclient
 
+from app import fetch_control
 from app.collectors import base as collector_base
 from app.collectors.base import DirEntry, PathOutsideBaseError, SourceNotAFileError
 from app.collectors.ranged import check_length, check_size
@@ -198,6 +199,7 @@ def fetch_file(source: Source, relative_path: str, destination: Path) -> None:
         size = _file_stat(remote_path, relative_path, kwargs).st_size
         if size > limit:
             raise collector_base.too_large(size, limit)
+        fetch_control.expect(size)
         # share_access="rwd": a read-only open that tolerates other readers,
         # writers and deleters (.NET FileShare.ReadWrite | Delete), so the
         # live log a service has open for writing can be read (#166).

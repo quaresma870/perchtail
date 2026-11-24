@@ -130,6 +130,8 @@ A file bigger than **Open from the end above** (Settings → Explorer and limits
 
 Until the start of the file is loaded, the line numbers are hidden, and **Go to line** and the toolbar's Copy lines are off ("Line numbers need the whole file"), because the lines aren't counted from the start of the file. Find, Find all, highlights, bookmarks and the next and previous problem work on what is loaded; Find all and Compare say "In the loaded part only". Tail goes on from the end. **Reload** reads the end again. `.gz` files and files inside archives always open whole.
 
+When opening a file whole takes more than a second, a bar shows how much of it has been copied from the source, for example "128 MB of 300 MB" ("Redacting…" while redaction runs on it, or only "128 MB" when the source didn't give its size), with **Cancel**. Cancel stops the read on the source and closes what was opening, without a message; for **Load whole file**, the tab keeps the end it had. Over WinRM the bar moves in steps of 3 to 4 MB, the size of what PowerShell sends at a time.
+
 Opened whole, a file over 200 MB opens only after a warning, which offers:
 
 - **Tail the end**: loads the last 1 MB and starts Tail, with the same bar. Not offered for `.gz` files or files inside archives.

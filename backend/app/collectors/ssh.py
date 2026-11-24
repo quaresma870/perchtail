@@ -10,6 +10,7 @@ from pathlib import Path
 
 import paramiko
 
+from app import fetch_control
 from app.collectors import base as collector_base
 from app.collectors.base import (
     DirEntry,
@@ -415,6 +416,7 @@ def fetch_file(
             size = attributes.st_size or 0
             if size > limit:
                 raise collector_base.too_large(size, limit)
+            fetch_control.expect(size)
             with sftp.open(remote_path, "rb") as remote:
                 # Asks for the listed size ahead, as SFTPClient.get does;
                 # anything past it is read on demand and still counted.
