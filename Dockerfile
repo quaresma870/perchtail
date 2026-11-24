@@ -54,6 +54,10 @@ COPY agent-dist/ /app/agent-binaries/
 # a path relative to itself, so this placement isn't arbitrary.
 COPY --from=frontend-build /frontend/dist /app/frontend/dist
 
+# The project's license and the licenses of third-party material it ships
+# (THIRD-PARTY-NOTICES.md: the Settings sidebar icons in the bundle).
+COPY LICENSE THIRD-PARTY-NOTICES.md /app/
+
 # Everything stateful lives under /data, the volume docker-compose.yml
 # mounts, in one directory per kind of data (#172) so each can be mounted
 # on its own: /data/db holds what must be backed up (database, credential

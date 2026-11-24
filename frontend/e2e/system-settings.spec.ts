@@ -29,7 +29,15 @@ test('settings sidebar: grouped sections, the current page marked, the old Syste
   for (const group of ['Sources', 'Access', 'Content', 'Operations', 'Audit']) {
     await expect(sidebar.getByRole('list', { name: group, exact: true })).toBeVisible()
   }
-  const current = sidebar.getByRole('link', { name: 'Explorer and limits' })
+  // A line between sections, none before the first or after the last; each
+  // link has its decorative icon, the name stays the page's.
+  await expect(sidebar.getByRole('separator')).toHaveCount(4)
+  const groupsBox = sidebar.locator('.nav-groups')
+  await expect(groupsBox.locator(':scope > :first-child')).toHaveClass(/nav-group/)
+  await expect(groupsBox.locator(':scope > :last-child')).toHaveClass(/nav-group/)
+  await expect(groupsBox.locator(':scope > .nav-group + .nav-group')).toHaveCount(0)
+  const current = sidebar.getByRole('link', { name: 'Explorer and limits', exact: true })
+  await expect(current.locator('svg[aria-hidden="true"]')).toHaveCount(1)
   await expect(current).toHaveAttribute('aria-current', 'page')
   await expect(sidebar.locator('[aria-current="page"]')).toHaveCount(1)
 
@@ -89,6 +97,8 @@ test('settings sidebar: a user with create_source only sees the Sources section'
   const sidebar = page.getByRole('navigation', { name: 'Settings' })
   await expect(sidebar.getByRole('link')).toHaveText(['Sources', 'Folders', 'Agents'])
   await expect(sidebar.getByRole('list')).toHaveCount(1)
+  // A single section has no line.
+  await expect(sidebar.getByRole('separator')).toHaveCount(0)
 })
 
 test('system settings: alert interval, monitoring token generation', async ({ page }) => {

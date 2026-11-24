@@ -4,9 +4,11 @@
   import { currentHash } from '../hash'
   import { systemSettings } from '../settings'
   import { isSettingsPageActive, settingsNavGroups } from '../settings-nav'
+  import SettingsIcon from './SettingsIcon.svelte'
 
-  // The Settings sidebar: a list of links per group from 768 px up, a select
-  // with a group per section below that (see SettingsLayout.svelte).
+  // The Settings sidebar: a list of links per group, each with its icon, and a
+  // line between groups, from 768 px up; a select with a group per section
+  // below that (see SettingsLayout.svelte).
   $: groups = settingsNavGroups($currentUser, $systemSettings.audit_view_enabled)
   $: activePath =
     groups
@@ -21,8 +23,11 @@
 
 <nav class="settings-nav" aria-label="Settings">
   <div class="nav-groups">
-    {#each groups as group (group.label)}
+    {#each groups as group, index (group.label)}
       {@const titleId = `settings-nav-${group.label.toLowerCase()}`}
+      {#if index > 0}
+        <hr class="nav-separator" />
+      {/if}
       <div class="nav-group">
         <div class="nav-group-title" id={titleId}>{group.label}</div>
         <ul aria-labelledby={titleId}>
@@ -31,7 +36,8 @@
               <a
                 href={`#${page.path}`}
                 class:active={page.path === activePath}
-                aria-current={page.path === activePath ? 'page' : undefined}>{page.label}</a
+                aria-current={page.path === activePath ? 'page' : undefined}
+                ><SettingsIcon name={page.icon} /><span>{page.label}</span></a
               >
             </li>
           {/each}
@@ -61,8 +67,12 @@
   .nav-groups {
     display: flex;
     flex-direction: column;
-    gap: 1.1rem;
     padding: 1.25rem 0.75rem;
+  }
+  .nav-separator {
+    border: 0;
+    border-top: 1px solid var(--border-soft);
+    margin: 8px 0.6rem 6px;
   }
   .nav-group-title {
     font-size: 0.72rem;
@@ -81,7 +91,9 @@
     gap: 0.1rem;
   }
   a {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
     color: var(--text-muted);
     text-decoration: none;
     font-size: 0.86rem;
