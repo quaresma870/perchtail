@@ -8,6 +8,9 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+### Security
+- The push agent uses a `gorilla/websocket` commit that fixes GO-2026-6278: the mask key of each WebSocket frame the agent sent came from a weak random generator. Over `wss://`, which the agent requires unless `PERCHTAIL_ALLOW_INSECURE=true`, TLS already protects the frames. The agent now also depends on `golang.org/x/net`, through `gorilla/websocket`.
+
 ## [0.7.0] - 2026-11-23
 
 The release after 0.6.4. It carries everything from the pre-releases 0.7.0-rc.1 to rc.4, whose sections in [CHANGELOG.md](https://github.com/quaresma870/perchtail/blob/v0.7.0/CHANGELOG.md) list every change; the code is the one tested in the lab as rc.4, on Linux, Windows (SMB, WinRM, JEA) and push agent sources. PerchTail is licensed under the AGPL-3.0 from this release on (see Changed in rc.2).
