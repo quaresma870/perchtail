@@ -16,6 +16,7 @@ release ships (0.x releases may include breaking changes between minors).
 - On a push agent, expanding a `.zip`, `.tar.gz` or `.tgz` in the explorer and opening, reloading or downloading a file inside one are now done on the agent's host also when redaction doesn't apply to the source: the agent lists the archive and sends only the file asked for, instead of sending the whole archive to the server first. The rules are still checked on the server for each file inside, before it is asked for. A whole archive downloaded, a folder ZIP and a plain `.gz` file are still sent whole. As with redaction on, a file inside a `.zip` compressed with a method the agent can't read now answers "The source returned an error" instead of the 409 `archive_member_unreadable`.
 
 ### Fixed
+- Settings → Explorer and limits: the text under the Limits card's title, and its Save limits button, were against the card's left edge; they now line up with the rest of the card.
 - Switching tabs, coming back to the Viewer from another page, or highlighting patterns arriving no longer rebuilds the open file, which froze the page for seconds with large files; each tab also keeps its place and selection.
 - A push agent's old connection, closed when the agent reconnects (for example after an upgrade from the portal), no longer logs an error with a traceback.
 - Listing, opening or downloading from an archive that doesn't exist on a local-disk source answers 404 instead of a server error.
