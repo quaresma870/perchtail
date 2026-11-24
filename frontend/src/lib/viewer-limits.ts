@@ -16,6 +16,76 @@ export const TAIL_MAX_LINES = 200_000
  * (RANGE_MAX_BYTES on the server). */
 export const TAIL_START_BYTES = 1024 * 1024
 
+/** "Load earlier" stops once a tab opened at its end holds this much of
+ * the file: past it, Load whole file. */
+export const MAX_LOADED_EARLIER_BYTES = 32 * 1024 * 1024
+
+const MB = 1024 * 1024
+
+/** Whether a file opens at its end (its last TAIL_START_BYTES, through
+ * Follow) rather than whole: a plain file whose listed size is over
+ * `thresholdMb` (the `open_from_end_mb` System setting; 0 opens every file
+ * whole). A .gz file or an archive member is decompressed on the server and
+ * can't be read from an offset: it always opens whole. */
+export function opensFromEnd(
+  size: number | null | undefined,
+  thresholdMb: number | null | undefined,
+  name: string,
+  member: string | null,
+): boolean {
+  if (typeof size !== 'number' || !Number.isFinite(size)) return false
+  if (typeof thresholdMb !== 'number' || !Number.isFinite(thresholdMb) || thresholdMb <= 0) return false
+  if (member !== null || name.toLowerCase().endsWith('.gz')) return false
+  return size > thresholdMb * MB
+}
+
+/** The window "Load earlier" reads before `start` (the byte where what a
+ * tab holds begins): at most TAIL_START_BYTES, never before 0. */
+export function earlierWindow(start: number, bytes = TAIL_START_BYTES): { offset: number; end: number } {
+  return { offset: Math.max(0, start - bytes), end: start }
+}
+
+/** Why "Load earlier" can't run for a tab now, or '' when it can: Tail
+ * drops the oldest lines (TAIL_MAX_LINES), and what a tab loads this way
+ * stops at MAX_LOADED_EARLIER_BYTES. Lines Tail already dropped can't be
+ * placed either. */
+export function loadEarlierBlocked(
+  tab: { following: boolean; byteSize: number; startOffset?: number; droppedLines?: number },
+  max = MAX_LOADED_EARLIER_BYTES,
+): string {
+  if (tab.following) return 'Stop Tail to load earlier lines'
+  if ((tab.droppedLines ?? 0) > 0 || tab.byteSize - (tab.startOffset ?? 0) >= max) {
+    return 'Load the whole file to see more'
+  }
+  return ''
+}
+
+/** Whether a tab holds only part of its file from the end: its start isn't
+ * loaded, so line numbers aren't the file's. */
+export function startNotLoaded(tab: { startOffset?: number } | null | undefined): boolean {
+  return (tab?.startOffset ?? 0) > 0
+}
+
+/** Moves bookmarks (1-indexed lines) down by the `added` lines put above
+ * them. */
+export function shiftBookmarksDown(bookmarks: number[], added: number): number[] {
+  if (added <= 0) return bookmarks
+  return bookmarks.map((line) => line + added)
+}
+
+/** Where what a window read from `offset` shows starts, when it isn't
+ * redacted: past its first, cut line unless it starts the file. `bytes`
+ * keeps everything when no line ends in it (a line longer than a window:
+ * the next window, which ends where this one starts, holds its start). A
+ * newline that is only the window's last byte ends that long line, not one
+ * that starts in the window, so it is kept too. */
+export function cutToFirstLine(bytes: Uint8Array, offset: number): { bytes: Uint8Array; start: number } {
+  if (offset <= 0) return { bytes, start: 0 }
+  const newline = bytes.indexOf(10)
+  if (newline === -1 || newline === bytes.length - 1) return { bytes, start: offset }
+  return { bytes: bytes.subarray(newline + 1), start: offset + newline + 1 }
+}
+
 export function tabLimitReached(openTabs: number, max = MAX_OPEN_TABS): boolean {
   return openTabs >= max
 }

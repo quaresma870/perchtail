@@ -64,6 +64,7 @@ _DEFAULTS = {
     "concurrency_per_source": 4,
     "concurrency_user_transfers": 2,
     "listing_max_entries": 5000,
+    "open_from_end_mb": 50,
     "backup_interval_hours": 24,
     "redaction_enabled": False,
     "redaction_downloads": True,
@@ -258,6 +259,30 @@ def test_the_audit_entry_records_old_and_new_values(session, client_for):
     assert entry.event_metadata["audit_folder_listings"] == {"old": True, "new": False}
 
 
+def test_open_from_end_defaults_to_50_and_its_change_is_audited(session, client_for):
+    from app import system_settings
+
+    """Files above `open_from_end_mb` open at their end in the viewer: 50 MB
+    unless changed, 0 turns it off, and a change is audited like the
+    other settings, with the values before and after."""
+    from app.auth.models import AuditLog
+    from sqlmodel import select
+
+    admin = _make_user(session, global_capabilities=[GlobalCapability.manage_system_settings])
+    client = client_for(admin)
+    assert client.get("/system-settings").json()["open_from_end_mb"] == 50
+    assert system_settings.get_int(session, "open_from_end_mb") == 50
+
+    response = client.patch("/system-settings", json={"open_from_end_mb": 0})
+    assert response.status_code == 200
+    assert response.json()["open_from_end_mb"] == 0
+    assert system_settings.get_int(session, "open_from_end_mb") == 0
+    [entry] = session.exec(
+        select(AuditLog).where(AuditLog.action == "system_settings.update")
+    ).all()
+    assert entry.event_metadata["open_from_end_mb"] == {"old": 50, "new": 0}
+
+
 def test_a_secret_setting_is_recorded_only_as_changed(session, client_for, monkeypatch):
     from app.auth.models import AuditLog
     from sqlmodel import select
@@ -381,6 +406,13 @@ def test_name_index_interval_is_kept_between_5_minutes_and_a_day(session, client
         ({"listing_max_entries": 100}, 200),
         ({"listing_max_entries": 99}, 422),
         ({"listing_max_entries": 20001}, 422),
+        # Opening large files at their end: 0 turns it off.
+        ({"open_from_end_mb": 0}, 200),
+        ({"open_from_end_mb": 1}, 200),
+        ({"open_from_end_mb": 100000}, 200),
+        ({"open_from_end_mb": -1}, 422),
+        ({"open_from_end_mb": 100001}, 422),
+        ({"open_from_end_mb": 1.5}, 422),
         ({"backup_interval_hours": 24}, 200),
         ({"backup_interval_hours": 168}, 200),
         ({"backup_interval_hours": -1}, 422),

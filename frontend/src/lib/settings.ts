@@ -33,6 +33,7 @@ export const systemSettings = writable<SystemSettings>({
   concurrency_per_source: 4,
   concurrency_user_transfers: 2,
   listing_max_entries: 5000,
+  open_from_end_mb: 50,
   backup_interval_hours: 0,
   redaction_enabled: false,
   redaction_downloads: true,

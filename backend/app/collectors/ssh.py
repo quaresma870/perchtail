@@ -447,8 +447,8 @@ def read_range(
     target_check: TargetCheck = None,
 ) -> collector_base.RangeRead:
     """Incremental follow (#254): the file's size, its first `head` bytes and
-    up to `length` bytes from `offset`, read with an SFTP seek -- nothing before the offset is
-    transferred."""
+    up to `length` bytes from `offset`, read as pipelined SFTP requests
+    (_read_range_readv) -- nothing before the offset is transferred."""
     client = _connect(source)
     try:
         sftp = _open_sftp(client)
@@ -456,7 +456,7 @@ def read_range(
             remote_path, _ = _resolve_file(sftp, source, relative_path, target_check)
             with sftp.open(remote_path, "rb") as f:
                 size = f.stat().st_size or 0
-                return collector_base.read_range_from(f, size, offset, length, head)
+                return _read_range_readv(f, size, offset, length, head)
         finally:
             sftp.close()
     finally:
@@ -466,6 +466,42 @@ def read_range(
 # What one SFTP read request asks for in a ranged read: paramiko splits each
 # piece into requests of its own size and sends them all before waiting.
 _RANGED_PIECE = 1024 * 1024
+
+
+def _read_range_readv(
+    f: paramiko.SFTPFile, size: int, offset: int, length: int, head: int
+) -> collector_base.RangeRead:
+    """read_range_from over SFTP: the same bounds (the head at most
+    RANGE_MAX_HEAD_BYTES, the range at most RANGE_MAX_BYTES and never past
+    `size`), but read with SFTPFile.readv, which sends every request before
+    waiting for the first answer, instead of a seek and a read that wait for
+    each 32 KiB request in turn. The head and the range go out together
+    unless they overlap; from offset 0 the head is the range's start."""
+    head_length = min(head, size, collector_base.RANGE_MAX_HEAD_BYTES) if head > 0 else 0
+    data_length = (
+        min(length, size - offset, collector_base.RANGE_MAX_BYTES)
+        if offset < size and length > 0
+        else 0
+    )
+    data_chunk = [(offset, data_length)] if data_length else []
+    if not head_length:
+        head_bytes, data = b"", _readv_one(f, data_chunk)
+    elif offset == 0 and data_length >= head_length:
+        data = _readv_one(f, data_chunk)
+        head_bytes = data[:head_length]
+    elif offset >= head_length:
+        blocks = list(f.readv([(0, head_length), *data_chunk]))
+        head_bytes, data = blocks[0], (blocks[1] if data_chunk else b"")
+    else:
+        # The head overlaps the range: its own requests, then the range's.
+        head_bytes = _readv_one(f, [(0, head_length)])
+        data = _readv_one(f, data_chunk)
+    return collector_base.RangeRead(size, head_bytes, data)
+
+
+def _readv_one(f: paramiko.SFTPFile, chunks: list[tuple[int, int]]) -> bytes:
+    """The one block `chunks` asks for, read with readv; b"" for none."""
+    return b"".join(f.readv(chunks)) if chunks else b""
 
 
 class _SFTPRemote:

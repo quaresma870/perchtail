@@ -91,6 +91,14 @@ export const LIMIT_FIELDS = [
     max: 20000,
     hint: 'The most entries a folder or archive shows in the explorer. A bigger folder shows the first ones and says so; the search finds the rest.',
   },
+  {
+    key: 'open_from_end_mb',
+    label: 'Open from the end above',
+    unit: 'MB',
+    min: 0,
+    max: 100000,
+    hint: 'Files bigger than this open at their last 1 MB in the viewer, with Load earlier and Load whole file. Compressed files and archive members always open whole. 0 opens every file whole.',
+  },
 ] as const
 export type LimitFields = Pick<SystemSettings, (typeof LIMIT_FIELDS)[number]['key']>
 

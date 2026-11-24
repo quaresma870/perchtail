@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Page } from '@playwright/test'
+import { LARGE_FILE_NAME, largeFileSource } from './large-file'
 import { confirmPopup } from './popups'
 
 // Runs axe-core on the main pages (#377) and fails on serious or critical
@@ -90,6 +91,24 @@ test('accessibility: viewer with a file open', async ({ page }) => {
   await expectNoSeriousViolations(page, (axe) =>
     axe.include('html').exclude('.cm-scroller').include('.cm-scroller > *'),
   )
+})
+
+// A file opened at its end, with the bar that offers Load earlier and Load
+// whole file. A local-disk source, not the SSH/SMB test servers.
+test('accessibility: viewer with a file opened at its end', async ({ page }) => {
+  const { sourceId, cleanUp } = await largeFileSource(page.request, `e2e-a11y-end-${Date.now()}`)
+  try {
+    await page.goto(`/#/viewer/${sourceId}`)
+    await page.locator('.tree-body').getByRole('button', { name: LARGE_FILE_NAME }).click({ timeout: 20_000 })
+    await expect(page.getByTestId('partial-bar')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Load earlier', exact: true })).toBeEnabled()
+    await expectNoSeriousViolations(page, (axe) =>
+      axe.include('html').exclude('.cm-scroller').include('.cm-scroller > *'),
+    )
+  } finally {
+    await page.goto('/#/viewer')
+    await cleanUp()
+  }
 })
 
 test('accessibility: Settings -> Sources', async ({ page }) => {

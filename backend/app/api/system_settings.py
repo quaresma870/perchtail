@@ -64,6 +64,8 @@ class SystemSettingsPublic(BaseModel):
     concurrency_user_transfers: int
     # Listing cap (#347).
     listing_max_entries: int
+    # Files above this many MB open at their end in the viewer; 0 = off.
+    open_from_end_mb: int
     # Scheduled backup (#334, app/backup.py), hours; 0 = off.
     backup_interval_hours: int
     # Redaction (#382, #249): changed by super admins only.
@@ -97,6 +99,8 @@ CONCURRENCY_USER_TRANSFERS_MAX = 32
 # Listing cap (#347): below an agent's own cap (collectors/agent.py).
 LISTING_MAX_ENTRIES_MIN = 100
 LISTING_MAX_ENTRIES_MAX = 20000
+# Opening large files at their end: 0 (off) to 100000 MB.
+OPEN_FROM_END_MB_MAX = 100_000
 
 
 # The shortest audit retention allowed, in days; 0 (keep forever) is also
@@ -156,6 +160,8 @@ class SystemSettingsUpdate(BaseModel):
     listing_max_entries: int | None = Field(
         default=None, ge=LISTING_MAX_ENTRIES_MIN, le=LISTING_MAX_ENTRIES_MAX
     )
+    # 0 = every file opens whole.
+    open_from_end_mb: int | None = Field(default=None, ge=0, le=OPEN_FROM_END_MB_MAX)
     # 0 = off; otherwise 1 hour to a week.
     backup_interval_hours: int | None = Field(default=None, ge=0, le=168)
     # Super admins only (_check_redaction_settings).
@@ -186,6 +192,7 @@ _CONCURRENCY_INTS = (
     "concurrency_per_source",
     "concurrency_user_transfers",
     "listing_max_entries",
+    "open_from_end_mb",
 )
 
 

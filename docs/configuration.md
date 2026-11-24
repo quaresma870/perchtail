@@ -185,6 +185,7 @@ The limits are saved together with **Save limits**. A request over a limit is an
 | `concurrency_per_source` | **At once on one source** | `4` | 1 to 64, and not above `concurrency_global` | The same, on any one source, so one busy server can't take every slot. |
 | `concurrency_user_transfers` | **Downloads per user** | `2` | 1 to 32 | Downloads and folder ZIPs one person may have in progress. |
 | `listing_max_entries` | **Entries per listing** | `5000` | 100 to 20000 | The most entries a folder or archive listing shows. A bigger folder shows the first ones and says so; the search finds the rest. |
+| `open_from_end_mb` | **Open from the end above** | `50` | `0` (off), or 1 to 100000 MB | A file bigger than this, as listed, opens in the viewer at its last 1 MB, read through Tail without copying the file to scratch, with **Load earlier** and **Load whole file**. `.gz` files and files inside archives always open whole. `0` opens every file whole, with the warning above 200 MB. |
 
 ### Settings → Monitoring
 

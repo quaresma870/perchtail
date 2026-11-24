@@ -89,6 +89,9 @@
   /** The find bar's search (#299), or null while it's closed: highlighted
    * in the editor and used by next/previous (Enter, F3). */
   export let find: FindSpec | null = null
+  /** False while the tab holds only the end of its file: its line numbers
+   * wouldn't be the file's, so the gutter hides them. */
+  export let lineNumbers = true
 
   let host: HTMLDivElement
   let view: EditorView | null = null
@@ -171,13 +174,31 @@
     return scrollHeight - clientHeight - scrollTop < BOTTOM_THRESHOLD_PX
   }
 
-  // Text appended at the end and compartments that changed, in one
-  // transaction: the document, the reader's place and selection stay.
+  // Text added at the end or at the start and compartments that changed,
+  // in one transaction: the document, the reader's place and selection
+  // stay. Text put above what the reader sees ("Load earlier") pushes it
+  // down, even from the very top: the line at the top of the screen is
+  // noted before, and the scroll moves by as much as that line moved.
   function applyPlan(v: EditorView, plan: SyncPlan, from: EditorInputs) {
     const effects = plan.reconfigure.map((part) => compartments[part].reconfigure(partExtension(part)))
-    const changes =
-      plan.action === 'append' ? { from: v.state.doc.length, insert: content.slice(from.content.length) } : undefined
-    if (changes || effects.length > 0) v.dispatch({ changes, effects })
+    let changes: { from: number; insert: string } | undefined
+    if (plan.action === 'append') changes = { from: v.state.doc.length, insert: content.slice(from.content.length) }
+    else if (plan.action === 'prepend') changes = { from: 0, insert: content.slice(0, content.length - from.content.length) }
+    if (!changes && effects.length === 0) return
+    if (plan.action !== 'prepend' || !changes || !v.dom.isConnected) {
+      v.dispatch({ changes, effects })
+      return
+    }
+    const scrollTop = v.scrollDOM.scrollTop
+    const line = v.lineBlockAtHeight(scrollTop)
+    const moved = line.from + changes.insert.length
+    v.dispatch({ changes, effects })
+    v.requestMeasure({
+      read: (view) => view.lineBlockAt(moved).top - line.top,
+      write: (shift, view) => {
+        view.scrollDOM.scrollTop = scrollTop + shift
+      },
+    })
   }
 
   // Scrolls now and again once CodeMirror has measured the document, which
@@ -487,7 +508,7 @@
   })
 </script>
 
-<div class="cm-host" bind:this={host}></div>
+<div class="cm-host" class:no-line-numbers={!lineNumbers} bind:this={host}></div>
 
 <style>
   .cm-host {
@@ -498,5 +519,9 @@
   .cm-host :global(.cm-editor) {
     height: 100%;
     font-size: 0.85rem;
+  }
+  /* CodeMirror's own gutter style is display: flex !important. */
+  .no-line-numbers :global(.cm-lineNumbers) {
+    display: none !important;
   }
 </style>

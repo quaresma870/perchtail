@@ -22,6 +22,8 @@
    * from the find bar (#299). */
   export let content = ''
   export let spec: FindSpec
+  /** Said next to the count, e.g. that only part of the file is loaded. */
+  export let note = ''
 
   let resultsEl: HTMLDivElement
 
@@ -255,6 +257,9 @@
             .join(', ')}</span
         >{/if}</span
     >
+    {#if note}
+      <span class="count note">{note}</span>
+    {/if}
     <span class="count">
       {#if lines.length === 0}
         No matches

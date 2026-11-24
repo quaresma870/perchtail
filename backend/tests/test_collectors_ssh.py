@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import app.collectors.ssh as ssh_module
 import paramiko
 import pytest
+from app.collectors import base as collector_base
 from app.collectors.base import LinkTargetHiddenError
 from app.models import PatternKind, Protocol, Rule, RuleType, Source
 from structlog.testing import capture_logs
@@ -732,8 +733,9 @@ def test_sibling_directory_with_a_shared_prefix_is_outside(monkeypatch, tmp_path
 
 
 class _SeekableRemoteFile(io.BytesIO):
-    """What paramiko's SFTPFile offers read_range: stat, seek and read,
-    recording the offset so a test can tell nothing before it was read."""
+    """What paramiko's SFTPFile offers read_range: stat, seek, read and
+    readv, recording each read so a test can tell what was asked for and
+    that nothing before the offset was read."""
 
     def __init__(self, content: bytes, reads: list):
         super().__init__(content)
@@ -743,8 +745,14 @@ class _SeekableRemoteFile(io.BytesIO):
         return FakeAttr("app.log", False, len(self.getvalue()))
 
     def read(self, size=-1):
-        self._reads.append((self.tell(), size))
+        self._reads.append(("read", self.tell(), size))
         return super().read(size)
+
+    def readv(self, chunks):
+        self._reads.append(("readv", list(chunks)))
+        content = self.getvalue()
+        for offset, length in chunks:
+            yield content[offset : offset + length]
 
 
 class _RangeSFTPClient(FakeSFTPClient):
@@ -762,11 +770,63 @@ def test_read_range_reads_only_from_the_offset(monkeypatch):
     monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
 
     assert ssh_module.read_range(_source(), "app.log", 9, 1000, 4) == (18, b"line", b"line two\n")
-    # The head, then the range: nothing in between is read.
-    assert sftp.reads == [(0, 4), (9, 9)]
+    # The head and the range in one readv: nothing in between is read.
+    assert sftp.reads == [("readv", [(0, 4), (9, 9)])]
     sftp.reads.clear()
     assert ssh_module.read_range(_source(), "app.log", 18, 1000) == (18, b"", b"")
+    assert sftp.reads == []
     assert sftp.closed
+
+
+@pytest.mark.parametrize(
+    "offset,length,head",
+    [
+        (0, 1000, 0),
+        (0, 1000, 4),
+        (0, 2, 4),
+        (2, 1000, 4),
+        (4, 1000, 4),
+        (9, 5, 64),
+        (17, 1000, 64),
+        (18, 1000, 64),
+        (30, 1000, 64),
+        (5, 0, 4),
+    ],
+)
+def test_read_range_with_readv_returns_what_a_seek_and_read_did(monkeypatch, offset, length, head):
+    """SSH ranged reads go out as pipelined requests (SFTPFile.readv), never
+    seek and read, and return the same size, head and bytes as the shared
+    read_range_from, whatever the offset, length and head."""
+    content = b"line one\nline two\n"
+    sftp = _RangeSFTPClient({"/var/log/appname/app.log": content})
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    got = ssh_module.read_range(_source(), "app.log", offset, length, head)
+
+    expected = collector_base.read_range_from(
+        io.BytesIO(content), len(content), offset, length, head
+    )
+    assert got == expected
+    assert all(read[0] == "readv" for read in sftp.reads)
+    for read in sftp.reads:
+        for start, size in read[1]:
+            # Only the head and the range itself are asked for.
+            assert size > 0
+            assert start in (0, offset)
+
+
+def test_read_range_with_readv_keeps_the_bounds(monkeypatch):
+    """A range is never more than RANGE_MAX_BYTES, nor the head more than
+    RANGE_MAX_HEAD_BYTES, as with seek and read."""
+    content = b"x" * (collector_base.RANGE_MAX_BYTES + 10_000)
+    sftp = _RangeSFTPClient({"/var/log/appname/app.log": content})
+    monkeypatch.setattr(ssh_module, "_connect", lambda source: FakeSSHClient(sftp))
+
+    size, head, data = ssh_module.read_range(_source(), "app.log", 100, 2**40, 10**6)
+
+    assert size == len(content)
+    assert len(head) == collector_base.RANGE_MAX_HEAD_BYTES
+    assert len(data) == collector_base.RANGE_MAX_BYTES
 
 
 def test_read_range_refuses_a_link_out_of_the_base(monkeypatch):

@@ -42,6 +42,7 @@
     decodeWithPartial,
     followUrl,
     readFollowHeaders,
+    readFollowStart,
     readRedactionHeaders,
     tailIntervalMs,
   } from '../lib/follow'
@@ -65,6 +66,7 @@
     closeTabs,
     closeTabsOfHiddenSources as closeHiddenSourceTabs,
     explorerExpanded,
+    forgetSeverityWithoutTabs,
     setExpanded,
     sourceHue,
     viewerState,
@@ -74,9 +76,14 @@
   import {
     capTailBuffer,
     countNewlines,
-    dropPartialFirstLine,
+    cutToFirstLine,
+    earlierWindow,
     isLargeFile,
+    loadEarlierBlocked,
+    opensFromEnd,
     shiftBookmarks,
+    shiftBookmarksDown,
+    startNotLoaded,
     tabLimitMessage,
     tabLimitReached,
     TAIL_MAX_LINES,
@@ -214,7 +221,8 @@
   let copyStatusTimer: ReturnType<typeof setTimeout> | null = null
   let formatError = ''
   let compareArmed = false
-  let compareWith: { name: string; content: string } | null = null
+  // `partial`: another tab that holds only the end of its file.
+  let compareWith: { name: string; content: string; partial?: boolean } | null = null
   let compareKey = 0
 
   $: tabs = $viewerState.tabs
@@ -387,6 +395,7 @@
     name: string,
     size?: number,
     force = false,
+    fromEnd = true,
   ): Promise<boolean> {
     const key = tabKey(sourceId, path, member)
     if (tabs.some((t) => t.key === key)) {
@@ -398,6 +407,13 @@
     if (tabLimitReached(tabs.length)) {
       notice = { message: tabLimitMessage(), retryable: false }
       return false
+    }
+    // Over the `open_from_end_mb` System setting, a plain file opens at its
+    // end, without Tail and without copying it whole first; `fromEnd` is
+    // false when that was refused (follow_unsupported).
+    if (fromEnd && size !== undefined && opensFromEnd(size, $systemSettings.open_from_end_mb, name, member)) {
+      largeFile = null
+      return openEnd(sourceId, sourceName, path, name, size, false)
     }
     if (!force && size !== undefined && isLargeFile(size)) {
       largeFile = { sourceId, sourceName, path, member, name, size }
@@ -416,9 +432,10 @@
         notice = {
           ...problem,
           retry: problem.retryable
-            ? () => openFile(sourceId, sourceName, path, member, name, size, true)
+            ? () => openFile(sourceId, sourceName, path, member, name, size, true, fromEnd)
             : undefined,
         }
+        forgetSeverityWithoutTabs(sourceId)
         return false
       }
       const bytes = new Uint8Array(await response.arrayBuffer())
@@ -463,14 +480,17 @@
       notice = {
         message: `${name}: the server could not be reached.`,
         retryable: true,
-        retry: () => openFile(sourceId, sourceName, path, member, name, size, true),
+        retry: () => openFile(sourceId, sourceName, path, member, name, size, true, fromEnd),
       }
+      forgetSeverityWithoutTabs(sourceId)
       return false
     }
   }
 
   // A file over LARGE_FILE_BYTES waiting for the reader's choice (#347):
   // its end with Tail, a download, or the whole file anyway.
+  // `replaceKey`: Load whole file of that tab, which holds only the end of
+  // the file, rather than a new tab.
   let largeFile: {
     sourceId: number
     sourceName: string
@@ -478,10 +498,14 @@
     member: string | null
     name: string
     size: number
+    replaceKey?: string
   } | null = null
   $: largeFileSource = largeFile ? (allSources.find((s) => s.id === largeFile?.sourceId) ?? null) : null
   $: largeFileCanTail =
-    largeFile !== null && largeFile.member === null && !largeFile.name.toLowerCase().endsWith('.gz')
+    largeFile !== null &&
+    largeFile.replaceKey === undefined &&
+    largeFile.member === null &&
+    !largeFile.name.toLowerCase().endsWith('.gz')
   $: largeFileCanDownload = largeFileSource?.my_capabilities?.includes('download') ?? false
   $: largeFileDownloadHref = largeFile
     ? `/sources/${largeFile.sourceId}/download?${new URLSearchParams({ path: largeFile.path, ...(largeFile.member ? { member: largeFile.member } : {}) }).toString()}`
@@ -489,9 +513,14 @@
 
   function openLargeFileAnyway() {
     if (!largeFile) return
-    const { sourceId, sourceName, path, member, name, size } = largeFile
+    const { sourceId, sourceName, path, member, name, size, replaceKey } = largeFile
     largeFile = null
-    openFile(sourceId, sourceName, path, member, name, size, true)
+    if (replaceKey !== undefined) {
+      const tab = tabs.find((t) => t.key === replaceKey)
+      if (tab) loadWholeFile(tab, true)
+      return
+    }
+    openFile(sourceId, sourceName, path, member, name, size, true, false)
   }
 
   function tailLargeFile() {
@@ -508,65 +537,123 @@
     redacted: boolean
     redactionCount: number
     partialChars: number
+    // Where `content` starts in the file (bytes of the original).
+    startOffset: number
+    // Decodes what Tail appends after `content`.
+    decoder: TextDecoder
   }
+
+  // How many more answers the end of a file is read in when the first one
+  // didn't reach it (redacted, the context read before the offset counts).
+  const END_MORE_ROUNDS = 8
 
   /** Reads the end of a file (its last TAIL_START_BYTES) through Follow,
    * from `size` as listed; once more from the size the server reports when
-   * the file shrank since it was listed. */
+   * the file shrank since it was listed. `reloadWhole`: the file can't be
+   * read from an offset (follow_unsupported). */
   async function readEnd(
     sourceId: number,
     path: string,
     name: string,
     size: number,
     retried = false,
-  ): Promise<EndRead | FetchProblem> {
+  ): Promise<EndRead | (FetchProblem & { reloadWhole?: boolean })> {
     const offset = tailStartOffset(size)
-    const response = await trackedFetch(followUrl(sourceId, path, offset, null, true), { credentials: 'include' })
+    let response = await trackedFetch(followUrl(sourceId, path, offset, null, true), { credentials: 'include' })
     if (!response.ok) {
       // What the server says (an agent to update, content redaction can't
       // read...); only a file Tail can't follow from an offset gets this.
       const failure = await readFollowFailure(response, name)
       if (failure.reloadWhole) {
-        return { message: `${name} can't be read from its end. Open it whole or download it.`, retryable: false }
+        return {
+          message: `${name} can't be read from its end. Open it whole or download it.`,
+          retryable: false,
+          reloadWhole: true,
+        }
       }
       return { message: failure.message, retryable: failure.retryable, missing: failure.missing }
     }
-    const answer = readFollowHeaders(response.headers, offset)
+    let answer = readFollowHeaders(response.headers, offset)
     if (answer.reset) {
       const now = Number(response.headers.get('x-file-size'))
       if (!retried && Number.isFinite(now)) return readEnd(sourceId, path, name, now, true)
       return { message: `${name} changed while it was being read. Try again.`, retryable: true }
     }
-    const bytes = new Uint8Array(await response.arrayBuffer())
-    const redaction = readRedactionHeaders(response.headers)
-    const { text, partialChars } = decodeWithPartial(new TextDecoder(), bytes, redaction.partialBytes)
+    let bytes: Uint8Array = new Uint8Array(await response.arrayBuffer())
+    let redaction = readRedactionHeaders(response.headers)
+    let startOffset: number
+    if (redaction.redacted) {
+      // The server already started at the next whole line, and says where.
+      startOffset = readFollowStart(response.headers) ?? offset
+    } else {
+      // Bytes from the middle of a line (maybe of a character): from the
+      // next line on.
+      const cut = cutToFirstLine(bytes, offset)
+      bytes = cut.bytes
+      startOffset = cut.start
+    }
+    const decoder = new TextDecoder()
+    let { text: content, partialChars } = decodeWithPartial(decoder, bytes, redaction.partialBytes)
+    let redacted = redaction.redacted
+    let redactionCount = redaction.count
+    let head = answer.head
+    for (let round = 0; answer.more && round < END_MORE_ROUNDS; round++) {
+      response = await trackedFetch(followUrl(sourceId, path, answer.offset, head, false), { credentials: 'include' })
+      if (!response.ok) break // what was read shows; Reload or Tail reads the rest
+      const next = readFollowHeaders(response.headers, answer.offset)
+      if (next.reset) return { message: `${name} changed while it was being read. Try again.`, retryable: true }
+      redaction = readRedactionHeaders(response.headers)
+      const decoded = decodeWithPartial(decoder, new Uint8Array(await response.arrayBuffer()), redaction.partialBytes)
+      content = content.slice(0, content.length - partialChars) + decoded.text
+      partialChars = decoded.partialChars
+      redacted = redacted || redaction.redacted
+      redactionCount += redaction.count
+      answer = next
+      head = next.head
+    }
     return {
-      // Redacted, the server already started at the next whole line.
-      content: redaction.aligned ? text : dropPartialFirstLine(text, offset),
+      content,
       byteSize: answer.offset,
-      followHead: answer.head,
-      redacted: redaction.redacted,
-      redactionCount: redaction.count,
+      followHead: head,
+      redacted,
+      redactionCount,
       partialChars,
+      startOffset,
+      decoder,
     }
   }
 
-  /** Opens only the end of a large file, with Tail on (#347). */
-  async function openEnd(sourceId: number, sourceName: string, path: string, name: string, size: number) {
+  /** Opens only the end of a file: a large one with Tail on (#347, "Tail
+   * the end"), or, without Tail, one over the `open_from_end_mb` setting,
+   * which opens whole instead when it can't be read from its end. */
+  async function openEnd(
+    sourceId: number,
+    sourceName: string,
+    path: string,
+    name: string,
+    size: number,
+    tail = true,
+  ): Promise<boolean> {
     const key = tabKey(sourceId, path, null)
     if (tabLimitReached(tabs.length)) {
       notice = { message: tabLimitMessage(), retryable: false }
-      return
+      return false
     }
     ensureSeverityPatterns(sourceId)
     try {
       const read = await readEnd(sourceId, path, name, size)
       if ('message' in read) {
-        notice = read.retryable ? { ...read, retry: () => openEnd(sourceId, sourceName, path, name, size) } : read
-        return
+        if (read.reloadWhole && !tail) return openFile(sourceId, sourceName, path, null, name, size, false, false)
+        const { reloadWhole: _whole, ...problem } = read
+        if (problem.missing) refreshFolder(sourceId, parentPath(path))
+        notice = problem.retryable
+          ? { ...problem, retry: () => openEnd(sourceId, sourceName, path, name, size, tail) }
+          : problem
+        forgetSeverityWithoutTabs(sourceId)
+        return false
       }
-      followDecoders.set(key, new TextDecoder())
-      followStarted.add(key)
+      followDecoders.set(key, read.decoder)
+      if (tail) followStarted.add(key)
       const tab: Tab = {
         key,
         sourceId,
@@ -581,12 +668,13 @@
         bookmarks: [],
         markPatterns: [],
         format: 'none',
-        following: true,
+        following: tail,
         byteSize: read.byteSize,
         followHead: read.followHead,
         followMode: 'incremental',
         newLines: 0,
-        endOnly: true,
+        endOnly: read.startOffset > 0,
+        startOffset: read.startOffset,
         redacted: read.redacted,
         redactionCount: read.redactionCount,
         partialChars: read.partialChars,
@@ -594,13 +682,115 @@
       notice = null
       forgetEditorState(key)
       setState({ tabs: [...tabs.filter((t) => t.key !== key), tab], activeKey: key })
+      return true
     } catch {
       notice = {
         message: `${name}: the server could not be reached.`,
         retryable: true,
-        retry: () => openEnd(sourceId, sourceName, path, name, size),
+        retry: () => openEnd(sourceId, sourceName, path, name, size, tail),
       }
+      forgetSeverityWithoutTabs(sourceId)
+      return false
     }
+  }
+
+  // The tab whose "Load earlier" is reading, so it isn't asked twice.
+  let earlierLoading: string | null = null
+  $: earlierBlocked = activeTab ? loadEarlierBlocked(activeTab) : ''
+
+  /** "Load earlier" on a tab opened at its end: the window before what it
+   * holds, through Follow up to `startOffset`, added at the top. Redacted,
+   * the server sends whole lines and says where they start; otherwise the
+   * window's first, cut line is left for the next window, which ends where
+   * this one's whole lines start. */
+  async function loadEarlier(tab: Tab) {
+    if (!startNotLoaded(tab) || loadEarlierBlocked(tab) || earlierLoading !== null) return
+    const { offset, end } = earlierWindow(tab.startOffset ?? 0)
+    earlierLoading = tab.key
+    try {
+      const response = await trackedFetch(followUrl(tab.sourceId, tab.path, offset, tab.followHead, false, end), {
+        credentials: 'include',
+      })
+      if (!response.ok) {
+        const { reloadWhole: _whole, stopFollowing: _stop, ...problem } = await readFollowFailure(response, tab.name)
+        if (problem.missing) {
+          markMissing(tab)
+          return
+        }
+        notice = { ...problem, retry: problem.retryable ? () => retryLoadEarlier(tab.key) : undefined }
+        return
+      }
+      if (readFollowHeaders(response.headers, end).reset) {
+        notice = { message: `${tab.name} changed since it was opened. Reload it to read it again.`, retryable: false }
+        return
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      const redaction = readRedactionHeaders(response.headers)
+      let text: string
+      let start: number
+      if (redaction.redacted) {
+        text = new TextDecoder().decode(bytes)
+        start = readFollowStart(response.headers) ?? offset
+      } else {
+        const cut = cutToFirstLine(bytes, offset)
+        text = new TextDecoder().decode(cut.bytes)
+        start = cut.start
+      }
+      // A Reload or Load whole file meanwhile replaced what the tab holds.
+      const current = tabs.find((t) => t.key === tab.key)
+      if (!current || current.startOffset !== end) return
+      const added = countNewlines(text)
+      updateTab(tab.key, {
+        content: text + current.content,
+        startOffset: start,
+        // The whole file is loaded: Reload reads all of it again.
+        endOnly: start > 0,
+        newlineCount: current.newlineCount === undefined ? undefined : current.newlineCount + added,
+        bookmarks: shiftBookmarksDown(current.bookmarks, added),
+        redacted: (current.redacted ?? false) || redaction.redacted,
+        redactionCount: (current.redactionCount ?? 0) + redaction.count,
+      })
+      notice = null
+    } catch {
+      notice = {
+        message: `${tab.name}: the server could not be reached.`,
+        retryable: true,
+        retry: () => retryLoadEarlier(tab.key),
+      }
+    } finally {
+      earlierLoading = null
+    }
+  }
+
+  // "Showing the last 1 MB of 300 MB", in bytes of the original file.
+  function partialLabel(tab: Tab): string {
+    return `Showing the last ${formatSize(tab.byteSize - (tab.startOffset ?? 0))} of ${formatSize(tab.byteSize)}`
+  }
+
+  function retryLoadEarlier(key: string) {
+    const tab = tabs.find((t) => t.key === key)
+    if (tab) loadEarlier(tab)
+  }
+
+  /** "Load whole file" on a tab opened at its end: the file opened whole,
+   * as any file (after the large-file warning), in place of what the tab
+   * holds. */
+  async function loadWholeFile(tab: Tab, force = false) {
+    if (!force && isLargeFile(tab.byteSize)) {
+      largeFile = {
+        sourceId: tab.sourceId,
+        sourceName: tab.sourceName,
+        path: tab.path,
+        member: tab.member,
+        name: tab.name,
+        size: tab.byteSize,
+        replaceKey: tab.key,
+      }
+      notice = null
+      return
+    }
+    largeFile = null
+    await reloadTab(tab, true)
   }
 
   async function handleOpen(
@@ -652,7 +842,7 @@
       compareArmed = false
       if (tab.key !== activeKey) {
         const label = `${tab.sourceName} › ${tab.name}`
-        compareWith = { name: label, content: tab.content }
+        compareWith = { name: label, content: tab.content, partial: startNotLoaded(tab) }
         compareKey += 1
       }
       return
@@ -767,8 +957,10 @@
     if (activeTab) await reloadTab(activeTab)
   }
 
-  async function reloadTab(tab: Tab) {
-    if (tab.endOnly) {
+  /** `whole`: Load whole file of a tab that holds only the end of its
+   * file; it then holds the whole file, as any tab opened whole. */
+  async function reloadTab(tab: Tab, whole = false) {
+    if (tab.endOnly && !whole) {
       await reloadEnd(tab)
       return
     }
@@ -782,7 +974,8 @@
           markMissing(tab)
           return
         }
-        notice = { ...problem, retry: problem.retryable ? reloadActiveTab : undefined }
+        const retry = whole ? () => retryLoadWhole(tab.key) : reloadActiveTab
+        notice = { ...problem, retry: problem.retryable ? retry : undefined }
         return
       }
       const bytes = new Uint8Array(await response.arrayBuffer())
@@ -808,14 +1001,26 @@
                 redacted: redaction.redacted,
                 redactionCount: redaction.count,
                 partialChars,
+                // The whole file now: its own line numbers, which the
+                // bookmarks of the end weren't.
+                ...(whole ? { endOnly: false, startOffset: undefined, bookmarks: [] } : {}),
               }
             : t,
         ),
       })
       if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
     } catch {
-      notice = { message: `${tab.name}: the server could not be reached.`, retryable: true, retry: reloadActiveTab }
+      notice = {
+        message: `${tab.name}: the server could not be reached.`,
+        retryable: true,
+        retry: whole ? () => retryLoadWhole(tab.key) : reloadActiveTab,
+      }
     }
+  }
+
+  function retryLoadWhole(key: string) {
+    const tab = tabs.find((t) => t.key === key)
+    if (tab) reloadTab(tab, true)
   }
 
   /** Reload of a tab that holds only the end of its file: the end again,
@@ -831,7 +1036,7 @@
         notice = read
         return
       }
-      followDecoders.set(tab.key, new TextDecoder())
+      followDecoders.set(tab.key, read.decoder)
       updateTab(tab.key, {
         content: read.content,
         byteSize: read.byteSize,
@@ -841,6 +1046,7 @@
         newlineCount: undefined,
         droppedLines: 0,
         bookmarks: [],
+        startOffset: read.startOffset,
         redacted: read.redacted,
         redactionCount: read.redactionCount,
         partialChars: read.partialChars,
@@ -1031,7 +1237,8 @@
   }
 
   async function doCopySelectedLines() {
-    if (!paneRef) return
+    // Line numbers aren't the file's while its start isn't loaded.
+    if (!paneRef || startNotLoaded(activeTab)) return
     const copied = await paneRef.copySelectedLines()
     copyStatus = copied ? 'copied' : 'empty'
     if (copyStatusTimer) clearTimeout(copyStatusTimer)
@@ -1039,6 +1246,8 @@
   }
 
   async function openGoToLine() {
+    // Line numbers are the file's only once its start is loaded.
+    if (startNotLoaded(activeTab)) return
     goToLineOpen = true
     goToLineValue = ''
     await tick()
@@ -1318,6 +1527,9 @@
               Comparing <strong>{activeTab.sourceName} › {activeTab.name}</strong> ↔
               <strong>{compareWith.name}</strong>
             </span>
+            {#if startNotLoaded(activeTab) || compareWith.partial}
+              <span class="hint" role="status">In the loaded part only</span>
+            {/if}
           </div>
           <div class="toolbar-right">
             <button class="link" on:click={() => (compareWith = null)}>✕ Exit compare</button>
@@ -1357,7 +1569,12 @@
                 />
               </form>
             {:else}
-              <button class="btn-toggle" title="Go to a line (Ctrl/Cmd+G)" on:click={openGoToLine}>Go to line</button>
+              <button
+                class="btn-toggle"
+                title={startNotLoaded(activeTab) ? 'Line numbers need the whole file' : 'Go to a line (Ctrl/Cmd+G)'}
+                disabled={startNotLoaded(activeTab)}
+                on:click={openGoToLine}>Go to line</button
+              >
             {/if}
             <span class="tb-sep" aria-hidden="true"></span>
             <button
@@ -1459,11 +1676,6 @@
                 every {followIntervalMs / 1000} s
               </span>
             {/if}
-            {#if activeTab.endOnly}
-              <span class="hint" title="A large file: only its end was loaded. Reload reads the end again.">
-                End of the file only
-              </span>
-            {/if}
             {#if activeTab.droppedLines}
               <span class="hint" role="status" title="Reload to read the file again from the source">
                 Older lines dropped: Tail keeps the last {TAIL_MAX_LINES.toLocaleString('en')} lines
@@ -1486,8 +1698,11 @@
             {/if}
             <button
               class="icon-btn"
-              title="Copy selected lines with line numbers"
+              title={startNotLoaded(activeTab)
+                ? 'Line numbers need the whole file'
+                : 'Copy selected lines with line numbers'}
               aria-label="Copy lines"
+              disabled={startNotLoaded(activeTab)}
               on:click={doCopySelectedLines}
             >
               <ToolbarIcon name="copy" />
@@ -1573,6 +1788,30 @@
             on:close={closeFind}
           />
         {/if}
+        {#if startNotLoaded(activeTab)}
+          <!-- A file opened at its end: how much of it is loaded, and the
+               way to the rest. -->
+          <div class="partial-bar" role="status" data-testid="partial-bar">
+            <span>{partialLabel(activeTab)}</span>
+            <span class="partial-actions">
+              <button
+                class="btn-toggle"
+                disabled={earlierBlocked !== '' || earlierLoading !== null}
+                title={earlierBlocked || 'Read the 1 MB before what is shown and add it above'}
+                on:click={() => activeTab && loadEarlier(activeTab)}
+              >
+                {earlierLoading === activeTab.key ? 'Loading…' : 'Load earlier'}
+              </button>
+              <button
+                class="btn-toggle"
+                title="Open the whole file in this tab"
+                on:click={() => activeTab && loadWholeFile(activeTab)}
+              >
+                Load whole file
+              </button>
+            </span>
+          </div>
+        {/if}
         <!-- The Tail notice is anchored to the editor, not the whole area, so
              it stays over the log when Find all is open below (#298). -->
         <div class="editor-pane">
@@ -1588,6 +1827,7 @@
             bookmarks={activeTab.bookmarks}
             markPatterns={activeTab.markPatterns}
             find={editorFind}
+            lineNumbers={!startNotLoaded(activeTab)}
             on:bottom={onReachedBottom}
             on:findclosed={closeFind}
           />
@@ -1601,6 +1841,7 @@
           <FindInDocumentPanel
             content={displayContent}
             spec={findAllSpec}
+            note={startNotLoaded(activeTab) ? 'In the loaded part only' : ''}
             on:jump={(e) => paneRef?.scrollToLine(e.detail.line)}
             on:close={() => (findAllSpec = null)}
           />
@@ -1763,6 +2004,23 @@
     border-bottom: 1px solid var(--danger, #f87171);
     color: var(--text);
     font-size: 0.82rem;
+  }
+  .partial-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    padding: 0.35rem 0.9rem;
+    background: var(--accent-soft);
+    border-bottom: 1px solid var(--border-soft);
+    color: var(--text);
+    font-size: 0.82rem;
+  }
+  .partial-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex: 0 0 auto;
   }
   .notice-actions {
     display: flex;

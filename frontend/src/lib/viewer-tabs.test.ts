@@ -12,7 +12,13 @@ import {
   type SavedEditorState,
 } from './editor-states'
 import type { SeverityPattern } from './types'
-import { closeTabs, closeTabsOfHiddenSources, viewerState, type Tab } from './viewer-tabs'
+import {
+  closeTabs,
+  closeTabsOfHiddenSources,
+  forgetSeverityWithoutTabs,
+  viewerState,
+  type Tab,
+} from './viewer-tabs'
 
 function tab(sourceId: number, path: string): Tab {
   return {
@@ -154,5 +160,35 @@ describe("closing a source's tabs", () => {
     const before = get(severityBySource)
     closeTabs(['9::none.log::'])
     expect(get(severityBySource)).toBe(before)
+  })
+})
+
+describe('an open that failed before its tab was made', () => {
+  const pattern = { id: 1, pattern: 'ERROR' } as unknown as SeverityPattern
+
+  beforeEach(() => {
+    viewerState.set({ tabs: [], activeKey: null })
+    severityBySource.set({})
+  })
+
+  it("forgets the source's patterns when it has no tab", () => {
+    severityBySource.set({ 1: [pattern], 2: [pattern] })
+    viewerState.set({ tabs: [tab(2, 'b.log')], activeKey: '2::b.log::' })
+    forgetSeverityWithoutTabs(1)
+    expect(get(severityBySource)).toEqual({ 2: [pattern] })
+  })
+
+  it('keeps them while a tab of the source is open', () => {
+    severityBySource.set({ 1: [pattern] })
+    viewerState.set({ tabs: [tab(1, 'a.log')], activeKey: '1::a.log::' })
+    forgetSeverityWithoutTabs(1)
+    expect(get(severityBySource)).toEqual({ 1: [pattern] })
+  })
+
+  it('leaves the store alone for a source it never had', () => {
+    const all = { 2: [pattern] }
+    severityBySource.set(all)
+    forgetSeverityWithoutTabs(1)
+    expect(get(severityBySource)).toBe(all)
   })
 })
