@@ -129,7 +129,7 @@ Click a file in the explorer or in search results. A file over 200 MB opens only
 
 A `.gz` file opens decompressed. A `.zip`, `.tar.gz` or `.tgz` file opens as a folder, see [Archives](#archives).
 
-When a file can't be opened, the viewer says why, for example that it no longer exists on the source, that it "wasn't found, or is hidden by this source's rules", or that it is over the server's size limit. **Try again** appears when retrying may help, for example when PerchTail is busy or the file is locked on the source, not for a refusal that won't change, such as a disabled source, an agent that must be updated, an archive that can't be read, an encrypted archive member or content redaction can't read.
+When a file can't be opened, the viewer says why, for example that it "wasn't found, or is hidden by this source's rules" (the same message whether it is gone from the source or hidden), or that it is over the server's size limit. **Try again** appears when retrying may help, for example when PerchTail is busy or the file is locked on the source, not for a refusal that won't change, such as a disabled source, an agent that must be updated, an archive that can't be read, an encrypted archive member or content redaction can't read.
 
 On a push-agent source whose agent is older than 0.7, folders still list, but nothing can be opened, followed or downloaded: the viewer says "This source's agent must be updated before its files can be read. Ask an administrator to update it from Settings → Agents."
 
@@ -196,7 +196,7 @@ Find and Find all work on what the tab holds, in your browser; they don't read t
 - Only the active tab is followed, and nothing is fetched while the browser tab is hidden.
 - If you have scrolled up, Tail doesn't move you: a button shows how many new lines arrived; click it to jump to the end.
 - If the file was rotated or truncated (it shrank, or its start changed), the tab reloads it from the start and says so.
-- If the file disappears from the source, Tail stops and the tab keeps what it had.
+- If the file disappears from the source or the rules come to hide it, Tail stops, the tab keeps what it had, and the message says it "wasn't found, or is hidden by this source's rules".
 - If the server refuses a check, the viewer shows why. When the refusal won't change at the next check, such as a disabled source, an agent that must be updated or content redaction can't read, Tail stops, the tab keeps what it had, and the message ends with "The tab keeps what it had; Tail stopped."; a file locked on the source is tried again at the next check.
 - With redaction on, a line still being written shows as `[redacted: incomplete line]` until a later check finds it complete, and the count of redacted values follows what the tab still holds.
 - A tab keeps at most the last 200,000 lines while Tail adds to it. Older lines are dropped from the top, and the toolbar says so. **Reload** reads the file again.

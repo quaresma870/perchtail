@@ -73,8 +73,9 @@ class SourceNotFoundError(SourceError):
     status_code = 404
     public_message = "Not found on the source"
     # Lets the viewer say "no longer exists" and drop it from the tree
-    # (#272). Only reached once the rules allow the path: a hidden one
-    # answers a plain "not found".
+    # (#272). Every path that can't be read (hidden by the rules, a link to
+    # a hidden target, a folder asked for as a file) gets the same answer
+    # (app/api/errors.py, not_found_content).
     error_code = "not_found_on_source"
 
 

@@ -864,14 +864,15 @@
   // A burst bigger than one answer is read in a few more right away.
   const FOLLOW_ROUNDS_PER_TICK = 8
 
-  // The file left the source (#272): Follow stops, the tab keeps what it
-  // had and is marked, its folder is listed again, and a note says so once.
+  // The file left the source or is hidden by its rules (#272): Follow stops,
+  // the tab keeps what it had and is marked, its folder is listed again, and
+  // a note says so once.
   function markMissing(tab: Tab) {
     updateTab(tab.key, { following: false, missing: true })
     followStarted.delete(tab.key)
     refreshFolder(tab.sourceId, parentPath(tab.path))
     notice = {
-      message: `${tab.name} no longer exists on the source. The tab keeps what it had; Tail stopped.`,
+      message: `${tab.name} wasn't found, or is hidden by this source's rules. The tab keeps what it had; Tail stopped.`,
       retryable: false,
     }
   }

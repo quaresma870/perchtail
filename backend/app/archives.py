@@ -153,6 +153,18 @@ def _zip_member_stretch(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[int
     return start, max(end, start)
 
 
+def has_folder(members: list[ArchiveMember], member_dir: str) -> bool:
+    """Whether `member_dir` is a folder of the archive: listed as one, or
+    above a member (tree_children synthesises it then). A file's name, or a
+    name that isn't there, is not."""
+    prefix = f"{member_dir}/"
+    for member in members:
+        name = normalize_member_name(member.name)
+        if name.startswith(prefix) or (name == member_dir and member.is_dir):
+            return True
+    return False
+
+
 def _zip_member_name(zf: zipfile.ZipFile, requested: str) -> str:
     """Maps a (normalized) member name from the tree back to the zip's own
     member name, so members with odd raw names can still be opened."""
