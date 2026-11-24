@@ -12,6 +12,8 @@
     type RowView,
   } from '../find-in-document'
   import { clampPanelHeight, KEY_STEP_PX, loadPanelHeight, MIN_PANEL_PX, savePanelHeight } from '../panel-size'
+  import { contextMenuIntent, findAllMenu, isMenuKey } from '../context-menu'
+  import ContextMenu from './ContextMenu.svelte'
 
   /** Notepad++-style "Find All" (#155): one row per matching line with the
    * whole line shown and every match highlighted; rows can be selected
@@ -153,13 +155,47 @@
     menu = null
   }
 
+  // The menu opens with a right-click (Shift+right-click keeps the
+  // browser's), or with the Menu key or Shift+F10 on the results (#287).
+  let lastKeyOpen: number | null = null
+
   function openMenu(row: number | null, event: MouseEvent) {
+    const intent = contextMenuIntent(event, lastKeyOpen, Date.now())
+    if (intent === 'browser') return
     event.preventDefault()
+    if (intent === 'ignore') return
     if (row !== null && !selected.has(row)) {
       selected = new Set([row])
       anchor = row
     }
     menu = { x: event.clientX, y: event.clientY }
+  }
+
+  function openMenuByKey() {
+    lastKeyOpen = Date.now()
+    const focusedRow = resultsEl.querySelector<HTMLElement>('.result-row.selected')
+    const rect = (focusedRow ?? resultsEl).getBoundingClientRect()
+    menu = { x: rect.left + 16, y: rect.top + Math.min(rect.height, ROW_PX) }
+  }
+
+  function chooseMenu(id: string) {
+    switch (id) {
+      case 'copy':
+        return copy(false)
+      case 'copy-with-numbers':
+        return copy(true)
+      case 'select-all':
+        return selectAll()
+      case 'refine':
+        return startRefine(false)
+      case 'exclude':
+        return startRefine(true)
+      case 'go-to-line':
+        return goToSelected()
+      case 'close':
+        menu = null
+        dispatch('close')
+    }
   }
 
   async function copy(withNumbers: boolean) {
@@ -214,7 +250,10 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+    if (isMenuKey(event)) {
+      event.preventDefault()
+      openMenuByKey()
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
       event.preventDefault()
       selectAll()
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c' && selected.size) {
@@ -227,8 +266,6 @@
     }
   }
 </script>
-
-<svelte:window on:click={() => (menu = null)} />
 
 <div
   class="find-all-panel"
@@ -345,19 +382,15 @@
   </div>
 
   {#if menu}
-    <ul class="context-menu" style="left: {menu.x}px; top: {menu.y}px" role="menu">
-      <li><button disabled={!selected.size} on:click={() => copy(false)}>Copy selected lines</button></li>
-      <li>
-        <button disabled={!selected.size} on:click={() => copy(true)}>Copy with line numbers</button>
-      </li>
-      <li><button on:click={selectAll}>Select all</button></li>
-      <li class="divider"></li>
-      <li><button disabled={!lines.length} on:click={() => startRefine(false)}>Search in these results…</button></li>
-      <li><button disabled={!lines.length} on:click={() => startRefine(true)}>Exclude lines matching…</button></li>
-      <li class="divider"></li>
-      <li><button disabled={!selected.size} on:click={goToSelected}>Go to line</button></li>
-      <li><button on:click={() => { menu = null; dispatch('close') }}>Close</button></li>
-    </ul>
+    <ContextMenu
+      entries={findAllMenu({ selectedRows: selected.size, rows: lines.length })}
+      x={menu.x}
+      y={menu.y}
+      label="Find all results"
+      opener={resultsEl}
+      on:select={(e) => chooseMenu(e.detail)}
+      on:close={() => (menu = null)}
+    />
   {/if}
 </div>
 
@@ -522,40 +555,5 @@
     flex: 0 0 auto;
     color: var(--text-faint);
     font-size: 0.72rem;
-  }
-  .context-menu {
-    position: fixed;
-    z-index: 50;
-    list-style: none;
-    margin: 0;
-    padding: 0.25rem 0;
-    min-width: 14rem;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  }
-  .context-menu button {
-    display: block;
-    width: 100%;
-    text-align: left;
-    border: none;
-    background: none;
-    padding: 0.35rem 0.85rem;
-    font-size: 0.8rem;
-    color: var(--text);
-    cursor: pointer;
-  }
-  .context-menu button:hover:not(:disabled) {
-    background: var(--bg-hover);
-  }
-  .context-menu button:disabled {
-    color: var(--text-faint);
-    cursor: default;
-  }
-  .divider {
-    height: 1px;
-    margin: 0.25rem 0;
-    background: var(--border-soft);
   }
 </style>

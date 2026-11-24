@@ -94,6 +94,20 @@ test('accessibility: viewer with a file open', async ({ page }) => {
   )
 })
 
+// The right-click menu of a log line (#287), open over the viewer.
+test('accessibility: viewer with a line menu open', async ({ page }) => {
+  await page.goto('/#/viewer')
+  await page.locator('.explorer').getByRole('button', { name: SYSTEM_SOURCE_NAME }).click()
+  await page.locator('.tree-body').getByRole('button', { name: 'perchtail.log' }).click()
+  await expect(page.locator('.tab.active .tab-label')).toContainText('perchtail.log')
+  await expect(page.locator('.cm-content')).not.toBeEmpty()
+  await page.locator('.cm-line').first().click({ button: 'right' })
+  await expect(page.getByRole('menu', { name: 'Line actions' })).toBeVisible()
+  await expectNoSeriousViolations(page, (axe) =>
+    axe.include('html').exclude('.cm-scroller').include('.cm-scroller > *'),
+  )
+})
+
 // A file opened at its end, with the bar that offers Load earlier and Load
 // whole file. A local-disk source, not the SSH/SMB test servers.
 test('accessibility: viewer with a file opened at its end', async ({ page }) => {

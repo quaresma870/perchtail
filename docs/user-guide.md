@@ -110,7 +110,8 @@ A live search lists folders through the source each time, so it is slower than t
 
 Each file opens in its own tab. Tabs from several sources can be open side by side; the tab then shows the source's name before the file name, and a coloured dot tells the sources apart. Hover over a tab for its source and path.
 
-- Click **×** on a tab to close it.
+- Click **×** on a tab, or click it with the middle mouse button, to close it.
+- Right-click a tab, or press the Menu key or Shift+F10 on it, for its menu: **Close**, **Close others**, **Close to the left** and **Close to the right** (when there are tabs on that side), **Close all**, **Reload**, **Download** (if your role can download from its source), **Compare with active tab** (on a tab other than the one shown) and **Copy path** (the file's path on the source; for a file inside an archive, the archive's path, then `›` and the file's path in it). Closing several tabs at once closes each as **×** would.
 - At most 30 tabs can be open. Opening a 31st shows "30 files are open, the most the viewer keeps at once. Close a tab to open another."
 - Tabs stay open while you move around PerchTail. Reloading the page or signing out closes them.
 - Tabs of a source that is disabled, deleted or no longer granted to you close on their own.
@@ -164,6 +165,22 @@ On a push-agent source whose agent is older than 0.7, folders still list, but no
 
 Wrap, Show chars, highlights and bookmarks belong to the tab and are lost when it closes.
 
+### Right-click menu
+
+Right-click a line of the file for its menu, or click in the file and press the Menu key or Shift+F10 for the menu of the line the cursor is on. A right-click on a line outside the selection moves the cursor to that line first. Only the entries that apply are listed:
+
+- **Copy** (Ctrl+C): copies the selection, or the whole line when nothing is selected.
+- **Copy with line numbers**: as the toolbar's Copy lines.
+- **Find all of selection**: lists every line holding the selected text, as written, in the Find all panel. Only for a selection on one line.
+- **Highlight selection**: adds the selected text as a highlight, as **Highlight** does. Only for a selection on one line.
+- **Toggle bookmark**: on the line you right-clicked.
+- **Go to line…** (Ctrl+G).
+- **Copy link to line**: copies an address that opens this file at this line in PerchTail. Not for a file inside an archive.
+
+Copy with line numbers, Go to line and Copy link to line aren't listed while only the end of a file is loaded, nor once Tail has dropped older lines.
+
+In any menu, the arrow keys, Home and End move between entries, Enter or Space chooses one, and Escape closes it and puts you back where you were. A click outside the menu, or scrolling, closes it too. Shift+right-click shows the browser's own menu instead. Copying needs the page to be on HTTPS (or on the server itself); otherwise the viewer says "Copy needs a secure page (HTTPS or localhost)".
+
 ### Severity highlighting
 
 Words that mark a severity (error, warning, info, debug) are coloured by level, and some patterns tint the whole line. Which words count is set by your administrator, for all sources or for one source. **Previous problem** and **Next problem** in the toolbar step through the marked lines.
@@ -191,7 +208,7 @@ The find bar searches the open file:
 - **Enter** goes to the next match, **Shift+Enter** to the previous one, and **Escape** closes the bar.
 - **Find all** (Alt+Enter) lists every matching line in a panel below the file, with each match highlighted. Double-click a line to jump to it in the file. Drag the panel's top edge to resize it.
 
-Right-click in the Find all panel for more:
+Right-click in the Find all panel, or press the Menu key or Shift+F10 in it, for more (entries that need selected lines are listed only when some are selected):
 
 - **Copy selected lines** and **Copy with line numbers**. Select lines with click, Ctrl/Cmd+click, Shift+click or Ctrl/Cmd+A, or **Select all**.
 - **Search in these results…** keeps only the lines that also match another search, and **Exclude lines matching…** removes the lines that match it. Steps can be chained; click **All results** or an earlier step to go back.
@@ -210,7 +227,7 @@ Find and Find all work on what the tab holds, in your browser; they don't read t
 - If the file disappears from the source or the rules come to hide it, Tail stops, the tab keeps what it had, and the message says it "wasn't found, or is hidden by this source's rules".
 - If the server refuses a check, the viewer shows why. When the refusal won't change at the next check, such as a disabled source, an agent that must be updated or content redaction can't read, Tail stops, the tab keeps what it had, and the message ends with "The tab keeps what it had; Tail stopped."; a file locked on the source is tried again at the next check.
 - With redaction on, a line still being written shows as `[redacted: incomplete line]` until a later check finds it complete, and the count of redacted values follows what the tab still holds.
-- A tab keeps at most the last 200,000 lines while Tail adds to it. Older lines are dropped from the top, and the toolbar says so. **Reload** reads the file again.
+- A tab keeps at most the last 200,000 lines while Tail adds to it. Older lines are dropped from the top, and the toolbar says so. From then on the line numbers aren't the file's, so **Go to line** and the toolbar's Copy lines are off ("Line numbers need the whole file") and the right-click menu leaves out Copy with line numbers, Go to line and Copy link to line. **Reload** reads the file again.
 
 Some files can't be read from where Tail left off: `.gz` files and files inside archives. For those, Tail reloads the whole file at each check.
 

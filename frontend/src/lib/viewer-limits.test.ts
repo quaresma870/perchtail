@@ -13,6 +13,7 @@ import {
   TAIL_START_BYTES,
   isLargeFile,
   LARGE_FILE_BYTES,
+  lineNumbersNotFiles,
   MAX_OPEN_TABS,
   shiftBookmarks,
   tabLimitMessage,
@@ -163,6 +164,14 @@ describe('Load earlier', () => {
     expect(startNotLoaded({ startOffset: 0 })).toBe(false)
     expect(startNotLoaded({})).toBe(false)
     expect(startNotLoaded(null)).toBe(false)
+  })
+
+  it("knows whether the line numbers are the file's", () => {
+    expect(lineNumbersNotFiles({ startOffset: 0, droppedLines: 0 })).toBe(false)
+    expect(lineNumbersNotFiles({})).toBe(false)
+    expect(lineNumbersNotFiles(null)).toBe(false)
+    expect(lineNumbersNotFiles({ startOffset: 10 })).toBe(true)
+    expect(lineNumbersNotFiles({ droppedLines: 1 })).toBe(true)
   })
 
   it('moves bookmarks down by the lines added above', () => {

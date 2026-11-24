@@ -66,6 +66,15 @@ export function startNotLoaded(tab: { startOffset?: number } | null | undefined)
   return (tab?.startOffset ?? 0) > 0
 }
 
+/** Whether a tab's line numbers aren't the file's: its start isn't loaded,
+ * or Tail dropped older lines from the top. Copy lines, Go to line and the
+ * link to a line need them. */
+export function lineNumbersNotFiles(
+  tab: { startOffset?: number; droppedLines?: number } | null | undefined,
+): boolean {
+  return startNotLoaded(tab) || (tab?.droppedLines ?? 0) > 0
+}
+
 /** Moves bookmarks (1-indexed lines) down by the `added` lines put above
  * them. */
 export function shiftBookmarksDown(bookmarks: number[], added: number): number[] {
