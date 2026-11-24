@@ -53,7 +53,7 @@ Command-line tools run from `backend/`: `python -m alembic upgrade head` (migrat
 
 ### Frontend (`frontend/src/`)
 
-A Svelte 5 single-page app in TypeScript, built with Vite. Routing is hash-based (`svelte-spa-router`), so the backend serves it as plain static files. Pages are in `routes/`; shared code and its vitest unit tests (`*.test.ts`) are in `lib/`; components are in `lib/components/`. The viewer uses CodeMirror 6 (`lib/components/CodeMirrorPane.svelte`). In development, `npm run dev` proxies the API paths listed in `vite.config.ts` to a backend on `127.0.0.1:8000`.
+A Svelte 5 single-page app in TypeScript, built with Vite. Routing is hash-based (`svelte-spa-router`), so the backend serves it as plain static files. Pages are in `routes/`; shared code and its vitest unit tests (`*.test.ts`) are in `lib/`; components are in `lib/components/`. The viewer uses CodeMirror 6 (`lib/components/CodeMirrorPane.svelte`); each open tab's editor state is kept in memory by tab key (`lib/editor-states.ts`, forgotten when the tab closes and on logout), so switching tabs or coming back to the Viewer restores the document, selection and place instead of rebuilding it, and severity patterns, language, Wrap, Show chars, bookmarks and highlights are CodeMirror compartments reconfigured in place (`lib/editor-sync.ts` decides when only a rebuild will do). In development, `npm run dev` proxies the API paths listed in `vite.config.ts` to a backend on `127.0.0.1:8000`.
 
 ### Push agent (`agent/`)
 

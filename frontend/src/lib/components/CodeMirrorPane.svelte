@@ -1,14 +1,55 @@
+<script module lang="ts">
+  import { Compartment } from '@codemirror/state'
+  import { search } from '@codemirror/search'
+  import type { EditorView as View } from 'codemirror'
+  import type { EditorPart } from '../editor-sync'
+
+  // Saved editor states (lib/editor-states.ts) outlive the pane that made
+  // them, so whatever they hold is shared by every pane: the compartments,
+  // and the hidden search panel, which finds its pane through the view.
+  const compartments: Record<EditorPart, Compartment> = {
+    severity: new Compartment(),
+    language: new Compartment(),
+    wrap: new Compartment(),
+    whitespace: new Compartment(),
+    bookmarks: new Compartment(),
+    marks: new Compartment(),
+  }
+
+  interface PanelOwner {
+    mounted(): void
+    destroyed(): void
+  }
+  const panelOwners = new WeakMap<View, PanelOwner>()
+
+  // The find bar lives in the viewer, outside the editor: a bar inside it
+  // would go with every rebuild or tab change. CodeMirror only highlights
+  // matches while its search panel is open, so the panel it opens is an
+  // empty, hidden one.
+  const hiddenSearchPanel = search({
+    createPanel: (view) => {
+      const dom = document.createElement('div')
+      dom.className = 'find-highlights-only'
+      dom.hidden = true
+      return {
+        dom,
+        mount: () => panelOwners.get(view)?.mounted(),
+        destroy: () => panelOwners.get(view)?.destroyed(),
+      }
+    },
+  })
+</script>
+
 <script lang="ts">
   import { createEventDispatcher, onMount, onDestroy } from 'svelte'
   import { EditorView, basicSetup } from 'codemirror'
-  import { EditorState } from '@codemirror/state'
+  import { EditorState, type Extension } from '@codemirror/state'
   import {
     closeSearchPanel,
     findNext as cmFindNext,
     findPrevious as cmFindPrevious,
     getSearchQuery,
     openSearchPanel,
-    search,
     searchPanelOpen,
     SearchQuery,
     setSearchQuery,
@@ -23,6 +64,8 @@
     whitespaceHighlighting,
   } from '../codemirror-theme'
   import { formatLinesWithNumbers } from '../copy-lines'
+  import { createEditorState, getEditorState, saveEditorState, type SavedEditorState } from '../editor-states'
+  import { planSync, type EditorInputs, type SyncPlan } from '../editor-sync'
   import { languageForFilename } from '../file-language'
   import { nextLine, previousLine } from '../line-cycle'
   import type { MarkPattern } from '../mark-highlighting'
@@ -31,6 +74,12 @@
   import { compileFind, type FindSpec } from '../find-in-document'
 
   export let content = ''
+  /** The tab whose file this is: its editor state is kept under this key
+   * (lib/editor-states.ts) while another tab is shown or the pane is gone. */
+  export let stateKey = ''
+  /** The display format (`content` is already formatted): a change
+   * rebuilds the document. */
+  export let format = 'none'
   export let severityPatterns: SeverityPattern[] = []
   export let filename = ''
   export let wrapEnabled = false
@@ -48,60 +97,68 @@
   // `findclosed`: the editor closed its search (Escape in the editor).
   const dispatch = createEventDispatcher<{ bottom: void; findclosed: void }>()
 
-  // The find bar lives in the viewer, outside the editor: the editor is
-  // rebuilt on every Wrap, Highlight or tab change, which would close a bar
-  // inside it. CodeMirror only highlights matches while its search panel is
-  // open, so the panel it opens is an empty, hidden one.
   let applyingFind = false
-  const hiddenSearchPanel = search({
-    createPanel: () => {
-      const dom = document.createElement('div')
-      dom.className = 'find-highlights-only'
-      dom.hidden = true
-      return {
-        dom,
-        // CodeMirror's own keys (Mod-f, F3) can open it with no search in
-        // the bar; it closes again rather than highlight a stray query.
-        mount: () => {
-          if (!applyingFind && !find) queueMicrotask(closeStraySearch)
-        },
-        destroy: () => {
-          if (!applyingFind && !destroying) dispatch('findclosed')
-        },
-      }
+  const panelOwner: PanelOwner = {
+    // CodeMirror's own keys (Mod-f, F3) can open it with no search in the
+    // bar; it closes again rather than highlight a stray query.
+    mounted: () => {
+      if (!applyingFind && !find) queueMicrotask(closeStraySearch)
     },
-  })
+    destroyed: () => {
+      if (!applyingFind && !destroying) dispatch('findclosed')
+    },
+  }
 
-  function extensions() {
+  // What each compartment holds, from the current props.
+  function partExtension(part: EditorPart): Extension {
+    switch (part) {
+      case 'severity':
+        return severityHighlighting(severityPatterns)
+      case 'language':
+        return [
+          languageExtension(languageForFilename(filename)),
+          // The content element has role="textbox" and needs a name (#377).
+          EditorView.contentAttributes.of({
+            'aria-label': filename ? `Contents of ${filename}` : 'File contents',
+          }),
+        ]
+      case 'wrap':
+        return wrapEnabled ? EditorView.lineWrapping : []
+      case 'whitespace':
+        return showWhitespace ? whitespaceHighlighting(content) : []
+      case 'bookmarks':
+        return bookmarkHighlighting(bookmarks)
+      case 'marks':
+        return markHighlighting(markPatterns)
+    }
+  }
+
+  function extensions(): Extension[] {
     return [
       basicSetup,
       // basicSetup only wires the search *keymap* (Mod-f etc.), not this
       // extension itself — without it the panel has no state to open into.
       hiddenSearchPanel,
       darkTheme,
-      severityHighlighting(severityPatterns),
-      bookmarkHighlighting(bookmarks),
-      markHighlighting(markPatterns),
+      compartments.severity.of(partExtension('severity')),
+      compartments.bookmarks.of(partExtension('bookmarks')),
+      compartments.marks.of(partExtension('marks')),
       redactionHighlighting,
-      languageExtension(languageForFilename(filename)),
-      ...(wrapEnabled ? [EditorView.lineWrapping] : []),
-      ...(showWhitespace ? [whitespaceHighlighting(content)] : []),
+      compartments.language.of(partExtension('language')),
+      compartments.wrap.of(partExtension('wrap')),
+      compartments.whitespace.of(partExtension('whitespace')),
       EditorView.editable.of(false),
       EditorState.readOnly.of(true),
-      // The content element has role="textbox" and needs a name (#377).
-      EditorView.contentAttributes.of({
-        'aria-label': filename ? `Contents of ${filename}` : 'File contents',
-      }),
     ]
   }
 
-  let appliedContent: string | null = null
-  let appliedPatterns: SeverityPattern[] | null = null
-  let appliedFilename: string | null = null
-  let appliedWrap: boolean | null = null
-  let appliedShowWhitespace: boolean | null = null
-  let appliedBookmarks: number[] | null = null
-  let appliedMarkPatterns: MarkPattern[] | null = null
+  function currentInputs(): EditorInputs {
+    return { content, format, severityPatterns, filename, wrapEnabled, showWhitespace, bookmarks, markPatterns }
+  }
+
+  // What the editor shows now, and for which tab.
+  let applied: EditorInputs | null = null
+  let appliedKey: string | null = null
 
   // Distance from the bottom (px) within which the view still counts as
   // "at the bottom" -- exact 0 would require pixel-perfect scrolling to
@@ -114,106 +171,146 @@
     return scrollHeight - clientHeight - scrollTop < BOTTOM_THRESHOLD_PX
   }
 
-  // Rebuilds the editor state whenever any of content, the effective
-  // severity-pattern set, the filename (-> language), wrap/show-whitespace
-  // toggles, the bookmark list, or the mark-pattern list changes -- these
-  // can all change independently of each other (e.g. the pattern set
-  // finishes loading after the file is already open), so each is tracked
-  // rather than only reacting to content.
-  //
-  // `view.setState` is a wholesale replacement, not an incremental
-  // transaction, so it resets scroll to the top by default -- harmless for
-  // a one-off toggle, but it would make "Follow" (tail -f) unusable: every
-  // poll would yank the view back to line 1 instead of tracking new
-  // content. Recorded before the swap and restored after: back to the
-  // bottom if the view was already there (the common "watching it grow"
-  // case), otherwise the same absolute scroll offset, so an ordinary
-  // toggle (Wrap, a mark, etc.) no longer disturbs a reader's place either.
-  // True when the only change is text appended to the content already shown
-  // (and Show whitespace, which scans the content, is off).
-  function appendOnly(): boolean {
-    return (
-      appliedContent !== null &&
-      content.length > appliedContent.length &&
-      severityPatterns === appliedPatterns &&
-      filename === appliedFilename &&
-      wrapEnabled === appliedWrap &&
-      !showWhitespace &&
-      showWhitespace === appliedShowWhitespace &&
-      bookmarks === appliedBookmarks &&
-      markPatterns === appliedMarkPatterns &&
-      content.startsWith(appliedContent)
-    )
+  // Text appended at the end and compartments that changed, in one
+  // transaction: the document, the reader's place and selection stay.
+  function applyPlan(v: EditorView, plan: SyncPlan, from: EditorInputs) {
+    const effects = plan.reconfigure.map((part) => compartments[part].reconfigure(partExtension(part)))
+    const changes =
+      plan.action === 'append' ? { from: v.state.doc.length, insert: content.slice(from.content.length) } : undefined
+    if (changes || effects.length > 0) v.dispatch({ changes, effects })
   }
 
-  function syncView() {
-    if (!view) return
-    if (
-      content === appliedContent &&
-      severityPatterns === appliedPatterns &&
-      filename === appliedFilename &&
-      wrapEnabled === appliedWrap &&
-      showWhitespace === appliedShowWhitespace &&
-      bookmarks === appliedBookmarks &&
-      markPatterns === appliedMarkPatterns
-    ) {
-      return
+  // Scrolls now and again once CodeMirror has measured the document, which
+  // a state just put in place hasn't been yet.
+  function restoreScroll(v: EditorView, top: number | 'bottom') {
+    const apply = () => {
+      if (v.dom.isConnected) v.scrollDOM.scrollTop = top === 'bottom' ? v.scrollDOM.scrollHeight : top
     }
-    const wasAtBottom = isNearBottom(view)
-    if (appendOnly()) {
-      // Incremental follow (#254): only text was added at the end, so it
-      // goes in as one transaction -- no rebuild, the reader's place and
-      // selection stay where they are.
-      view.dispatch({
-        changes: { from: view.state.doc.length, insert: content.slice((appliedContent ?? '').length) },
-      })
-      if (wasAtBottom) view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight
-      appliedContent = content
-      return
-    }
-    const previousScrollTop = view.scrollDOM.scrollTop
-    // The rebuild drops the search panel; that's not the reader closing it.
+    apply()
+    v.requestMeasure({ read: () => null, write: apply })
+  }
+
+  // Where the shown tab was last scrolled to. When the Viewer leaves the
+  // page, its elements are gone before the pane is destroyed and can't say
+  // any more.
+  type ScrollPlace = Pick<SavedEditorState, 'scrollTop' | 'scrollSnapshot' | 'atBottom'>
+  let lastPlace: ScrollPlace | null = null
+  function placeOf(v: EditorView): ScrollPlace {
+    return { scrollTop: v.scrollDOM.scrollTop, scrollSnapshot: v.scrollSnapshot(), atBottom: isNearBottom(v) }
+  }
+
+  // Keeps the shown tab's editor for when it comes back.
+  function saveShown() {
+    if (!view || appliedKey === null || applied === null) return
+    const place = view.dom.isConnected
+      ? placeOf(view)
+      : (lastPlace ?? getEditorState(appliedKey) ?? { scrollTop: 0, atBottom: false })
+    saveEditorState(appliedKey, {
+      state: view.state,
+      content: applied.content,
+      scrollTop: place.scrollTop,
+      scrollSnapshot: place.scrollSnapshot,
+      atBottom: place.atBottom,
+      inputs: applied,
+    })
+  }
+
+  // Shows the tab `stateKey`: the editor state it had when it was last
+  // shown, brought up to date (appended text, compartments that changed
+  // meanwhile), or a new one only when there is none or its text changed
+  // otherwise.
+  function showTab() {
+    const saved = getEditorState(stateKey)
+    const next = currentInputs()
+    const plan = saved ? planSync(saved.inputs, next) : null
+    const reuse = saved !== undefined && plan !== null && plan.action !== 'rebuild'
+    const state = reuse ? saved.state : createEditorState({ doc: content, extensions: extensions() })
+    // Swapping the state drops the search panel; that's not the reader
+    // closing it.
     applyingFind = true
     try {
-      view.setState(EditorState.create({ doc: content, extensions: extensions() }))
+      if (view) {
+        view.setState(state)
+      } else {
+        view = new EditorView({ state, parent: host })
+        panelOwners.set(view, panelOwner)
+      }
+      if (reuse) applyPlan(view, plan, saved.inputs)
     } finally {
       applyingFind = false
     }
+    applied = next
+    appliedKey = stateKey
+    lastPlace = null
     appliedFind = undefined
     applyFind()
-    view.scrollDOM.scrollTop = wasAtBottom ? view.scrollDOM.scrollHeight : previousScrollTop
-    appliedContent = content
-    appliedPatterns = severityPatterns
-    appliedFilename = filename
-    appliedWrap = wrapEnabled
-    appliedShowWhitespace = showWhitespace
-    appliedBookmarks = bookmarks
-    appliedMarkPatterns = markPatterns
+    if (!saved) {
+      // A new file starts at the top. As a CodeMirror scroll, so a jump
+      // asked for right after (a search hit's line) wins.
+      view.dispatch({ effects: EditorView.scrollIntoView(0, { y: 'start' }) })
+    } else if (saved.atBottom) {
+      restoreScroll(view, 'bottom')
+    } else if (saved.scrollSnapshot) {
+      // As a document position: the lines' heights are only known once the
+      // view has measured them.
+      view.dispatch({ effects: saved.scrollSnapshot })
+    } else {
+      restoreScroll(view, saved.scrollTop)
+    }
+  }
+
+  // Brings the editor up to date with the props. The document is built
+  // from the whole text only when it's new or its text changed other than
+  // by text appended at the end (lib/editor-sync.ts); everything else --
+  // severity patterns, language, Wrap, Show chars, bookmarks, highlights --
+  // is a compartment reconfigured in place, keeping the reader's place.
+  function syncView() {
+    if (!view) return
+    if (stateKey !== appliedKey) {
+      saveShown()
+      showTab()
+      return
+    }
+    const next = currentInputs()
+    const plan = planSync(applied, next)
+    if (plan.action === 'none') return
+    const wasAtBottom = isNearBottom(view)
+    if (plan.action === 'rebuild') {
+      // A Reload, a Tail that dropped lines from the top, a format change:
+      // the place is kept, or the end if the reader was there.
+      const previousScrollTop = view.scrollDOM.scrollTop
+      applyingFind = true
+      try {
+        view.setState(createEditorState({ doc: content, extensions: extensions() }))
+      } finally {
+        applyingFind = false
+      }
+      appliedFind = undefined
+      applyFind()
+      view.scrollDOM.scrollTop = wasAtBottom ? view.scrollDOM.scrollHeight : previousScrollTop
+    } else {
+      // Incremental follow (#254): appended text goes in as one transaction.
+      applyPlan(view, plan, applied ?? next)
+      if (plan.action === 'append' && wasAtBottom) view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight
+    }
+    applied = next
   }
 
   onMount(() => {
-    view = new EditorView({
-      state: EditorState.create({ doc: content, extensions: extensions() }),
-      parent: host,
-    })
-    applyFind()
+    showTab()
+    if (!view) return
     let wasAtBottom = true
     view.scrollDOM.addEventListener('scroll', () => {
+      if (view?.dom.isConnected) lastPlace = placeOf(view)
       const atBottom = view !== null && isNearBottom(view)
       if (atBottom && !wasAtBottom) dispatch('bottom')
       wasAtBottom = atBottom
     })
-    appliedContent = content
-    appliedPatterns = severityPatterns
-    appliedFilename = filename
-    appliedWrap = wrapEnabled
-    appliedShowWhitespace = showWhitespace
-    appliedBookmarks = bookmarks
-    appliedMarkPatterns = markPatterns
   })
 
   // Applies `find` to the editor: opens the hidden panel and sets the
-  // query, or closes it. Also run after every rebuild, which drops both.
+  // query, or closes it. Also run after every state swap, which drops both
+  // or brings back a tab's own.
   let appliedFind: FindSpec | null | undefined = undefined
   function closeStraySearch() {
     if (!view || find || !searchPanelOpen(view.state)) return
@@ -251,6 +348,8 @@
   $: find, applyFind()
 
   $: content,
+    stateKey,
+    format,
     severityPatterns,
     filename,
     wrapEnabled,
@@ -377,11 +476,13 @@
     return true
   }
 
-  // The editor going away (Compare, closing the tab) isn't the reader
-  // closing the search.
+  // The editor going away (Compare, another page, the last tab closing)
+  // isn't the reader closing the search. The shown tab's state is kept for
+  // when it comes back.
   let destroying = false
   onDestroy(() => {
     destroying = true
+    saveShown()
     view?.destroy()
   })
 </script>

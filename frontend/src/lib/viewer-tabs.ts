@@ -1,4 +1,6 @@
-import { writable } from 'svelte/store'
+import { tick } from 'svelte'
+import { get, writable } from 'svelte/store'
+import { forgetAllEditorStates, forgetEditorState, severityBySource } from './editor-states'
 import type { FormatMode } from './format-content'
 import type { MarkPattern } from './mark-highlighting'
 import { advancedFilter, filterOptions, scopes } from './explorer-scope'
@@ -84,6 +86,56 @@ export function sourceHue(sourceId: number): number {
   return (sourceId * 137.508) % 360
 }
 
+/** Closes the tabs with these keys: they leave `viewerState` (the active
+ * tab stays if it isn't one of them, the last tab left becomes active
+ * otherwise) and their editor states and formatted text are forgotten,
+ * again once an editor still showing one has let go of it (CodeMirrorPane
+ * keeps the state of the tab it shows when it switches or goes). A source
+ * left with no open tab loses its entry in `severityBySource`. Returns the
+ * closed tabs. */
+export function closeTabs(keys: Iterable<string>): Tab[] {
+  const closing = new Set(keys)
+  let closed: Tab[] = []
+  let remaining: Tab[] = []
+  viewerState.update((state) => {
+    closed = state.tabs.filter((t) => closing.has(t.key))
+    if (closed.length === 0) return state
+    remaining = state.tabs.filter((t) => !closing.has(t.key))
+    const activeKey = remaining.some((t) => t.key === state.activeKey)
+      ? state.activeKey
+      : remaining.length > 0
+        ? remaining[remaining.length - 1].key
+        : null
+    return { ...state, tabs: remaining, activeKey }
+  })
+  const forget = () => {
+    for (const key of closing) forgetEditorState(key)
+  }
+  forget()
+  void tick().then(forget)
+  // A source left with no tab drops its severity patterns too: the next
+  // file opened from it asks for them again.
+  const stillOpen = new Set(remaining.map((t) => t.sourceId))
+  const leaving = new Set(closed.map((t) => t.sourceId).filter((id) => !stillOpen.has(id)))
+  if (leaving.size > 0) {
+    severityBySource.update((all) => {
+      const next = { ...all }
+      for (const id of leaving) delete next[id]
+      return next
+    })
+  }
+  return closed
+}
+
+/** Closes the tabs of every source not in `shown` (disabled, deleted or no
+ * longer granted), so nothing of it stays on screen or in memory. Returns
+ * the closed tabs. */
+export function closeTabsOfHiddenSources(shown: ReadonlySet<number>): Tab[] {
+  const hidden = get(viewerState).tabs.filter((t) => !shown.has(t.sourceId))
+  if (hidden.length === 0) return []
+  return closeTabs(hidden.map((t) => t.key))
+}
+
 export async function closeAllTabs(): Promise<void> {
   // The advanced filter's scopes go with the tabs (#274).
   scopes.set([])
@@ -95,6 +147,13 @@ export async function closeAllTabs(): Promise<void> {
     return { tabs: [], activeKey: null }
   })
   explorerExpanded.set(new Set())
+  // The editor states and severity patterns go with the tabs; again once
+  // an editor still on screen has let go of its tab (CodeMirrorPane keeps
+  // the state of the tab it shows when it goes).
+  forgetAllEditorStates()
+  severityBySource.set({})
+  await tick()
+  forgetAllEditorStates()
   await Promise.all(
     tabs
       .filter((t) => t.scratchKey)

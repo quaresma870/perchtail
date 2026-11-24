@@ -130,8 +130,9 @@ const severityMatchesArrived = StateEffect.define<null>()
  * builder: RangeSetBuilder requires strictly ascending position order,
  * and interleaving line-level and mark-level decorations in a single
  * builder would violate that. `patterns` is captured at construction time —
- * the caller (CodeMirrorPane) rebuilds the whole extension set when the
- * effective pattern list changes, same as it already does for `content`. */
+ * when the effective pattern list changes, the caller (CodeMirrorPane)
+ * reconfigures the severity compartment with a new instance; the document
+ * and the rest of the editor state stay as they are. */
 export function severityHighlighting(
   patterns: SeverityPattern[],
   matcher: SeverityMatcher = severityMatcher,
@@ -245,9 +246,10 @@ function buildMarkDecorations(view: EditorView, marks: MarkPattern[]): Decoratio
  * highlighted at once, each in its own color (mark-highlighting.ts) --
  * distinct from severityHighlighting's admin-configured, level-based set.
  * Same single-ViewPlugin/token-only shape as severityHighlighting's `tokens`
- * plugin (marks never tint a whole line), rebuilt whenever the active mark
- * list changes, same "captured at construction time" convention as every
- * other content-dependent extension here. */
+ * plugin (marks never tint a whole line). The marks are captured at
+ * construction time, like every other content-dependent extension here:
+ * when the active mark list changes, CodeMirrorPane reconfigures the marks
+ * compartment with a new instance. */
 export function markHighlighting(marks: MarkPattern[]) {
   return ViewPlugin.fromClass(
     class {
@@ -364,7 +366,9 @@ function buildWhitespaceDecorations(view: EditorView, crlfLines: Set<number>): D
  * need here, not a generic editor nicety. `content` is the raw fetched
  * text (needed to detect CRLF before CodeMirror's own parsing consumes the
  * `\r`, see findCrlfLineNumbers) -- computed once per call, same "captured
- * at construction time" pattern as severityHighlighting's patterns. A
+ * at construction time" pattern as severityHighlighting's patterns (when
+ * the text or the toggle changes, CodeMirrorPane reconfigures the
+ * whitespace compartment with a new instance). A
  * single ViewPlugin is enough here (unlike severityHighlighting's two):
  * every decoration is a `Decoration.replace`/`Decoration.widget` over a
  * distinct, non-overlapping position in one pass, so there's no

@@ -510,6 +510,8 @@ Severity indicators colour matching text in the viewer, by level (error, warning
 
 A pattern is plain text matched anywhere in a line, ignoring case, or a regular expression with the `re:` prefix. Each pattern has a level and switches: **line** tints the whole line instead of only the matched text, **nav** includes it in the viewer's previous and next problem buttons, and **on** turns it on or off.
 
+A change reaches the files already open in the viewer when you go back to it: the viewer asks again for the patterns of each source with open tabs and keeps showing the ones it had until they arrive.
+
 Patterns run in every viewer's browser, so they have the same limits as rule patterns: at most 1000 characters, and regular expressions in the rules' syntax (RE2: no backreferences or lookaround). The viewer matches them in a background worker, apart from the page, and only on the first 2000 characters of each line. A pattern that takes more than a second in all over the lines in view, or over the whole file for the previous and next problem buttons, or that gets stuck on a line, is turned off until the page is reloaded, with a warning that names it ("A severity indicator took too long to match and is turned off until you reload the page: …"), and the other patterns keep working: make such a pattern simpler, for example without a repeated group inside another (`(a+)+`).
 
 A pattern saved before these limits, with lookaround, a backreference or more than 1000 characters, keeps working in the viewer, and can still be switched off, given another level or switches, or deleted; only a change to its pattern must be in the rules' syntax.
