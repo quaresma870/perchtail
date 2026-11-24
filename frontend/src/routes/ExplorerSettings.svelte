@@ -224,7 +224,7 @@
   {#if limitsDraft}
     <section class="card">
       <h2 class="section-title">Limits</h2>
-      <p class="hint">
+      <p class="hint section-hint">
         What the server takes on at once, so a few big folders or a script can't hold every worker. A request
         over a limit is answered "busy, try again in a few seconds" instead of waiting.
       </p>
@@ -248,10 +248,10 @@
           </div>
         </div>
       {/each}
-      {#if limitsError}
-        <p class="error">{limitsError}</p>
-      {/if}
-      <div>
+      <div class="setting-row column">
+        {#if limitsError}
+          <p class="error">{limitsError}</p>
+        {/if}
         <button type="button" class="btn btn-ghost" on:click={saveLimits} disabled={limitsSaving || !limitsDirty}>
           {limitsSaving ? 'Saving…' : 'Save limits'}
         </button>

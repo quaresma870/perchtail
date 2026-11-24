@@ -298,6 +298,11 @@ code,
   color: var(--danger);
   margin: 0;
 }
+/* A card's own hint, below its title: inset like the title and the rows,
+   as Settings -> Redaction does. */
+.settings-blocks .section-hint {
+  margin: 0 1.5rem 0.6rem;
+}
 .settings-blocks .warning {
   color: var(--warning);
   margin: 0.35rem 0 0;

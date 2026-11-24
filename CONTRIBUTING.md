@@ -100,6 +100,16 @@ This builds the frontend and starts its own isolated backend on port 8001 with a
 
 `frontend/e2e/accessibility.spec.ts` runs axe-core on each main page and fails on serious or critical WCAG 2.0/2.1 A and AA violations, listing each rule, its impact and the selectors of the offending nodes. A new page, or a new popup on an existing one, gets its own test in that spec: open it, wait for it to finish loading, then check it. Fix what it finds in the component; only a third-party node that can't be fixed by configuration (such as CodeMirror's scroller) is excluded, with a comment saying why.
 
+#### The README's screenshots
+
+`frontend/e2e/readme-screenshots.spec.ts` remakes the images in `docs/images/` from demo data it creates (fictional customers and hosts) and deletes again. It doesn't run in the normal suite: it is skipped unless `README_SCREENSHOTS` is set. From `frontend/`, with the e2e backend and its sshd/smbd test servers:
+
+```bash
+README_SCREENSHOTS=1 npx playwright test e2e/readme-screenshots.spec.ts
+```
+
+The SSH and SMB sources point at the test servers by address; with `README_HOST_NAMES=1` they use their own names (`web-01`, `web-02`, `files-01`, `files-02`, `edge-01`) as hosts instead, for a backend whose machine resolves those names to the test servers (in its `/etc/hosts`). Optimize the PNGs afterwards (for example `optipng -o5 -strip all docs/images/*.png`) and check each one before committing it.
+
 ### Push agent (Go)
 
 The agent in `agent/` is built with Go 1.27 (`go 1.27.0` in `agent/go.mod`; CI uses the latest 1.27 release). Run the checks CI runs from `agent/`:
