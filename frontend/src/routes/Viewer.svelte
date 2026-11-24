@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte'
+  import { get } from 'svelte/store'
   import { push, router } from 'svelte-spa-router'
   import { api } from '../lib/api'
   import ConnectionCard from '../lib/components/ConnectionCard.svelte'
@@ -44,6 +45,13 @@
     readRedactionHeaders,
     tailIntervalMs,
   } from '../lib/follow'
+  import {
+    forgetEditorState,
+    formattedContent,
+    NO_PATTERNS,
+    refreshSeverityPatterns,
+    severityBySource,
+  } from '../lib/editor-states'
   import { canFormat, formatContent } from '../lib/format-content'
   import { languageForFilename } from '../lib/file-language'
   import { MARK_SWATCH_COLORS, nextMarkColorIndex, type MarkPattern } from '../lib/mark-highlighting'
@@ -53,7 +61,15 @@
   import { systemSettings } from '../lib/settings'
   import { tabKey } from '../lib/tab-key'
   import type { SeverityPattern, Source } from '../lib/types'
-  import { explorerExpanded, setExpanded, sourceHue, viewerState, type Tab } from '../lib/viewer-tabs'
+  import {
+    closeTabs,
+    closeTabsOfHiddenSources as closeHiddenSourceTabs,
+    explorerExpanded,
+    setExpanded,
+    sourceHue,
+    viewerState,
+    type Tab,
+  } from '../lib/viewer-tabs'
   import { formatSize } from '../lib/file-details'
   import {
     capTailBuffer,
@@ -85,8 +101,6 @@
   let allSources: Source[] = []
   let loading = true
   let loadError = ''
-  // Per-source severity patterns, fetched on first use for that source.
-  let severityBySource: Record<number, SeverityPattern[]> = {}
   // Severity patterns turned off for taking too long (severity-highlighting.ts);
   // the warning shows those not dismissed yet.
   let dismissedSlowPatterns = 0
@@ -212,11 +226,20 @@
   // Redaction (#382, #249): a file the viewer got redacted is downloaded
   // redacted too, unless downloads are left out of redaction.
   $: downloadLabel = activeTab?.redacted && $systemSettings.redaction_downloads ? 'Download (redacted)' : 'Download'
-  $: activeSeverityPatterns = activeTab ? (severityBySource[activeTab.sourceId] ?? []) : []
-  $: displayContent = activeTab
-    ? (formatContent(activeTab.content, languageForFilename(activeTab.name), activeTab.format) ??
-      activeTab.content)
-    : ''
+  // The same list for as long as the source's patterns don't change, so
+  // patterns arriving for another source leave the editor alone.
+  $: activeSeverityPatterns = activeTab ? ($severityBySource[activeTab.sourceId] ?? NO_PATTERNS) : NO_PATTERNS
+  // Formatted again only when the tab's text or format changed, not on
+  // every tab switch.
+  $: displayContent = activeTab ? displayedContent(activeTab) : ''
+  function displayedContent(tab: Tab): string {
+    return formattedContent(
+      tab.key,
+      tab.content,
+      tab.format,
+      () => formatContent(tab.content, languageForFilename(tab.name), tab.format) ?? tab.content,
+    )
+  }
   $: sourceNames = new Set(tabs.map((t) => t.sourceId)).size > 1
 
   // Advanced filter (#274): the box filters files in the ticked sources and
@@ -330,17 +353,20 @@
     loading = false
   }
 
-  async function ensureSeverityPatterns(sourceId: number) {
-    if (severityBySource[sourceId] !== undefined) return
-    severityBySource = { ...severityBySource, [sourceId]: [] }
-    try {
-      const patterns = await api.get<SeverityPattern[]>(
-        `/sources/${sourceId}/severity-patterns/effective`,
-      )
-      severityBySource = { ...severityBySource, [sourceId]: patterns }
-    } catch {
-      // no highlighting for this source; browsing still works
+  // Per-source severity patterns, fetched on first use for that source and
+  // kept across pages (lib/editor-states.ts). Asked for as the file is, so
+  // they're usually there when it opens. `refresh` asks again for a source
+  // already kept (the Viewer shown again), using the kept list meanwhile
+  // and replacing it only if it changed.
+  async function ensureSeverityPatterns(sourceId: number, refresh = false) {
+    if (get(severityBySource)[sourceId] !== undefined) {
+      if (!refresh) return
+    } else {
+      severityBySource.update((all) => ({ ...all, [sourceId]: NO_PATTERNS }))
     }
+    await refreshSeverityPatterns(sourceId, () =>
+      api.get<SeverityPattern[]>(`/sources/${sourceId}/severity-patterns/effective`),
+    )
   }
 
   function openUrl(sourceId: number, path: string, member: string | null): string {
@@ -379,6 +405,7 @@
       return false
     }
     largeFile = null
+    ensureSeverityPatterns(sourceId)
     try {
       const response = await trackedFetch(openUrl(sourceId, path, member), { credentials: 'include' })
       if (!response.ok) {
@@ -429,7 +456,7 @@
         partialChars,
       }
       notice = null
-      ensureSeverityPatterns(sourceId)
+      forgetEditorState(key)
       setState({ tabs: [...tabs, tab], activeKey: key })
       return true
     } catch {
@@ -531,6 +558,7 @@
       notice = { message: tabLimitMessage(), retryable: false }
       return
     }
+    ensureSeverityPatterns(sourceId)
     try {
       const read = await readEnd(sourceId, path, name, size)
       if ('message' in read) {
@@ -564,7 +592,7 @@
         partialChars: read.partialChars,
       }
       notice = null
-      ensureSeverityPatterns(sourceId)
+      forgetEditorState(key)
       setState({ tabs: [...tabs.filter((t) => t.key !== key), tab], activeKey: key })
     } catch {
       notice = {
@@ -644,12 +672,8 @@
   function closeTab(tab: Tab) {
     followDecoders.delete(tab.key)
     followStarted.delete(tab.key)
-    const remaining = tabs.filter((t) => t.key !== tab.key)
-    setState({
-      tabs: remaining,
-      activeKey:
-        activeKey === tab.key ? (remaining.length > 0 ? remaining[remaining.length - 1].key : null) : activeKey,
-    })
+    // Its editor state goes too (lib/viewer-tabs.ts).
+    closeTabs([tab.key])
     if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
   }
 
@@ -658,23 +682,12 @@
   // a list was actually loaded: an empty list from a failed request mustn't
   // close everything.
   function closeTabsOfHiddenSources() {
-    const shown = new Set(allSources.map((s) => s.id))
-    const hidden = tabs.filter((t) => !shown.has(t.sourceId))
-    if (hidden.length === 0) return
+    const hidden = closeHiddenSourceTabs(new Set(allSources.map((s) => s.id)))
     for (const tab of hidden) {
       followDecoders.delete(tab.key)
       followStarted.delete(tab.key)
       if (tab.scratchKey) releaseScratch(tab.sourceId, tab.path, tab.member)
     }
-    const remaining = tabs.filter((t) => shown.has(t.sourceId))
-    setState({
-      tabs: remaining,
-      activeKey: remaining.some((t) => t.key === activeKey)
-        ? activeKey
-        : remaining.length > 0
-          ? remaining[remaining.length - 1].key
-          : null,
-    })
   }
 
   function updateActiveTab(patch: Partial<Tab>) {
@@ -1054,7 +1067,8 @@
     migrateLegacyViewChoice()
     window.addEventListener('keydown', handleKeydown)
     await loadSources()
-    for (const tab of tabs) ensureSeverityPatterns(tab.sourceId)
+    // Patterns changed in Settings meanwhile reach the open tabs.
+    for (const sourceId of new Set(tabs.map((t) => t.sourceId))) ensureSeverityPatterns(sourceId, true)
     if (focusSourceId !== null) {
       const focused = allSources.find((s) => s.id === focusSourceId)
       if (focused) revealInTree(focused)
@@ -1564,6 +1578,8 @@
           <CodeMirrorPane
             bind:this={paneRef}
             content={displayContent}
+            stateKey={activeTab.key}
+            format={activeTab.format}
             severityPatterns={activeSeverityPatterns}
             filename={activeTab.name}
             wrapEnabled={activeTab.wrapEnabled}

@@ -25,15 +25,28 @@ const fileB = `editor-features-b-${stamp}.json`
 const pathA = path.join(LOG_DIR, fileA)
 const pathB = path.join(LOG_DIR, fileB)
 const RAW_A = '{"service":"gateway","message":"connection timeout"}'
+// Long enough to scroll, for the tests of each tab keeping its place.
+const fileLong = `editor-features-long-${stamp}.log`
+const pathLong = path.join(LOG_DIR, fileLong)
+const longLine = (n: number) => `entry ${String(n).padStart(4, '0')} of the long fixture`
+// A line no severity pattern matches until the test of patterns changed in
+// Settings adds one for it.
+const fileSeverity = `editor-features-severity-${stamp}.log`
+const pathSeverity = path.join(LOG_DIR, fileSeverity)
+const severityMarker = `sevrefresh${stamp}`
 
 test.beforeAll(() => {
   fs.writeFileSync(pathA, `${RAW_A}\n`)
   fs.writeFileSync(pathB, '{"service":"gateway","message":"connection refused"}\n')
+  fs.writeFileSync(pathLong, `${Array.from({ length: 3000 }, (_, i) => longLine(i + 1)).join('\n')}\n`)
+  fs.writeFileSync(pathSeverity, `first plain line\nthe ${severityMarker} line\nlast plain line\n`)
 })
 
 test.afterAll(() => {
   fs.rmSync(pathA, { force: true })
   fs.rmSync(pathB, { force: true })
+  fs.rmSync(pathLong, { force: true })
+  fs.rmSync(pathSeverity, { force: true })
 })
 
 // FolderTree renders both a source's own tree entries and (once opened)
@@ -135,6 +148,121 @@ test('one find bar: Find button or Ctrl/Cmd+F, next/previous with a count, Escap
   await page.keyboard.press('ControlOrMeta+f')
   await expect(find).toBeFocused()
   await expect(find).toHaveValue('service')
+})
+
+// Selects line 1500 of the long file (Go to line), scrolls a little past
+// it, and returns where the editor is scrolled to.
+async function selectLineAndScroll(page: import('@playwright/test').Page): Promise<number> {
+  await page.getByRole('button', { name: 'Go to line' }).click()
+  await page.getByPlaceholder('Line #').fill('1500')
+  await page.getByPlaceholder('Line #').press('Enter')
+  await expect(page.locator('.cm-activeLine')).toHaveText(longLine(1500))
+  const scroller = page.locator('.cm-scroller')
+  const centered = await scroller.evaluate((el) => el.scrollTop)
+  await scroller.hover()
+  await page.mouse.wheel(0, 120)
+  await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(centered + 60)
+  // The wheel may still be scrolling smoothly: the place is where it stops.
+  let top = -1
+  await expect
+    .poll(async () => {
+      const previous = top
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+      top = await scroller.evaluate((el) => el.scrollTop)
+      return top === previous
+    })
+    .toBe(true)
+  expect(top).toBeGreaterThan(1000)
+  return top
+}
+
+// The long file's tab is back with the same selection (what Find starts
+// with) and scrolled to the same place.
+async function expectSamePlace(page: import('@playwright/test').Page, top: number) {
+  await expect(page.locator('.tab.active .tab-label')).toContainText(fileLong)
+  await expect(page.locator('.cm-content')).toContainText('of the long fixture')
+  const scroller = page.locator('.cm-scroller')
+  // Within a pixel or so: the browser may round a fractional scroll offset.
+  await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(top - 2)
+  await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeLessThan(top + 2)
+  await page.getByRole('button', { name: 'Find', exact: true }).click()
+  await expect(page.getByRole('textbox', { name: 'Find', exact: true })).toHaveValue(longLine(1500))
+}
+
+test('each tab keeps its selection and place when switching tabs', async ({ page }) => {
+  await treeFile(page, fileLong).click()
+  await expect(page.locator('.cm-content')).toContainText(longLine(1))
+  await treeFile(page, fileA).click()
+  await expect(page.locator('.cm-content')).toContainText('"service"')
+  await page.locator('.tab-label', { hasText: fileLong }).click()
+  await expect(page.locator('.cm-content')).toContainText(longLine(1))
+  const top = await selectLineAndScroll(page)
+
+  await page.locator('.tab-label', { hasText: fileA }).click()
+  await expect(page.locator('.cm-content')).toContainText('"service"')
+  await page.locator('.tab-label', { hasText: fileLong }).click()
+
+  await expectSamePlace(page, top)
+})
+
+test('a tab keeps its selection and place after a visit to another page', async ({ page }) => {
+  await treeFile(page, fileLong).click()
+  await expect(page.locator('.cm-content')).toContainText(longLine(1))
+  const top = await selectLineAndScroll(page)
+
+  await page.goto('/#/settings/sources')
+  await expect(page.locator('.cm-content')).toHaveCount(0)
+  await page.goto('/#/viewer')
+
+  await expectSamePlace(page, top)
+})
+
+test('a file closed and opened again starts from the top, without the old selection', async ({ page }) => {
+  await treeFile(page, fileLong).click()
+  await expect(page.locator('.cm-content')).toContainText(longLine(1))
+  await selectLineAndScroll(page)
+
+  await page.getByRole('button', { name: `Close ${fileLong}` }).click()
+  await expect(page.locator('.tab-label', { hasText: fileLong })).toHaveCount(0)
+  await treeFile(page, fileLong).click()
+
+  await expect(page.locator('.tab.active .tab-label')).toContainText(fileLong)
+  await expect(page.locator('.cm-content')).toContainText(longLine(1))
+  expect(await page.locator('.cm-scroller').evaluate((el) => el.scrollTop)).toBe(0)
+  await page.getByRole('button', { name: 'Find', exact: true }).click()
+  await expect(page.getByRole('textbox', { name: 'Find', exact: true })).toHaveValue('')
+})
+
+test('a severity pattern added in Settings tints the open tab once back in the Viewer', async ({ page }) => {
+  await treeFile(page, fileSeverity).click()
+  const markedLine = page.locator('.cm-line', { hasText: severityMarker })
+  await expect(markedLine).toBeVisible()
+  await expect(markedLine).not.toHaveClass(/cm-line-error/)
+
+  await page.goto('/#/settings/severity-indicators')
+  const addRow = page.locator('.add-row')
+  await addRow.locator('select.level-select').selectOption('error')
+  await addRow.getByPlaceholder('panic or re:\\berror\\b').fill(severityMarker)
+  await addRow.locator('label.flag', { hasText: 'line' }).locator('input[type=checkbox]').check()
+  await addRow.getByRole('button', { name: 'Add pattern' }).click()
+  const values = () =>
+    page
+      .locator('.pattern-row input.pattern-input')
+      .evaluateAll((els) => els.map((el) => (el as HTMLInputElement).value))
+  await expect.poll(async () => (await values()).includes(severityMarker)).toBe(true)
+
+  try {
+    await page.goto('/#/viewer')
+    await expect(page.locator('.tab.active .tab-label')).toContainText(fileSeverity)
+    await expect(markedLine).toHaveClass(/cm-line-error/)
+    await expect(page.locator('.cm-line.cm-line-error')).toHaveCount(1)
+  } finally {
+    await page.goto('/#/settings/severity-indicators')
+    await expect.poll(async () => (await values()).includes(severityMarker)).toBe(true)
+    const row = page.locator('.pattern-row').nth((await values()).indexOf(severityMarker))
+    await row.getByRole('button', { name: 'delete' }).click()
+    await expect.poll(async () => (await values()).includes(severityMarker)).toBe(false)
+  }
 })
 
 test('find all can be resized by its handle', async ({ page }) => {
