@@ -8,6 +8,10 @@ release ships (0.x releases may include breaking changes between minors).
 
 ## [Unreleased]
 
+## [0.7.1-rc.1] - 2026-11-24
+
+A security release. Upgrade the server, then the push agents (Settings → Agents, or as in agent/README.md). If your `.env` came from an earlier `.env.example`, read Upgrading first.
+
 ### Upgrading
 - An `.env` (or `perchtail.env`) copied from an earlier `.env.example` sets `LOG_QUIET_THIRD_PARTY=false`: delete the line, or set it to `true`, so the protocol libraries stay at `INFO` when `LOG_LEVEL=DEBUG`. While it is `false`, PerchTail logs `logging.third_party_debug` at startup.
 
