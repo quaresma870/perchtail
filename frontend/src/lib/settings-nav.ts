@@ -1,3 +1,4 @@
+import type { SettingsIconName } from './settings-icon-paths'
 import type { CurrentUser, GlobalCapability } from './types'
 
 // The Settings sidebar: pages grouped in sections. Each page is shown only to
@@ -7,6 +8,8 @@ import type { CurrentUser, GlobalCapability } from './types'
 export interface SettingsPage {
   label: string
   path: string
+  /** The icon shown before the page's name in the sidebar. */
+  icon: SettingsIconName
 }
 
 export interface SettingsGroup {
@@ -46,12 +49,23 @@ const GROUPS: { label: string; pages: PageDefinition[] }[] = [
   {
     label: 'Sources',
     pages: [
-      { label: 'Sources', path: '/settings/sources', visible: everyone },
-      { label: 'Folders', path: '/settings/folders', visible: has('create_source') },
-      { label: 'Agents', path: '/settings/agents', visible: has('create_source') },
+      { label: 'Sources', path: '/settings/sources', icon: 'server', visible: everyone },
+      {
+        label: 'Folders',
+        path: '/settings/folders',
+        icon: 'folders',
+        visible: has('create_source'),
+      },
+      {
+        label: 'Agents',
+        path: '/settings/agents',
+        icon: 'plug-connected',
+        visible: has('create_source'),
+      },
       {
         label: 'Source defaults',
         path: '/settings/source-defaults',
+        icon: 'adjustments',
         visible: has('manage_system_settings'),
       },
     ],
@@ -59,12 +73,18 @@ const GROUPS: { label: string; pages: PageDefinition[] }[] = [
   {
     label: 'Access',
     pages: [
-      { label: 'Users', path: '/settings/users', visible: has('manage_users') },
-      { label: 'Roles', path: '/settings/roles', visible: has('manage_roles') },
-      { label: 'Single sign-on', path: '/settings/sso', visible: has('manage_sso') },
+      { label: 'Users', path: '/settings/users', icon: 'users', visible: has('manage_users') },
+      {
+        label: 'Roles',
+        path: '/settings/roles',
+        icon: 'shield-lock',
+        visible: has('manage_roles'),
+      },
+      { label: 'Single sign-on', path: '/settings/sso', icon: 'key', visible: has('manage_sso') },
       {
         label: 'Sign-in security',
         path: '/settings/sign-in-security',
+        icon: 'lock',
         visible: has('manage_system_settings'),
       },
     ],
@@ -72,15 +92,17 @@ const GROUPS: { label: string; pages: PageDefinition[] }[] = [
   {
     label: 'Content',
     pages: [
-      { label: 'Redaction', path: '/settings/redaction', visible: superAdmin },
+      { label: 'Redaction', path: '/settings/redaction', icon: 'eye-off', visible: superAdmin },
       {
         label: 'Severity indicators',
         path: '/settings/severity-indicators',
+        icon: 'alert-triangle',
         visible: has('manage_system_settings'),
       },
       {
         label: 'Explorer and limits',
         path: '/settings/explorer',
+        icon: 'gauge',
         visible: has('manage_system_settings'),
       },
     ],
@@ -88,15 +110,31 @@ const GROUPS: { label: string; pages: PageDefinition[] }[] = [
   {
     label: 'Operations',
     pages: [
-      { label: 'Alerts', path: '/settings/alerts', visible: has('manage_system_settings') },
-      { label: 'Email', path: '/settings/email', visible: superAdmin },
+      {
+        label: 'Alerts',
+        path: '/settings/alerts',
+        icon: 'bell',
+        visible: has('manage_system_settings'),
+      },
+      { label: 'Email', path: '/settings/email', icon: 'mail', visible: superAdmin },
       {
         label: 'Backups and updates',
         path: '/settings/backups',
+        icon: 'database-export',
         visible: has('manage_system_settings'),
       },
-      { label: 'Monitoring', path: '/settings/monitoring', visible: has('manage_system_settings') },
-      { label: 'Import / export', path: '/settings/import-export', visible: superAdmin },
+      {
+        label: 'Monitoring',
+        path: '/settings/monitoring',
+        icon: 'activity',
+        visible: has('manage_system_settings'),
+      },
+      {
+        label: 'Import / export',
+        path: '/settings/import-export',
+        icon: 'transfer',
+        visible: superAdmin,
+      },
     ],
   },
   {
@@ -105,11 +143,13 @@ const GROUPS: { label: string; pages: PageDefinition[] }[] = [
       {
         label: 'Audit log',
         path: '/settings/audit-log',
+        icon: 'list-search',
         visible: (user, enabled) => canOpenAuditLogPage(user, enabled),
       },
       {
         label: 'Access review',
         path: '/settings/access-review',
+        icon: 'user-check',
         visible: has('view_access_report'),
       },
     ],
@@ -126,7 +166,7 @@ export function settingsNavGroups(
     label: group.label,
     pages: group.pages
       .filter((page) => page.visible(user, auditViewEnabled))
-      .map(({ label, path }) => ({ label, path })),
+      .map(({ label, path, icon }) => ({ label, path, icon })),
   })).filter((group) => group.pages.length > 0)
 }
 

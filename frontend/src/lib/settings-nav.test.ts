@@ -5,6 +5,7 @@ import {
   isSettingsPageActive,
   settingsNavGroups,
 } from './settings-nav'
+import { SETTINGS_ICON_PATHS } from './settings-icon-paths'
 import type { CurrentUser, GlobalCapability } from './types'
 
 function user(capabilities: GlobalCapability[] = [], isSuperAdmin = false): CurrentUser {
@@ -66,6 +67,38 @@ describe('settingsNavGroups', () => {
       '/settings/audit-log',
       '/settings/access-review',
     ])
+  })
+
+  it('gives every page its icon, each one drawn by SettingsIcon', () => {
+    const icons = settingsNavGroups(user([], true), true).flatMap((group) =>
+      group.pages.map((page) => `${page.label}: ${page.icon}`),
+    )
+    expect(icons).toEqual([
+      'Sources: server',
+      'Folders: folders',
+      'Agents: plug-connected',
+      'Source defaults: adjustments',
+      'Users: users',
+      'Roles: shield-lock',
+      'Single sign-on: key',
+      'Sign-in security: lock',
+      'Redaction: eye-off',
+      'Severity indicators: alert-triangle',
+      'Explorer and limits: gauge',
+      'Alerts: bell',
+      'Email: mail',
+      'Backups and updates: database-export',
+      'Monitoring: activity',
+      'Import / export: transfer',
+      'Audit log: list-search',
+      'Access review: user-check',
+    ])
+    for (const group of settingsNavGroups(user([], true), true)) {
+      for (const page of group.pages) {
+        expect(Object.keys(SETTINGS_ICON_PATHS)).toContain(page.icon)
+        expect(SETTINGS_ICON_PATHS[page.icon].length).toBeGreaterThan(0)
+      }
+    }
   })
 
   it('keeps the Audit log page for a super admin with the audit view off', () => {
