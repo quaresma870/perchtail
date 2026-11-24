@@ -176,6 +176,58 @@ def test_the_replaced_connection_is_closed_only_after_the_commit(session, monkey
     assert seen == [False]
 
 
+def _replaced_then_sends(session, send):
+    """Connects an agent, replaces its connection with a second one, waits
+    for the server to close the first, then has the first send something
+    (as a message already on its way when the server closed it would be)
+    and closes it, returning what `__exit__` raised, if anything: an error
+    in the old connection's handler comes out there."""
+    source = _agent_source(session, "s3cret")
+    registry = get_agent_registry()
+    client = _client(session)
+    headers = {"authorization": "Bearer s3cret"}
+    old = client.websocket_connect("/agent/connect", headers=headers)
+    old.__enter__()
+    assert _wait_until(lambda: registry.is_connected(source.id))
+    raised = None
+    with client.websocket_connect("/agent/connect", headers=headers):
+        while old.receive()["type"] != "websocket.close":
+            pass  # a keepalive ping, if one was sent before the close
+        send(old)
+        try:
+            old.__exit__(None, None, None)
+        except Exception as exc:  # noqa: BLE001 - returned to the test
+            raised = exc
+        assert registry.is_connected(source.id)
+    assert _wait_until(lambda: not registry.is_connected(source.id))
+    return source, raised
+
+
+def test_a_message_reaching_a_replaced_connection_ends_it_quietly(session):
+    """Lab, 0.7.1-rc.1: after an upgrade from the portal, the old
+    connection's receive loop read a message that was on its way when the
+    new connection closed it, and its next read raised Starlette's
+    WebSocketDisconnected, logged by uvicorn as an ASGI error with its
+    traceback. It ends as a disconnect, with a DEBUG line."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        source, raised = _replaced_then_sends(session, lambda ws: ws.send_json({"type": "pong"}))
+    assert raised is None
+    assert {
+        "event": "agent.receive_after_close",
+        "log_level": "debug",
+        "source_id": source.id,
+    } in [{key: entry.get(key) for key in ("event", "log_level", "source_id")} for entry in logs]
+
+
+def test_another_error_in_the_receive_loop_is_still_raised(session):
+    """Only a read from a socket the server closed is quiet: invalid JSON
+    still fails the handler as before."""
+    _, raised = _replaced_then_sends(session, lambda ws: ws.send_text("not json"))
+    assert isinstance(raised, ValueError)
+
+
 def test_connect_records_the_os_the_agent_reports(session):
     """#189: rules for a Windows agent are matched case-insensitively, so
     the backend needs to know which OS the agent runs on."""

@@ -13,6 +13,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
+from starlette.websockets import WebSocketDisconnected
 
 from app import agent_registry as registry_module
 from app.agent_registry import AgentRegistry, get_agent_registry
@@ -262,6 +263,23 @@ async def _receive(websocket: WebSocket, registry: AgentRegistry, bind, source_i
                 registry.resolve_response(source_id, message, websocket)
     except WebSocketDisconnect:
         pass
+    except RuntimeError as exc:
+        # The server closed this socket (a newer connection replaced it, or
+        # registry.disconnect) while a message was on its way: the next read
+        # finds it closed. Anything else is raised as before.
+        if not _closed_by_server(exc):
+            raise
+        logger.debug("agent.receive_after_close", source_id=source_id)
+
+
+_NOT_CONNECTED = 'WebSocket is not connected. Need to call "accept" first.'
+
+
+def _closed_by_server(exc: RuntimeError) -> bool:
+    """Whether a read failed only because the server had closed the socket:
+    Starlette's WebSocketDisconnected, or the plain RuntimeError with the
+    same message that older Starlette versions raise instead."""
+    return isinstance(exc, WebSocketDisconnected) or str(exc) == _NOT_CONNECTED
 
 
 @router.get("/agent/binaries/{name}")
