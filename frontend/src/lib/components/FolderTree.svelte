@@ -1,10 +1,20 @@
 <script lang="ts">
-  import { createEventDispatcher, onDestroy, onMount } from 'svelte'
+  import { createEventDispatcher, getContext, onDestroy, onMount } from 'svelte'
   import { get } from 'svelte/store'
   import { explorerExpanded, setExpanded } from '../viewer-tabs'
   import { ApiError } from '../api'
   import { tabKey, memberPath } from '../tab-key'
   import { downloadHref } from '../download-href'
+  import {
+    EXPLORER_MENUS,
+    fileLink,
+    fileMenu,
+    folderExpandKeys,
+    folderMenu,
+    tabPathText,
+    type ExplorerMenu,
+    type ExplorerMenus,
+  } from '../context-menu'
   import { registerFolder } from '../explorer-refresh'
   import { advancedFilter, coveringScope, scopeContext, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
   import { sortEntries } from '../explorer-sort'
@@ -34,10 +44,18 @@
   // expanded and kept while it's open (#347), so a folder inside it opens
   // without fetching the archive again.
   export let archiveMembers: BrowseEntry[] | null = null
+  // Inside an archive: lists the archive again (Refresh in its menu).
+  export let relistArchive: (() => void) | null = null
 
+  // `mode`, from the right-click menu (#287): Open (even with Compare
+  // armed), Open with Tail, Open the end, or Compare with the active tab.
   const dispatch = createEventDispatcher<{
-    open: { path: string; member: string | null; name: string; size: number }
+    open: { path: string; member: string | null; name: string; size: number; mode?: OpenMode }
   }>()
+  type OpenMode = 'open' | 'tail' | 'end' | 'compare'
+
+  const menus = getContext<ExplorerMenus | undefined>(EXPLORER_MENUS)
+  let labelButton: HTMLElement
 
   let expanded = false
   let children: BrowseEntry[] = []
@@ -136,6 +154,115 @@
     }
   }
 
+  // A folder inside an archive takes its children from the archive's
+  // members, again when the archive is listed again.
+  $: if (loaded && entry.is_dir && archiveRoot !== null && archiveMembers !== null) {
+    children = archiveChildren(archiveMembers, entry.path)
+  }
+
+  /** Refresh of an archive: its members listed again. */
+  async function relistOwnArchive() {
+    try {
+      await load()
+      error = ''
+      refreshError = ''
+    } catch (err) {
+      refreshError = err instanceof ApiError ? err.detail : "Couldn't refresh this archive"
+    }
+  }
+
+  // Right-click menu (#287).
+  $: isArchiveNode = entry.is_archive && archiveRoot === null
+  $: asFile = !entry.is_dir && !isArchiveNode
+
+  /** The path Copy path gives: a member after its archive. */
+  function pathText(): string {
+    return archiveRoot !== null ? tabPathText(archiveRoot, memberPath(entry.path, archiveRoot)) : entry.path
+  }
+
+  function openAs(mode: OpenMode) {
+    if (archiveRoot !== null) {
+      const member = memberPath(entry.path, archiveRoot)
+      dispatch('open', { path: archiveRoot, member, name: entry.name, size: entry.size, mode })
+    } else {
+      dispatch('open', { path: entry.path, member: null, name: entry.name, size: entry.size, mode })
+    }
+  }
+
+  /** Collapse all: this node and everything below it close, and stay
+   * closed when it opens again. */
+  function collapseAll() {
+    explorerExpanded.update((keys) => {
+      const drop = new Set(folderExpandKeys(keys, sourceId, archiveRoot, entry.path))
+      return drop.size === 0 ? keys : new Set([...keys].filter((key) => !drop.has(key)))
+    })
+    expanded = false
+  }
+
+  function buildMenu(): ExplorerMenu {
+    if (asFile) {
+      return {
+        label: 'File actions',
+        entries: fileMenu({
+          archiveMember: archiveRoot !== null,
+          gzip: entry.name.toLowerCase().endsWith('.gz'),
+          otherTabActive: activeKey !== null && activeKey !== ownKey,
+          canDownload: ownDownloadHref !== null,
+        }),
+        run: runFileMenu,
+      }
+    }
+    return {
+      label: 'Folder actions',
+      entries: folderMenu({
+        inArchive: archiveRoot !== null,
+        archive: isArchiveNode,
+        listed: expanded && loaded,
+        expanded,
+        canDownload: ownDownloadHref !== null,
+      }),
+      run: runFolderMenu,
+    }
+  }
+
+  function runFileMenu(id: string) {
+    switch (id) {
+      case 'open':
+        return openAs('open')
+      case 'open-tail':
+        return openAs('tail')
+      case 'open-end':
+        return openAs('end')
+      case 'compare':
+        return openAs('compare')
+      case 'download':
+        if (ownDownloadHref) window.open(ownDownloadHref, '_blank', 'noreferrer')
+        return
+      case 'copy-path':
+        return menus?.copy(pathText())
+      case 'copy-link':
+        return menus?.copy(fileLink(window.location.href, sourceId, entry.path))
+    }
+  }
+
+  function runFolderMenu(id: string) {
+    switch (id) {
+      case 'refresh':
+        if (isArchiveNode) return void relistOwnArchive()
+        if (archiveRoot !== null) return relistArchive?.()
+        return void refreshNow()
+      case 'search-here':
+        return menus?.searchHere({ sourceId, path: entry.path })
+      case 'collapse-all':
+        return collapseAll()
+      case 'download':
+        if (ownDownloadHref) window.open(ownDownloadHref, '_blank', 'noreferrer')
+        return
+      case 'copy-path':
+        return menus?.copy(pathText())
+    }
+  }
+
   async function toggle() {
     if (canExpand) {
       if (!loaded) {
@@ -171,11 +298,13 @@
 </script>
 
 <div class="node">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="row"
     class:inert={entry.is_dir && archiveRoot !== null}
     class:active={isActive}
     class:new={isNew}
+    on:contextmenu={(e) => menus?.mouse(e, labelButton, buildMenu)}
   >
     <!-- aria-label: the file name only, not the size shown next to it; the
          size and modification time are in the hover text. -->
@@ -195,7 +324,9 @@
       style="padding-left: {depth * 14}px"
       aria-label={entry.is_dir ? entry.name : `${entry.name}, ${formatSize(entry.size)}`}
       title={entry.is_dir ? undefined : fileDetails(entry)}
+      bind:this={labelButton}
       on:click={toggle}
+      on:keydown={(e) => menus?.key(e, buildMenu)}
     >
       {#if canExpand}
         <span class="chevron">{expanded ? '▾' : '▸'}</span>
@@ -264,6 +395,7 @@
           depth={depth + 1}
           archiveRoot={entry.is_archive ? entry.path : archiveRoot}
           archiveMembers={entry.is_archive ? ownMembers : archiveMembers}
+          relistArchive={isArchiveNode ? relistOwnArchive : relistArchive}
           {activeKey}
           {canDownload}
           on:open

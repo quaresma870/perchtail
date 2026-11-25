@@ -64,11 +64,54 @@ A folder or archive lists at most a set number of entries (5000 by default). Whe
 
 ### Status
 
-A coloured dot before each source shows whether it answers: reachable, failing, an agent that isn't connected, or not checked yet. Hover over the dot for details. If your role can manage the source, **✓?** next to it checks the connection now.
+A coloured dot before each source shows whether it answers: reachable, failing, an agent that isn't connected, or not checked yet. Hover over the dot for details. If your role can manage the source, **✓?** next to it, or **Check now** in its right-click menu, checks the connection now.
 
 ### Refresh
 
 The folders you have open are listed again on their own every 30 seconds by default, so files that rotate in and out show up. Only the list of files is refreshed, never their content, and nothing is refreshed while the browser tab is hidden. New files are marked. **⟳** next to an expanded source or folder lists it again at once.
+
+### Right-click menus in the explorer
+
+Right-click a file, folder or source, or a customer or folder of sources in the Tree view, for its menu, or press the Menu key or Shift+F10 on it. The keys work as in the viewer's menus (see "Right-click menu" under "The viewer"), and Escape puts you back on the item. Only the entries that apply, and that your role allows, are listed. A right-click on a link next to an item, such as its download icon, shows the browser's own menu.
+
+A file:
+
+- **Open**: as a click does, even while **Compare** is waiting for a file.
+- **Open with Tail**: opens it and turns **Tail** on. Not for a `.gz` file or a file inside an archive.
+- **Open the end**: opens only its last 1 MB, without Tail, as a file over the size your administrator set opens. Not for a `.gz` file or a file inside an archive. A file already open just becomes the tab shown.
+- **Compare with active tab**: compares it with the tab shown, when that tab is another file.
+- **Download**: if your role can download from the source.
+- **Copy path**: its path on the source; for a file inside an archive, the archive's path, then `›` and the file's path in it.
+- **Copy link**: an address that opens this file in PerchTail. Not for a file inside an archive.
+
+A folder (a source's top folders too):
+
+- **Refresh**: lists it again, as **⟳** does, while it is expanded.
+- **Search here**: limits the search box to this folder, as ticking it under **Filter sources** does, and puts you in the box: type to list its matching files, live (see "Searching sources live").
+- **Collapse all**: closes it and every folder below it.
+- **Download as ZIP**: if your role can download from the source.
+- **Copy path**.
+
+A folder inside an archive has only **Refresh** (the archive is read again), **Collapse all** and **Copy path**. An archive itself has **Refresh**, **Collapse all**, **Download** (if your role can download from the source) and **Copy path**.
+
+A source:
+
+- **Refresh**, **Search here** and **Collapse all**, as for a folder.
+- **Check now**: checks the connection, as **✓?** does, if your role can manage the source.
+- **Index file names now**: lists its file names for the search now, if your role can run it and the source's file-name index is on.
+- **Copy host**: its host name or address.
+- **Edit source** and **Edit rules**: open the source's page in Settings, where its settings and its rules are, if your role can manage the source or its rules.
+
+The application logs source has no Copy host, Edit source nor Edit rules.
+
+A customer or folder of sources (Tree view):
+
+- **Search here**: limits the search box to every source in it.
+- **Check all now**: checks the connection of each enabled source in it your role can manage, three at a time. Listed only when there is one.
+- **Expand all**: opens it and every customer or folder of sources below it. The sources stay as they were, since opening one lists it.
+- **Collapse all**: closes it and everything below it.
+
+Copies and **Check all now** say how they went under the search box, and **Index file names now** under the source.
 
 ### Recent sources
 
@@ -100,6 +143,7 @@ If the index is turned off, or some sources are left out of it, the results say 
 
 **Filter sources**, next to **List** and **Tree**, adds checkboxes to the explorer. Tick sources, folders inside them, or customers and folders of sources, then type in the search box: PerchTail lists every folder below what you ticked, live, and shows the files whose names match. This works for sources left out of the index too.
 
+- **Search here** in the right-click menu of a folder, source, or customer or folder of sources does the same for that one item, replacing what was ticked.
 - **Add or change** goes back to the checkboxes, and **Show the files** back to the results.
 - **Stop** ends one search, and **Stop all** every search.
 - **Clear all** removes every ticked item.
@@ -235,10 +279,10 @@ A large file opens at its end, and Tail goes on from there; with files opened wh
 
 ## Downloads
 
-Downloads need the download capability on the source. Without it, the download buttons don't appear.
+Downloads need the download capability on the source. Without it, the download buttons and menu entries don't appear.
 
-- **A file:** the download icon in the viewer's toolbar, or the one next to the file in the explorer. A `.gz` file downloads decompressed, without its `.gz` extension.
-- **A folder:** the download icon next to the folder in the explorer downloads it as a ZIP of every visible file inside it, in its subfolders too.
+- **A file:** the download icon in the viewer's toolbar, the one next to the file in the explorer, or **Download** in the right-click menu of the file or of its tab. A `.gz` file downloads decompressed, without its `.gz` extension.
+- **A folder:** the download icon next to the folder in the explorer, or **Download as ZIP** in its right-click menu, downloads it as a ZIP of every visible file inside it, in its subfolders too.
 
 Every download is a fresh read from the source and is recorded in the audit log.
 

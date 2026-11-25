@@ -226,6 +226,147 @@ test("Try again after a failed Reload from a tab's menu reloads that tab, not th
   await expect(page.locator('.tab.active .tab-label')).toContainText(files[1])
 })
 
+// The explorer's menus (#287): files, folders and sources.
+
+test("a file's menu opens it with Tail on, and copies its path", async ({ page }) => {
+  await treeFile(page, files[0]).click({ button: 'right' })
+  await expect(page.getByRole('menu', { name: 'File actions' })).toBeVisible()
+  await expect(item(page, 'Open')).toBeFocused()
+  for (const name of ['Open with Tail', 'Open the end', 'Download', 'Copy path', 'Copy link']) {
+    await expect(item(page, name)).toBeVisible()
+  }
+  // No tab shown yet: nothing to compare with.
+  await expect(item(page, 'Compare with active tab')).toHaveCount(0)
+  await item(page, 'Open with Tail').click()
+  await expect(page.locator('.tab.active .tab-label')).toContainText(files[0])
+  await expect(page.locator('.cm-content')).toContainText(lineText(5))
+  await expect(page.getByRole('button', { name: 'Tail', exact: true })).toHaveAttribute('aria-pressed', 'true')
+
+  await treeFile(page, files[1]).click({ button: 'right' })
+  await expect(item(page, 'Compare with active tab')).toBeVisible()
+  await item(page, 'Copy path').click()
+  await expect(page.locator('.explorer-note')).toHaveText('Copied')
+  const copied = await page.evaluate(() => navigator.clipboard.readText())
+  expect(copied.endsWith(files[1])).toBe(true)
+})
+
+test("a file's menu opens with Shift+F10 and gives the focus back on Escape", async ({ page }) => {
+  const node = treeFile(page, files[2])
+  await node.focus()
+  await page.keyboard.press('Shift+F10')
+  await expect(item(page, 'Open')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(menu(page)).toHaveCount(0)
+  await expect(node).toBeFocused()
+})
+
+// A local-disk source under the e2e backend's LOCAL_SOURCE_ROOTS
+// (backend/scripts/run_e2e_server.sh), with a folder and a file next to it.
+const fixtureRoot = '/tmp/perchtail-e2e-fixtures'
+
+async function folderSource(page: Page) {
+  fs.mkdirSync(fixtureRoot, { recursive: true })
+  const dir = fs.mkdtempSync(path.join(fixtureRoot, 'menus-'))
+  fs.mkdirSync(path.join(dir, 'sub'))
+  const inside = `inside-${stamp}.log`
+  const outside = `outside-${stamp}.log`
+  fs.writeFileSync(path.join(dir, 'sub', inside), 'in the folder\n')
+  fs.writeFileSync(path.join(dir, outside), 'next to it\n')
+  const name = `e2e-menus-${stamp}-${Math.random().toString(36).slice(2, 8)}`
+  const created = await page.request.post('/sources', {
+    data: { name, protocol: 'local', host: 'localhost', base_path: dir },
+  })
+  expect(created.ok()).toBeTruthy()
+  const id: number = (await created.json()).id
+  const rule = await page.request.post(`/sources/${id}/rules`, { data: { type: 'include', pattern: '**/*' } })
+  expect(rule.ok()).toBeTruthy()
+  return {
+    id,
+    name,
+    inside,
+    outside,
+    cleanUp: async () => {
+      await page.request.delete(`/sources/${id}`)
+      fs.rmSync(dir, { recursive: true, force: true })
+    },
+  }
+}
+
+const sourceRow = (page: Page, name: string) => page.locator('.source-row', { hasText: name })
+const folderButton = (page: Page) => page.locator('.tree-body').getByRole('button', { name: 'sub', exact: true })
+
+test("a folder's Search here limits the explorer's search to that folder", async ({ page }) => {
+  const source = await folderSource(page)
+  try {
+    await page.goto(`/#/viewer/${source.id}`)
+    await expect(folderButton(page)).toBeVisible({ timeout: 20_000 })
+    await folderButton(page).click({ button: 'right' })
+    await expect(page.getByRole('menu', { name: 'Folder actions' })).toBeVisible()
+    for (const name of ['Search here', 'Download as ZIP', 'Copy path']) await expect(item(page, name)).toBeVisible()
+    await item(page, 'Search here').click()
+    await expect(page.locator('.scope-chip')).toHaveCount(1)
+    await expect(page.locator('.scope-chip')).toContainText(`${source.name} › sub`)
+    const box = page.getByRole('searchbox', { name: 'Search sources and files' })
+    await expect(box).toBeFocused()
+    await box.fill('.log')
+    const results = page.locator('.scoped-results')
+    await expect(results.getByText(source.inside)).toBeVisible({ timeout: 20_000 })
+    await expect(results.getByText(source.outside)).toHaveCount(0)
+  } finally {
+    await source.cleanUp()
+  }
+})
+
+test("a source's menu for an admin: Edit source opens the source's page", async ({ page }) => {
+  const source = await folderSource(page)
+  try {
+    await page.goto(`/#/viewer/${source.id}`)
+    await expect(folderButton(page)).toBeVisible({ timeout: 20_000 })
+    await sourceRow(page, source.name).click({ button: 'right' })
+    await expect(page.getByRole('menu', { name: 'Source actions' })).toBeVisible()
+    for (const name of ['Refresh', 'Search here', 'Collapse all', 'Check now', 'Copy host', 'Edit source', 'Edit rules']) {
+      await expect(item(page, name)).toBeVisible()
+    }
+    await item(page, 'Edit source').click()
+    await expect(page).toHaveURL(new RegExp(`#/settings/sources/${source.id}$`))
+  } finally {
+    await source.cleanUp()
+  }
+})
+
+test('with view only, the menus leave out Download, Check now, Edit source and Edit rules', async ({ page }) => {
+  const source = await folderSource(page)
+  try {
+    // The role holds only `view` on every source.
+    await page.route(/\/sources(\?.*)?$/, async (route) => {
+      if (route.request().method() !== 'GET') return route.continue()
+      const response = await route.fetch()
+      const body = (await response.json()) as Record<string, unknown>[]
+      await route.fulfill({ response, json: body.map((s) => ({ ...s, my_capabilities: ['view'] })) })
+    })
+    await page.goto(`/#/viewer/${source.id}`)
+    await expect(folderButton(page)).toBeVisible({ timeout: 20_000 })
+
+    await sourceRow(page, source.name).click({ button: 'right' })
+    await expect(item(page, 'Copy host')).toBeVisible()
+    for (const name of ['Check now', 'Index file names now', 'Edit source', 'Edit rules']) {
+      await expect(item(page, name)).toHaveCount(0)
+    }
+    await page.keyboard.press('Escape')
+
+    await folderButton(page).click({ button: 'right' })
+    await expect(item(page, 'Search here')).toBeVisible()
+    await expect(item(page, 'Download as ZIP')).toHaveCount(0)
+    await page.keyboard.press('Escape')
+
+    await treeFile(page, source.outside).click({ button: 'right' })
+    await expect(item(page, 'Open')).toBeVisible()
+    await expect(item(page, 'Download')).toHaveCount(0)
+  } finally {
+    await source.cleanUp()
+  }
+})
+
 test('the tab menu opens with Shift+F10 on a tab', async ({ page }) => {
   await openFile(page, files[0])
   const label = page.locator('.tab.active .tab-label')
