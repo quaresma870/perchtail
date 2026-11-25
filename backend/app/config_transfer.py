@@ -81,7 +81,6 @@ _SOURCE_KEYS = {
     "base_path",
     "roots",
     "enabled",
-    "search_indexing_enabled",  # ignored with a warning (#303), refused from 1.0
     "name_index_enabled",
     "credential",
     "rules",
@@ -291,7 +290,15 @@ def _parse_source(
     if not isinstance(node, dict):
         problems.append(Problem(where, "Expected a mapping"))
         return
-    unknown = set(node) - _SOURCE_KEYS
+    if "search_indexing_enabled" in node:
+        problems.append(
+            Problem(
+                f"{where}.search_indexing_enabled",
+                "search_indexing_enabled no longer exists: the full-text search index was "
+                "removed in 0.7. Remove this key.",
+            )
+        )
+    unknown = set(node) - _SOURCE_KEYS - {"search_indexing_enabled"}
     if unknown:
         problems.append(Problem(where, f"Unknown keys: {', '.join(sorted(map(str, unknown)))}"))
     name = node.get("name")
@@ -319,14 +326,6 @@ def _parse_source(
     ):
         problems.append(Problem(f"{where}.port", "port must be a number from 1 to 65535"))
         return
-    if "search_indexing_enabled" in node:
-        parsed.warnings.append(
-            Problem(
-                f"{where}.search_indexing_enabled",
-                "Ignored: the full-text search index was removed in 0.7. "
-                "Remove this key; from 1.0 it's refused.",
-            )
-        )
     flags = {}
     for flag, default in (
         ("enabled", True),

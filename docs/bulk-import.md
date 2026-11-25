@@ -6,7 +6,7 @@ Start from the [template](examples/perchtail-import.example.yaml), which the imp
 
 ## How an import works
 
-1. Paste the file, or pick it with **Load a file**, and click **Preview**. Nothing is written yet. The preview lists every customer, folder and source the file would create or change, and what changes, or the problems that stop it (**Problems — nothing was imported**), each with its place in the file (`customers[0].sources[2].base_path`). **Warnings** lists what the import goes ahead with but the file should change, such as a `search_indexing_enabled` key.
+1. Paste the file, or pick it with **Load a file**, and click **Preview**. Nothing is written yet. The preview lists every customer, folder and source the file would create or change, and what changes, or the problems that stop it (**Problems — nothing was imported**), each with its place in the file (`customers[0].sources[2].base_path`).
 2. Type credentials for any SSH, SMB or WinRM source that has none, in the file or saved, or leave them blank and set them later in each source's settings.
 3. Click **Apply** (the button shows how many changes). The whole file is applied in one transaction: either every change lands or none does.
 
@@ -45,7 +45,7 @@ A source:
 | `base_path` | yes, unless `roots` | checked as in the source editor, see [Base path](source-setup.md#base-path); a push-agent source's is trimmed and only refused when it contains control characters, in the editor too |
 | `roots` | no | two or more `{label, path}` to read several folders, at most **Folders per source** (Settings → Source defaults) or, for an existing source that already has more, as many as it has, and not for push-agent sources; see [Several folders in one source](source-setup.md#several-folders-in-one-source) |
 | `enabled` | no | default `true` |
-| `search_indexing_enabled` | no | removed in 0.7 with the content index: ignored with a warning, refused from 1.0 |
+| `search_indexing_enabled` | no | removed in 0.7 with the content index: a file that sets it is refused (a problem at `...search_indexing_enabled`, nothing imported); remove the key |
 | `name_index_enabled` | no | default `true`: the source's file names (never content) go into the file-name index |
 | `winrm_scheme` | no | WinRM sources only: `https` or `http`. Left out: `https` when `port` is left out or is 5986, `http` for any other port |
 | `tls_ca_pem` | no | WinRM sources only: the CA certificate (PEM) of an HTTPS listener whose certificate comes from an internal CA or is self-signed, as **CA certificate** in the source editor |

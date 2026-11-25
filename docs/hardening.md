@@ -4,7 +4,7 @@ A checklist for running PerchTail in production. Each item says what to do and w
 
 ## Before the first start
 
-- [ ] **Generate `CREDENTIAL_ENCRYPTION_KEY` at random**, for example `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`. It encrypts every stored credential and keys the audit chain. PerchTail refuses the shipped `changeme` and warns about a weak key at startup and at the top of the system settings pages (for example Settings → Explorer and limits); set `CREDENTIAL_KEY_REFUSE_WEAK=true` to make a weak key stop it from starting.
+- [ ] **Generate `CREDENTIAL_ENCRYPTION_KEY` at random**, for example `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`. It encrypts every stored credential and keys the audit chain. PerchTail refuses to start with the shipped `changeme` or with a weak key; leave `CREDENTIAL_KEY_REFUSE_WEAK` at its default `true`.
 - [ ] **Keep the key outside the host**, in your organisation's secret store, where you can reach it if the host is lost. The database, the salt in `DATA_DIR` and the key are useless without each other.
 - [ ] **Set `BACKUP_ENCRYPTION_KEY`** to a second random key, kept apart from the first, so a stolen backup and a leaked `CREDENTIAL_ENCRYPTION_KEY` aren't enough together ([backup-and-restore.md](backup-and-restore.md#the-key)).
 - [ ] **Set `PUBLIC_BASE_URL`** to the `https://` address users will use. The SSO redirect address and password-reset links are built from it, and password recovery by email can only be turned on while it is `https://`. Push agents don't use it: each has its own `PERCHTAIL_SERVER_URL`.
@@ -75,7 +75,7 @@ A checklist for running PerchTail in production. Each item says what to do and w
 | Setting | Default | Hardened value |
 |---|---|---|
 | `CREDENTIAL_ENCRYPTION_KEY` | `changeme` (refused) | A random key of at least 32 bytes, kept outside the host |
-| `CREDENTIAL_KEY_REFUSE_WEAK` | `false` | `true` |
+| `CREDENTIAL_KEY_REFUSE_WEAK` | `true` | `true` |
 | `CREDENTIAL_SALT_ALLOW_REGENERATE` | `false` | `false`; only for an installation whose salt is lost for good |
 | `BACKUP_ENCRYPTION_KEY` | empty (uses `CREDENTIAL_ENCRYPTION_KEY`) | A second random key |
 | `PUBLIC_BASE_URL` | `http://localhost:8080` | The `https://` address users use |

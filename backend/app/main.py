@@ -302,6 +302,11 @@ async def lifespan(app: FastAPI):
             reasons=weak_key,
             hint=key_strength.WEAK_KEY_ADVICE,
         )
+        logger.warning(
+            "startup.weak_credential_key_allowed",
+            hint="CREDENTIAL_KEY_REFUSE_WEAK is false: a temporary way out to rotate the "
+            "key with python -m app.rotate_credential_key. Remove it once the key is strong.",
+        )
 
     # One instance per DATA_DIR (#334): taken before anything moves files or
     # opens the database, held until shutdown has finished.

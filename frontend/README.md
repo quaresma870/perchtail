@@ -23,7 +23,7 @@ The development server needs a backend running on `127.0.0.1:8000`. Set the back
 
 ```bash
 cd backend
-export CREDENTIAL_ENCRYPTION_KEY=dev-only-not-a-secret   # anything but "changeme"; a key this weak only logs a warning
+python -c "import secrets; print(f'CREDENTIAL_ENCRYPTION_KEY={secrets.token_urlsafe(32)}')" >> .env   # once only: the data is encrypted with this key, and a weak key is refused
 export SESSION_COOKIE_SECURE=false                       # the dev server is plain HTTP
 python -m alembic upgrade head
 uvicorn app.main:app --reload --port 8000

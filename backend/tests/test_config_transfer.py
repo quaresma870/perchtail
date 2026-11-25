@@ -325,6 +325,43 @@ def test_problems_are_reported_with_where_and_nothing_is_written(
     assert session.exec(select(Source)).all() == []
 
 
+_WITH_SEARCH_INDEXING = TEMPLATE.replace(
+    "        base_path: Logs\n",
+    "        base_path: Logs\n        search_indexing_enabled: false\n",
+).replace(
+    "\n    base_path: /var/log\n",
+    "\n    base_path: /var/log\n    search_indexing_enabled: true\n",
+)
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_search_indexing_enabled_refuses_the_whole_import(session, client, dry_run):
+    assert _WITH_SEARCH_INDEXING.count("search_indexing_enabled") == 2
+    result = _import(client, text=_WITH_SEARCH_INDEXING, dry_run=dry_run)
+    assert result["applied"] is False
+    refused = [p for p in result["problems"] if "search_indexing_enabled" in p["where"]]
+    assert [p["where"] for p in refused] == [
+        "customers[0].sources[1].search_indexing_enabled",
+        "sources[0].search_indexing_enabled",
+    ]
+    assert all("removed in 0.7" in p["message"] for p in refused)
+    assert result["warnings"] == []
+    assert session.exec(select(Source)).all() == []
+    assert session.exec(select(Customer)).all() == []
+    assert session.exec(select(Folder)).all() == []
+
+
+def test_the_same_file_without_search_indexing_enabled_applies(session, client):
+    result = _import(client, text=_WITH_SEARCH_INDEXING)
+    assert result["problems"]
+    lines = _WITH_SEARCH_INDEXING.splitlines(keepends=True)
+    cleaned = "".join(line for line in lines if "search_indexing_enabled" not in line)
+    result = _import(client, text=cleaned)
+    assert result["problems"] == []
+    assert result["applied"] is True
+    assert len(session.exec(select(Source)).all()) == 4
+
+
 def test_protocol_cannot_change_on_reimport(session, client):
     _import(client)
     result = _import(
