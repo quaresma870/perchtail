@@ -16,6 +16,9 @@ from sqlalchemy import create_engine
 
 BACKEND = Path(__file__).resolve().parents[1]
 UNKNOWN_REVISION = "ffffffffffff"
+# Passes app/key_strength.py: a weak key stops the lifespan before what a
+# test wants to reach.
+STRONG_TEST_KEY = "q7Vt2pXk9LmN4rYs8BwE3cHj6FdA1gZu5KoTiPxQ0eR"
 
 # The Docker HEALTHCHECK calls from inside the container (#366).
 LOCAL = ("127.0.0.1", 50000)
@@ -98,20 +101,53 @@ def test_lifespan_refuses_to_start_with_the_default_credential_key(monkeypatch):
         get_settings.cache_clear()
 
 
-def test_lifespan_refuses_a_weak_key_only_when_asked_to(monkeypatch):
-    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "short-key")
-    monkeypatch.setenv("CREDENTIAL_KEY_REFUSE_WEAK", "true")
+@pytest.mark.parametrize("refuse_weak", [None, "false"])
+def test_lifespan_refuses_the_default_credential_key_whatever_refuse_weak_says(
+    monkeypatch, refuse_weak
+):
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "changeme")
+    if refuse_weak is None:
+        monkeypatch.delenv("CREDENTIAL_KEY_REFUSE_WEAK", raising=False)
+    else:
+        monkeypatch.setenv("CREDENTIAL_KEY_REFUSE_WEAK", refuse_weak)
     get_settings.cache_clear()
-
-    async def _enter_and_exit_lifespan():
-        async with lifespan(app):
-            pass
-
     try:
-        with pytest.raises(RuntimeError, match="too weak"):
-            asyncio.run(_enter_and_exit_lifespan())
+        with pytest.raises(RuntimeError, match="insecure default"):
+            _run_lifespan()
     finally:
         get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("refuse_weak", [None, "true"])
+def test_lifespan_refuses_a_weak_key_by_default(monkeypatch, refuse_weak):
+    import app.main as main_module
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "short-key")
+    if refuse_weak is None:
+        monkeypatch.delenv("CREDENTIAL_KEY_REFUSE_WEAK", raising=False)
+    else:
+        monkeypatch.setenv("CREDENTIAL_KEY_REFUSE_WEAK", refuse_weak)
+    get_settings.cache_clear()
+    logger = _RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", logger)
+    lock_calls = []
+    monkeypatch.setattr(main_module.instance_lock, "acquire", lambda s: lock_calls.append(s))
+
+    try:
+        with pytest.raises(RuntimeError, match="too weak") as raised:
+            _run_lifespan()
+    finally:
+        get_settings.cache_clear()
+
+    assert "rotate_credential_key" in str(raised.value)
+    assert "short-key" not in str(raised.value)
+    assert lock_calls == []
+    [(level, _event, fields)] = [
+        e for e in logger.events if e[1] == "startup.weak_credential_encryption_key"
+    ]
+    assert level == "critical"
+    assert fields["reasons"]
+    assert not [e for e in logger.events if e[1] == "startup.weak_credential_key_allowed"]
 
 
 def test_api_docs_and_schema_are_off_by_default():
@@ -140,8 +176,13 @@ def own_data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "db"))
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("SCRATCH_DIR", str(tmp_path / "scratch"))
-    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "test-key-not-the-default")
-    for name in ("DATABASE_URL", "CREDENTIAL_SALT_PATH", "SSH_KNOWN_HOSTS_PATH"):
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", STRONG_TEST_KEY)
+    for name in (
+        "DATABASE_URL",
+        "CREDENTIAL_SALT_PATH",
+        "SSH_KNOWN_HOSTS_PATH",
+        "CREDENTIAL_KEY_REFUSE_WEAK",
+    ):
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()
     logger = _RecordingLogger()
@@ -209,9 +250,14 @@ def _uvicorn(tmp_path) -> subprocess.CompletedProcess:
         "DATA_DIR": str(tmp_path / "db"),
         "LOG_DIR": str(tmp_path / "logs"),
         "SCRATCH_DIR": str(tmp_path / "scratch"),
-        "CREDENTIAL_ENCRYPTION_KEY": "test-key-not-the-default",
+        "CREDENTIAL_ENCRYPTION_KEY": STRONG_TEST_KEY,
     }
-    for name in ("DATABASE_URL", "CREDENTIAL_SALT_PATH", "SSH_KNOWN_HOSTS_PATH"):
+    for name in (
+        "DATABASE_URL",
+        "CREDENTIAL_SALT_PATH",
+        "SSH_KNOWN_HOSTS_PATH",
+        "CREDENTIAL_KEY_REFUSE_WEAK",
+    ):
         env.pop(name, None)
     return subprocess.run(
         [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "0"],
@@ -251,20 +297,38 @@ def test_the_server_exits_non_zero_on_a_database_newer_than_the_app(tmp_path):
     assert tables == {"alembic_version"}
 
 
-def test_a_weak_key_is_a_warning_at_startup(own_data_dir):
-    # own_data_dir's key ("test-key-not-the-default") is short: the start
-    # goes on past the check, with the warning in the log. A held instance
-    # lock stops it right after, before the database.
-    _tmp_path, logger, _init_db_calls = own_data_dir
+def _start_until_the_instance_lock():
+    """Runs the lifespan past the key checks: a held instance lock stops it
+    right after them, before the database."""
     first = instance_lock.acquire(get_settings())
     try:
         with pytest.raises(instance_lock.InstanceLockHeldError):
             _run_lifespan()
     finally:
         first.release()
-    warnings = [e for e in logger.events if e[1] == "startup.weak_credential_encryption_key"]
-    assert warnings and warnings[0][0] == "warning"
-    assert "test-key-not-the-default" not in str(warnings)
+
+
+def test_a_weak_key_starts_with_two_warnings_when_refuse_weak_is_false(own_data_dir, monkeypatch):
+    _tmp_path, logger, _init_db_calls = own_data_dir
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "test-key-not-the-default")
+    monkeypatch.setenv("CREDENTIAL_KEY_REFUSE_WEAK", "false")
+    get_settings.cache_clear()
+    _start_until_the_instance_lock()
+    weak = [e for e in logger.events if e[1] == "startup.weak_credential_encryption_key"]
+    assert [e[0] for e in weak] == ["warning"]
+    [(level, _event, fields)] = [
+        e for e in logger.events if e[1] == "startup.weak_credential_key_allowed"
+    ]
+    assert level == "warning"
+    assert "temporary" in fields["hint"]
+    assert "rotate_credential_key" in fields["hint"]
+    assert "test-key-not-the-default" not in str(logger.events)
+
+
+def test_a_strong_key_starts_without_a_key_warning(own_data_dir):
+    _tmp_path, logger, _init_db_calls = own_data_dir
+    _start_until_the_instance_lock()
+    assert not [e for e in logger.events if "credential" in e[1]]
 
 
 def test_api_docs_answer_with_api_docs_true(tmp_path):

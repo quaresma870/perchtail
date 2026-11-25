@@ -180,6 +180,11 @@ Going back to a release before 0.7.0, which has no restore command: stop PerchTa
 
 Push agents upgraded in between stay on the newer version: an agent never downgrades itself. To put an older agent back, install its binary by hand.
 
+## Upgrading to 1.0.0
+
+- **A weak `CREDENTIAL_ENCRYPTION_KEY` stops PerchTail from starting.** `CREDENTIAL_KEY_REFUSE_WEAK` now defaults to `true`. If 0.7 warned about your key (`startup.weak_credential_encryption_key` in the log, or "CREDENTIAL_ENCRYPTION_KEY is weaker than recommended." at the top of the system settings pages), rotate it with `python -m app.rotate_credential_key` before upgrading ([credential-key-rotation.md](credential-key-rotation.md)), or set `CREDENTIAL_KEY_REFUSE_WEAK=false` for the time it takes and remove it afterwards. The commands are in [troubleshooting.md](troubleshooting.md#perchtail-doesnt-start-weak-credential-key).
+- **A YAML import that sets `search_indexing_enabled` is refused.** The setting no longer exists since 0.7; remove the key from your import files ([bulk-import.md](bulk-import.md#format)).
+
 ## Upgrading to 0.7.1
 
 Upgrade the server, then the push agents (see "Upgrading push agents" above).
@@ -232,7 +237,7 @@ An `.env` (or `perchtail.env`) copied from an earlier `.env.example` sets `LOG_Q
 
 ### Keys and backups
 
-- **A weak `CREDENTIAL_ENCRYPTION_KEY` is warned about** in the log and at the top of the system settings pages (for example **Settings → Explorer and limits**): change it with `python -m app.rotate_credential_key` ([credential-key-rotation.md](credential-key-rotation.md)). `CREDENTIAL_KEY_REFUSE_WEAK=true` refuses to start with one ([configuration.md](configuration.md#keys-security-and-sessions)).
+- **A weak `CREDENTIAL_ENCRYPTION_KEY` is warned about** in the log and at the top of the system settings pages (for example **Settings → Explorer and limits**): change it with `python -m app.rotate_credential_key` ([credential-key-rotation.md](credential-key-rotation.md)). `CREDENTIAL_KEY_REFUSE_WEAK=true` refuses to start with one ([configuration.md](configuration.md#keys-security-and-sessions)); from 1.0.0 that is the default.
 - **The scheduled backup is on by default for new installs**, every 24 hours. An existing install keeps it off: turn it on in **Settings → Backups and updates**, card **Backups** ([configuration.md](configuration.md#backups-card)).
 
 ### Sources, rules and archives
@@ -249,7 +254,7 @@ An `.env` (or `perchtail.env`) copied from an earlier `.env.example` sets `LOG_Q
 
 ### Search and alerts
 
-- **The content index and the Search page are gone.** The migration drops their tables; nothing can be kept. The `SEARCH_INDEX_*` variables are ignored ([configuration.md](configuration.md#other-variables)), and a YAML import that still sets `search_indexing_enabled` applies with a warning ([bulk-import.md](bulk-import.md#format)). File names are searched with the file-name index ([admin-guide.md](admin-guide.md#file-name-index)).
+- **The content index and the Search page are gone.** The migration drops their tables; nothing can be kept. The `SEARCH_INDEX_*` variables are ignored ([configuration.md](configuration.md#other-variables)), and a YAML import that still sets `search_indexing_enabled` applies with a warning in 0.7 and is refused from 1.0.0 ([bulk-import.md](bulk-import.md#format)). File names are searched with the file-name index ([admin-guide.md](admin-guide.md#file-name-index)).
 - **Alerts read new lines live.** Existing alerts start again at the end of each file they watch, and their query is now plain text or a regular expression: rewrite a query that used full-text operators such as `AND` or quotes ([admin-guide.md](admin-guide.md#creating-an-alert)).
 - **Webhook calls changed shape**: each hit has `source_id`, `source_name`, `file_path`, `offset` and `line` instead of `line_number` and `snippet_html`. Update receivers that read `snippet_html` ([admin-guide.md](admin-guide.md#webhook-calls)).
 

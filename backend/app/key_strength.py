@@ -16,9 +16,9 @@ many iterations it gets. A key is strong enough when both hold:
   repeated word or phrase (`"changeme" * 6`), whose characters alone look
   varied, so neither passes on length alone.
 
-In this release a weak key is a warning (the log at startup and Settings ->
-System); `CREDENTIAL_KEY_REFUSE_WEAK=true` turns it into a refusal to start,
-which is meant to become the default in 1.0.
+A weak key stops PerchTail from starting. `CREDENTIAL_KEY_REFUSE_WEAK=false`
+lets it start instead, with a warning (the log at startup and the system
+settings pages), for the time it takes to rotate the key.
 """
 
 import base64

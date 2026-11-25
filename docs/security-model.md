@@ -104,7 +104,7 @@ The first start creates a local super admin (`admin` by default) with a random p
 
 What is never stored in a form that can be read back: local passwords, previous passwords and MFA backup codes (argon2id hashes), and session tokens, password-reset tokens, agent enrollment tokens and the monitoring token (SHA-256 hashes).
 
-- PerchTail refuses to start with the shipped `changeme` key, warns about a weak key (shorter than 32 bytes once decoded, or less than 128 bits of estimated entropy) and, with `CREDENTIAL_KEY_REFUSE_WEAK=true`, refuses to start with one.
+- PerchTail refuses to start with the shipped `changeme` key or with a weak key (shorter than 32 bytes once decoded, or less than 128 bits of estimated entropy). `CREDENTIAL_KEY_REFUSE_WEAK=false` lets it start with a weak key, with warnings, while the key is rotated.
 - It refuses to generate a new salt while the database holds data encrypted under the old one, so a lost salt is noticed rather than silently making every secret unreadable.
 - `python -m app.rotate_credential_key` re-encrypts every secret under a new key and re-signs the audit chain in one transaction ([credential-key-rotation.md](credential-key-rotation.md)).
 - The key and the salt are useless without each other. Keep the key outside the host, where you can reach it if the host is lost ([backup-and-restore.md](backup-and-restore.md)).

@@ -268,7 +268,7 @@ With redaction on ([redaction.md](redaction.md)), content redaction can't handle
 PerchTail refuses to start in these cases. The reason is in the service's output (`docker compose logs perchtail` or `journalctl -u perchtail`). The Docker image and the systemd unit in [install-from-source.md](install-from-source.md) run `alembic upgrade head` before the server, so the lock and database checks can also stop that step, with the same messages.
 
 - **Insecure key**: "CREDENTIAL_ENCRYPTION_KEY is still the insecure default ('changeme') -- refusing to start." Event `startup.insecure_credential_encryption_key`. Set a real `CREDENTIAL_ENCRYPTION_KEY`. On an existing installation, use the key it was set up with: every stored credential is encrypted with a key derived from it. To change the key, see [credential-key-rotation.md](credential-key-rotation.md).
-- **Weak key, when refused**: "CREDENTIAL_ENCRYPTION_KEY is too weak (...) and CREDENTIAL_KEY_REFUSE_WEAK is true -- refusing to start." Event `startup.weak_credential_encryption_key` at `CRITICAL`. Without `CREDENTIAL_KEY_REFUSE_WEAK=true`, a weak key (shorter than 32 bytes once decoded, or less than 128 bits of estimated entropy) only logs the same event as a warning, with the reasons, and the system settings pages (for example **Settings → Explorer and limits**) show "CREDENTIAL_ENCRYPTION_KEY is weaker than recommended." at the top. Generate a new key and change to it with `python -m app.rotate_credential_key` ([credential-key-rotation.md](credential-key-rotation.md)): replacing the value alone makes the stored credentials unreadable.
+- **Weak key**: "CREDENTIAL_ENCRYPTION_KEY is too weak (...) and CREDENTIAL_KEY_REFUSE_WEAK is true -- refusing to start." Event `startup.weak_credential_encryption_key` at `CRITICAL`. See "PerchTail doesn't start: weak credential key" below.
 - **Missing salt**: "CREDENTIAL_SALT_PATH (...) is missing, but the database already holds data encrypted with a key derived from it. ..." Event `startup.credential_salt_missing`. Restore the original `credential_salt` file from a backup (see [backup-and-restore.md](backup-and-restore.md)). Only if it's lost for good, set `CREDENTIAL_SALT_ALLOW_REGENERATE=true`: every stored credential, SSO secret and MFA secret then has to be entered again.
 - **Instance lock held**: "another PerchTail instance is using DATA_DIR (...): host=..., pid=..., version=..., started_at=.... Only one instance may run per DATA_DIR; stop the other one first." Event `startup.instance_lock_held`. Another PerchTail process, or a migration, is using the same `DATA_DIR`. Stop it. The lock ends with its process, so a crash never leaves a stale lock behind.
 - **Database migrated by a newer version**: "the database is at revision ..., which PerchTail ... doesn't know: it was migrated by a newer version. Run that version, or restore a backup taken before the upgrade." Event `startup.database_newer_than_app`. This happens when you start an older version after an upgrade. See [upgrade.md](upgrade.md) and [backup-and-restore.md](backup-and-restore.md#rolling-back-an-upgrade).
@@ -276,6 +276,36 @@ PerchTail refuses to start in these cases. The reason is in the service's output
 - **Test hooks set**: "PERCHTAIL_TEST_PATCH_MODULE is set without PERCHTAIL_TEST_MODE=true; ...", or, in the Docker image, "PERCHTAIL_TEST_PATCH_MODULE and PERCHTAIL_TEST_MODE are for the tests only; remove them from the environment." Remove both variables: they are for the end-to-end tests only.
 
 Not fatal, but worth fixing: `scratch.leftovers_not_cleared` means `SCRATCH_DIR` is a filesystem root or holds the database or the logs, so PerchTail didn't empty it at startup. Give scratch a folder of its own.
+
+### PerchTail doesn't start: weak credential key
+
+From 1.0, a `CREDENTIAL_ENCRYPTION_KEY` shorter than 32 bytes once decoded, or with less than 128 bits of estimated entropy, stops PerchTail from starting: the log has `startup.weak_credential_encryption_key` at `CRITICAL`, with the reasons. Replacing the value alone makes the stored credentials unreadable; change it with a rotation, which runs with the weak key while PerchTail is stopped ([credential-key-rotation.md](credential-key-rotation.md)).
+
+Docker, in the folder with `docker-compose.yml`:
+
+```bash
+docker compose stop perchtail
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # the new key; keep it
+docker compose run --rm --no-deps -u perchtail --entrypoint python perchtail \
+  -m app.rotate_credential_key --dry-run
+docker compose run --rm --no-deps -u perchtail --entrypoint python perchtail \
+  -m app.rotate_credential_key
+# set CREDENTIAL_ENCRYPTION_KEY to the new key in .env, then:
+docker compose up -d
+```
+
+Install from source:
+
+```bash
+sudo systemctl stop perchtail
+sudo systemd-run --pty --wait --uid=perchtail --gid=perchtail \
+  -p EnvironmentFile=/etc/perchtail/perchtail.env -p WorkingDirectory=/opt/perchtail/backend \
+  /opt/perchtail-venv/bin/python -m app.rotate_credential_key
+# set CREDENTIAL_ENCRYPTION_KEY to the new key in /etc/perchtail/perchtail.env, then:
+sudo systemctl start perchtail
+```
+
+Both rotation commands prompt for the new key. If PerchTail has to run before the key can be rotated, set `CREDENTIAL_KEY_REFUSE_WEAK=false` for that time: it starts, logs `startup.weak_credential_encryption_key` and `startup.weak_credential_key_allowed` as warnings, and the system settings pages (for example **Settings → Explorer and limits**) show "CREDENTIAL_ENCRYPTION_KEY is weaker than recommended." at the top. Remove the setting once the key is rotated.
 
 ## FAQ
 
