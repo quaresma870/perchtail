@@ -30,17 +30,20 @@ import time
 import app.collectors.winrm as winrm_module
 
 FIXTURE_ROOT = "C:\\Logs\\e2e-fixture"
+# About 9 MiB (three of the read script's 3 MiB lines), read slowly
+# (SLOW_RECEIVES answers, SLOW_SECONDS apart): long enough to watch an
+# open's progress and cancel it. slow-2.log to slow-5.log are the same
+# content, for several slow opens at once.
+_SLOW_CONTENT = b"".join(
+    b"slow line %07d of a file that takes a while\n" % n for n in range(205_000)
+)
+SLOW_FILE = "slow.log"
+SLOW_FILES = (SLOW_FILE, *(f"slow-{n}.log" for n in range(2, 6)))
 FIXTURE_FILES = {
     "hello.log": b"winrm hello world log line 1\nwinrm hello world log line 2\n",
     "other.log": b"winrm other log\n",
-    # About 9 MiB (three of the read script's 3 MiB lines), read slowly
-    # (SLOW_RECEIVES answers, SLOW_SECONDS apart):
-    # long enough to watch an open's progress and cancel it.
-    "slow.log": b"".join(
-        b"slow line %07d of a file that takes a while\n" % n for n in range(205_000)
-    ),
+    **dict.fromkeys(SLOW_FILES, _SLOW_CONTENT),
 }
-SLOW_FILE = "slow.log"
 SLOW_RECEIVES = 40
 SLOW_SECONDS = float(os.environ.get("PERCHTAIL_FAKE_WINRM_SLOW_SECONDS", "0.25"))
 
@@ -79,7 +82,7 @@ class _FakeProtocol:
     def __init__(self):
         self.transport = _FakeTransport()
         self._output: dict[str, tuple[bytes, int]] = {}
-        # The read of SLOW_FILE, answered a piece per Receive.
+        # The read of one of SLOW_FILES, answered a piece per Receive.
         self._pieces: list[bytes] = []
 
     def open_shell(self) -> str:
@@ -100,7 +103,7 @@ class _FakeProtocol:
             # What the real script's existence check answers (#272).
             return b"PERCHTAIL_NOT_FOUND\r\n", 5
         content = content[: int(read_match.group("size"))]
-        self._slow = read_match.group("path").endswith("\\" + SLOW_FILE)
+        self._slow = read_match.group("path").rsplit("\\", 1)[-1] in SLOW_FILES
         block = int(read_match.group("block"))
         lines = [
             base64.b64encode(content[i : i + block]) + b"\r\n"

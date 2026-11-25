@@ -14,14 +14,14 @@ from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Literal, NamedTuple
+from typing import Annotated, BinaryIO, Literal, NamedTuple
 from urllib.parse import quote
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel
+from pydantic import BaseModel, StringConstraints
 from sqlmodel import Session, select
 from starlette.types import Receive, Scope, Send
 
@@ -136,6 +136,9 @@ class _FileContentRoute(APIRoute):
 
 
 router = APIRouter(prefix="/sources/{source_id}", tags=["archive"], route_class=_FileContentRoute)
+# Routes about the user's opens on any source (GET /open-progress for
+# several opens at once), with the same Cache-Control.
+progress_router = APIRouter(tags=["archive"], route_class=_FileContentRoute)
 
 
 def readable_source(capability: Capability):
@@ -1697,7 +1700,32 @@ def open_progress(
     what that open recorded: no connector slot, nothing asked of the
     source, not audited."""
     control = _open_control(user, source, request_id)
+    return _progress_of(control)
+
+
+def _progress_of(control: fetch_control.FetchControl) -> OpenProgress:
     return OpenProgress(expected=control.expected, written=control.written, phase=control.phase)
+
+
+_RequestId = Annotated[str, StringConstraints(pattern=fetch_control.REQUEST_ID_PATTERN)]
+
+
+@progress_router.get("/open-progress", response_model=dict[str, OpenProgress | None])
+def open_progress_many(
+    request_id: list[_RequestId] = Query(min_length=1, max_length=fetch_control.MAX_PER_USER),
+    user: User = Depends(get_current_active_user),
+) -> dict[str, OpenProgress | None]:
+    """The progress of several of the user's own opens, on any source, in
+    one request, so a viewer with several files opening asks once a
+    second instead of once per file. Each id maps to its progress, or to
+    null when it isn't there, finished, or someone else's: the same answer
+    for each. Like the per-source endpoint, reads only what the opens
+    recorded: no connector slot, nothing asked of a source, not audited."""
+    answer: dict[str, OpenProgress | None] = {}
+    for request in request_id:
+        control = fetch_control.find_own(user.id, request)
+        answer[request] = None if control is None else _progress_of(control)
+    return answer
 
 
 @router.post("/open-cancel", status_code=status.HTTP_204_NO_CONTENT)
