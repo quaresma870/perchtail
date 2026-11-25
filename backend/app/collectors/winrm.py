@@ -387,13 +387,22 @@ def _encoded_command(script: str) -> str:
 class _ReadStream:
     """Turns the read script's stdout, as it arrives, into bytes written to
     `dst`: only whole lines are decoded, so what is held in memory is at most
-    one unfinished line plus the response being handled."""
+    one unfinished line plus the response being handled.
+
+    The progress of an /open (app/fetch_control.py) counts what has
+    arrived, not only whole lines: a line is 3 MiB of the file, and with
+    several reads at once one can take many seconds. The unfinished line
+    counts as the bytes its whole groups of four base64 characters stand
+    for. What is counted only grows and never passes `size`; a short
+    unfinished line that turns out to be a marker is caught up by the
+    bytes that come after it."""
 
     def __init__(self, dst, size: int):
         self.dst = dst
         self.size = size
         self.pending = b""
         self.written = 0
+        self.counted = 0
         self.end: int | None = None
 
     def feed(self, data: bytes) -> None:
@@ -403,6 +412,13 @@ class _ReadStream:
             raise _UnexpectedOutput("a line longer than a read block")
         for line in lines:
             self._line(line.strip())
+        self._count(self.written + len(self.pending.rstrip(b"\r")) // 4 * 3)
+
+    def _count(self, arrived: int) -> None:
+        arrived = min(arrived, self.size)
+        if arrived > self.counted:
+            more, self.counted = arrived - self.counted, arrived
+            fetch_control.wrote(more)
 
     def finish(self) -> None:
         self._line(self.pending.strip())
@@ -430,7 +446,7 @@ class _ReadStream:
             raise _UnexpectedOutput("more bytes than the file's size")
         self.dst.write(block)
         self.written += len(block)
-        fetch_control.wrote(len(block))
+        self._count(self.written)
 
 
 def _close_quietly(call, *args, **kwargs) -> None:

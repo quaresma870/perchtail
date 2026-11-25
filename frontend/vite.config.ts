@@ -22,6 +22,7 @@ const apiPrefixes = [
   '/healthz',
   '/metrics',
   '/monitoring',
+  '/open-progress',
   '/readyz',
   '/redaction-rules',
   '/roles',

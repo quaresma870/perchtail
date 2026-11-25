@@ -3,9 +3,11 @@ import { expect, type APIRequestContext } from '@playwright/test'
 // A WinRM source over the e2e backend's fake connector
 // (backend/app/testing/fake_winrm.py), whose slow.log (about 9 MB) is read
 // in 40 answers a quarter of a second apart: long enough to watch the
-// progress of opening it whole and to cancel it.
+// progress of opening it whole and to cancel it. slow-2.log to slow-5.log
+// are the same, for several slow opens at once.
 const FIXTURE_ROOT = 'C:\\Logs\\e2e-fixture'
 export const SLOW_FILE_NAME = 'slow.log'
+export const SLOW_FILE_NAMES = [SLOW_FILE_NAME, 'slow-2.log', 'slow-3.log', 'slow-4.log', 'slow-5.log']
 
 export interface SlowSource {
   sourceId: number

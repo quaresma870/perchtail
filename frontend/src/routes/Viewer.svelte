@@ -47,11 +47,18 @@
   import FindBar from '../lib/components/FindBar.svelte'
   import OpenProgress from '../lib/components/OpenProgress.svelte'
   import {
+    fetchProgress,
     newRequestId,
+    nextStatus,
+    openInTurn,
+    openQueue,
     PROGRESS_DELAY_MS,
     PROGRESS_POLL_MS,
+    queuedStatus,
+    receivingStatus,
+    startedStatus,
     withRequestId,
-    type OpenProgressInfo,
+    type OpenStatus,
   } from '../lib/open-progress'
   import { compileFind, type FindSpec } from '../lib/find-in-document'
   import { countAppended, countMatches, matchIndexAt, type MatchCount } from '../lib/find-count'
@@ -414,59 +421,101 @@
   }
 
   // Files being opened whole (lib/open-progress.ts): each /open carries a
-  // request id; after a second its progress is asked for every second and
-  // shown with Cancel.
+  // request id; at most three run at once (openQueue), the others wait
+  // here, shown at once as Queued. A running one shows its bar after a
+  // second, and one GET /open-progress a second asks about all of them.
   interface PendingOpen {
     requestId: string
     sourceId: number
+    sourceName: string
     name: string
     shown: boolean
-    progress: OpenProgressInfo | null
+    status: OpenStatus
     controller: AbortController
     cancelled: boolean
     timer: ReturnType<typeof setTimeout> | null
   }
   let pendingOpens: PendingOpen[] = []
+  let progressNow = Date.now()
+  let progressTimer: ReturnType<typeof setTimeout> | null = null
+  let progressAsking = false
+  let viewerGone = false
   $: shownOpens = pendingOpens.filter((p) => p.shown)
 
-  /** GET of an /open URL with progress and Cancel; null when the reader
-   * cancelled it (nothing to say about it). */
-  async function fetchOpen(url: string, sourceId: number, name: string): Promise<Response | null> {
+  const touchOpens = () => (pendingOpens = [...pendingOpens])
+
+  function askingProgress(): PendingOpen[] {
+    return pendingOpens.filter((p) => p.shown && !p.status.queued && !p.status.receiving && !p.cancelled)
+  }
+
+  /** Asks for the progress in `delay` ms, unless a request is already
+   * planned or on its way (which plans the next one when it ends). */
+  function scheduleProgress(delay = PROGRESS_POLL_MS) {
+    if (viewerGone || progressTimer !== null || progressAsking) return
+    progressTimer = setTimeout(askProgress, delay)
+  }
+
+  async function askProgress() {
+    progressTimer = null
+    const asked = askingProgress()
+    if (asked.length === 0) return
+    progressAsking = true
+    const answers = await fetchProgress(asked.map((p) => p.requestId))
+    progressAsking = false
+    progressNow = Date.now()
+    if (answers !== null) {
+      for (const p of asked) p.status = nextStatus(p.status, answers[p.requestId] ?? null, progressNow)
+    }
+    touchOpens()
+    if (askingProgress().length > 0) scheduleProgress()
+  }
+
+  /** GET of an /open URL with progress and Cancel, its body already read;
+   * null when the reader cancelled it (nothing to say about it). Waits its
+   * turn in openQueue first; the turn ends once the whole body was read
+   * (openInTurn), as the browser connection is busy until then. */
+  async function fetchOpen(url: string, sourceId: number, sourceName: string, name: string): Promise<Response | null> {
+    const queued = openQueue.active >= openQueue.limit
     const pending: PendingOpen = {
       requestId: newRequestId(),
       sourceId,
+      sourceName,
       name,
-      shown: false,
-      progress: null,
+      shown: queued,
+      status: queued ? queuedStatus() : startedStatus(),
       controller: new AbortController(),
       cancelled: false,
       timer: null,
     }
-    const touch = () => (pendingOpens = pendingOpens.map((p) => (p === pending ? pending : p)))
-    const poll = async () => {
-      pending.shown = true
-      touch()
-      try {
-        const answer = await fetch(
-          `/sources/${sourceId}/open-progress?${new URLSearchParams({ request_id: pending.requestId })}`,
-          { credentials: 'include' },
-        )
-        if (answer.ok) pending.progress = (await answer.json()) as OpenProgressInfo
-      } catch {
-        // the next tick asks again; the open itself says if the server is gone
-      }
-      if (pendingOpens.includes(pending) && !pending.cancelled) {
-        touch()
-        pending.timer = setTimeout(poll, PROGRESS_POLL_MS)
-      }
-    }
-    pending.timer = setTimeout(poll, PROGRESS_DELAY_MS)
     pendingOpens = [...pendingOpens, pending]
+    const signal = pending.controller.signal
     try {
-      const response = await trackedFetch(withRequestId(url, pending.requestId), {
-        credentials: 'include',
-        signal: pending.controller.signal,
-      })
+      const response = await openInTurn(
+        openQueue,
+        signal,
+        () => trackedFetch(withRequestId(url, pending.requestId), { credentials: 'include', signal }),
+        {
+          started: () => {
+            if (pending.status.queued) {
+              pending.status = startedStatus()
+              touchOpens()
+              scheduleProgress()
+            } else {
+              pending.timer = setTimeout(() => {
+                pending.timer = null
+                pending.shown = true
+                touchOpens()
+                scheduleProgress(0)
+              }, PROGRESS_DELAY_MS)
+            }
+          },
+          receiving: () => {
+            pending.status = receivingStatus(pending.status)
+            touchOpens()
+          },
+        },
+      )
+      // null: cancelled while queued, nothing was asked of the server.
       return pending.cancelled ? null : response
     } catch (error) {
       if (pending.cancelled) return null
@@ -478,14 +527,17 @@
   }
 
   /** Cancel: the server stops reading the source and frees what it held;
-   * the open ends here at once, without a message. */
+   * the open ends here at once, without a message. A queued open only
+   * leaves the queue: the server never heard of it. */
   function cancelOpen(pending: PendingOpen) {
     pending.cancelled = true
     if (pending.timer) clearTimeout(pending.timer)
-    fetch(`/sources/${pending.sourceId}/open-cancel?${new URLSearchParams({ request_id: pending.requestId })}`, {
-      method: 'POST',
-      credentials: 'include',
-    }).catch(() => undefined)
+    if (!pending.status.queued && !pending.status.receiving) {
+      fetch(`/sources/${pending.sourceId}/open-cancel?${new URLSearchParams({ request_id: pending.requestId })}`, {
+        method: 'POST',
+        credentials: 'include',
+      }).catch(() => undefined)
+    }
     pending.controller.abort()
     pendingOpens = pendingOpens.filter((p) => p !== pending)
   }
@@ -526,7 +578,7 @@
     largeFile = null
     ensureSeverityPatterns(sourceId)
     try {
-      const response = await fetchOpen(openUrl(sourceId, path, member), sourceId, name)
+      const response = await fetchOpen(openUrl(sourceId, path, member), sourceId, sourceName, name)
       if (response === null) {
         // Cancelled: no tab, and nothing to say.
         forgetSeverityWithoutTabs(sourceId)
@@ -1099,7 +1151,7 @@
       // Load whole file shows its progress, with Cancel, which keeps what
       // the tab had.
       const response = whole
-        ? await fetchOpen(url, tab.sourceId, tab.name)
+        ? await fetchOpen(url, tab.sourceId, tab.sourceName, tab.name)
         : await trackedFetch(url, { credentials: 'include' })
       if (response === null) return
       if (!response.ok) {
@@ -1693,8 +1745,11 @@
 
   onDestroy(() => {
     // Tabs stay open in viewerState; only this view's timers stop. An open
-    // still in progress ends on its own, without asking for its progress.
+    // still in progress, or queued, ends on its own, without asking for its
+    // progress.
+    viewerGone = true
     for (const pending of pendingOpens) if (pending.timer) clearTimeout(pending.timer)
+    if (progressTimer) clearTimeout(progressTimer)
     pendingOpens = []
     window.removeEventListener('keydown', handleKeydown)
     stopCount?.()
@@ -1894,9 +1949,19 @@
         {/each}
       </div>
     {/if}
-    {#each shownOpens as pending (pending.requestId)}
-      <OpenProgress name={pending.name} progress={pending.progress} on:cancel={() => cancelOpen(pending)} />
-    {/each}
+    {#if shownOpens.length > 0}
+      <div class="open-progress-list">
+        {#each shownOpens as pending (pending.requestId)}
+          <OpenProgress
+            name={pending.name}
+            sourceName={pending.sourceName}
+            status={pending.status}
+            now={progressNow}
+            on:cancel={() => cancelOpen(pending)}
+          />
+        {/each}
+      </div>
+    {/if}
     {#if notice}
       <div class="notice" role="alert">
         <span>{notice.message}</span>
@@ -2442,6 +2507,12 @@
   }
   .tab-source {
     color: var(--text-faint);
+  }
+  /* About three bars high; more scroll inside, so the editor stays put. */
+  .open-progress-list {
+    flex-shrink: 0;
+    max-height: 7.5rem;
+    overflow-y: auto;
   }
   .notice {
     display: flex;

@@ -618,7 +618,9 @@ def fetch_member(
     to a connection that announced FEATURE_REDACTION, with which the agent
     lists and extracts archives on its host, and, with FEATURE_PROGRESS,
     asked for progress (PROGRESS_COMMANDS). Through a link, only when
-    `target_check` allows where it leads (_following_links)."""
+    `target_check` allows where it leads (_following_links). For an
+    /open, what arrives counts in its progress, and Cancel stops it, as
+    in fetch_file."""
     max_decompressed = _max_decompressed_bytes()
     fields: dict = {
         "path": relative_path,
@@ -633,7 +635,7 @@ def fetch_member(
             return get_agent_registry().send_command_sync(
                 source.id,
                 "fetch",
-                sink=sink,
+                sink=fetch_control.counting(sink),
                 limit=max_decompressed,
                 require_feature=(FEATURE_REDACTION, FEATURE_LINKS),
                 expect_real=expect_real,
@@ -651,8 +653,9 @@ def fetch_member(
                 raise DecompressionLimitError(str(exc)) from exc
             _raise_command_error(exc, expanding=True)
         raise
-    except BaseException:
+    except BaseException as exc:
         destination.unlink(missing_ok=True)
+        fetch_control.raise_if_cancelled(exc)
         raise
     if result.get("streamed") is not True:
         # Every agent that extracts on its host streams the member.

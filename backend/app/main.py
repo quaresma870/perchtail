@@ -23,6 +23,7 @@ from app.api.access_report import router as access_report_router
 from app.api.agent_upgrades import router as agent_upgrades_router
 from app.api.agent_ws import router as agent_ws_router
 from app.api.alerts import router as alerts_router
+from app.api.archive import progress_router as open_progress_router
 from app.api.archive import router as archive_router
 from app.api.audit import router as audit_router
 from app.api.auth import router as auth_router
@@ -497,6 +498,7 @@ app.include_router(access_report_router)
 app.include_router(alerts_router)
 app.include_router(files_router)
 app.include_router(archive_router)
+app.include_router(open_progress_router)
 app.include_router(audit_router)
 app.include_router(config_transfer_router)
 app.include_router(customers_router)

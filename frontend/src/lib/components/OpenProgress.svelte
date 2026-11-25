@@ -1,26 +1,31 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte'
-  import { progressLabel, progressValues, type OpenProgressInfo } from '../open-progress'
+  import { progressValues, statusLabel, type OpenStatus } from '../open-progress'
 
-  /** A file being opened whole, shown once it takes more than a second:
-   * how much was copied from the source, and Cancel. */
+  /** A file being opened whole, shown once it takes more than a second
+   * (or at once while it waits in the viewer's queue): how much was copied
+   * from the source, and Cancel. */
   export let name: string
-  export let progress: OpenProgressInfo | null = null
+  export let sourceName: string
+  export let status: OpenStatus
+  /** The time the label is worked out for (ms), so "Finishing…" shows. */
+  export let now: number
 
   const dispatch = createEventDispatcher<{ cancel: void }>()
 
-  $: label = progressLabel(progress)
-  $: values = progressValues(progress)
+  $: label = statusLabel(status, now)
+  $: values = status.queued || status.receiving ? null : progressValues(status.progress)
   $: percent = values ? Math.round((values.now / values.max) * 100) : null
 </script>
 
-<div class="open-progress" data-testid="open-progress">
+<div class="open-progress" data-testid="open-progress" class:queued={status.queued}>
   <span class="name">Opening {name}</span>
+  <span class="source">{sourceName}</span>
   <div
     class="bar"
     class:unknown={percent === null}
     role="progressbar"
-    aria-label={`Opening ${name}`}
+    aria-label={`Opening ${name} on ${sourceName}`}
     aria-valuemin={values ? 0 : undefined}
     aria-valuenow={values?.now}
     aria-valuemax={values?.max}
@@ -50,6 +55,13 @@
     white-space: nowrap;
     max-width: 40ch;
   }
+  .source {
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 24ch;
+  }
   .bar {
     flex: 1 1 8rem;
     min-width: 8rem;
@@ -66,6 +78,9 @@
   .unknown .fill {
     width: 30%;
     opacity: 0.6;
+  }
+  .queued .fill {
+    width: 0;
   }
   .label {
     color: var(--text-muted);

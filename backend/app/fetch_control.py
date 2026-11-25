@@ -6,9 +6,9 @@ The viewer names each open with a random `request_id` (32 hex characters).
 it runs and puts it in `current` around the fetch; the connectors' copy
 loops, which run in the same thread (TranslatingConnector.call), count
 what they wrote into it and, between blocks, stop with FetchCancelledError
-once Cancel set its event. GET /open-progress reads it, POST /open-cancel
-sets the event. In memory only: a restart forgets every control, as it
-ends every request.
+once Cancel set its event. GET /open-progress reads it (the viewer asks
+about all its opens in one request), POST /open-cancel sets the event. In
+memory only: a restart forgets every control, as it ends every request.
 
 Without a control in `current` (a download, a folder ZIP, Tail, an /open
 without request_id), nothing changes: the helpers below cost one
@@ -70,11 +70,17 @@ def _register(user_id: int, source_id: int, request_id: str) -> FetchControl | N
 def find(user_id: int, source_id: int, request_id: str) -> FetchControl | None:
     """The user's control for `request_id` on that source, or None (none,
     finished, another user's or another source's)."""
-    with _lock:
-        control = _controls.get((user_id, request_id))
+    control = find_own(user_id, request_id)
     if control is None or control.source_id != source_id:
         return None
     return control
+
+
+def find_own(user_id: int, request_id: str) -> FetchControl | None:
+    """The user's control for `request_id` on any source, or None (none,
+    finished or another user's)."""
+    with _lock:
+        return _controls.get((user_id, request_id))
 
 
 @contextmanager

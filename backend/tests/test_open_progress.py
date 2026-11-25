@@ -18,7 +18,7 @@ import app.collectors.ssh as ssh_module
 import app.collectors.winrm as winrm_module
 import pytest
 from app import fetch_control, system_settings
-from app.api.archive import _redact_file
+from app.api.archive import _redact_file, progress_router
 from app.api.archive import router as archive_router
 from app.api.auth import get_current_active_user
 from app.api.errors import install as install_error_handlers
@@ -45,6 +45,7 @@ from tests.test_collectors_winrm import (
 from tests.test_collectors_winrm import _source as _winrm_source
 from tests.test_collectors_winrm_jea import _source as _jea_source
 from tests.test_collectors_winrm_jea import endpoint  # noqa: F401 - a fixture
+from tests.test_fake_winrm import fake_winrm_module  # noqa: F401 - a fixture
 from tests.test_redaction_endpoints import scratch_store  # noqa: F401 - a fixture
 
 _BASE = "/var/log/appname"
@@ -115,6 +116,7 @@ def slow(
     fetch_control.clear()
     app = FastAPI()
     app.include_router(archive_router)
+    app.include_router(progress_router)
     install_error_handlers(app)
     app.dependency_overrides[get_session] = lambda: session
     role = Role(name="super", is_super_admin=True)
@@ -274,6 +276,53 @@ def test_progress_and_cancel_answer_the_same_404_for_what_isnt_theirs(slow, requ
     assert opening.result().status_code == 200
 
 
+def _progress_many(client, *request_ids):
+    return client.get("/open-progress", params={"request_id": list(request_ids)})
+
+
+def test_one_request_answers_for_several_opens_only_the_users_own(slow, session):
+    """GET /open-progress with several ids: each of the user's own opens
+    with its progress; an id that isn't there and another user's open the
+    same null."""
+    client, source, gate, users = slow
+    unknown = "0" * 32
+    opening = _start_blocked_open(client, source, gate)
+    try:
+        answer = _progress_many(client, REQUEST, unknown)
+        assert answer.status_code == 200
+        assert answer.json() == {
+            REQUEST: {"expected": len(CONTENT), "written": CHUNK, "phase": "copying"},
+            unknown: None,
+        }
+        assert answer.headers["cache-control"] == "no-store"
+        users["current"] = users["other"]
+        assert _progress_many(client, REQUEST, unknown).json() == {REQUEST: None, unknown: None}
+        users["current"] = users["admin"]
+        # It takes no connector slot: the open holds the only one.
+        assert _progress_many(client, REQUEST).status_code == 200
+    finally:
+        users["current"] = users["admin"]
+        gate.free = True
+        gate.go.set()
+    assert opening.result().status_code == 200
+    assert _progress_many(client, REQUEST).json() == {REQUEST: None}
+    # Never audited; the open is, once.
+    assert {row.action for row in session.exec(select(AuditLog)).all()} == {"file.open"}
+
+
+@pytest.mark.parametrize(
+    "request_ids",
+    [[], ["short"], ["0" * 32, "g" * 32], [f"{n:032x}" for n in range(9)]],
+    ids=["none", "not-hex", "one-bad", "nine"],
+)
+def test_the_several_opens_progress_takes_one_to_eight_valid_ids(slow, request_ids):
+    client, _source, gate, _users = slow
+    gate.free = True
+    assert _progress_many(client, *request_ids).status_code == 422
+    eight = [f"{n:032x}" for n in range(8)]
+    assert _progress_many(client, *eight).json() == dict.fromkeys(eight)
+
+
 def test_another_source_cant_see_the_open(slow, session):
     client, source, gate, _users = slow
     other = Source(name="db-01", protocol=Protocol.local, host="localhost", base_path="/tmp")
@@ -424,6 +473,69 @@ def test_winrs_stops_between_receives_and_ends_the_command(
     assert not destination.exists()
 
 
+def test_winrs_counts_what_arrived_of_a_line_between_receives(
+    fake_winrm_module,  # noqa: F811
+    monkeypatch,
+    tmp_path,
+):
+    """The e2e fake sends slow.log (three 3 MiB base64 lines) in 40
+    Receives: the progress grows at every one of them, not only when a
+    whole line has arrived, and never passes the size."""
+    monkeypatch.setattr(fake_winrm_module, "SLOW_SECONDS", 0)
+    fake = fake_winrm_module._FakeWinRMSession()
+    monkeypatch.setattr(winrm_module, "_session", lambda source, envelope_size=None: fake)
+    content = fake_winrm_module.FIXTURE_FILES[fake_winrm_module.SLOW_FILE]
+    control = fetch_control.FetchControl(user_id=1, source_id=1)
+    seen: list[int] = []
+    receive = fake.protocol.get_command_output_raw
+
+    def receive_and_note(shell_id, command_id):
+        answer = receive(shell_id, command_id)
+        seen.append(control.written)  # before this answer is handled
+        return answer
+
+    monkeypatch.setattr(fake.protocol, "get_command_output_raw", receive_and_note)
+    source = Source(
+        name="w",
+        protocol=Protocol.winrm,
+        host="h",
+        base_path=fake_winrm_module.FIXTURE_ROOT,
+        credential_ref="x",
+    )
+    reset = _with_control(control)
+    destination = tmp_path / "out"
+    try:
+        winrm_module.fetch_file(source, fake_winrm_module.SLOW_FILE, destination)
+    finally:
+        reset()
+    assert destination.read_bytes() == content
+    assert control.expected == len(content)
+    assert control.written == len(content)
+    line = winrm_module._SUB_BLOCK_BYTES
+    assert len(seen) == fake_winrm_module.SLOW_RECEIVES
+    # Before the first line was whole, it already counted what had arrived.
+    assert 0 < seen[2] < line
+    # It grew between every two Receives.
+    assert all(later > earlier for earlier, later in zip(seen[1:], seen[2:], strict=False))
+    assert max(seen) <= len(content)
+
+
+def test_winrs_never_counts_past_the_size():
+    """An unfinished line that turns out to be the end marker counts at
+    most up to the size, and the count never goes back."""
+    control = fetch_control.FetchControl(user_id=1, source_id=1)
+    reset = _with_control(control)
+    try:
+        stream = winrm_module._ReadStream(io.BytesIO(), 6)
+        stream.feed(b"MDEyMzQ1\r\nPERCHTAIL_EN")
+        assert control.written == 6
+        stream.feed(b"D 6\r\n")
+        stream.finish()
+    finally:
+        reset()
+    assert (stream.written, stream.end, control.written) == (6, 6, 6)
+
+
 def test_jea_stops_between_blocks(
     endpoint,  # noqa: F811
     tmp_path,
@@ -444,17 +556,29 @@ def test_jea_stops_between_blocks(
     assert not destination.exists()
 
 
+def _fetch_whole(source, destination):
+    agent_collector.fetch_file(source, "big.log", destination)
+
+
+def _fetch_member(source, destination):
+    agent_collector.fetch_member(source, "logs.zip", "big.log", destination)
+
+
+@pytest.mark.parametrize("fetch", [_fetch_whole, _fetch_member], ids=["file", "member"])
 def test_the_agent_is_sent_cancel_and_the_open_stops(
     loop_in_thread,  # noqa: F811
     monkeypatch,
     tmp_path,
+    fetch,
 ):
-    from app.agent_registry import FEATURE_LINKS, AgentRegistry
+    """A whole file and an archive member extracted on the agent both
+    count what arrives in the open's progress, and both stop on Cancel."""
+    from app.agent_registry import FEATURE_LINKS, FEATURE_REDACTION, AgentRegistry
 
     registry = AgentRegistry()
     registry.bind_loop(loop_in_thread)
     ws = FakeWebSocket()
-    registry.register(1, ws, frozenset({FEATURE_LINKS}))
+    registry.register(1, ws, frozenset({FEATURE_LINKS, FEATURE_REDACTION}))
     monkeypatch.setattr(agent_collector, "get_agent_registry", lambda: registry)
     monkeypatch.setattr(agent_collector, "require_links", lambda source: None)
     source = Source(id=1, name="files-01", protocol=Protocol.agent, host="files-01", base_path="/")
@@ -481,7 +605,7 @@ def test_the_agent_is_sent_cancel_and_the_open_stops(
     destination = tmp_path / "out"
     try:
         with pytest.raises(FetchCancelledError):
-            agent_collector.fetch_file(source, "big.log", destination)
+            fetch(source, destination)
     finally:
         reset()
         thread.join(timeout=WAIT * 2)
