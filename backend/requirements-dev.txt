@@ -1398,9 +1398,9 @@ pynacl==1.6.2 \
     # via
     #   -c requirements.txt
     #   paramiko
-pyotp==2.11.2 \
-    --hash=sha256:651926820da4adccbe9801c77bdc14558552485b1a957d3e1e842d587597cbb0 \
-    --hash=sha256:d693ddda5c2fd2c368a034ec1ad2fbbe0d3f59d9a662ab00f41ae839a0d00474
+pyotp==2.12.1 \
+    --hash=sha256:2f65978d0a0afe5588ec960c810cbb974ba1957ffbf29775d8d4e1b2d4b8984c \
+    --hash=sha256:8d0c4192f3c5d1b1a8792df23b9d8acbb7e70abd2b160962af55c5700edbd236
     # via
     #   -c requirements.txt
     #   -r requirements.in
