@@ -1,4 +1,9 @@
 version: 2
+# Every ecosystem waits a few days before proposing a version that has just
+# been published (cooldown), so a release pulled or found compromised in its
+# first days never reaches a PR. Security updates are not held back.
+# Minor and patch updates of an ecosystem come as one PR; a major update
+# comes on its own.
 updates:
   # Backend (backend/requirements.in -> requirements.txt pins, requirements-dev.txt)
   - package-ecosystem: pip
@@ -6,6 +11,13 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 5
+    groups:
+      backend:
+        update-types:
+          - minor
+          - patch
     labels:
       - dependencies
       - backend
@@ -21,6 +33,13 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 5
+    groups:
+      frontend:
+        update-types:
+          - minor
+          - patch
     labels:
       - dependencies
       - frontend
@@ -31,6 +50,13 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 5
+    groups:
+      agent:
+        update-types:
+          - minor
+          - patch
     labels:
       - dependencies
       - agent
@@ -41,12 +67,18 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
-    # init, analyze and upload-sarif must move together: CodeQL fails when
-    # its steps run different versions.
+    cooldown:
+      default-days: 5
     groups:
+      # init, analyze and upload-sarif must move together: CodeQL fails when
+      # its steps run different versions.
       codeql-action:
         patterns:
           - "github/codeql-action*"
+      actions:
+        update-types:
+          - minor
+          - patch
     labels:
       - dependencies
       - ci
@@ -58,6 +90,17 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 5
+    ignore:
+      # A new Python or Node version (python:3.12 -> 3.15, node:22 -> 26) is
+      # a deliberate change of the Dockerfile, the CI's python-version and
+      # node-version and pyproject.toml's target together, not a PR of its
+      # own. Rebuilds of the same version (a new digest) still come.
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
     labels:
       - dependencies
       - docker
