@@ -41,6 +41,12 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    # init, analyze and upload-sarif must move together: CodeQL fails when
+    # its steps run different versions.
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
     labels:
       - dependencies
       - ci
