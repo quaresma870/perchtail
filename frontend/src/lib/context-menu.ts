@@ -128,6 +128,236 @@ export function findAllMenu(ctx: FindAllMenuContext): MenuEntry[] {
   ])
 }
 
+export interface FileMenuContext {
+  /** A member of an archive (opened from inside it). */
+  archiveMember: boolean
+  /** A plain .gz file, decompressed on the server: no Tail, no reading
+   * from its end. */
+  gzip: boolean
+  /** A tab is shown, and it isn't this file. */
+  otherTabActive: boolean
+  /** The user holds `download` on the source. */
+  canDownload: boolean
+}
+
+/** The menu of a file in the explorer. */
+export function fileMenu(ctx: FileMenuContext): MenuEntry[] {
+  const fromOffset = !ctx.archiveMember && !ctx.gzip
+  return tidy([
+    { id: 'open', label: 'Open' },
+    fromOffset && { id: 'open-tail', label: 'Open with Tail' },
+    fromOffset && { id: 'open-end', label: 'Open the end' },
+    ctx.otherTabActive && { id: 'compare', label: 'Compare with active tab' },
+    SEPARATOR,
+    ctx.canDownload && { id: 'download', label: 'Download' },
+    { id: 'copy-path', label: 'Copy path' },
+    !ctx.archiveMember && { id: 'copy-link', label: 'Copy link' },
+  ])
+}
+
+export interface FolderMenuContext {
+  /** A folder inside an archive (listed from the archive's members). */
+  inArchive: boolean
+  /** The node is an archive, shown as a folder of its members. */
+  archive: boolean
+  /** Expanded, with its listing on screen (what Refresh lists again). */
+  listed: boolean
+  /** Expanded (what Collapse all closes). */
+  expanded: boolean
+  /** The user holds `download` on the source. */
+  canDownload: boolean
+}
+
+/** The menu of a folder in the explorer (a source's root folders too), of a
+ * folder inside an archive, and of an archive shown as a folder. */
+export function folderMenu(ctx: FolderMenuContext): MenuEntry[] {
+  const plainFolder = !ctx.inArchive && !ctx.archive
+  return tidy([
+    ctx.listed && { id: 'refresh', label: 'Refresh' },
+    plainFolder && { id: 'search-here', label: 'Search here' },
+    ctx.expanded && { id: 'collapse-all', label: 'Collapse all' },
+    SEPARATOR,
+    plainFolder && ctx.canDownload && { id: 'download', label: 'Download as ZIP' },
+    ctx.archive && !ctx.inArchive && ctx.canDownload && { id: 'download', label: 'Download' },
+    { id: 'copy-path', label: 'Copy path' },
+  ])
+}
+
+export interface SourceMenuContext {
+  /** Expanded, with its listing on screen. */
+  listed: boolean
+  expanded: boolean
+  /** The system log source. */
+  system: boolean
+  /** The user holds `manage_source` on it (the connection check). */
+  canManageSource: boolean
+  /** The user holds `run_now` on it and its file-name index is on. */
+  canIndexNow: boolean
+  /** The user holds `manage_rules` on it. */
+  canManageRules: boolean
+}
+
+/** The menu of a source in the explorer. */
+export function sourceMenu(ctx: SourceMenuContext): MenuEntry[] {
+  return tidy([
+    ctx.listed && { id: 'refresh', label: 'Refresh' },
+    { id: 'search-here', label: 'Search here' },
+    ctx.expanded && { id: 'collapse-all', label: 'Collapse all' },
+    SEPARATOR,
+    ctx.canManageSource && { id: 'check-now', label: 'Check now' },
+    ctx.canIndexNow && { id: 'index-now', label: 'Index file names now' },
+    !ctx.system && { id: 'copy-host', label: 'Copy host' },
+    SEPARATOR,
+    ctx.canManageSource && !ctx.system && { id: 'edit-source', label: 'Edit source' },
+    ctx.canManageRules && !ctx.system && { id: 'edit-rules', label: 'Edit rules' },
+  ])
+}
+
+export interface GroupMenuContext {
+  expanded: boolean
+  /** Sources under the group on which the user holds `manage_source`. */
+  checkableSources: number
+}
+
+/** The menu of a customer or folder of sources in the tree view. */
+export function groupMenu(ctx: GroupMenuContext): MenuEntry[] {
+  return tidy([
+    { id: 'search-here', label: 'Search here' },
+    ctx.checkableSources > 0 && { id: 'check-all', label: 'Check all now' },
+    { id: 'expand-all', label: 'Expand all' },
+    ctx.expanded && { id: 'collapse-all', label: 'Collapse all' },
+  ])
+}
+
+/** The ids of a group and of every group below it, and of every source
+ * below it, at any depth. */
+export function groupContents(node: GroupNode): { groupIds: string[]; sources: GroupNode['sources'] } {
+  const groupIds: string[] = [node.id]
+  const sources: GroupNode['sources'] = [...node.sources]
+  for (const child of node.children) {
+    const inner = groupContents(child)
+    groupIds.push(...inner.groupIds)
+    sources.push(...inner.sources)
+  }
+  return { groupIds, sources }
+}
+
+/** What groupContents needs of a connections-tree node. */
+export interface GroupNode {
+  id: string
+  children: GroupNode[]
+  sources: { id: number; enabled?: boolean; my_capabilities?: string[] }[]
+}
+
+/** The sources Check all now checks: those on which the user holds
+ * `manage_source`, leaving out the disabled ones (the server refuses to
+ * check them). */
+export function checkableSourceIds(sources: GroupNode['sources']): number[] {
+  return sources
+    .filter((s) => s.enabled !== false && s.my_capabilities?.includes('manage_source'))
+    .map((s) => s.id)
+}
+
+/** How many connection checks Check all now runs at once. */
+export const CHECK_ALL_CONCURRENCY = 3
+
+/** Runs the jobs, at most `limit` at once, each starting when one ends; a
+ * failure doesn't stop the others. The results are in the jobs' order. */
+export async function runLimited<T>(
+  jobs: (() => Promise<T>)[],
+  limit: number,
+): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = new Array(jobs.length)
+  let next = 0
+  async function worker() {
+    while (next < jobs.length) {
+      const i = next++
+      try {
+        results[i] = { status: 'fulfilled', value: await jobs[i]() }
+      } catch (reason) {
+        results[i] = { status: 'rejected', reason }
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, jobs.length) }, worker))
+  return results
+}
+
+/** Whether a right-click landed inside a link (the download icon and other
+ * links on a node): there the browser keeps its own menu. */
+export function insideLink(target: EventTarget | null): boolean {
+  const closest = (target as { closest?: unknown } | null)?.closest
+  return typeof closest === 'function' && (target as Element).closest('a[href]') !== null
+}
+
+/** Which keys of the explorer's expanded set (lib/viewer-tabs.ts,
+ * `explorerExpanded`) Collapse all drops: a folder's own key and those of
+ * everything below it, archives under it included. Folder keys are
+ * `dir:<source id>:<archive path, or empty>:<path>`. */
+export function folderExpandKeys(
+  keys: Iterable<string>,
+  sourceId: number,
+  archiveRoot: string | null,
+  path: string,
+): string[] {
+  const own = `dir:${sourceId}:${archiveRoot ?? ''}:${path}`
+  // Outside an archive, the node may be an archive itself, or a folder with
+  // archives below it: their members' keys start with the archive's path.
+  const members = archiveRoot === null ? [`dir:${sourceId}:${path}:`, `dir:${sourceId}:${path}/`] : []
+  return [...keys].filter(
+    (key) => key === own || key.startsWith(`${own}/`) || members.some((prefix) => key.startsWith(prefix)),
+  )
+}
+
+/** The keys Collapse all drops for a source: its own and every folder's. */
+export function sourceExpandKeys(keys: Iterable<string>, sourceId: number): string[] {
+  return [...keys].filter((key) => key === `source:${sourceId}` || key.startsWith(`dir:${sourceId}:`))
+}
+
+/** The keys Collapse all drops for a group: its own, every group's below it
+ * and those of every source below it. */
+export function groupExpandKeys(keys: Iterable<string>, groupIds: string[], sourceIds: number[]): string[] {
+  const groups = new Set(groupIds.map((id) => `tree:${id}`))
+  const all = [...keys]
+  return [
+    ...all.filter((key) => groups.has(key)),
+    ...sourceIds.flatMap((id) => sourceExpandKeys(all, id)),
+  ]
+}
+
+/** The address that opens a file of a source in the viewer
+ * (`#/viewer/<id>?path=…`), from the page's own address. */
+export function fileLink(pageUrl: string, sourceId: number, path: string): string {
+  const url = new URL(pageUrl)
+  return `${url.origin}${url.pathname}#/viewer/${sourceId}?${new URLSearchParams({ path }).toString()}`
+}
+
+/** What a node of the explorer asks for when its menu opens: the menu's
+ * name, its entries and what to do with the one chosen. */
+export interface ExplorerMenu {
+  label: string
+  entries: MenuEntry[]
+  run: (id: string) => void
+}
+
+/** Given by the Viewer to the explorer's nodes (Svelte context, under
+ * EXPLORER_MENUS): opens a node's menu, and does what the explorer can't
+ * do on its own. */
+export interface ExplorerMenus {
+  /** A right-click on a node; `opener` gets the focus back. */
+  mouse: (event: MouseEvent, opener: HTMLElement, build: () => ExplorerMenu) => void
+  /** A key on a node's button: the Menu key or Shift+F10 opens its menu. */
+  key: (event: KeyboardEvent, build: () => ExplorerMenu) => void
+  /** Search here: the explorer's search limited to this scope. */
+  searchHere: (scope: { sourceId: number; path: string } | { groupId: string; name: string }) => void
+  /** Copies text, saying in the explorer whether it worked. */
+  copy: (text: string) => void
+  /** Check all now: the connection check of these sources. */
+  checkSources: (sourceIds: number[]) => void
+}
+
+export const EXPLORER_MENUS = Symbol('explorer-menus')
+
 /** A tab's path as Copy path gives it: an archive member after its archive. */
 export function tabPathText(path: string, member: string | null): string {
   return member ? `${path} › ${member}` : path

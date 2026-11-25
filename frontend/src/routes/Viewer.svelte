@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from 'svelte'
+  import { onDestroy, onMount, setContext, tick } from 'svelte'
   import { get } from 'svelte/store'
   import { push, router } from 'svelte-spa-router'
   import { api } from '../lib/api'
@@ -27,8 +27,14 @@
   import CodeMirrorPane from '../lib/components/CodeMirrorPane.svelte'
   import ContextMenu from '../lib/components/ContextMenu.svelte'
   import {
+    CHECK_ALL_CONCURRENCY,
     contextMenuIntent,
+    EXPLORER_MENUS,
+    insideLink,
     isMenuKey,
+    runLimited,
+    type ExplorerMenu,
+    type ExplorerMenus,
     lineLink,
     logLineMenu,
     tabMenu,
@@ -903,14 +909,35 @@
       member: string | null
       name: string
       size?: number
+      // From a file's right-click menu (#287).
+      mode?: 'open' | 'tail' | 'end' | 'compare'
     }>,
   ) {
-    const { sourceId, sourceName, path, member, name, size } = event.detail
-    if (compareArmed) {
+    const { sourceId, sourceName, path, member, name, size, mode } = event.detail
+    if (mode === 'compare' || (mode === undefined && compareArmed)) {
+      compareArmed = false
       await pickCompareTarget(sourceId, path, member, name)
       return
     }
-    await openFile(sourceId, sourceName, path, member, name, size)
+    const key = tabKey(sourceId, path, member)
+    if (mode === 'end' && member === null && !tabs.some((t) => t.key === key)) {
+      // Its last TAIL_START_BYTES, as a file over open_from_end_mb opens.
+      largeFile = null
+      await openEnd(sourceId, sourceName, path, name, size ?? 0, false)
+      return
+    }
+    const opened = await openFile(sourceId, sourceName, path, member, name, size)
+    if (opened && mode === 'tail') startTail(key)
+  }
+
+  /** Open with Tail: Tail on in the tab just opened (or already open). */
+  function startTail(key: string) {
+    viewerState.update((state) => ({
+      ...state,
+      tabs: state.tabs.map((t) =>
+        t.key === key && !t.following && t.followMode === 'incremental' ? { ...t, following: true, newLines: 0 } : t,
+      ),
+    }))
   }
 
   // "Compare": a one-shot snapshot of another file -- from any source, so
@@ -1386,8 +1413,89 @@
   type OpenMenu =
     | { kind: 'line'; x: number; y: number; opener: HTMLElement; entries: MenuEntry[]; line: number; selection: string }
     | { kind: 'tab'; x: number; y: number; opener: HTMLElement; entries: MenuEntry[]; tabKey: string }
+    | ({ kind: 'explorer'; x: number; y: number; opener: HTMLElement } & ExplorerMenu)
   let contextMenu: OpenMenu | null = null
   let lastTabKeyMenu: number | null = null
+
+  // The explorer's menus (files, folders, sources and groups of sources):
+  // each node works out its own entries and runs them; what it can't do on
+  // its own comes from here.
+  let lastExplorerKeyMenu: number | null = null
+  let searchBox: HTMLInputElement | null = null
+  // What an explorer action (a copy, Check all now) came to, for a moment.
+  let explorerNote = ''
+  let explorerNoteTimer: ReturnType<typeof setTimeout> | null = null
+
+  function showExplorerNote(note: string) {
+    explorerNote = note
+    if (explorerNoteTimer) clearTimeout(explorerNoteTimer)
+    explorerNoteTimer = setTimeout(() => (explorerNote = ''), 3000)
+  }
+
+  function openExplorerMenu(x: number, y: number, opener: HTMLElement, menu: ExplorerMenu) {
+    if (menu.entries.length === 0) return
+    contextMenu = { kind: 'explorer', x, y, opener, ...menu }
+  }
+
+  async function checkSources(sourceIds: number[]) {
+    showExplorerNote(`Checking ${sourceIds.length} ${sourceIds.length === 1 ? 'source' : 'sources'}…`)
+    // A few at a time: each check holds a server thread until the source
+    // answers or times out.
+    const results = await runLimited(
+      sourceIds.map((id) => () => api.post(`/sources/${id}/check`)),
+      CHECK_ALL_CONCURRENCY,
+    )
+    const failed = results.filter((r) => r.status === 'rejected').length
+    showExplorerNote(
+      failed === 0
+        ? `Checked ${sourceIds.length} ${sourceIds.length === 1 ? 'source' : 'sources'}`
+        : `Checked ${sourceIds.length - failed} of ${sourceIds.length}; the others couldn't be checked`,
+    )
+    // Each check is the source's status now: the dots show it.
+    try {
+      allSources = viewable(await api.get<Source[]>('/sources'))
+      closeTabsOfHiddenSources()
+    } catch {
+      // the next periodic read brings it
+    }
+  }
+
+  const explorerMenus: ExplorerMenus = {
+    mouse(event, opener, build) {
+      // On a node's links (the download icon) the browser's menu stays.
+      if (insideLink(event.target)) return
+      const intent = contextMenuIntent(event, lastExplorerKeyMenu, Date.now())
+      if (intent === 'browser') return
+      event.preventDefault()
+      if (intent === 'ignore') return
+      openExplorerMenu(event.clientX, event.clientY, opener, build())
+    },
+    key(event, build) {
+      if (!isMenuKey(event)) return
+      event.preventDefault()
+      lastExplorerKeyMenu = Date.now()
+      const opener = event.currentTarget as HTMLElement
+      const rect = opener.getBoundingClientRect()
+      openExplorerMenu(rect.left, rect.bottom, opener, build())
+    },
+    searchHere(scope) {
+      // The search, limited to this one scope; the files show once
+      // something is typed (or at once, with text already there).
+      scopes.set([scope])
+      pickingScopes = fileQuery.trim() === ''
+      void tick().then(() => searchBox?.focus())
+    },
+    copy(text) {
+      navigator.clipboard
+        .writeText(text)
+        .then(() => showExplorerNote('Copied'))
+        .catch(() => showExplorerNote('Copy needs a secure page (HTTPS or localhost)'))
+    },
+    checkSources(sourceIds) {
+      void checkSources(sourceIds)
+    },
+  }
+  setContext(EXPLORER_MENUS, explorerMenus)
 
   function openLineMenu(request: LineMenuRequest) {
     if (!activeTab) return
@@ -1527,7 +1635,8 @@
     contextMenu = null
     if (!menu) return
     if (menu.kind === 'line') void runLineMenu(id, menu.line, menu.selection)
-    else runTabMenu(id, menu.tabKey)
+    else if (menu.kind === 'tab') runTabMenu(id, menu.tabKey)
+    else menu.run(id)
   }
 
   function downloadHref(tab: Tab): string {
@@ -1591,6 +1700,7 @@
     stopCount?.()
     if (countTimer) clearTimeout(countTimer)
     if (copyStatusTimer) clearTimeout(copyStatusTimer)
+    if (explorerNoteTimer) clearTimeout(explorerNoteTimer)
     stopFollowTimer()
     stopAutoRefresh()
     if (statusTimer) clearInterval(statusTimer)
@@ -1605,6 +1715,7 @@
         type="search"
         aria-label="Search sources and files"
         placeholder="Search sources and files: text, app-*.log, or /regex/"
+        bind:this={searchBox}
         bind:value={fileQuery}
         on:input={() => { if (fileQuery.trim() && $scopes.length > 0) pickingScopes = false }}
       />
@@ -1640,6 +1751,9 @@
     </div>
     {#if isMatcherError(compiledFilter)}
       <p class="filter-error search-error" role="status">{compiledFilter.error}</p>
+    {/if}
+    {#if explorerNote}
+      <p class="hint explorer-note" role="status">{explorerNote}</p>
     {/if}
     {#if $advancedFilter || $scopes.length > 0}
     <div class="scope-bar">
@@ -2186,7 +2300,11 @@
           entries={contextMenu.entries}
           x={contextMenu.x}
           y={contextMenu.y}
-          label={contextMenu.kind === 'line' ? 'Line actions' : 'Tab actions'}
+          label={contextMenu.kind === 'explorer'
+            ? contextMenu.label
+            : contextMenu.kind === 'line'
+              ? 'Line actions'
+              : 'Tab actions'}
           opener={contextMenu.opener}
           on:select={(e) => chooseFromMenu(e.detail)}
           on:close={() => (contextMenu = null)}
@@ -2241,7 +2359,8 @@
   .filter-error {
     color: var(--danger);
   }
-  .search-error {
+  .search-error,
+  .explorer-note {
     margin: 0 0.75rem 0.4rem;
     font-size: 0.8rem;
   }

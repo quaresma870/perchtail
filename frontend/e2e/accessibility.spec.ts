@@ -108,6 +108,15 @@ test('accessibility: viewer with a line menu open', async ({ page }) => {
   )
 })
 
+// The right-click menu of a source in the explorer (#287).
+test('accessibility: viewer with an explorer menu open', async ({ page }) => {
+  await page.goto('/#/viewer')
+  const row = page.locator('.source-row', { hasText: SYSTEM_SOURCE_NAME })
+  await row.click({ button: 'right' })
+  await expect(page.getByRole('menu', { name: 'Source actions' })).toBeVisible()
+  await expectNoSeriousViolations(page)
+})
+
 // A file opened at its end, with the bar that offers Load earlier and Load
 // whole file. A local-disk source, not the SSH/SMB test servers.
 test('accessibility: viewer with a file opened at its end', async ({ page }) => {

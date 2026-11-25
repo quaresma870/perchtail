@@ -1,6 +1,14 @@
 <script lang="ts">
-  import { createEventDispatcher, onDestroy, onMount } from 'svelte'
+  import { createEventDispatcher, getContext, onDestroy, onMount } from 'svelte'
+  import { push } from 'svelte-spa-router'
   import { api, ApiError } from '../api'
+  import {
+    EXPLORER_MENUS,
+    sourceExpandKeys,
+    sourceMenu,
+    type ExplorerMenu,
+    type ExplorerMenus,
+  } from '../context-menu'
   import { registerFolder } from '../explorer-refresh'
   import { advancedFilter, coveringScope, scopeContext, scopeKey, scopes, toggleScopeIn } from '../explorer-scope'
   import { sortEntries } from '../explorer-sort'
@@ -145,6 +153,77 @@
     load()
   }
 
+  // Right-click menu (#287).
+  const menus = getContext<ExplorerMenus | undefined>(EXPLORER_MENUS)
+  let rowButton: HTMLElement
+  $: caps = source.my_capabilities ?? []
+
+  // Index file names now: what came of it, for a few seconds.
+  let indexNote = ''
+  let indexNoteTimer: ReturnType<typeof setTimeout> | null = null
+  onDestroy(() => {
+    if (indexNoteTimer) clearTimeout(indexNoteTimer)
+  })
+
+  async function indexNow() {
+    let note: string
+    try {
+      const result = await api.post<{ started: boolean }>(`/sources/${source.id}/name-index`)
+      note = result.started ? 'Listing the file names in the background.' : 'Already listing this source.'
+    } catch (err) {
+      note = err instanceof ApiError ? err.detail : 'Failed to start the listing'
+    }
+    indexNote = note
+    if (indexNoteTimer) clearTimeout(indexNoteTimer)
+    indexNoteTimer = setTimeout(() => (indexNote = ''), 5000)
+  }
+
+  /** Collapse all: the source and every folder in it close, and stay
+   * closed when it opens again. */
+  function collapseAll() {
+    explorerExpanded.update((keys) => {
+      const drop = new Set(sourceExpandKeys(keys, source.id))
+      return drop.size === 0 ? keys : new Set([...keys].filter((key) => !drop.has(key)))
+    })
+    expanded = false
+  }
+
+  function buildMenu(): ExplorerMenu {
+    return {
+      label: 'Source actions',
+      entries: sourceMenu({
+        listed: expanded && loaded,
+        expanded,
+        system: source.is_system,
+        canManageSource: caps.includes('manage_source'),
+        canIndexNow: caps.includes('run_now') && source.name_index_enabled,
+        canManageRules: caps.includes('manage_rules'),
+      }),
+      run: runMenu,
+    }
+  }
+
+  function runMenu(id: string) {
+    switch (id) {
+      case 'refresh':
+        return void refreshNow()
+      case 'search-here':
+        return menus?.searchHere({ sourceId: source.id, path: '' })
+      case 'collapse-all':
+        return collapseAll()
+      case 'check-now':
+        return void checkNow()
+      case 'index-now':
+        return void indexNow()
+      case 'copy-host':
+        return menus?.copy(source.host)
+      case 'edit-source':
+      case 'edit-rules':
+        // The source's page holds its settings and its rules.
+        return void push(`/settings/sources/${source.id}`)
+    }
+  }
+
   onMount(() => {
     if (initiallyExpanded) {
       toggle()
@@ -156,7 +235,8 @@
 </script>
 
 <div class="source-node" bind:this={element}>
-  <div class="source-row">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="source-row" on:contextmenu={(e) => menus?.mouse(e, rowButton, buildMenu)}>
   {#if $advancedFilter}
     <input
       type="checkbox"
@@ -173,7 +253,9 @@
     class:expanded
     style="padding-left: {depth * 14}px"
     title={`${source.protocol} · ${source.host}`}
+    bind:this={rowButton}
     on:click={toggle}
+    on:keydown={(e) => menus?.key(e, buildMenu)}
   >
     <span class="chevron">{expanded ? '▾' : '▸'}</span>
     <span class="status-dot status-{view.state}" title={view.tooltip} aria-label={view.tooltip}></span>
@@ -202,6 +284,9 @@
   {/if}
   </div>
 
+  {#if indexNote}
+    <div class="hint" role="status" style="padding-left: {(depth + 1) * 14}px">{indexNote}</div>
+  {/if}
   {#if expanded}
     <div class="tree-body">
       {#if refreshError}
