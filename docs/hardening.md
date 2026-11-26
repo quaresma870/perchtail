@@ -25,7 +25,7 @@ A checklist for running PerchTail in production. Each item says what to do and w
 ## The host and its files
 
 - [ ] **Run the container as shipped**: read-only root filesystem, `no-new-privileges`, every capability dropped except the few the entrypoint's root step needs to hand `/data` to PerchTail's user before it drops them all. Better, run it as PerchTail's user from the start (`user: "10001:10001"` in `docker-compose.yml`, without `cap_add`), as the README's Quick start describes.
-- [ ] **Never run PerchTail as root** on a source install. It runs as its own user, and `python -m app.backup` and `python -m app.rotate_credential_key` refuse to run as root.
+- [ ] **Never run PerchTail as root** on a source install. It runs as its own user, and `python -m app.backup`, `python -m app.rotate_credential_key` and `python -m app.migrate_database` refuse to run as root.
 - [ ] **Keep `DATA_DIR`, `LOG_DIR`, `SCRATCH_DIR` and `BACKUP_DIR` readable by PerchTail's user only.** PerchTail sets them to mode 0700, and the database, the salt and `ssh_known_hosts` to 0600, at every start; don't loosen them.
 - [ ] **Put each on its own volume**, so a burst of downloads or logging can't fill the database's disk, and keep `DATA_DIR` on a local disk (SQLite in WAL mode needs one). Scratch holds the content of open files while they are open: put it on a disk only the host can read, encrypted or in memory.
 - [ ] **Encrypt the disks** that hold `DATA_DIR`, `BACKUP_DIR` and `SCRATCH_DIR`, if the host's platform allows it.

@@ -103,6 +103,69 @@ Check `sudo journalctl -u perchtail` for `startup.complete`.
 - **Migrations change data.** Some drop tables or rewrite rows (0.7.0 drops the content index's tables, and gives `manage_source` to existing grants); read the release's `### Upgrading` notes.
 - **Some migrations rebuild a table.** 0.7.0 rebuilds the audit log table: on a large audit log it takes a while, and needs free disk for a second copy of the table while it runs.
 
+## Moving from SQLite to PostgreSQL
+
+`python -m app.migrate_database` copies a SQLite installation into an empty PostgreSQL database: users, roles and grants, customers, folders, sources and their encrypted credentials, rules, settings, alerts, the file-name index and the audit log with its hash chain, each row with its own id. Everything happens in one transaction on PostgreSQL, checked before it is committed; the SQLite file is only read, never changed.
+
+### Before you start
+
+- **Upgrade first.** The command copies a database at this version's revision only: upgrade PerchTail as usual and let it start once on SQLite, which migrates the file.
+- **Make a backup** while PerchTail still runs, and `verify` it ([backup-and-restore.md](backup-and-restore.md)): `docker compose exec -u perchtail perchtail python -m app.backup create`. `python -m app.backup` works on SQLite only for now, so this is the last backup it makes until it supports PostgreSQL.
+- **Create the database**: empty, on PostgreSQL 18 or later, in UTF8, owned by the role PerchTail will connect as, ideally with the `C.UTF-8` locale of the `builtin` provider, and where that role may create the `pg_trgm` extension (see [configuration.md](configuration.md#postgresql)): `CREATE DATABASE perchtail OWNER perchtail ENCODING 'UTF8' LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' TEMPLATE template0;`. The command creates the schema itself. Plan for room for the whole database on the server; a large file-name index takes a while to copy.
+- **Check the audit chain.** The command refuses a database whose audit hash chain doesn't verify. In **Settings → Audit log**, click **Verify now** on the SQLite installation; if it reports breaks a super admin can record as known (**Mark as known**), record them first. A chain with any other break can't be migrated.
+- **Keep `DATA_DIR`.** PerchTail on PostgreSQL still needs it: the credential salt, the SSH host keys and the audit chain marker stay there, and the command refuses to run without the salt. Keep the same `CREDENTIAL_ENCRYPTION_KEY`.
+
+### Running it
+
+Stop PerchTail, then point `DATABASE_URL` (or `DATABASE_URL_FILE`) at the PostgreSQL database in `.env`, with the TLS options it needs ([configuration.md](configuration.md#postgresql)). Run the command as PerchTail's own user, with the same environment as PerchTail; it refuses to run as root. `--from` names the SQLite file PerchTail used, `/data/db/perchtail.db` in the Docker image.
+
+Docker, in the folder with `docker-compose.yml`:
+
+```bash
+docker compose stop perchtail
+# Set DATABASE_URL in .env, then:
+
+# Does everything, checks included, then rolls back: writes nothing.
+docker compose run --rm --no-deps -u perchtail --entrypoint python perchtail \
+  -m app.migrate_database --from sqlite:////data/db/perchtail.db --dry-run
+
+# The migration.
+docker compose run --rm --no-deps -u perchtail --entrypoint python perchtail \
+  -m app.migrate_database --from sqlite:////data/db/perchtail.db
+```
+
+Install from source ([install-from-source.md](install-from-source.md)), with `DATABASE_URL` set in `/etc/perchtail/perchtail.env` and `<DATA_DIR>` the folder the SQLite file is in:
+
+```bash
+sudo systemctl stop perchtail
+sudo systemd-run --pty --wait --uid=perchtail --gid=perchtail \
+  -p EnvironmentFile=/etc/perchtail/perchtail.env -p WorkingDirectory=/opt/perchtail/backend \
+  /opt/perchtail-venv/bin/python -m app.migrate_database --from sqlite:///<DATA_DIR>/perchtail.db --dry-run
+# then the same command without --dry-run
+```
+
+The command refuses, and writes nothing, when:
+
+- PerchTail, `alembic upgrade` or another migration runs on this `DATA_DIR` or on the PostgreSQL database;
+- `--from` isn't a SQLite database file, or the file is at another revision than this version's ("start this version of PerchTail on it once");
+- `DATABASE_URL` isn't a PostgreSQL database, or one PerchTail wouldn't start on (older than 18, not UTF8, or reached over the network without a verified certificate while `DATABASE_REQUIRE_VERIFIED_TLS` is `true`);
+- the credential salt isn't where `CREDENTIAL_SALT_PATH` says;
+- any of PerchTail's tables in the PostgreSQL database already holds a row: the message names them. There is no option to overwrite; drop the database and create it again.
+
+Then, in one transaction, it creates the schema in an empty database, copies every table with its ids, and moves the id sequences past them. Before committing, it checks that every table has as many rows as in the SQLite file, that the current `CREDENTIAL_ENCRYPTION_KEY` decrypts every stored secret (source credentials, SSO provider settings, MFA secrets, the SMTP password, webhook URLs), that the audit hash chain verifies, and that the schema's revision is the file's. Only then does it record `database.migrate` in the audit log, chained after the copied entries ([audit-events.md](audit-events.md)), verify the chain again and commit. If anything fails, it rolls back, says what failed, and the PostgreSQL database is as it was. Secrets are copied encrypted, as stored; neither they nor the database's password are printed or logged. A row PostgreSQL refuses (one pointing at a row that is gone, which SQLite doesn't check) is reported by its table and the kind of error, never with its values. The log has a `database.migrate` event with the result (`ok`, `dry_run`, `refused` with the `reason`, or `failed`).
+
+### Checking it
+
+Start PerchTail. It runs on PostgreSQL from now on (the log's `startup.complete`; `GET /readyz`). Then:
+
+- **Settings → Audit log** shows the `database.migrate` entry with the rows copied per table, and no integrity problem at the top;
+- sign in with a local account and with SSO if you use it, open a file on a source of each protocol (its credential decrypts), and search for a file name;
+- make a backup once `python -m app.backup` supports PostgreSQL, and keep the SQLite file and its backup until then.
+
+### Going back
+
+The SQLite file wasn't changed: stop PerchTail, remove `DATABASE_URL` from `.env` (or point it at the SQLite file again), and start PerchTail. Everything done on PostgreSQL in between (sources, rules, users, audit entries) isn't in the SQLite file and is lost.
+
 ## Upgrading push agents
 
 The server never upgrades itself, and push agents aren't upgraded with it. An agent older than the server keeps connecting; **Settings → Agents** and the source's page show its version and flag it as outdated. An agent is only ever upgraded to the server's own version, so upgrade the server first.
