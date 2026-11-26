@@ -51,7 +51,7 @@ A checklist for running PerchTail in production. Each item says what to do and w
 - [ ] **Review access periodically** with Settings → Access review: who holds what, accounts without MFA, and accounts that haven't signed in for a while. Deactivate accounts that are no longer needed: that ends their sessions at once.
 - [ ] **Tighten the password policy** (Settings → Sign-in security) if your organisation asks for more than the defaults (12 characters, simple and personal passwords refused).
 - [ ] **Leave password recovery by email off** unless users need it; when on, it never serves administrators or SSO accounts.
-- [ ] **Use `https://` webhook URLs** for alerts. PerchTail also accepts `http://`, which sends the matching lines unencrypted.
+- [ ] **Give every alert an `https://` webhook URL.** New and edited alerts must use one; an alert saved with `http://` before keeps sending the matching lines unencrypted, with a warning in the alerts list and `alert.webhook_insecure` in the log.
 - [ ] **Turn redaction on** (Settings → Redaction) when logs hold secrets or personal data that not everyone who reads them should see, with the rules that fit them, and check it on real files: it is best effort ([redaction.md](redaction.md)).
 
 ## Logging and monitoring

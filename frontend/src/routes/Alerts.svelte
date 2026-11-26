@@ -154,6 +154,11 @@
 
   async function saveAlert() {
     formError = ''
+    // The server refuses anything else; said here in words.
+    if (webhookUrl.trim() && !webhookUrl.trim().startsWith('https://')) {
+      formError = 'The webhook URL must start with https://.'
+      return
+    }
     saving = true
     try {
       const fields = { name, query, regex, file_glob: fileGlob }
@@ -350,6 +355,12 @@
             </div>
             {#if alert.failed_deliveries > 0 || alert.last_error}
               <p class="delivery-warning" role="status">⚠ {deliveryWarning(alert)}</p>
+            {/if}
+            {#if alert.webhook_insecure}
+              <p class="delivery-warning insecure-warning" role="status">
+                ⚠ Its webhook URL is <code>http://</code>, so the calls aren't encrypted. Edit the
+                alert and give it an <code>https://</code> URL.
+              </p>
             {/if}
           </div>
           <div class="alert-actions">

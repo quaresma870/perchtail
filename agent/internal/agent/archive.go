@@ -5,11 +5,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -70,6 +72,69 @@ func unreadable(err error, wrap func(error) error) error {
 }
 
 var errEmptyArchive = errors.New("the archive is empty")
+
+// MaxZipEntries is the most entries a .zip may hold, as on the server
+// (backend/app/archives.py, MAX_ZIP_ENTRIES): archive/zip reads the whole
+// index into memory before anything else, so the count the archive states
+// is read first (zipEntryCount) and a .zip stating more is unreadable.
+const MaxZipEntries = 50000
+
+var errTooManyZipEntries = errors.New("the archive has more than " + strconv.Itoa(MaxZipEntries) + " entries")
+
+var (
+	zipEndSignature      = []byte("PK\x05\x06")
+	zip64LocatorSig      = []byte("PK\x06\x07")
+	zip64EndSignature    = []byte("PK\x06\x06")
+	zipEndLength         = int64(22)
+	zip64LocatorLength   = int64(20)
+	zip64EndRecordLength = int64(56)
+)
+
+// zipEntryCount is how many entries the .zip r (of size bytes) says it
+// holds: from its end-of-central-directory record, or from the ZIP64 record
+// right before the ZIP64 locator when there is one, found as the server's
+// zipfile finds them (the last 22 bytes first, then the last 64 KiB). false
+// when there is no such record; the zip reader then refuses the file
+// itself.
+func zipEntryCount(r io.ReaderAt, size int64) (uint64, bool) {
+	if size < zipEndLength {
+		return 0, false
+	}
+	tailLength := zipEndLength
+	tail := make([]byte, tailLength)
+	if _, err := r.ReadAt(tail, size-tailLength); err != nil {
+		return 0, false
+	}
+	if !bytes.Equal(tail[:4], zipEndSignature) || tail[20] != 0 || tail[21] != 0 {
+		tailLength = min(size, zipEndLength+0xFFFF)
+		tail = make([]byte, tailLength)
+		if _, err := r.ReadAt(tail, size-tailLength); err != nil {
+			return 0, false
+		}
+	}
+	at := bytes.LastIndex(tail, zipEndSignature)
+	if at < 0 || int64(len(tail)-at) < zipEndLength {
+		return 0, false
+	}
+	entries := uint64(binary.LittleEndian.Uint16(tail[at+10:]))
+	locatorOffset := size - tailLength + int64(at) - zip64LocatorLength
+	if locatorOffset < 0 {
+		return entries, true
+	}
+	locator := make([]byte, zip64LocatorLength)
+	if _, err := r.ReadAt(locator, locatorOffset); err != nil || !bytes.Equal(locator[:4], zip64LocatorSig) {
+		return entries, true
+	}
+	recordOffset := locatorOffset - zip64EndRecordLength
+	if recordOffset < 0 {
+		return 0, false
+	}
+	record := make([]byte, zip64EndRecordLength)
+	if _, err := r.ReadAt(record, recordOffset); err != nil || !bytes.Equal(record[:4], zip64EndSignature) {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(record[32:]), true
+}
 
 // errNoTarHeader is a .tar.gz whose content, once decompressed, ends before
 // its first whole entry.
@@ -163,11 +228,18 @@ func walkArchive(f contentFile, name string, fn func(archiveEntry) (bool, error)
 		if err != nil {
 			return err
 		}
+		if entries, ok := zipEntryCount(f, st.Size()); ok && entries > MaxZipEntries {
+			return archiveUnreadable(errTooManyZipEntries)
+		}
 		zr, err := zip.NewReader(f, st.Size())
 		// A member named ../x or /x is reported (ErrInsecurePath) with a
 		// reader that works: names are only shown, never used as paths.
 		if err != nil && !errors.Is(err, zip.ErrInsecurePath) {
 			return archiveUnreadable(err)
+		}
+		// An archive whose record states fewer entries than its index holds.
+		if len(zr.File) > MaxZipEntries {
+			return archiveUnreadable(errTooManyZipEntries)
 		}
 		for _, zf := range zr.File {
 			entryName := zipName(zf)

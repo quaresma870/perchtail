@@ -246,6 +246,9 @@ Push agents upgraded in between stay on the newer version: an agent never downgr
 ## Upgrading to 1.0.0
 
 - **A weak `CREDENTIAL_ENCRYPTION_KEY` stops PerchTail from starting.** `CREDENTIAL_KEY_REFUSE_WEAK` now defaults to `true`. If 0.7 warned about your key (`startup.weak_credential_encryption_key` in the log, or "CREDENTIAL_ENCRYPTION_KEY is weaker than recommended." at the top of the system settings pages), rotate it with `python -m app.rotate_credential_key` before upgrading ([credential-key-rotation.md](credential-key-rotation.md)), or set `CREDENTIAL_KEY_REFUSE_WEAK=false` for the time it takes and remove it afterwards. The commands are in [troubleshooting.md](troubleshooting.md#perchtail-doesnt-start-weak-credential-key).
+- **Alert webhooks need `https://`.** Creating an alert, or changing its webhook URL, with an `http://` URL is refused. Alerts that already have one keep sending: the alerts list says under each that its calls aren't encrypted, and each call logs `alert.webhook_insecure` (WARNING). Give them an `https://` URL; if a receiver only speaks HTTP, put a TLS-terminating proxy in front of it.
+- **A `.zip` with more than 50,000 entries can't be read** (expanded, or a file opened or downloaded from it), answering "This archive can't be read…". Split such archives. Upgrade push agents too ([Upgrading push agents](#upgrading-push-agents)): an agent from before this release still lists the first 50,000 entries of such an archive.
+- **An account can own at most 100 alerts.** An account that already has more keeps them, but can't add another until it is under 100.
 - **A YAML import that sets `search_indexing_enabled` is refused.** The setting no longer exists since 0.7; remove the key from your import files ([bulk-import.md](bulk-import.md#format)).
 
 ## Upgrading to 0.7.1

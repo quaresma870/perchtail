@@ -693,10 +693,21 @@ def masked_webhook_url(url: str) -> str:
 CONNECTION_FAILED = "connection failed"
 
 
-def post_webhook(url: str, payload: dict) -> str | None:
+def webhook_is_insecure(url: str) -> bool:
+    """Whether the webhook URL is plain http://. New and edited alerts must
+    use https:// (app/api/alerts.py); an alert saved with http:// before
+    that keeps sending until it is edited, with a warning."""
+    return urlparse(url).scheme.lower() == "http"
+
+
+def post_webhook(url: str, payload: dict, *, alert_id: int | None = None) -> str | None:
     """Sends one webhook call; None when it worked, else why it didn't.
     The target is resolved and validated here, and pinned to the address
-    that validation saw (see app/webhook_safety.py: no DNS rebinding)."""
+    that validation saw (see app/webhook_safety.py: no DNS rebinding). A
+    call to a plain http:// URL logs alert.webhook_insecure (WARNING),
+    without the URL."""
+    if webhook_is_insecure(url):
+        logger.warning("alert.webhook_insecure", alert_id=alert_id)
     try:
         target = resolve_pinned_webhook_target(url)
         with httpx.Client(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
@@ -824,7 +835,7 @@ def deliver_due(session: Session) -> None:
             logger.error("alert.redaction_failed", alert_id=alert.id, error=str(exc))
             error = "redaction failed"
         else:
-            error = post_webhook(webhook_url(alert), payload)
+            error = post_webhook(webhook_url(alert), payload, alert_id=alert.id)
         delivery.attempts += 1
         if error is None:
             logger.info("alert.webhook_sent", alert_id=alert.id, attempts=delivery.attempts)

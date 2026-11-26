@@ -1,6 +1,7 @@
 import gzip
 import io
 import shutil
+import struct
 import tarfile
 import zipfile
 import zlib
@@ -26,6 +27,18 @@ MAX_TAR_ENTRIES = 50_000
 MAX_TAR_NAME_BYTES = 8 * 1024 * 1024
 MAX_TAR_HEADER_BYTES = 1024 * 1024
 MAX_TAR_GLOBAL_HEADER_BYTES = 1024 * 1024
+# A .zip holding more than MAX_ZIP_ENTRIES entries can't be read: zipfile
+# loads its whole index (one ZipInfo per entry) before anything else, so the
+# count is read from the end-of-central-directory record (or its ZIP64
+# version) first, and the archive refused before ZipFile is built
+# (_open_zip). The same ceiling as MAX_TAR_ENTRIES.
+MAX_ZIP_ENTRIES = 50_000
+_EOCD = struct.Struct("<4s4H2LH")
+_EOCD_SIGNATURE = b"PK\x05\x06"
+_ZIP64_LOCATOR = struct.Struct("<4sLQL")
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_ZIP64_EOCD = struct.Struct("<4sQ2H2L4Q")
+_ZIP64_EOCD_SIGNATURE = b"PK\x06\x06"
 # What a corrupt gzip stream raises while it is read, and what tarfile
 # raises on headers chained deeper than Python's recursion limit.
 _GZIP_ERRORS = (gzip.BadGzipFile, EOFError, zlib.error)
@@ -51,6 +64,79 @@ def _bounded_copy(src: BinaryIO, destination: Path, max_bytes: int | None) -> No
     except BaseException:
         destination.unlink(missing_ok=True)
         raise
+
+
+class ZipTooManyEntriesError(zipfile.BadZipFile):
+    """A .zip with more than MAX_ZIP_ENTRIES entries. A BadZipFile, so every
+    caller refuses it as an archive that can't be read (409
+    archive_unreadable), as it refuses a damaged one."""
+
+    def __init__(self, entries: int):
+        super().__init__(f"the archive has {entries} entries, more than {MAX_ZIP_ENTRIES}")
+        self.entries = entries
+
+
+def zip_entry_count(fp: BinaryIO) -> int | None:
+    """How many entries the .zip `fp` says it holds, from its
+    end-of-central-directory record, or from the ZIP64 record before it
+    when there is one, found the way zipfile finds them. None when there is
+    no such record (zipfile then refuses the file itself). Reads at most
+    the last 64 KiB and a few bytes before them."""
+    size = fp.seek(0, io.SEEK_END)
+    if size < _EOCD.size:
+        return None
+    # As zipfile: the last 22 bytes first (an archive without a comment),
+    # so a .zip read in place isn't read further back than zipfile reads.
+    tail_length = _EOCD.size
+    fp.seek(size - tail_length)
+    tail = fp.read(tail_length)
+    if tail[:4] != _EOCD_SIGNATURE or tail[-2:] != b"\x00\x00":
+        tail_length = min(size, _EOCD.size + 0xFFFF)
+        fp.seek(size - tail_length)
+        tail = fp.read(tail_length)
+    at = tail.rfind(_EOCD_SIGNATURE)
+    if at < 0 or len(tail) - at < _EOCD.size:
+        return None
+    entries = _EOCD.unpack_from(tail, at)[4]
+    eocd_offset = size - tail_length + at
+    locator_offset = eocd_offset - _ZIP64_LOCATOR.size
+    if locator_offset < 0:
+        return entries
+    fp.seek(locator_offset)
+    locator = fp.read(_ZIP64_LOCATOR.size)
+    if len(locator) != _ZIP64_LOCATOR.size or locator[:4] != _ZIP64_LOCATOR_SIGNATURE:
+        return entries
+    # As zipfile: the ZIP64 record sits right before its locator.
+    record_offset = locator_offset - _ZIP64_EOCD.size
+    if record_offset < 0:
+        return None
+    fp.seek(record_offset)
+    record = fp.read(_ZIP64_EOCD.size)
+    if len(record) != _ZIP64_EOCD.size or record[:4] != _ZIP64_EOCD_SIGNATURE:
+        return None
+    return _ZIP64_EOCD.unpack(record)[7]
+
+
+def _open_zip(archive: str | Path | BinaryIO) -> zipfile.ZipFile:
+    """The .zip `archive` (a path or a seekable file) opened for reading,
+    unless it holds more than MAX_ZIP_ENTRIES entries
+    (ZipTooManyEntriesError): the count it states is checked before
+    ZipFile reads its index, and the entries ZipFile found after, for an
+    archive whose record says fewer than it holds."""
+    if isinstance(archive, (str, Path)):
+        with open(archive, "rb") as fp:
+            stated = zip_entry_count(fp)
+    else:
+        stated = zip_entry_count(archive)
+        archive.seek(0)
+    if stated is not None and stated > MAX_ZIP_ENTRIES:
+        raise ZipTooManyEntriesError(stated)
+    zf = zipfile.ZipFile(archive)
+    if len(zf.filelist) > MAX_ZIP_ENTRIES:
+        found = len(zf.filelist)
+        zf.close()
+        raise ZipTooManyEntriesError(found)
+    return zf
 
 
 class MemberUnreadableError(Exception):
@@ -298,7 +384,7 @@ def scan_members(
     given as a seekable file instead of a path (a ranged read of a remote
     one, collectors/ranged.py); a tar.gz only as a path."""
     if is_zip(filename):
-        with zipfile.ZipFile(local_path) as zf:
+        with _open_zip(local_path) as zf:
             members = [
                 ArchiveMember(
                     name=info.filename,
@@ -362,7 +448,7 @@ def extract_member(
     scan_members); one that can read ahead (collectors/ranged.py) is told
     the member's stretch first."""
     if is_zip(filename):
-        with zipfile.ZipFile(local_path) as zf:
+        with _open_zip(local_path) as zf:
             info = zf.getinfo(_zip_member_name(zf, member_name))
             if info.flag_bits & _ZIP_ENCRYPTED:
                 raise MemberUnreadableError(SKIP_ENCRYPTED)
@@ -582,7 +668,7 @@ def _rebuild_zip(
     written: set[str] = set()
     member_copy = work_dir / "rebuild-member"
     with (
-        zipfile.ZipFile(local_path) as source,
+        _open_zip(local_path) as source,
         zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as rebuilt,
     ):
         for info in source.infolist():

@@ -151,7 +151,7 @@ icacls "C:\ProgramData\AppName\Logs" /grant "DOMAIN\svc-perchtail:(OI)(CI)RX"
 
 - Require SMB3+; disable SMBv1 on the host entirely if it's still enabled anywhere — it's deprecated and insecure.
 - PerchTail's connector authenticates over NTLM regardless of whether the source is domain-joined — the stored credential is only a username and password, with no way to supply a realm or keytab for Kerberos. Require NTLMv2 as the minimum on the share side.
-- Enable SMB signing. PerchTail requires signed messages by default (**Require signing** under **SMB security** in the source editor, `smb_require_signing` in a bulk import) and refuses a server that doesn't sign; turn it off only for a server that can't sign, and the editor and the source's page then warn about it. **Encrypt (SMB 3)** (`smb_encrypt`, off by default) also asks for SMB 3 encryption of the whole session and refuses a server that can't encrypt; without it the server decides.
+- Enable SMB signing. PerchTail requires signed messages by default (**Require signing** under **SMB security** in the source editor, `smb_require_signing` in a bulk import) and refuses a server that doesn't sign; turn it off only for a server that can't sign, and the editor and the source's page then warn about it. **Encrypt (SMB 3)** (`smb_encrypt`) also asks for SMB 3 encryption of the whole session and refuses a server that can't encrypt; without it the server decides. It starts ticked for a new source in the source editor; untick it only for a server that can't encrypt. The API and a bulk import leave it off when it isn't given.
 
 ### 5. Firewall
 
@@ -174,7 +174,7 @@ winrm quickconfig
 
 Then add an HTTPS listener (port 5986) with a certificate the PerchTail host can verify. In the source editor, set **Scheme** to HTTPS (the default for new sources). If the certificate comes from an internal CA or is self-signed, paste that CA certificate (PEM) into **CA certificate (PEM, optional)**. It is trusted for that source only, without changing the server-wide trust store or setting `REQUESTS_CA_BUNDLE`. Deleting the source, or changing its host, port or CA certificate, removes the old certificate's file when no other source uses it, audited as `source.pins_removed`.
 
-Plain HTTP (port 5985) still has NTLM encrypt the WinRM messages, but the server isn't authenticated, so a machine in the middle can impersonate it. Use it only on a network you control.
+Plain HTTP (port 5985) still has NTLM encrypt the WinRM messages, but the server isn't authenticated (the source editor warns when **Scheme** is HTTP), so a machine in the middle can impersonate it. Use it only on a network you control.
 
 Sources created before 0.5.0 have no scheme stored and keep the old rule until edited: HTTPS on port 5986 or with no port, HTTP on any other port. Saving the source in the editor stores the scheme explicitly.
 

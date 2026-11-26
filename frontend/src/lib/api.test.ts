@@ -53,6 +53,37 @@ describe('api.get', () => {
     })
   })
 
+  it("shows the first error's message when a 422's detail is a list", async () => {
+    mockFetchOnce({
+      ok: false,
+      status: 422,
+      statusText: 'Unprocessable Entity',
+      json: async () => ({
+        detail: [
+          { loc: ['body', 'webhook_url'], msg: 'Value error, webhook_url must be an https:// URL' },
+          { loc: ['body', 'name'], msg: 'Field required' },
+        ],
+      }),
+    })
+    await expect(api.post('/alerts', {})).rejects.toMatchObject({
+      status: 422,
+      detail: 'Value error, webhook_url must be an https:// URL',
+    })
+  })
+
+  it('keeps the status text when a 422 list has no readable message', async () => {
+    mockFetchOnce({
+      ok: false,
+      status: 422,
+      statusText: 'Unprocessable Entity',
+      json: async () => ({ detail: [] }),
+    })
+    await expect(api.post('/alerts', {})).rejects.toMatchObject({
+      status: 422,
+      detail: 'Unprocessable Entity',
+    })
+  })
+
   it('parses a structured detail object into message + errorCode', async () => {
     mockFetchOnce({
       ok: false,

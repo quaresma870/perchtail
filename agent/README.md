@@ -30,7 +30,7 @@ On each connection the agent sends, besides its token, its operating system, its
 
 ## Limits
 
-- A listing (a folder, or an archive's members) stops at 50,000 entries, or earlier once the answer nears 8 MiB, and says it was cut short; a server from 0.7 asks for its own cap, never above that.
+- A listing (a folder, or a `.tar.gz` archive's members) stops at 50,000 entries, or earlier once the answer nears 8 MiB, and says it was cut short; a server from 0.7 asks for its own cap, never above that. A `.zip` with more than 50,000 entries isn't listed at all: it is refused with `archive_unreadable`.
 - At most 8 commands run at once, of which at most 2 redact.
 - Content is sent in pieces of at most 1 MiB, and a ranged read (Tail) reads at most 1 MiB. The largest file and the most decompression may produce are set by the server in each request (its `MAX_FETCH_MB` and `MAX_DECOMPRESSED_MB`); a refusal says which of the two was passed, so the server names the right one even when they are the same number.
 - Upgrade downloads are capped (256 MiB for the binary) and each may take at most 10 minutes; the agent must accept or refuse an upgrade within 15 seconds.

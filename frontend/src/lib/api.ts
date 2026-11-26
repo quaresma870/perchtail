@@ -33,7 +33,12 @@ async function requestWithHeaders<T>(path: string, init?: RequestInit): Promise<
     let errorCode: string | undefined
     try {
       const body = await response.json()
-      if (body.detail && typeof body.detail === 'object') {
+      if (Array.isArray(body.detail)) {
+        // A request the server's validation refused (422): a list of
+        // errors, each with a readable `msg`; the first one says enough.
+        const first = body.detail[0]
+        if (first && typeof first.msg === 'string' && first.msg) detail = first.msg
+      } else if (body.detail && typeof body.detail === 'object') {
         detail = body.detail.message ?? detail
         errorCode = body.detail.error_code
       } else {
