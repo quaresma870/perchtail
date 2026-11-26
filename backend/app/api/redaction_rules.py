@@ -254,6 +254,9 @@ def _delete(session: Session, user: User, rule: RedactionRule) -> None:
         select(SourceRedactionOverride).where(SourceRedactionOverride.rule_id == rule_id)
     ).all():
         session.delete(override)
+    # The overrides go first: no relationship tells the unit of work they
+    # point at the rule, and PostgreSQL enforces the foreign key.
+    session.flush()
     session.delete(rule)
     record_audit_event(
         session,

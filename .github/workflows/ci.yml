@@ -65,6 +65,44 @@ jobs:
           pip install bandit==1.9.4
           bandit -q -r backend/app
 
+  # The backend suite again on PostgreSQL (#306): TEST_DATABASE_URL points the
+  # tests at a throwaway PostgreSQL 18 service, reachable only inside the
+  # runner. It has a password, a fixed test value, because the tests check
+  # that a database password never reaches the logs or an error.
+  backend-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18@sha256:c699303802144847d238196173655dbbecf7a96aeca1565f2b02eb671a1f0b6b
+        env:
+          POSTGRES_USER: perchtail_test
+          POSTGRES_DB: perchtail_test
+          POSTGRES_PASSWORD: perchtail_test
+          POSTGRES_INITDB_ARGS: --locale-provider=builtin --locale=C.UTF-8
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U perchtail_test -d perchtail_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql://perchtail_test:perchtail_test@127.0.0.1:5432/perchtail_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements-dev.txt
+
+      - name: Test on PostgreSQL
+        run: pytest -v
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

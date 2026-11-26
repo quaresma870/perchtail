@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import re
 import time
 from datetime import timedelta
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ from app.auth.rbac import (
 from app.db import configure_sqlite_connection
 from app.models import Customer, Folder, Protocol, Source
 from app.timeutils import utcnow
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlmodel import Session, SQLModel, create_engine, select
 
 
@@ -537,6 +538,81 @@ def test_the_snapshot_keeps_a_transaction_the_session_already_has(tmp_path):
     with Session(engine) as other:
         assert [source.name for source in other.exec(select(Source)).all()] == ["pending"]
     engine.dispose()
+
+
+@pytest.mark.postgres_only
+def test_the_postgresql_snapshot_is_one_read_transaction(session):
+    """As test_the_snapshot_is_one_read_transaction, on PostgreSQL: a
+    customer, source and grant committed by another connection after the
+    first read (the roles) must not end up half in the report."""
+    acme = _add(session, Customer(name="Acme"))
+    _source(session, "acme-1", customer=acme)
+    role = _role(session, "ops")
+    _grant(session, role, ScopeType.customer, acme, [Capability.view])
+    _user(session, "ops-user", role)
+    role_id = role.id
+    session.commit()
+
+    engine = session.get_bind()
+    writer_engine = create_engine(engine.url)
+    written = []
+
+    def write_elsewhere(_conn, _cursor, statement, *_):
+        # After the first read of the snapshot, the roles.
+        if written or not re.search(r"\bFROM role\b", statement):
+            return
+        written.append(True)
+        with Session(writer_engine) as writer:
+            beta = _add(writer, Customer(name="Beta"))
+            _source(writer, "beta-1", customer=beta)
+            _grant(writer, writer.get(Role, role_id), ScopeType.customer, beta, [Capability.view])
+
+    event.listen(engine, "after_cursor_execute", write_elsewhere)
+    try:
+        snapshot = access_report.load_snapshot(session)
+    finally:
+        event.remove(engine, "after_cursor_execute", write_elsewhere)
+        writer_engine.dispose()
+
+    assert written
+    assert set(snapshot.customers.values()) == {"Acme"}
+    assert [source.name for source in snapshot.sources] == ["acme-1"]
+    assert len(snapshot.grants) == 1
+    assert snapshot.roles[role_id].name == "ops"  # read, though no longer in a session
+
+    fresh = access_report.load_snapshot(session)
+    assert set(fresh.customers.values()) == {"Acme", "Beta"}
+    assert sorted(source.name for source in fresh.sources) == ["acme-1", "beta-1"]
+    assert len(fresh.grants) == 2
+
+
+@pytest.mark.postgres_only
+def test_the_postgresql_snapshot_is_repeatable_read_and_read_only(session, monkeypatch):
+    seen = {}
+    original = access_report._read_snapshot
+
+    def read_snapshot(reader):
+        seen["isolation"] = reader.execute(text("SHOW transaction_isolation")).scalar()
+        seen["read_only"] = reader.execute(text("SHOW transaction_read_only")).scalar()
+        return original(reader)
+
+    monkeypatch.setattr(access_report, "_read_snapshot", read_snapshot)
+    access_report.load_snapshot(session)
+    assert seen == {"isolation": "repeatable read", "read_only": "on"}
+
+
+@pytest.mark.postgres_only
+def test_the_postgresql_snapshot_sees_what_the_session_wrote(session):
+    """A session that wrote something keeps its own transaction for the
+    reads, so the report sees what it hasn't committed yet."""
+    acme = _add(session, Customer(name="Acme"))
+    session.add(
+        Source(name="pending", customer_id=acme.id, protocol=Protocol.ssh, host="h", base_path="/")
+    )
+
+    snapshot = access_report.load_snapshot(session)
+    assert [source.name for source in snapshot.sources] == ["pending"]
+    session.rollback()
 
 
 def test_two_thousand_sources_and_fifty_users_stay_fast(session):

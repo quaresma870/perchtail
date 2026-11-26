@@ -26,7 +26,7 @@ None of the four answers the world. The bearer token is the monitoring token gen
 
 Answers `200 {"status": "ready"}` when all the checks pass, and `503 {"status": "not_ready", "failed": [...]}` naming the ones that didn't:
 
-- `database`: an insert into a small table, rolled back at once, so it needs SQLite's write lock and leaves nothing behind. It waits at most 2 seconds for the lock (instead of the normal 30), so a probe on a locked database fails fast.
+- `database`: an insert into a small table, rolled back at once, so it needs SQLite's write lock and leaves nothing behind. It waits at most 2 seconds for the lock (instead of the normal 30), so a probe on a locked database fails fast. On PostgreSQL the insert waits at most 2 seconds for a lock and runs at most 2 seconds (`lock_timeout` and `statement_timeout`, for its own transaction only), so a locked table, a read-only database or a standby fails it as fast.
 - `data_dir`: a small temporary file is created, written and removed in `DATA_DIR`. A full disk or a read-only mount fails it.
 - `scheduler`: the background job scheduler runs.
 - `database_lock`: PostgreSQL only, and only once it has failed. Another PerchTail instance took the database's one-instance lock after this one lost its connection (`database.instance_lock_lost`); it stays failed until this instance is restarted.
@@ -137,7 +137,7 @@ Timestamps are UTC, without a time zone (`next_run_at` has one). Fields that can
 | `instance.hostname`, `instance.pid` | Which process answered, for a setup with more than one. |
 | `database.reachable` | `false` when a `SELECT 1` failed. |
 | `database.latency_ms` | How long that `SELECT 1` took. |
-| `database.size_bytes`, `database.wal_bytes` | Size of the SQLite file and of its write-ahead log (`perchtail.db-wal`; 0 when there is none). `null` for another database. The WAL is checkpointed and cut back every hour and limited to 64 MiB after each checkpoint. |
+| `database.size_bytes`, `database.wal_bytes` | Size of the SQLite file and of its write-ahead log (`perchtail.db-wal`; 0 when there is none). The WAL is checkpointed and cut back every hour and limited to 64 MiB after each checkpoint. On PostgreSQL, `size_bytes` is the database's size (`pg_database_size`) and `wal_bytes` is `null`: the write-ahead log belongs to the whole server, not to PerchTail's database. Both are `null` when the database can't be reached or the size can't be read. |
 | `scratch.used_bytes`, `scratch.max_bytes`, `scratch.used_fraction` | What's on disk under `SCRATCH_DIR`, against `SCRATCH_MAX_GB`. |
 | `scratch.min_free_bytes` | Free space kept on the scratch filesystem: the larger of `SCRATCH_MIN_FREE_GB` and `SCRATCH_MIN_FREE_PERCENT` of its size. Below it, and when scratch is at `SCRATCH_MAX_GB`, new fetches are refused with HTTP 507. |
 | `limits.global_in_use`, `limits.global_max` | Folder listings, file opens, Tail polls, downloads, folder ZIPs and archive listings talking to sources right now, and how many may at once (Settings → Explorer and limits). |
@@ -283,7 +283,7 @@ To pick fields yourself instead, make one HTTP agent item on `/monitoring/health
 | `perchtail_status` | | 0 ok, 1 degraded, 2 error. |
 | `perchtail_uptime_seconds` | | Seconds since the process started. |
 | `perchtail_database_reachable`, `perchtail_database_latency_seconds` | | The database check. |
-| `perchtail_database_size_bytes`, `perchtail_database_wal_size_bytes` | | SQLite file and WAL sizes. |
+| `perchtail_database_size_bytes`, `perchtail_database_wal_size_bytes` | | SQLite file and WAL sizes; on PostgreSQL the database's size, and no WAL series. |
 | `perchtail_scratch_used_bytes`, `perchtail_scratch_max_bytes`, `perchtail_scratch_min_free_bytes` | | Scratch use and limit, and the free space kept on its filesystem. |
 | `perchtail_connector_slots_in_use`, `perchtail_connector_slots_max`, `perchtail_connector_slots_per_source_max`, `perchtail_connector_slots_busiest_source` | | Listings, opens, Tail polls, downloads and ZIPs talking to sources, against the limits. |
 | `perchtail_transfers_in_use`, `perchtail_transfers_per_user_max` | | Downloads and folder ZIPs in progress, and the per-user limit. |

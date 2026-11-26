@@ -81,7 +81,11 @@ def render_metrics(health) -> str:
         "Time a SELECT 1 took.",
         db.latency_ms / 1000 if db.latency_ms is not None else None,
     )
-    out.gauge("database_size_bytes", "Size of the SQLite database file.", db.size_bytes)
+    out.gauge(
+        "database_size_bytes",
+        "Size of the SQLite database file, or of the PostgreSQL database.",
+        db.size_bytes,
+    )
     out.gauge("database_wal_size_bytes", "Size of the SQLite write-ahead log.", db.wal_bytes)
 
     out.gauge("scratch_used_bytes", "Bytes used under SCRATCH_DIR.", health.scratch.used_bytes)
