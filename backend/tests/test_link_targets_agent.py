@@ -15,6 +15,7 @@ import zipfile
 
 import pytest
 from app.agent_registry import FEATURE_LINKS, AgentCommandError, get_agent_registry
+from app.api.auth import session_cookie_name
 from app.auth.models import AuditLog, Capability, Role, RoleGrant, ScopeType, User
 from app.auth.sessions import create_session
 from app.collectors import agent as agent_module
@@ -400,7 +401,7 @@ def api(session, agent, tmp_path, monkeypatch):
     app.dependency_overrides[get_session] = lambda: session
     _, token = create_session(session, user, user_agent="pytest")
     client = TestClient(app)
-    client.cookies.set("perchtail_session", token)
+    client.cookies.set(session_cookie_name(), token)
     yield client, source
     app.dependency_overrides.pop(get_session, None)
     get_settings.cache_clear()

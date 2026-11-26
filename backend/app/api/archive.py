@@ -1,7 +1,6 @@
 import gzip
 import hashlib
 import io
-import mimetypes
 import os
 import shutil
 import tarfile
@@ -2292,6 +2291,11 @@ def redacted_filename(name: str) -> str:
     return f"{name}.redacted"
 
 
+# A downloaded file is always sent as bytes to save, never as a type the
+# browser might render or sniff from its name (a .html or .svg log).
+DOWNLOAD_MEDIA_TYPE = "application/octet-stream"
+
+
 def _download_name(session: Session, name: str) -> str:
     if system_settings.get_bool(session, "redaction_download_suffix"):
         return redacted_filename(name)
@@ -2926,7 +2930,11 @@ def _download_redacted(
     headers = {REDACTED_DOWNLOAD_HEADER: "1"}
     if prepared.ready:
         return _FinishingFileResponse(
-            prepared.path, filename=name, headers=headers, on_finish=finish
+            prepared.path,
+            filename=name,
+            headers=headers,
+            on_finish=finish,
+            media_type=DOWNLOAD_MEDIA_TYPE,
         )
     # Set whenever the content isn't ready (_prepare_redacted_download).
     stream = _redacted_chunks(
@@ -2952,7 +2960,7 @@ def _download_redacted(
     headers["Content-Disposition"] = _attachment(name)
     return _FinishingStreamingResponse(
         stream,
-        media_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
+        media_type=DOWNLOAD_MEDIA_TYPE,
         headers=headers,
         on_finish=finish_stream,
     )
@@ -3024,7 +3032,9 @@ def download_file(
         )
         session.commit()
         with _local_file_gone(path, key is None):
-            return _FinishingFileResponse(served_path, filename=filename, on_finish=finish)
+            return _FinishingFileResponse(
+                served_path, filename=filename, on_finish=finish, media_type=DOWNLOAD_MEDIA_TYPE
+            )
     except BaseException:
         finish()
         raise

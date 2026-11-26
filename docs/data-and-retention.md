@@ -54,7 +54,7 @@ The active file rotates at `LOG_MAX_FILE_MB` (100) or at midnight; rotated files
 
 ## The browser
 
-PerchTail keeps no token and no file content in the browser's storage. The session cookie is `HttpOnly`, so scripts can't read it. Local storage holds only the height of the viewer's panel; session storage, emptied when the tab is closed, holds the sort order and filters of the Settings tables. The explorer's sort order and the connections view are display preferences kept with the user's account. File content and the password-recovery pages are sent with `Cache-Control: no-store`, so the browser doesn't keep them in its cache; what a user downloads is theirs to keep or delete.
+PerchTail keeps no token and no file content in the browser's storage. The session cookie is `HttpOnly`, so scripts can't read it. Local storage holds only the height of the viewer's panel; session storage, emptied when the tab is closed, holds the sort order and filters of the Settings tables. The explorer's sort order and the connections view are display preferences kept with the user's account. Every API answer, file content and the password-recovery pages included, is sent with `Cache-Control: no-store`, so neither the browser nor a proxy keeps a copy; what a user downloads is theirs to keep or delete.
 
 ## Users
 

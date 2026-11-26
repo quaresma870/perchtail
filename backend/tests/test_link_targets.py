@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 from app import name_index
+from app.api.auth import session_cookie_name
 from app.auth.models import AuditLog, Capability, Role, RoleGrant, ScopeType, User
 from app.auth.sessions import create_session
 from app.collectors import local as local_module
@@ -208,7 +209,7 @@ def api(session, tree, tmp_path, monkeypatch):
     app.dependency_overrides[get_session] = lambda: session
     _, token = create_session(session, user, user_agent="pytest")
     client = TestClient(app)
-    client.cookies.set("perchtail_session", token)
+    client.cookies.set(session_cookie_name(), token)
     yield client, source
     app.dependency_overrides.pop(get_session, None)
     get_settings.cache_clear()

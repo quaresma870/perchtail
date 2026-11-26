@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 from app import request_context
+from app.api.auth import session_cookie_name
 from app.auth.models import AuditLog, Capability, Role, RoleGrant, ScopeType, User
 from app.auth.sessions import create_session, hash_token
 from app.config import get_settings, parse_networks
@@ -94,7 +95,7 @@ def real_app(session):
 def _client(session, user, address=("127.0.0.1", 50000)) -> tuple[TestClient, str]:
     _, token = create_session(session, user, user_agent="pytest-agent")
     client = TestClient(app, client=address)
-    client.cookies.set("perchtail_session", token)
+    client.cookies.set(session_cookie_name(), token)
     return client, token
 
 
@@ -163,7 +164,7 @@ def test_the_user_agent_is_truncated(session, real_app):
 
 def test_a_stale_cookie_signs_no_one_out_and_writes_nothing(session, real_app):
     client = TestClient(app)
-    client.cookies.set("perchtail_session", "not-a-session")
+    client.cookies.set(session_cookie_name(), "not-a-session")
     assert client.post("/auth/logout").status_code == 204
     assert _entries(session, "user.logout") == []
 

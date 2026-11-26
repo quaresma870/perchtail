@@ -8,7 +8,9 @@ into its 413 rather than a 500."""
 import inspect
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -271,6 +273,33 @@ async def integer_out_of_range(request: Request, exc: OverflowError) -> JSONResp
     )
 
 
+def log_validation_failure(request: Request, exc: RequestValidationError) -> None:
+    """One line per request refused as invalid (422): the method, the path,
+    the user when the session was already resolved, and where each problem
+    was (`loc`), never the values sent."""
+    context = request_context.current()
+    logger.info(
+        "request.validation_failed",
+        method=request.method,
+        path=request.url.path,
+        user_id=context.user_id if context is not None else None,
+        fields=[".".join(str(part) for part in error.get("loc", ())) for error in exc.errors()],
+    )
+
+
+def validation_response(exc: RequestValidationError) -> JSONResponse:
+    """FastAPI's 422 answer without the `input` of each error: the client
+    already has what it sent, and a refused password or token shouldn't
+    travel back in the answer."""
+    errors = [{k: v for k, v in error.items() if k != "input"} for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+
+
+async def validation_failed(request: Request, exc: RequestValidationError):
+    log_validation_failure(request, exc)
+    return validation_response(exc)
+
+
 def install(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, access_denied)
     app.add_exception_handler(SourceError, source_error_handler)
@@ -280,3 +309,4 @@ def install(app: FastAPI) -> None:
     app.add_exception_handler(ScratchFullError, scratch_full)
     app.add_exception_handler(FetchCancelledError, read_cancelled)
     app.add_exception_handler(OverflowError, integer_out_of_range)
+    app.add_exception_handler(RequestValidationError, validation_failed)

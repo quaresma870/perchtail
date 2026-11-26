@@ -219,6 +219,7 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `source.check.timed_out` | warning | A background check went past its deadline. |
 | `scratch.size_guard_eviction` | warning | Scratch use passed `SCRATCH_MAX_GB` and files were evicted. |
 | `scratch.full`, `scratch.disk_low` | warning | A fetch was refused (507): scratch was at `SCRATCH_MAX_GB` with files people have open, or its filesystem was down to the free space it keeps. |
+| `request.validation_failed` | info | A request was refused as invalid (422): `method`, `path`, `user_id` when signed in, and `fields`, where each problem was (for example `body.password`), never the values sent. Many from one client can mean a broken script or someone probing the API. |
 | `limits.busy` | warning | A request was answered 503 because a limit in Settings → Explorer and limits was full (`scope` says which). |
 | `archive.zip_stream_failed` | warning | A folder ZIP failed after it had started streaming, so the client got an incomplete download. |
 | `archive.late_audit_failed` | error | The audit entries written once a download ended (what a folder ZIP left out, or where a redacted download refused UTF-32 content; `action` says which) couldn't be saved. |

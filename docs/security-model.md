@@ -71,6 +71,7 @@ A delegated administrator (a role with `manage_users`, `manage_roles` or `manage
 - A role's grants are checked as a whole after each change, so removing one grant can't make another reach further than the administrator's authority.
 - The last active super admin can't be deactivated or demoted, and the built-in roles ("Super Admin" and "No Access") can't be changed.
 - An SSO user whose groups match no mapping gets the "No Access" role at sign-in, also when they had another role before; the last active super admin keeps theirs. A delegated administrator only creates, changes or deletes a group mapping whose role is within their authority, placed before every mapping whose role isn't (the last matching mapping wins), and the mappings to a role beyond their authority don't show them its name; only a super admin deletes or turns off the SSO provider.
+- Customer names are unique across the installation, so renaming a customer to a name already in use is refused (409) even when that other customer is outside the admin's reach: the refusal tells a delegated admin that the name exists, and nothing else about it.
 
 ### Signing in
 
@@ -86,11 +87,13 @@ The first start creates a local super admin (`admin` by default) with a random p
 
 ### Sessions and the browser
 
-- A session is a random 256-bit token in the `perchtail_session` cookie (`HttpOnly`, `SameSite=Strict`, `Secure` unless `SESSION_COOKIE_SECURE=false`). Only its SHA-256 is stored. It lasts `SESSION_TTL_HOURS` (12) and is checked on the server at every request.
-- Signing out deletes the session. Changing one's password ends the user's other sessions and gives the current one a new token; turning one's own MFA on or off ends the other sessions; an administrator's password reset, a password reset by email and deactivating the account end all of them. Users see and end their own sessions in My profile.
+- A session is a random 256-bit token in the `__Host-perchtail_session` cookie (`HttpOnly`, `SameSite=Strict`, `Secure`, `Path=/`, no `Domain`). The `__Host-` prefix makes a browser accept the cookie only from PerchTail's own host over HTTPS, so a site on a sibling subdomain or a page over plain HTTP can't plant or replace it. With `SESSION_COOKIE_SECURE=false` (local tests over HTTP only) the cookie is `perchtail_session`, without `Secure`. Only its SHA-256 is stored. It lasts `SESSION_TTL_HOURS` (12) and is checked on the server at every request.
+- Signing out deletes the session and sends `Clear-Site-Data: "cache"`, so the browser drops what it kept of PerchTail's pages. Changing one's password ends the user's other sessions and gives the current one a new token; turning one's own MFA on or off ends the other sessions; an administrator's password reset, a password reset by email and deactivating the account end all of them. Users see and end their own sessions in My profile.
 - **CSRF**: the `SameSite=Strict` cookie is never sent with a cross-site request; on top of it, a state-changing request whose `Origin` (or `Referer`) names another host than the request's is refused.
 - **Response headers**: a Content-Security-Policy that allows only PerchTail's own scripts (`script-src 'self'`, no inline script; inline styles are allowed because the viewer's editor injects them; `form-action 'self'`), `frame-ancestors 'none'` and `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, a Permissions-Policy turning off camera, microphone, location and other unused features, and `Cross-Origin-Opener-Policy: same-origin`. HSTS is set by the reverse proxy that terminates TLS.
-- File content and the password-recovery pages are sent with `Cache-Control: no-store`, so neither the browser nor a proxy keeps a copy.
+- Every API answer, file content included, is sent with `Cache-Control: no-store` (unless the answer sets its own), so neither the browser nor a proxy keeps a copy. The web interface's static files keep their caching.
+- A download is always `application/octet-stream` with `Content-Disposition: attachment`, so a downloaded `.html` or `.svg` file is saved, never shown or run in PerchTail's origin.
+- A request refused as invalid (422) is logged as `request.validation_failed` with the names of the fields at fault, never their values.
 - The web interface loads nothing from other sites: no CDN, web font, analytics or telemetry.
 - The interactive API documentation (`/docs`, `/redoc`, `/openapi.json`) answers 404 unless `API_DOCS=true`.
 
@@ -129,7 +132,7 @@ On every protocol, paths are checked to stay inside the source's folders, and re
 
 - A reverse proxy in front of it that terminates TLS and sets HSTS. PerchTail itself speaks plain HTTP and must not be reachable from users' networks except through the proxy.
 - A host whose clock is kept right by NTP: sessions, lockouts, password-reset links, TOTP codes and audit timestamps depend on it.
-- `CREDENTIAL_ENCRYPTION_KEY` (and `BACKUP_ENCRYPTION_KEY`) generated randomly and kept outside the host.
+- `CREDENTIAL_ENCRYPTION_KEY` (and `BACKUP_ENCRYPTION_KEY`) generated randomly and kept outside the host. `CREDENTIAL_ENCRYPTION_KEY_FILE` reads the key from a mounted secret instead of the environment.
 - `DATA_DIR` on a local disk, readable by PerchTail's user only, and backups copied off the host.
 
 [hardening.md](hardening.md) goes through each of these.

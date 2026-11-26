@@ -8,6 +8,7 @@ import uuid
 
 import pytest
 from app.api import roles as roles_api
+from app.api.auth import session_cookie_name
 from app.auth.models import (
     AuditLog,
     Capability,
@@ -229,7 +230,7 @@ def real_app(session):
 def _client(session, user) -> TestClient:
     _, token = create_session(session, user, user_agent="pytest")
     client = TestClient(app)
-    client.cookies.set("perchtail_session", token)
+    client.cookies.set(session_cookie_name(), token)
     return client
 
 

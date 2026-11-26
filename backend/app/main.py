@@ -201,6 +201,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # about a source isn't mistaken for a proxy saying PerchTail is down
         # (#276, frontend/src/lib/server-status.ts).
         response.headers["X-PerchTail"] = "1"
+        # API answers aren't kept by the browser or a proxy unless their
+        # route says otherwise; the built frontend's static files (the mount
+        # at "/") keep their own caching, but not their errors: an unknown
+        # path falls through to that mount and its 404 is no-store too.
+        static = isinstance(request.scope.get("endpoint"), StaticFiles)
+        if "cache-control" not in response.headers and (not static or response.status_code >= 400):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
 

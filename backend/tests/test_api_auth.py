@@ -1,7 +1,7 @@
 import uuid
 
 import pytest
-from app.api.auth import get_current_active_user
+from app.api.auth import get_current_active_user, session_cookie_name
 from app.api.auth import router as auth_router
 from app.auth.models import Role, User
 from app.auth.providers.local import create_local_user
@@ -57,7 +57,7 @@ def test_login_sets_cookie_and_returns_user(client, session):
     assert response.status_code == 200
     assert response.json()["username"] == USERNAME
     assert response.json()["must_change_password"] is True
-    assert "perchtail_session" in response.cookies
+    assert session_cookie_name() in response.cookies
 
 
 def test_login_rejects_wrong_password(client, session):
@@ -65,7 +65,7 @@ def test_login_rejects_wrong_password(client, session):
 
     response = _login(client, password="wrong")
     assert response.status_code == 401
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
 
 
 def test_me_requires_authentication(client):

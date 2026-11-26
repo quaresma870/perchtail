@@ -6,6 +6,7 @@ the refusal's audit entry is checked too."""
 import uuid
 
 import pytest
+from app.api.auth import session_cookie_name
 from app.auth.models import AuditLog, GlobalCapability, Role, User
 from app.auth.sessions import create_session
 from app.db import get_session
@@ -44,7 +45,7 @@ def real_app(session):
 def _client(session, user) -> TestClient:
     _, token = create_session(session, user, user_agent="pytest-agent")
     client = TestClient(app, client=("127.0.0.1", 50000))
-    client.cookies.set("perchtail_session", token)
+    client.cookies.set(session_cookie_name(), token)
     return client
 
 
