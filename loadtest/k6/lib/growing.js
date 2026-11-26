@@ -36,6 +36,17 @@ const MB = 1024 * 1024
 // viewer offers "Tail the end", which reads the last TAIL_START_BYTES
 // through Follow instead of opening the file whole.
 export const LARGE_FILE_BYTES = 200 * MB
+
+/** frontend/src/lib/viewer-limits.ts, opensFromEnd: a plain file whose
+ * listed size is over `thresholdMb` (the open_from_end_mb System setting,
+ * 50 MB by default; 0 opens every file whole) opens at its end; a .gz file
+ * always opens whole. */
+export function opensFromEnd(size, thresholdMb, name) {
+  if (typeof size !== 'number' || !Number.isFinite(size)) return false
+  if (typeof thresholdMb !== 'number' || !Number.isFinite(thresholdMb) || thresholdMb <= 0) return false
+  if (String(name).toLowerCase().endsWith('.gz')) return false
+  return size > thresholdMb * MB
+}
 export const TAIL_START_BYTES = 1 * MB
 // When none of the tabs could be opened, the user reads the message
 // before trying again: never a loop of retries without a pause.
@@ -258,7 +269,7 @@ export class FollowTab {
    * (not as an error). */
   open() {
     const listed = this.ui.listedSize ? this.ui.listedSize(this.source.id, this.path) : null
-    if (listed != null && listed > LARGE_FILE_BYTES) {
+    if (opensFromEnd(listed, this.ui.settings ? this.ui.settings.open_from_end_mb : null, this.path)) {
       this.endOnly = true
       followEndOnly.add(1, { suite: this.suite, protocol: this.source.protocol })
       return this.readEnd(listed) && this.ok

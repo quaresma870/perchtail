@@ -27,7 +27,8 @@ import http from 'k6/http'
 import { check, sleep } from 'k6'
 import exec from 'k6/execution'
 import { Counter } from 'k6/metrics'
-import { BASE_URL, ORIGIN, users, usernames } from './config.js'
+import { BASE_URL, ORIGIN, mfaSecrets, users, usernames } from './config.js'
+import { freshCode } from './totp.js'
 
 http.setResponseCallback(http.expectedStatuses({ min: 200, max: 299 }))
 const relogins = new Counter('session_relogins')
@@ -61,7 +62,7 @@ function sizeClass(bytes) {
 export class Ui {
   constructor() {
     this.loggedIn = false
-    this.settings = { tail_interval_seconds: 2, explorer_refresh_seconds: 0 }
+    this.settings = { tail_interval_seconds: 2, explorer_refresh_seconds: 0, open_from_end_mb: 50 }
     this.expanded = [] // [{sourceId, path}]
     this.lastRefresh = 0
     this.lastStatus = 0
@@ -152,7 +153,9 @@ export class Ui {
     if (this.loggedIn) return true
     const username = as || usernames[(exec.vu.idInTest - 1) % usernames.length]
     this.username = username
-    const res = this.request('POST', '/auth/login', { username, password: users[username] }, 'POST /auth/login')
+    const body = { username, password: users[username] }
+    if (mfaSecrets[username]) body.mfa_code = freshCode(username, mfaSecrets[username])
+    const res = this.request('POST', '/auth/login', body, 'POST /auth/login')
     if (res.status !== 200) {
       sleep(5)
       return false
@@ -179,6 +182,9 @@ export class Ui {
       const body = settings.json()
       this.settings.tail_interval_seconds = body.tail_interval_seconds || 2
       this.settings.explorer_refresh_seconds = body.explorer_refresh_seconds || 0
+      // 0 opens every file whole (frontend/src/lib/viewer-limits.ts).
+      this.settings.open_from_end_mb =
+        body.open_from_end_mb == null ? 50 : Number(body.open_from_end_mb)
     }
     const sources = this.get('/sources', 'GET /sources')
     if (sources.status === 200) this.visible = new Set(sources.json().map((s) => s.id))
@@ -201,7 +207,7 @@ export class Ui {
     const entries = res.json()
     if (this.listed.size > MAX_LISTED_SIZES) this.listed.clear()
     // The viewer decides from the listed size whether a file is opened
-    // whole or only its end (lib/viewer-limits.ts, LARGE_FILE_BYTES).
+    // whole or only its end (lib/viewer-limits.ts, opensFromEnd).
     for (const e of entries) if (!e.is_dir) this.listed.set(`${sourceId}\n${e.path}`, e.size)
     return entries
   }

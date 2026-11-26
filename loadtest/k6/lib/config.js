@@ -82,6 +82,8 @@ function readOptionalState(name) {
 }
 
 export const plan = readOptionalState('production-plan.json')
+/** The TOTP secrets of the kit's users that must use MFA (users-mfa.json). */
+export const mfaSecrets = readOptionalState('users-mfa.json') || {}
 export const RESULTS_DIR = (__ENV.LOADTEST_RESULTS_DIR || '').replace(/[\\/]+$/, '')
 
 export const WRITER_START_MS = Number(__ENV.LOADTEST_WRITER_START_MS || 0)
