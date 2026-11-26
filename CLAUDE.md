@@ -19,7 +19,7 @@ The database holds the following: SQLite in `DATA_DIR/perchtail.db` by default, 
 - hashes only, never the plain value: local passwords, previous passwords and MFA backup codes (argon2id), session tokens, password-reset tokens, agent enrollment tokens and the monitoring token (SHA-256);
 - users, roles and grants;
 - the audit log with its HMAC hash chain, the chain's state (anchor after purges, last verification result), and the audit outbox: events a migration recorded without the chain key, signed into the chain by the next start (`app/audit_outbox.py`);
-- the file-name index: path, size and modification time of each rule-visible file, never content (`file_name_entry`, searched through the `file_name_fts` FTS5 table);
+- the file-name index: path, size and modification time of each rule-visible file, never content (`file_name_entry`; a text of three characters or more is narrowed first through the `file_name_fts` FTS5 table on SQLite and with `path ILIKE`, its `%`, `_` and `\` escaped, on the `pg_trgm` GIN index on PostgreSQL, then every row is matched in Python, so both engines find the same names; `app/name_index_store.py`, `search_query`);
 - alert state: alerts, how far each alert has read each file (byte offset and a hash of the file's first bytes), and webhook deliveries waiting to be sent or retried. A pending delivery holds the matching lines and is dropped once sent or after an hour (`app/alerts.py`, `RETRY_FOR`);
 - job runs (last start, finish, result and error of each scheduled job), agent upgrade runs and the last update-check result.
 

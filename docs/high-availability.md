@@ -202,7 +202,7 @@ Sticky sessions alone don't make several instances safe, so don't adopt them as 
 
 **Load balancing type: standard round-robin / least-connections — no stickiness required for anything backed by shared state.** PerchTail can't run this way: it would take changes in PerchTail itself, not configuration. What stands in the way:
 
-1. **The database is SQLite**, which allows one writer, on a local disk. The file-name index's search is built on an SQLite FTS5 trigram table (`app/name_index_store.py`).
+1. **The database is SQLite**, which allows one writer, on a local disk. The file-name index's search is built on an SQLite FTS5 trigram table, or on PostgreSQL on a `pg_trgm` trigram index (`app/name_index_store.py`).
 2. **Login throttling is in process memory** (`app/login_throttle.py`): each replica would count failed sign-ins on its own, so an attacker spreading attempts across replicas would get more tries.
 3. **Every replica would run every background job.** The twelve jobs in [What lives in the process](#what-lives-in-the-process) run in each process, so `replicas: N` means N uncoordinated copies of each job working on the same data.
 4. **Agent connections and the scratch cache are per process.** `app/agent_registry.py` keeps the push agents' WebSocket connections in memory — a command for a source whose agent is connected to pod A can't be served by pod B. The scratch cache is local disk per pod, with the same problem for an open and its matching download landing on different pods. The connector limits are counted per process too.

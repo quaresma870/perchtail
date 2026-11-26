@@ -1,11 +1,17 @@
 """Storage and search for the file-name index (#304): the engine-specific
-part, kept in one module. On PostgreSQL (#306) the index is a pg_trgm GIN
-index on `path` instead (ensure_name_index_schema).
+part, kept in one module.
 
-`file_name_entry` (app/models.py FileNameEntry) holds one row per file; the
-`file_name_fts` FTS5 table indexes its `path` with the trigram tokenizer,
-which answers "contains this text" without reading every row. Triggers keep
-the two in step, so code only ever writes `file_name_entry`.
+`file_name_entry` (app/models.py FileNameEntry) holds one row per file. On
+SQLite the `file_name_fts` FTS5 table indexes its `path` with the trigram
+tokenizer, which answers "contains this text" without reading every row;
+triggers keep the two in step, so code only ever writes `file_name_entry`.
+On PostgreSQL (#306) a pg_trgm GIN index on `path` does the same
+(ensure_name_index_schema), searched with `path ILIKE '%text%'`, the text's
+`\\`, `%` and `_` escaped. Either index only narrows the rows: every row is
+then matched here (Matcher), so both engines return the same results. That
+holds for letter case too: FTS5 and ILIKE fold case letter by letter (on
+PostgreSQL, by the database's locale), never `ß` to `ss`, so a text of three
+characters or more with `ß` finds only names spelled with `ß` on both.
 
 Matching follows the explorer's filter (frontend/src/lib/explorer-scope.ts
 compileMatcher), always case-insensitive:
@@ -143,6 +149,46 @@ def _fts_phrase(literal: str) -> str:
     return '"' + literal.replace('"', '""') + '"'
 
 
+def _like_contains(literal: str) -> str:
+    """An ILIKE pattern for "contains this text": `\\`, `%` and `_` escaped
+    (with ESCAPE '\\'), so the literal is only ever plain text."""
+    escaped = literal.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def search_query(
+    dialect: str, matcher: Matcher | None, source_ids: set[int] | None, batch: int
+) -> tuple[object, dict]:
+    """One batch's SELECT and its parameters (without `after`). A literal of
+    three characters or more narrows the rows first with the trigram index:
+    FTS5 on SQLite, `ILIKE` on the pg_trgm GIN index on PostgreSQL. Either is
+    only a pre-filter, case-insensitive and never narrower than the matcher;
+    search_entries decides on every row."""
+    params: dict = {}
+    clauses = ["e.id > :after"]
+    if source_ids is not None:
+        ids = sorted(source_ids)
+        names = [f"s{i}" for i in range(len(ids))]
+        clauses.append(f"e.source_id IN ({', '.join(':' + n for n in names)})")
+        params.update(dict(zip(names, ids, strict=True)))
+    join = ""
+    if matcher is not None and len(matcher.literal) >= _TRIGRAM:
+        if dialect == "postgresql":
+            clauses.append("e.path ILIKE :pattern ESCAPE '\\'")
+            params["pattern"] = _like_contains(matcher.literal)
+        else:
+            join = f"JOIN {FTS_TABLE} f ON f.rowid = e.id AND f.path MATCH :phrase"
+            params["phrase"] = _fts_phrase(matcher.literal)
+    # Built from the fixed clauses above and an int; every value from the
+    # caller is a bound :parameter.
+    where = " AND ".join(clauses)
+    query = text(
+        "SELECT e.id, e.source_id, e.path, e.size, e.mtime "  # nosec B608
+        f"FROM file_name_entry e {join} WHERE {where} ORDER BY e.id LIMIT {int(batch)}"
+    )
+    return query, params
+
+
 def search_entries(
     session: Session,
     matcher: Matcher | None,
@@ -161,26 +207,9 @@ def search_entries(
     would tell the caller one matched)."""
     if source_ids is not None and not source_ids:
         return [], None
-    params: dict = {"after": after_id}
-    clauses = ["e.id > :after"]
-    if source_ids is not None:
-        ids = sorted(source_ids)
-        names = [f"s{i}" for i in range(len(ids))]
-        clauses.append(f"e.source_id IN ({', '.join(':' + n for n in names)})")
-        params.update(dict(zip(names, ids, strict=True)))
-    join = ""
-    if matcher is not None and len(matcher.literal) >= _TRIGRAM:
-        join = f"JOIN {FTS_TABLE} f ON f.rowid = e.id AND f.path MATCH :phrase"
-        params["phrase"] = _fts_phrase(matcher.literal)
-
     batch = max(limit * 4, 500)
-    # Built from the fixed clauses above and an int; every value from the
-    # caller is a bound :parameter.
-    where = " AND ".join(clauses)
-    query = text(
-        "SELECT e.id, e.source_id, e.path, e.size, e.mtime "  # nosec B608
-        f"FROM file_name_entry e {join} WHERE {where} ORDER BY e.id LIMIT {batch}"
-    )
+    query, params = search_query(session.get_bind().dialect.name, matcher, source_ids, batch)
+    params["after"] = after_id
     found: list[tuple[int, int, str, int, float | None]] = []
     while True:
         rows = session.execute(query, params).all()
