@@ -252,7 +252,16 @@ export function incident() {
         as('background', () => ui.pause(Math.min(30, Math.max(0, (end - Date.now()) / 1000))))
       }
     } else {
-      followTabs(ui, [new FollowTab(ui, SUITE, source, inc.path, () => ({}))], left)
+      let listed = ui.listedSize(source.id, inc.path)
+      for (let attempt = 0; listed == null && attempt < 3; attempt++) {
+        as('background', () => ui.pause(5))
+        as('browse', () => browseTo(ui, source, inc.path))
+        listed = ui.listedSize(source.id, inc.path)
+      }
+      const remaining = (exec.scenario.startTime + inc.duration * 1000 - Date.now()) / 1000
+      if (listed != null && remaining > 0) {
+        followTabs(ui, [new FollowTab(ui, SUITE, source, inc.path, () => ({}))], remaining)
+      }
     }
   } finally {
     as('logout', () => ui.logout())
