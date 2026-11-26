@@ -12,10 +12,11 @@ from app.auth.models import Capability, Role, RoleGrant, ScopeType, User
 from app.collectors.base import DirEntry, SourcePermissionError
 from app.db import get_session
 from app.models import FileNameEntry, PatternKind, Protocol, Rule, RuleType, Source
-from app.name_index_store import InvalidPattern, compile_matcher, search_entries
+from app.name_index_store import InvalidPattern, compile_matcher, search_entries, search_query
 from app.timeutils import utcnow
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlmodel import select
 
 
@@ -385,6 +386,80 @@ def test_short_text_matches_any_letter_case(session, tmp_path):
     _entry(session, source.id, "Évora.log")
     rows, _ = search_entries(session, compile_matcher("é", False), None, 0, 10)
     assert [r[2] for r in rows] == ["Évora.log"]
+
+
+def _found(session, query):
+    rows, _ = search_entries(session, compile_matcher(query, False), None, 0, 50)
+    return [r[2] for r in rows]
+
+
+def test_like_wildcards_and_backslashes_are_plain_text(session, tmp_path):
+    source = _source(session, tmp_path)
+    for path in ("a%b.log", "axb.log", "a_b.log", "ab.log", "a\\b.log", "a\\\\b.log"):
+        _entry(session, source.id, path)
+    assert _found(session, "a%b") == ["a%b.log"]
+    assert _found(session, "a_b") == ["a_b.log"]
+    assert _found(session, "a\\b") == ["a\\b.log"]
+    assert _found(session, "a\\\\b") == ["a\\\\b.log"]
+    assert _found(session, "%_\\") == []
+
+
+def test_the_postgresql_pre_filter_escapes_the_literal_and_binds_it():
+    query, params = search_query("postgresql", compile_matcher("a%b_c\\d", False), None, 500)
+    assert "e.path ILIKE :pattern ESCAPE '\\'" in str(query)
+    assert "a%b" not in str(query)
+    assert params == {"pattern": "%a\\%b\\_c\\\\d%"}
+    # Below three characters, no pre-filter: every row is matched in Python.
+    _, short = search_query("postgresql", compile_matcher("a%", False), None, 500)
+    assert short == {}
+
+
+def test_letter_case_and_accents_match_alike_with_and_without_the_index(session, tmp_path):
+    source = _source(session, tmp_path)
+    for path in ("Évora.log", "evora.log", "CAFÉ-01.log", "Café-02.LOG", "cafe-03.log"):
+        _entry(session, source.id, path)
+    assert _found(session, "évora") == ["Évora.log"]
+    assert _found(session, "EVORA") == ["evora.log"]
+    assert _found(session, "café") == ["CAFÉ-01.log", "Café-02.LOG"]
+    assert _found(session, "Fé-") == ["CAFÉ-01.log", "Café-02.LOG"]
+    assert _found(session, "É") == ["Évora.log", "CAFÉ-01.log", "Café-02.LOG"]
+
+
+def test_sharp_s_is_not_folded_to_ss_by_a_long_text(session, tmp_path):
+    # FTS5 and ILIKE fold case letter by letter, so a text of three or more
+    # characters with ß finds only names with ß, on both engines; a shorter
+    # text is matched without the index, by casefold, where ß is "ss".
+    source = _source(session, tmp_path)
+    for path in ("straße.log", "STRASSE.log", "Strasse.log"):
+        _entry(session, source.id, path)
+    assert _found(session, "straße") == ["straße.log"]
+    assert _found(session, "STRASSE") == ["STRASSE.log", "Strasse.log"]
+    assert _found(session, "aße") == ["straße.log"]
+    assert _found(session, "ß") == ["straße.log", "STRASSE.log", "Strasse.log"]
+
+
+@pytest.mark.postgres_only
+def test_postgresql_narrows_a_long_text_with_the_trigram_index(session, tmp_path):
+    source = _source(session, tmp_path)
+    for i in range(200):
+        _entry(session, source.id, f"host-{i}/app-{i}.log")
+    session.execute(text("ANALYZE file_name_entry"))
+    query, params = search_query("postgresql", compile_matcher("app-17", False), None, 500)
+    # The table is small: keep the planner off the sequential scan and the
+    # primary key, so the plan shows which index the WHERE clause can use.
+    session.execute(text("SET LOCAL enable_seqscan = off"))
+    session.execute(text("SET LOCAL enable_indexscan = off"))
+    plan = "\n".join(
+        r[0] for r in session.execute(text(f"EXPLAIN {query.text}"), {**params, "after": 0})
+    )
+    assert "ix_file_name_entry_path_trgm" in plan
+    # Short text: no pre-filter, so the trigram index has nothing to do.
+    short, short_params = search_query("postgresql", compile_matcher("17", False), None, 500)
+    plan = "\n".join(
+        r[0] for r in session.execute(text(f"EXPLAIN {short.text}"), {**short_params, "after": 0})
+    )
+    assert "ix_file_name_entry_path_trgm" not in plan
+    session.rollback()
 
 
 def test_a_source_is_queued_once(monkeypatch):
