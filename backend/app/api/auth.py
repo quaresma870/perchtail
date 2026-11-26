@@ -6,6 +6,7 @@ from fastapi import (
     APIRouter,
     BackgroundTasks,
     Depends,
+    Header,
     HTTPException,
     Request,
     Response,
@@ -75,6 +76,7 @@ from app.login_throttle import (
     seconds_until_allowed,
     sso_login_from_address,
 )
+from app.timeutils import utcnow
 
 logger = get_logger(__name__)
 
@@ -250,14 +252,21 @@ class UserPublic(BaseModel):
         )
 
 
+# Sent by the web interface on the requests it makes on its own (the
+# Explorer's source list and status, refreshing open folders, the progress of
+# an open): they keep working but don't count as use for the idle timeout.
+BACKGROUND_HEADER = "X-PerchTail-Background"
+
+
 def get_current_user(
     session: Session = Depends(get_session),
     session_token: str | None = Depends(session_cookie),
+    background: str | None = Header(default=None, alias=BACKGROUND_HEADER),
 ) -> User:
     if session_token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
-    user = get_user_by_token(session, session_token)
+    user = get_user_by_token(session, session_token, count_as_use=background != "1")
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
@@ -413,6 +422,7 @@ def login(
     payload: LoginRequest,
     request: Request,
     response: Response,
+    session_token: str | None = Depends(session_cookie),
     session: Session = Depends(get_session),
 ):
     require_password_length(session, payload.password)
@@ -475,9 +485,36 @@ def login(
             metadata={"reason": "admin_account" if mfa_policy.admin_account(user) else "setting"},
         )
     complete_login(session, user)
+    # The session this browser had, whoever it was for, ends with this
+    # sign-in rather than linger until it expires.
+    if session_token:
+        end_previous_session(session, session_token, signed_in=user)
     _, token = create_session(session, user, user_agent=request.headers.get("user-agent"))
     _set_session_cookie(response, token)
     return UserPublic.from_user(user, session)
+
+
+def end_previous_session(session: Session, token: str, *, signed_in: User) -> None:
+    """Ends the session a browser still had when someone signs in with it
+    (locally or through SSO). A session that hadn't expired yet is audited
+    as session.revoke, reason signed_in_again, against its own user: it may
+    have been someone else's."""
+    previous = session.exec(
+        select(AuthSession).where(AuthSession.token_hash == hash_token(token))
+    ).first()
+    if previous is None:
+        return
+    if previous.expires_at >= utcnow():
+        record_audit_event(
+            session,
+            user_id=signed_in.id,
+            action="session.revoke",
+            target_type="user",
+            target_id=previous.user_id,
+            metadata={"count": 1, "reason": "signed_in_again"},
+        )
+    session.delete(previous)
+    session.commit()
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -1087,6 +1124,7 @@ def sso_callback(
     error: str | None = None,
     error_description: str | None = None,
     sso_state_cookie: str | None = Depends(read_sso_state_cookie),
+    session_token: str | None = Depends(session_cookie),
     session: Session = Depends(get_session),
 ):
     app_settings = get_settings()
@@ -1178,6 +1216,9 @@ def sso_callback(
         session.rollback()
         return failed("login_failed", type(exc).__name__)
 
+    # As at a local sign-in: the browser's previous session ends here.
+    if session_token:
+        end_previous_session(session, session_token, signed_in=user)
     _, token = create_session(session, user, user_agent=request.headers.get("user-agent"))
     response = RedirectResponse(
         f"{app_settings.public_base_url}/", status_code=status.HTTP_302_FOUND

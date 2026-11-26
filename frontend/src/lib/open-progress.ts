@@ -5,6 +5,7 @@
 // MAX_RUNNING_OPENS run at once; the others wait in the viewer (OpenQueue),
 // so the browser keeps connections free for the progress and the rest of
 // the page.
+import { BACKGROUND_HEADERS } from './api'
 import { formatSize } from './file-details'
 
 /** An open that answers sooner shows nothing. */
@@ -122,7 +123,10 @@ export async function fetchProgress(
 ): Promise<Record<string, OpenProgressInfo | null> | null> {
   if (requestIds.length === 0) return {}
   try {
-    const answer = await fetcher(progressUrl(requestIds), { credentials: 'include' })
+    const answer = await fetcher(progressUrl(requestIds), {
+      credentials: 'include',
+      headers: BACKGROUND_HEADERS,
+    })
     if (!answer.ok) return null
     return (await answer.json()) as Record<string, OpenProgressInfo | null>
   } catch {

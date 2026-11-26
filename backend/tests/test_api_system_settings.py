@@ -69,9 +69,11 @@ _DEFAULTS = {
     "redaction_enabled": False,
     "redaction_downloads": True,
     "redaction_download_suffix": True,
-    "require_mfa_local_accounts": False,
+    "require_mfa_local_accounts": True,
     "password_reset_enabled": False,
     "password_reset_minutes": 30,
+    "password_context_words": [],
+    "session_idle_minutes": 60,
     "password_reset_unavailable": "Set up email under Settings → Email and turn it on first",
 }
 

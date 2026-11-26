@@ -34,8 +34,10 @@ BOOL_DEFAULTS: dict[str, str] = {
     # only counts while downloads are redacted.
     "redaction_download_suffix": "true",
     # MFA for every local account, not only the administrators who always
-    # need it (app/auth/mfa_policy.py). Off by default; super admins only.
-    "require_mfa_local_accounts": "false",
+    # need it (app/auth/mfa_policy.py). On by default for new installs; an
+    # install from before this default keeps off (migration b4d8e2f61a93
+    # stores it there). Super admins only.
+    "require_mfa_local_accounts": "true",
     # Password recovery by email for local accounts (#244,
     # app/auth/password_reset.py). Off by default; super admins only
     # (PASSWORD_RESET_SETTINGS). Only works while email is set up and on and
@@ -142,6 +144,16 @@ INT_DEFAULTS: dict[str, str] = {
     "backup_interval_hours": "24",
     # How long a password-reset link works (#244), in minutes, 5 to 60.
     "password_reset_minutes": "30",
+    # A session unused for this long, in minutes, ends (app/auth/sessions.py);
+    # 0 turns it off, otherwise 5 to 720.
+    "session_idle_minutes": "60",
+}
+
+# Lists of words, stored one per line. A missing key is an empty list.
+LIST_DEFAULTS: dict[str, tuple[str, ...]] = {
+    # Words no password may contain (app/password_policy.py), besides
+    # "perchtail": the organization's name, for example.
+    "password_context_words": (),
 }
 
 
@@ -179,6 +191,26 @@ def set_int(session: Session, key: str, value: int) -> None:
         session.add(SystemSetting(key=key, value=str(value)))
     else:
         row.value = str(value)
+
+
+def get_list(session: Session, key: str) -> list[str]:
+    row = session.get(SystemSetting, key)
+    if row is None:
+        return list(LIST_DEFAULTS[key])
+    # set_list joins with "\n" only: splitlines() would also split on
+    # \r, \x0b, \x85 and the like inside a value.
+    return [line for line in row.value.split("\n") if line]
+
+
+def set_list(session: Session, key: str, values: list[str]) -> None:
+    if key not in LIST_DEFAULTS:
+        raise KeyError(key)
+    value = "\n".join(values)
+    row = session.get(SystemSetting, key)
+    if row is None:
+        session.add(SystemSetting(key=key, value=value))
+    else:
+        row.value = value
 
 
 def get_choice(session: Session, key: str) -> str:

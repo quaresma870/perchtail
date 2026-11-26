@@ -78,6 +78,10 @@ class SystemSettingsPublic(BaseModel):
     # changed by super admins only.
     password_reset_enabled: bool
     password_reset_minutes: int
+    # Sign-in security: words no password may contain, and how long an
+    # unused session lasts (0 = no limit).
+    password_context_words: list[str]
+    session_idle_minutes: int
     # Why it can't be turned on or doesn't work now (email not set up and
     # on, PUBLIC_BASE_URL not https), or null when it can.
     password_reset_unavailable: str | None
@@ -101,6 +105,12 @@ LISTING_MAX_ENTRIES_MIN = 100
 LISTING_MAX_ENTRIES_MAX = 20000
 # Opening large files at their end: 0 (off) to 100000 MB.
 OPEN_FROM_END_MB_MAX = 100_000
+
+
+# How long an unused session may last, in minutes: 0 (no limit), or
+# SESSION_IDLE_MIN_MINUTES to SESSION_IDLE_MAX_MINUTES.
+SESSION_IDLE_MIN_MINUTES = 5
+SESSION_IDLE_MAX_MINUTES = 720
 
 
 # The shortest audit retention allowed, in days; 0 (keep forever) is also
@@ -178,6 +188,11 @@ class SystemSettingsUpdate(BaseModel):
         ge=password_reset.MIN_MINUTES,
         le=password_reset.MAX_MINUTES,
     )
+    # At most MAX_CONTEXT_WORDS words of CONTEXT_WORD_MIN to CONTEXT_WORD_MAX
+    # characters (checked in the endpoint, which trims and dedupes them).
+    password_context_words: list[str] | None = Field(default=None, max_length=200)
+    # 0 = no limit; otherwise at least 5 minutes (checked in the endpoint).
+    session_idle_minutes: int | None = Field(default=None, ge=0, le=SESSION_IDLE_MAX_MINUTES)
 
 
 _PASSWORD_INTS = (
@@ -212,6 +227,8 @@ def _read_all(session: Session) -> SystemSettingsPublic:
         backup_interval_hours=system_settings.get_int(session, "backup_interval_hours"),
         password_reset_minutes=system_settings.get_int(session, "password_reset_minutes"),
         password_reset_unavailable=password_reset.unavailable_reason(session),
+        password_context_words=system_settings.get_list(session, "password_context_words"),
+        session_idle_minutes=system_settings.get_int(session, "session_idle_minutes"),
         **{key: system_settings.get_int(session, key) for key in _PASSWORD_INTS},
         **{key: system_settings.get_int(session, key) for key in _CONCURRENCY_INTS},
     )
@@ -250,7 +267,9 @@ class SystemWarning(BaseModel):
 
 
 @router.get("/warnings", response_model=list[SystemWarning])
-def list_system_warnings(user: User = Depends(require_manage)):
+def list_system_warnings(
+    user: User = Depends(require_manage), session: Session = Depends(get_session)
+):
     """Problems with how this instance is set up that only its operator can
     fix, shown at the top of each system settings page (Settings -> Source
     defaults, Sign-in security, Explorer and limits, Alerts, Backups and
@@ -279,6 +298,15 @@ def list_system_warnings(user: User = Depends(require_manage)):
                 advice=TLS_ADVICE,
             )
         )
+    if not system_settings.get_bool(session, "require_mfa_local_accounts"):
+        warnings.append(
+            SystemWarning(
+                code="mfa_local_accounts_off",
+                message="Two-factor authentication isn't required of every local account.",
+                advice="A super admin can require it under Settings → Sign-in security."
+                " Administrators always need it; SSO accounts use their identity provider's.",
+            )
+        )
     return warnings
 
 
@@ -297,6 +325,7 @@ def update_system_settings(
     _check_redaction_settings(user, changed)
     _check_audit_retention(user, before["audit_retention_days"], changed)
     _check_audit_folder_listings(user, before["audit_folder_listings"], changed)
+    _check_session_idle(user, before["session_idle_minutes"], changed)
     _check_require_mfa(user, before["require_mfa_local_accounts"], changed)
     _check_password_reset(user, before, changed)
     min_length = changed.get(
@@ -305,6 +334,14 @@ def update_system_settings(
     max_length = changed.get(
         "password_max_length", system_settings.get_int(session, "password_max_length")
     )
+    if 0 < changed.get("session_idle_minutes", 0) < SESSION_IDLE_MIN_MINUTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"End unused sessions after {SESSION_IDLE_MIN_MINUTES} minutes at least,"
+            " or 0 for no limit",
+        )
+    if "password_context_words" in changed:
+        changed["password_context_words"] = _context_words(changed["password_context_words"])
     if 0 < changed.get("explorer_refresh_seconds", 0) < 5:
         raise HTTPException(
             status_code=422, detail="Refresh open folders every 5 seconds at least, or 0 for off"
@@ -338,6 +375,9 @@ def update_system_settings(
     for key in system_settings.CHOICE_DEFAULTS:
         if key in changed:
             system_settings.set_choice(session, key, changed[key])
+    for key in system_settings.LIST_DEFAULTS:
+        if key in changed:
+            system_settings.set_list(session, key, changed[key])
     # Lowering or turning off "don't reuse" drops the hashes it no longer
     # needs right away, not at each account's next change (#245).
     if "password_history" in changed:
@@ -351,6 +391,37 @@ def update_system_settings(
     )
     session.commit()
     return _read_all(session)
+
+
+def _context_words(words: list[str]) -> list[str]:
+    """The password_context_words to store: trimmed, without duplicates (in
+    any case), in the order given; 422 when one is too short or too long,
+    or there are too many."""
+    kept: list[str] = []
+    seen: set[str] = set()
+    for word in words:
+        word = word.strip()
+        if not word:
+            continue
+        # Stored one per line: a line break inside a word would split it
+        # into others that never passed these checks.
+        if len(word.splitlines()) != 1:
+            raise HTTPException(status_code=422, detail="A word can't contain a line break")
+        if not (password_policy.CONTEXT_WORD_MIN <= len(word) <= password_policy.CONTEXT_WORD_MAX):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Each word must be {password_policy.CONTEXT_WORD_MIN} to "
+                f"{password_policy.CONTEXT_WORD_MAX} characters long",
+            )
+        if word.lower() not in seen:
+            seen.add(word.lower())
+            kept.append(word)
+    if len(kept) > password_policy.MAX_CONTEXT_WORDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"At most {password_policy.MAX_CONTEXT_WORDS} words",
+        )
+    return kept
 
 
 def _changes(changed: dict, before: dict) -> dict:
@@ -413,6 +484,22 @@ def _check_audit_folder_listings(user: User, current: bool, changed: dict) -> No
         raise forbidden(
             "Only a super admin can turn off auditing of folder listings",
             reason="audit_folder_listings_disabled",
+            user=user,
+        )
+
+
+def _check_session_idle(user: User, current: int, changed: dict) -> None:
+    """Sessions may end sooner at anyone's say who manages system settings;
+    letting them last longer unused, or never end for it (0), is a super
+    admin's call, like shortening the audit retention."""
+    new = changed.get("session_idle_minutes")
+    if new is None or new == current or user.role.is_super_admin:
+        return
+    stricter = new > 0 and (current == 0 or new < current)
+    if not stricter:
+        raise forbidden(
+            "Only a super admin can let unused sessions last longer or turn the limit off",
+            reason="session_idle_longer",
             user=user,
         )
 

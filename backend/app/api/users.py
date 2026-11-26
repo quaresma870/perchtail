@@ -1,13 +1,18 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
 from app import password_policy, profile
-from app.api.auth import get_current_active_user, password_policy_error, profile_error
+from app.api.auth import (
+    SESSION_COOKIE_NAME,
+    get_current_active_user,
+    password_policy_error,
+    profile_error,
+)
 from app.audit import record_audit_event
-from app.auth.models import AuthProviderType, GlobalCapability, Role, User
+from app.auth.models import AuthProviderType, AuthSession, GlobalCapability, Role, User
 from app.auth.providers.local import create_local_user, set_password
 from app.auth.rbac import (
     OWN_ROLE_REFUSED,
@@ -15,7 +20,7 @@ from app.auth.rbac import (
     require_global_capability,
     require_role_within_authority,
 )
-from app.auth.sessions import revoke_all_sessions
+from app.auth.sessions import hash_token, revoke_all_sessions
 from app.db import get_session
 from app.initial_admin_password import remove_initial_admin_password
 
@@ -121,6 +126,63 @@ def _end_sessions_of_deactivated(session: Session, *, actor: User, target: User)
             target_id=target.id,
             metadata={"count": revoked, "reason": "deactivated"},
         )
+
+
+class RevokedSessions(BaseModel):
+    count: int
+
+
+@router.post("/sessions/revoke-all", response_model=RevokedSessions)
+def revoke_every_session(
+    user: User = Depends(get_current_active_user),
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    session: Session = Depends(get_session),
+):
+    """Super admins only: ends every session of every account but the
+    caller's own, audited as session.revoke with `reason: admin_all` and how
+    many ended."""
+    if not user.role.is_super_admin:
+        raise forbidden("Not permitted", reason="not_super_admin", user=user)
+    keep = hash_token(session_token) if session_token else None
+    rows = session.exec(select(AuthSession)).all()
+    revoked = 0
+    for row in rows:
+        if row.token_hash != keep:
+            session.delete(row)
+            revoked += 1
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="session.revoke",
+        target_type="system",
+        metadata={"count": revoked, "reason": "admin_all"},
+    )
+    session.commit()
+    return RevokedSessions(count=revoked)
+
+
+@router.post("/{user_id}/sessions/revoke", response_model=RevokedSessions)
+def revoke_user_sessions(
+    user_id: int,
+    user: User = Depends(require_manage),
+    session: Session = Depends(get_session),
+):
+    """Ends every session of an account, audited as session.revoke with
+    `reason: admin` and how many ended. As for a password reset, a delegated
+    admin can't do it to a peer admin."""
+    target = _get_manageable_user(session, user, user_id)
+    _require_not_peer_admin(user, target)
+    revoked = revoke_all_sessions(session, target.id)
+    record_audit_event(
+        session,
+        user_id=user.id,
+        action="session.revoke",
+        target_type="user",
+        target_id=target.id,
+        metadata={"count": revoked, "reason": "admin"},
+    )
+    session.commit()
+    return RevokedSessions(count=revoked)
 
 
 @router.get("", response_model=list[UserPublic])

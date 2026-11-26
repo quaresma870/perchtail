@@ -429,6 +429,8 @@ export interface SystemSettings {
   // Password recovery by email (#244): super admins only.
   password_reset_enabled: boolean
   password_reset_minutes: number
+  password_context_words: string[]
+  session_idle_minutes: number
   // Why it can't be turned on or doesn't work now, or null when it can.
   password_reset_unavailable: string | null
 }

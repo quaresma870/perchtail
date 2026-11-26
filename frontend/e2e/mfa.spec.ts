@@ -26,8 +26,11 @@ test('mfa: enroll, login with a TOTP code, login with a backup code, disable', a
   // from e2e/.auth/admin.json that every other spec's storageState is
   // seeded from. Clicking "Log out" on it would delete that session
   // server-side (see auth/sessions.py's delete_session), permanently
-  // breaking every spec that runs after this one in the same worker.
-  const userContext = await browser.newContext()
+  // breaking every spec that runs after this one in the same worker. The
+  // new context starts without cookies: it would otherwise get the
+  // project's storageState, and signing in from a browser that holds a
+  // session ends that session too.
+  const userContext = await browser.newContext({ storageState: { cookies: [], origins: [] } })
   const userPage = await userContext.newPage()
 
   // --- sign in as the throwaway user, clear the forced password change ---

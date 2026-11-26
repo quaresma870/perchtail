@@ -2,13 +2,21 @@
 Settings -> Sign-in security. Defaults follow NIST SP 800-63B: length over
 composition, no composition rules or expiry unless an admin turns them on.
 
-"Too simple" is decided by rules, not by a downloaded list of common
-passwords:
+"Too simple" is decided by rules, and by a list of common and leaked
+passwords shipped with PerchTail (common_passwords.txt.gz: the entries of 8
+characters or more of SecLists' 100,000 most common passwords, MIT
+license, THIRD-PARTY-NOTICES.md), compared without case and never fetched
+over the network:
 - one character, or a short block, repeated (aaaaaa, abcabc);
 - made only of sequences (123456, abcdef, also reversed), keyboard runs
   (qwerty, asdfgh, 1qaz2wsx) and repeated characters;
 - too few distinct characters for its length;
-- the username or email, give or take case and digits or symbols added.
+- the username or email, give or take case and digits or symbols added;
+- on the list of common passwords.
+
+A password never contains "perchtail", nor any of the words in the
+`password_context_words` setting (the organization's name, for example),
+whatever the other settings say.
 
 Errors name the rule that failed and never echo the password.
 
@@ -16,11 +24,14 @@ The policy applies whenever a password is set (own change, first-login
 change, admin-created accounts, resets); existing passwords are not checked
 retroactively. History keeps only previous argon2id hashes."""
 
+import gzip
 import secrets
 import string
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import timedelta
+from functools import lru_cache
+from pathlib import Path
 
 from sqlmodel import Session, col, delete, select
 
@@ -34,6 +45,14 @@ MAX_LENGTH_CEILING = 1024
 MAX_LENGTH_FLOOR = 64  # NIST: allow at least 64 characters
 MAX_HISTORY = 24
 MAX_AGE_DAYS_CEILING = 3650
+# The password_context_words setting: at most this many words, each this
+# long.
+MAX_CONTEXT_WORDS = 50
+CONTEXT_WORD_MIN = 3
+CONTEXT_WORD_MAX = 64
+# Always refused in a password, whatever the setting.
+BUILT_IN_CONTEXT_WORDS = ("perchtail",)
+_COMMON_PASSWORDS = Path(__file__).with_name("common_passwords.txt.gz")
 
 # Short pieces of a personal identifier (a 2-letter username) would reject
 # too much; only parts at least this long count.
@@ -79,9 +98,15 @@ class PasswordPolicy:
     history: int = 0
     required_classes: int = 0
     max_age_days: int = 0
+    # The password_context_words setting, lowercased.
+    context_words: tuple[str, ...] = field(default=())
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        """What the sign-in pages show of the policy: not the context
+        words, which name the organization."""
+        values = asdict(self)
+        values.pop("context_words")
+        return values
 
 
 def get_policy(session: Session) -> PasswordPolicy:
@@ -94,6 +119,9 @@ def get_policy(session: Session) -> PasswordPolicy:
         history=get_int(session, "password_history"),
         required_classes=get_int(session, "password_required_classes"),
         max_age_days=get_int(session, "password_max_age_days"),
+        context_words=tuple(
+            word.lower() for word in system_settings.get_list(session, "password_context_words")
+        ),
     )
 
 
@@ -185,6 +213,13 @@ def _personal_parts(user_identifiers: Sequence[str]) -> list[str]:
     return sorted(parts)
 
 
+@lru_cache(maxsize=1)
+def common_passwords() -> frozenset[str]:
+    """The shipped list of common and leaked passwords, lowercased, read once."""
+    with gzip.open(_COMMON_PASSWORDS, "rt", encoding="utf-8") as fh:
+        return frozenset(line.strip() for line in fh if line.strip())
+
+
 def _strip_decoration(password: str) -> str:
     """Lowercased, without digits and symbols at either end: Admin2024! ->
     admin."""
@@ -223,13 +258,21 @@ def check_password(
             raise PasswordPolicyError(
                 "few_distinct", "Too simple: it uses too few different characters."
             )
+        if password.lower() in common_passwords():
+            raise PasswordPolicyError(
+                "common", "Too simple: it's one of the most common or leaked passwords."
+            )
         whole = {(identifier or "").strip().lower() for identifier in user_identifiers}
         if _strip_decoration(password) in personal or _strip_decoration(password) in whole:
             raise PasswordPolicyError(
                 "is_username", "Too simple: it's your username or email with small changes."
             )
+    lowered = password.lower()
+    if any(word in lowered for word in (*BUILT_IN_CONTEXT_WORDS, *policy.context_words)):
+        raise PasswordPolicyError(
+            "context_word", "Don't include the name of this service or of your organization."
+        )
     if policy.reject_personal:
-        lowered = password.lower()
         if any(part in lowered for part in personal):
             raise PasswordPolicyError(
                 "contains_personal", "Don't include your username, email or name."

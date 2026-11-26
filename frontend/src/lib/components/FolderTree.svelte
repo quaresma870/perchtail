@@ -89,11 +89,12 @@
 
   /** Re-lists this folder in place: open subfolders and the scroll stay,
    * new files are highlighted for a few seconds. */
-  async function refresh(): Promise<boolean> {
+  // background: the Explorer's own auto-refresh, not the user's Refresh.
+  async function refresh(background = false): Promise<boolean> {
     if (refreshing) return true
     refreshing = true
     try {
-      const listing = await fetchListing(`${browseUrl()}&refresh=true`)
+      const listing = await fetchListing(`${browseUrl()}&refresh=true`, { background })
       const fresh = listing.entries
       truncatedText = listing.truncated ? truncatedNotice(listing) : ''
       const known = new Set(children.map((c) => c.path))
@@ -129,7 +130,7 @@
 
   let unregister: (() => void) | null = null
   $: if (canRefresh && expanded && loaded && !unregister) {
-    unregister = registerFolder({ sourceId, path: entry.path, refresh })
+    unregister = registerFolder({ sourceId, path: entry.path, refresh: () => refresh(true) })
   } else if (unregister && !(expanded && loaded)) {
     unregister()
     unregister = null

@@ -12,9 +12,10 @@ from app.timeutils import utcnow
 logger = get_logger(__name__)
 
 
-# last_seen_at only needs minute-level accuracy for the Sessions page, so it
-# isn't rewritten (a SQLite write on every authenticated request) more often
-# than this.
+# last_seen_at only needs minute-level accuracy for the Sessions page and the
+# idle timeout, so it isn't rewritten (a SQLite write on every authenticated
+# request) more often than this: a session ends between session_idle_minutes
+# and one minute more after its last use.
 _LAST_SEEN_RESOLUTION = timedelta(minutes=1)
 
 
@@ -67,7 +68,11 @@ def replace_session(session: Session, user: User, old_token: str | None) -> str:
     return token
 
 
-def get_user_by_token(session: Session, token: str) -> User | None:
+def get_user_by_token(session: Session, token: str, *, count_as_use: bool = True) -> User | None:
+    """The user of a valid session, or None. With count_as_use=False (a
+    request the web interface made on its own, X-PerchTail-Background) the
+    session is checked the same way but its last use isn't moved, so it
+    still ends after session_idle_minutes without the user."""
     auth_session = session.exec(
         select(AuthSession).where(AuthSession.token_hash == hash_token(token))
     ).first()
@@ -77,10 +82,21 @@ def get_user_by_token(session: Session, token: str) -> User | None:
     if auth_session.expires_at < utcnow():
         return None
 
+    if _idle_too_long(session, auth_session):
+        # Unused for longer than session_idle_minutes (Settings -> Sign-in
+        # security): it ends here, whatever its expiry. Every authenticated
+        # request counts as use, a Tail poll included, except the ones the
+        # web interface makes on its own (count_as_use=False).
+        session.delete(auth_session)
+        session.commit()
+        return None
+
     user = session.get(User, auth_session.user_id)
     if user is None or not user.active:
         return None
 
+    if not count_as_use:
+        return user
     now = utcnow()
     last_seen = auth_session.last_seen_at
     if last_seen is None or now - last_seen >= _LAST_SEEN_RESOLUTION:
@@ -88,6 +104,16 @@ def get_user_by_token(session: Session, token: str) -> User | None:
         session.add(auth_session)
         session.commit()
     return user
+
+
+def _idle_too_long(session: Session, auth_session: AuthSession) -> bool:
+    from app import system_settings
+
+    minutes = system_settings.get_int(session, "session_idle_minutes")
+    if minutes <= 0:
+        return False
+    last_use = auth_session.last_seen_at or auth_session.created_at
+    return last_use is not None and utcnow() - last_use > timedelta(minutes=minutes)
 
 
 def delete_session(session: Session, token: str) -> None:

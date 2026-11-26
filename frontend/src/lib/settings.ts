@@ -38,9 +38,11 @@ export const systemSettings = writable<SystemSettings>({
   redaction_enabled: false,
   redaction_downloads: true,
   redaction_download_suffix: true,
-  require_mfa_local_accounts: false,
+  require_mfa_local_accounts: true,
   password_reset_enabled: false,
   password_reset_minutes: 30,
+  password_context_words: [],
+  session_idle_minutes: 60,
   password_reset_unavailable: null,
 })
 

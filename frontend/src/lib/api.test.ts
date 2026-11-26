@@ -32,6 +32,22 @@ describe('api.get', () => {
     expect(init.headers['Content-Type']).toBe('application/json')
   })
 
+  it('marks a background GET so it does not count as use, and keeps the JSON header', async () => {
+    mockFetchOnce({ ok: true, status: 200, json: async () => [] })
+    await api.get('/sources', { background: true })
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(init.headers['X-PerchTail-Background']).toBe('1')
+    expect(init.headers['Content-Type']).toBe('application/json')
+    expect(init.credentials).toBe('include')
+  })
+
+  it('sends no background header on an ordinary GET', async () => {
+    mockFetchOnce({ ok: true, status: 200, json: async () => [] })
+    await api.get('/sources')
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(init.headers['X-PerchTail-Background']).toBeUndefined()
+  })
+
   it('returns undefined for a 204 No Content response without reading a body', async () => {
     const bodyReader = vi.fn()
     mockFetchOnce({ ok: true, status: 204, json: bodyReader })

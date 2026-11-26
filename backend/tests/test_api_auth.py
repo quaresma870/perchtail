@@ -271,11 +271,10 @@ def test_revoke_session_returns_404_for_a_session_owned_by_someone_else(client, 
     _make_user(session)
     _make_user(session, username="other@example.com")
 
-    _login(client, username="other@example.com")
-    other_session_id = client.get("/auth/sessions").json()[0]["id"]
-    # Logging in again (as this test's real subject) overwrites this
-    # client's cookie without touching the "other" session row above, same
-    # as a second real browser holding its own independent cookie would.
+    other_browser = TestClient(client.app)
+    _login(other_browser, username="other@example.com")
+    other_session_id = other_browser.get("/auth/sessions").json()[0]["id"]
+    # The real subject signs in on their own browser.
     _login(client)
 
     response = client.delete(f"/auth/sessions/{other_session_id}")
@@ -292,9 +291,8 @@ def test_revoke_session_returns_404_for_an_unknown_id(client, session):
 
 def test_logging_in_twice_shows_both_sessions_with_only_the_newest_current(client, session):
     _make_user(session)
-    _login(client)  # first "device"
-    _login(client)  # second "device" -- overwrites this client's cookie, same as a real
-    # second browser would independently hold its own
+    _login(TestClient(client.app))  # first device, a browser of its own
+    _login(client)  # second device
 
     response = client.get("/auth/sessions")
     body = response.json()

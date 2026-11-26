@@ -98,7 +98,10 @@ describe('asking for the progress', () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ [a]: copying(1), [b]: null })))
     expect(await fetchProgress([a, b], fetcher)).toEqual({ [a]: copying(1), [b]: null })
     expect(fetcher).toHaveBeenCalledTimes(1)
-    expect(fetcher).toHaveBeenCalledWith(`/open-progress?request_id=${a}&request_id=${b}`, { credentials: 'include' })
+    expect(fetcher).toHaveBeenCalledWith(`/open-progress?request_id=${a}&request_id=${b}`, {
+      credentials: 'include',
+      headers: { 'X-PerchTail-Background': '1' },
+    })
   })
 
   it('asks nothing without opens, and gives null when the request fails', async () => {

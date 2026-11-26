@@ -345,7 +345,7 @@
     statusTimer = setInterval(async () => {
       if (document.hidden) return
       try {
-        allSources = viewable(await api.get<Source[]>('/sources'))
+        allSources = viewable(await api.get<Source[]>('/sources', { background: true }))
         closeTabsOfHiddenSources()
       } catch {
         // the banner (server-status) says when PerchTail doesn't answer

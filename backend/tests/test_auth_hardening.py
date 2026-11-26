@@ -435,6 +435,9 @@ def test_any_global_capability_makes_mfa_mandatory(session, make_client, enforce
 
 
 def test_other_local_accounts_need_mfa_only_with_the_setting(session, make_client, enforced):
+    # Off, as on an install upgraded from before it was on by default.
+    system_settings.set_bool(session, "require_mfa_local_accounts", False)
+    session.commit()
     _local_user(session, "alice")
     client = make_client()
     _login(client, "alice")

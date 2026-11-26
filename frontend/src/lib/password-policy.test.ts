@@ -16,8 +16,9 @@ describe('describePolicy', () => {
   it('lists the default rules', () => {
     expect(describePolicy(DEFAULT)).toEqual([
       '12 to 128 characters',
-      'not too simple: no repeats, sequences or keyboard runs (aaaa, 1234, qwerty)',
+      'not too simple: no repeats, sequences, keyboard runs or common passwords (aaaa, 1234, qwerty, iloveyou)',
       'nothing from the username, email or name',
+      'nothing containing "perchtail" or the words your administrator listed',
     ])
   })
 
@@ -33,6 +34,7 @@ describe('describePolicy', () => {
     expect(rules).toEqual([
       '12 to 128 characters',
       'at least 3 of: lowercase, uppercase, digits, symbols',
+      'nothing containing "perchtail" or the words your administrator listed',
       'different from the last 5 passwords',
       'expires after 90 days',
     ])
