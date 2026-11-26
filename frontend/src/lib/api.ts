@@ -16,6 +16,20 @@ export class ApiError extends Error {
   }
 }
 
+/** Sent with the requests the interface makes on its own (the Explorer's
+ * source list, refreshing open folders, the progress of an open): they
+ * don't count as use for the idle session timeout. */
+export const BACKGROUND_HEADERS: Record<string, string> = { 'X-PerchTail-Background': '1' }
+
+/** Options of a GET: `background` for a request the user didn't ask for. */
+export interface GetOptions {
+  background?: boolean
+}
+
+function getInit(options?: GetOptions): RequestInit | undefined {
+  return options?.background ? { headers: BACKGROUND_HEADERS } : undefined
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithHeaders<T>(path, init)).data
 }
@@ -24,8 +38,8 @@ async function requestWithHeaders<T>(path: string, init?: RequestInit): Promise<
   // trackedFetch: tells the connection banner whether PerchTail answers (#276).
   const response = await trackedFetch(path, {
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
     ...init,
+    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   })
 
   if (!response.ok) {
@@ -57,9 +71,10 @@ async function requestWithHeaders<T>(path: string, init?: RequestInit): Promise<
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>(path),
+  get: <T>(path: string, options?: GetOptions) => request<T>(path, getInit(options)),
   /** A GET whose response headers matter too (the listing cap, #347). */
-  getWithHeaders: <T>(path: string) => requestWithHeaders<T>(path),
+  getWithHeaders: <T>(path: string, options?: GetOptions) =>
+    requestWithHeaders<T>(path, getInit(options)),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'POST', body: body !== undefined ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body: unknown) =>

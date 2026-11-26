@@ -65,13 +65,14 @@
   let newTimer: ReturnType<typeof setTimeout> | null = null
   let refreshing = false
 
-  async function refresh(): Promise<boolean> {
+  // background: the Explorer's own auto-refresh, not the user's Refresh.
+  async function refresh(background = false): Promise<boolean> {
     if (refreshing) return true
     refreshing = true
     try {
       // refresh=true: re-listing isn't "opening the source" again, so it
       // isn't audited as source.open.
-      const listing = await fetchListing(`/sources/${source.id}/browse?path=&refresh=true`)
+      const listing = await fetchListing(`/sources/${source.id}/browse?path=&refresh=true`, { background })
       const fresh = listing.entries
       truncatedText = listing.truncated ? truncatedNotice(listing) : ''
       const known = new Set(entries.map((e) => e.path))
@@ -132,7 +133,7 @@
 
   let unregister: (() => void) | null = null
   $: if (expanded && loaded && !unregister) {
-    unregister = registerFolder({ sourceId: source.id, path: '', refresh })
+    unregister = registerFolder({ sourceId: source.id, path: '', refresh: () => refresh(true) })
   } else if (unregister && !(expanded && loaded)) {
     unregister()
     unregister = null

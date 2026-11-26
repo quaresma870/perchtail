@@ -57,9 +57,22 @@ def _version(url: str) -> str:
         engine.dispose()
 
 
+def _script():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
+
+
+def _head() -> str:
+    [head] = _script().get_heads()
+    return head
+
+
 def test_every_revision_before_the_baseline_runs_on_sqlite_only():
-    revisions = [path for path in VERSIONS.glob("*.py") if BASELINE not in path.name]
-    assert len(revisions) == 47
+    before = {rev.revision for rev in _script().walk_revisions("base", BEFORE_BASELINE)}
+    revisions = [path for path in VERSIONS.glob("*.py") if path.name.split("_", 1)[0] in before]
+    assert len(revisions) == len(before) == 47
     for path in revisions:
         source = path.read_text(encoding="utf-8")
         assert "from migrations.engines import sqlite_only" in source, path.name
@@ -75,22 +88,25 @@ def test_every_revision_before_the_baseline_runs_on_sqlite_only():
             assert code[:2] == ["if not sqlite_only():", "return"], (path.name, function)
 
 
-def test_the_baseline_is_the_only_head():
-    from alembic.config import Config
-    from alembic.script import ScriptDirectory
-
-    script = ScriptDirectory.from_config(Config(str(BACKEND / "alembic.ini")))
-    assert script.get_heads() == [BASELINE]
+def test_one_head_with_the_baseline_right_after_the_sqlite_revisions():
+    script = _script()
+    assert len(script.get_heads()) == 1
     assert script.get_revision(BASELINE).down_revision == BEFORE_BASELINE
+    # Every revision after the baseline runs on both engines: no guard.
+    after = [rev for rev in script.walk_revisions(BASELINE, "heads") if rev.revision != BASELINE]
+    for rev in after:
+        source = Path(rev.path).read_text(encoding="utf-8")
+        assert "sqlite_only" not in source, rev.revision
 
 
 def test_sqlite_upgrades_to_the_baseline_without_a_change_and_checks_clean(tmp_path):
     _ok(_alembic(tmp_path, None, "upgrade", BEFORE_BASELINE))
     url = _sqlite_url(tmp_path)
     before = _schema(url)
-    _ok(_alembic(tmp_path, None, "upgrade", "head"))
+    _ok(_alembic(tmp_path, None, "upgrade", BASELINE))
     assert _version(url) == BASELINE
     assert _schema(url) == before
+    _ok(_alembic(tmp_path, None, "upgrade", "head"))
     check = _ok(_alembic(tmp_path, None, "check"))
     assert "No new upgrade operations detected" in check.stdout + check.stderr
 
@@ -100,7 +116,7 @@ def test_an_empty_postgresql_database_upgrades_to_head_and_checks_clean(
     tmp_path, empty_postgres_url
 ):
     _ok(_alembic(tmp_path, empty_postgres_url, "upgrade", "head"))
-    assert _version(empty_postgres_url) == BASELINE
+    assert _version(empty_postgres_url) == _head()
     engine = create_engine(empty_postgres_url)
     try:
         with engine.connect() as connection:
@@ -196,8 +212,25 @@ def test_the_last_revision_goes_down_and_up(tmp_path, request, engine):
     database = url or _sqlite_url(tmp_path)
     _ok(_alembic(tmp_path, url, "upgrade", "head"))
     tables = set(_schema(database))
+    head = _script().get_revision(_head())
 
     _ok(_alembic(tmp_path, url, "downgrade", "-1"))
+    assert _version(database) == head.down_revision
+    _ok(_alembic(tmp_path, url, "upgrade", "head"))
+    assert _version(database) == head.revision
+    assert set(_schema(database)) == tables
+
+
+@pytest.mark.parametrize(
+    "engine", ["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres_only)]
+)
+def test_the_baseline_goes_down_and_up(tmp_path, request, engine):
+    url = _engine_url(engine, tmp_path, request)
+    database = url or _sqlite_url(tmp_path)
+    _ok(_alembic(tmp_path, url, "upgrade", "head"))
+    tables = set(_schema(database))
+
+    _ok(_alembic(tmp_path, url, "downgrade", BEFORE_BASELINE))
     assert _version(database) == BEFORE_BASELINE
     if engine == "postgresql":
         assert set(_schema(database)) == set()
@@ -205,7 +238,7 @@ def test_the_last_revision_goes_down_and_up(tmp_path, request, engine):
         assert set(_schema(database)) == tables
 
     _ok(_alembic(tmp_path, url, "upgrade", "head"))
-    assert _version(database) == BASELINE
+    assert _version(database) == _head()
     assert set(_schema(database)) == tables
 
 

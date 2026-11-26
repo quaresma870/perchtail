@@ -41,7 +41,7 @@ If your administrator has turned on password recovery, the sign-in page shows **
 
 **With single sign-on:** click **Sign in with** followed by your organisation's provider. Your password and any second factor are handled by the provider, not by PerchTail. The first time you sign in, PerchTail creates your account. Your role follows your groups at the identity provider and is set again at every sign-in: if none of your groups is mapped to a role, you see nothing until an administrator maps one.
 
-A session lasts 12 hours from sign-in by default, then you sign in again. To sign out, open the menu with your name at the top right and click **Log out**. Signing out closes your open tabs.
+A session lasts 12 hours from sign-in by default, then you sign in again. It ends sooner when you don't use PerchTail for a while (an hour by default, set by your administrator): a Tail that is running counts as use, but a browser simply left open on the Explorer doesn't. Signing in with another account in the same browser ends the session that was there. To sign out, open the menu with your name at the top right and click **Log out**. Signing out closes your open tabs.
 
 ## The explorer
 

@@ -284,7 +284,17 @@ Local accounts of super admins and of roles with any global capability must alwa
 
 | Key | On screen | Default | Accepted values | Effect |
 |---|---|---|---|---|
-| `require_mfa_local_accounts` | **Require MFA for local accounts** | off | on, off | Extends the requirement to every local account. Applied at once: anyone covered without MFA is asked to set it up on their next request. Only a super admin can change it, either way. |
+| `require_mfa_local_accounts` | **Require MFA for local accounts** | on (off on an install upgraded from 0.7 or earlier) | on, off | Extends the requirement to every local account. Applied at once: anyone covered without MFA is asked to set it up on their next request. Only a super admin can change it, either way. |
+
+#### Sessions card
+
+| Key | On screen | Default | Accepted values | Effect |
+|---|---|---|---|---|
+| `session_idle_minutes` | **End unused sessions after** | `60` | `0` (no limit), or 5 to 720 minutes | A session nobody used for this long ends, and its user signs in again; `SESSION_TTL_HOURS` still ends every session at the latest. Any authenticated request counts as use, a running Tail included. What the web interface asks on its own (the Explorer's source list and status, refreshing open folders, the progress of a file being opened) doesn't count, so a browser left open on the Explorer still signs out. Only a super admin can make it longer or turn it off; whoever manages system settings can make it shorter. The last use is recorded at most once a minute, so a session ends between this many minutes and one more after it was last used. |
+
+A super admin also has **End every other session**, which signs out every account, on every device, except their own session (audited as `session.revoke`, `reason` `admin_all`).
+
+While **Require MFA for local accounts** is off, the system settings pages show "Two-factor authentication isn't required of every local account." at the top.
 
 #### Password recovery card
 
@@ -306,8 +316,14 @@ Applies to local accounts whenever a password is set: a user's own change, the c
 | `password_required_classes` | **Character classes required** | `0` (off) | `0` (off) to `4` (all 4) | How many of lowercase, uppercase, digit and symbol a password must contain. |
 | `password_history` | **Don't reuse the last N passwords (0 = off)** | `0` | 0 to 24 | Refuses the current password and the ones before it, N in all. Lowering it deletes the stored hashes it no longer needs at once. |
 | `password_max_age_days` | **Expire after N days (0 = never)** | `0` | 0 to 3650 | After this many days, a password must be changed. |
-| `password_reject_simple` | **Reject passwords that are too simple (repeats, sequences, keyboard runs, the username)** | on | on, off | Refuses repeated characters, sequences, keyboard runs and the username. |
+| `password_reject_simple` | **Reject passwords that are too simple (repeats, sequences, keyboard runs, the username)** | on | on, off | Refuses repeated characters, sequences, keyboard runs, the username, and passwords on the list of common and leaked passwords shipped with PerchTail (the 8-character-or-longer entries of SecLists' 100,000 most common passwords, compared without case; no network request). |
 | `password_reject_personal` | **Reject passwords containing the username, email or name** | on | on, off | Refuses passwords that contain the user's username, email or name. |
+
+#### Words passwords can't contain card
+
+| Key | On screen | Default | Accepted values | Effect |
+|---|---|---|---|---|
+| `password_context_words` | **Words passwords can't contain** | none | up to 50 words of 3 to 64 characters, one per line | A new password containing one of them, in any case, is refused, wherever the password policy applies; your organization's name, for example. A password containing "perchtail" is always refused, whatever this list and the other settings say. |
 
 ## Settings → Agents
 

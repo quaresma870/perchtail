@@ -241,6 +241,7 @@ A role can't be deleted while users hold it or while an SSO group mapping points
 - **Edit**, or a click on the username, changes the display name and email of a local account, the role, and **Active**. An SSO account's name and email come from the identity provider and can't be edited here. The username can't be changed.
 - The **Role** list in each row changes the role at once.
 - **Reset password** (local accounts only) creates a random temporary password, shows it once, signs the user out everywhere and makes them choose a new one at their next sign-in. The server refuses it for SSO accounts, which sign in only through the identity provider.
+- **End sessions** signs the user out on every device, after asking; they sign in again. Only a super admin can do it to an account whose role manages users or roles. It is audited as `session.revoke` (`reason`: `admin`).
 - **Deactivate** ends all of the user's sessions at once and stops them signing in. Their audit history is kept, and their alerts stop. **Reactivate** restores the account; the old sessions don't come back.
 
 Users are never deleted, only deactivated. The last active super admin can't be deactivated or moved to a role without super admin.

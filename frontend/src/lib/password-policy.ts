@@ -10,11 +10,14 @@ export function describePolicy(policy: PasswordPolicy): string[] {
     )
   }
   if (policy.reject_simple) {
-    rules.push('not too simple: no repeats, sequences or keyboard runs (aaaa, 1234, qwerty)')
+    rules.push('not too simple: no repeats, sequences, keyboard runs or common passwords (aaaa, 1234, qwerty, iloveyou)')
   }
   if (policy.reject_personal) {
     rules.push('nothing from the username, email or name')
   }
+  // Always refused, whatever the other rules (app/password_policy.py); the
+  // words themselves aren't public, they may name the organization.
+  rules.push('nothing containing "perchtail" or the words your administrator listed')
   if (policy.history === 1) {
     rules.push('different from the current password')
   } else if (policy.history > 1) {

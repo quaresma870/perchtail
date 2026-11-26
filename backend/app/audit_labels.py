@@ -37,6 +37,8 @@ UNNAMED_TARGET_TYPES = frozenset(
         "backup",
         "smtp_settings",
         "access_report",
+        # Every session of the installation (session.revoke, reason admin_all).
+        "system",
     }
 )
 

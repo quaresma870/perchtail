@@ -4,7 +4,7 @@
 // archive is open, instead of fetching the archive again for every folder
 // clicked inside it.
 
-import { api } from './api'
+import { api, type GetOptions } from './api'
 import type { BrowseEntry } from './types'
 
 /** Who cut a truncated listing when the cap didn't (X-Listing-Cut-By):
@@ -32,8 +32,8 @@ export function readListing(entries: BrowseEntry[], headers: Headers): Listing {
   }
 }
 
-export async function fetchListing(url: string): Promise<Listing> {
-  const { data, headers } = await api.getWithHeaders<BrowseEntry[]>(url)
+export async function fetchListing(url: string, options?: GetOptions): Promise<Listing> {
+  const { data, headers } = await api.getWithHeaders<BrowseEntry[]>(url, options)
   return readListing(data, headers)
 }
 

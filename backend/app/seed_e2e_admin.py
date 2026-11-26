@@ -69,6 +69,12 @@ def seed(username: str, password: str, totp_secret: str = DEFAULT_TOTP_SECRET) -
             mfa_enrolled_at=utcnow(),
         )
         session.add(user)
+        # The end-to-end specs sign in as local accounts without MFA; they
+        # run as on an install upgraded from before MFA was required of every
+        # local account by default. mfa-required.spec.ts turns it on itself.
+        from app import system_settings
+
+        system_settings.set_bool(session, "require_mfa_local_accounts", False)
         session.commit()
 
     print(f"Seeded e2e super-admin user {username!r}.")

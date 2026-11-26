@@ -214,6 +214,31 @@ test('accessibility: Settings -> Users', async ({ page }) => {
   await expectNoSeriousViolations(page)
 })
 
+// The confirmation before ending a user's sessions (Settings -> Users) and
+// before ending every other session (Settings -> Sign-in security);
+// cancelled, so nothing ends.
+test('accessibility: End sessions confirmation', async ({ page }) => {
+  await page.goto('/#/settings/users')
+  await settled(page, 'Users')
+  await page.getByRole('button', { name: 'End sessions', exact: true }).first().click()
+  const dialog = page.getByRole('dialog', { name: 'End sessions' })
+  await expect(dialog).toBeVisible()
+  await expectNoSeriousViolations(page)
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+})
+
+test('accessibility: End every other session confirmation', async ({ page }) => {
+  await page.goto('/#/settings/sign-in-security')
+  await settled(page, 'Sign-in security')
+  await page.getByRole('button', { name: 'End every other session', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'End every other session' })
+  await expect(dialog).toBeVisible()
+  await expectNoSeriousViolations(page)
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+})
+
 // The pages the System page was split into, each with one of its fields.
 const SYSTEM_SETTINGS_PAGES: [string, string, string][] = [
   ['source-defaults', 'Source defaults', 'Background check interval in minutes'],

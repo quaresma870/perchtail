@@ -38,7 +38,13 @@
     </p>
     <label>
       Current (temporary) password
-      <input class="input" type="password" bind:value={currentPassword} required />
+      <input
+        class="input"
+        type="password"
+        autocomplete="current-password"
+        bind:value={currentPassword}
+        required
+      />
     </label>
     <label>
       New password

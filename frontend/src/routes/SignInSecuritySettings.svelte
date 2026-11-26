@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { api } from '../lib/api'
   import { currentUser, refreshCurrentUser } from '../lib/auth'
+  import { confirmAction } from '../lib/confirm'
   import SystemSettingsPage from '../lib/components/SystemSettingsPage.svelte'
   import {
     SAVE_FAILED,
@@ -36,7 +38,22 @@
   let policyError = ''
   $: policyDirty = policyChanged(savedPolicy, policyDraft)
 
+  // Sessions: how long an unused one lasts (0 = no limit, else 5 to 720
+  // minutes), and, for a super admin, ending every other one.
+  let idleSaved = 60
+  let idleInput = '60'
+  let idleError = ''
+  let endedMessage = ''
+  // Words no password may contain, one per line.
+  let wordsSaved = ''
+  let wordsInput = ''
+  let wordsError = ''
+
   function apply(settings: SystemSettings) {
+    idleSaved = settings.session_idle_minutes
+    idleInput = String(settings.session_idle_minutes)
+    wordsSaved = settings.password_context_words.join('\n')
+    wordsInput = wordsSaved
     requireMfa = settings.require_mfa_local_accounts
     applyPasswordReset(settings)
     savedPolicy = pickPolicy(settings)
@@ -90,6 +107,62 @@
     patchPasswordReset({ password_reset_minutes: parsed })
   }
 
+  async function saveIdle() {
+    const parsed = Number(idleInput)
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 720 || (parsed > 0 && parsed < 5)) {
+      idleError = 'Enter 0 for no limit, or a whole number of minutes from 5 to 720.'
+      return
+    }
+    idleError = ''
+    saving = true
+    try {
+      const settings = await saveSystemSettings({ session_idle_minutes: parsed })
+      idleSaved = settings.session_idle_minutes
+      idleInput = String(idleSaved)
+    } catch (err) {
+      idleError = failureText(err, 'Failed to update the session timeout')
+    } finally {
+      saving = false
+    }
+  }
+
+  async function endEveryOtherSession() {
+    const ok = await confirmAction({
+      title: 'End every other session',
+      message:
+        'Everyone signed in, on every device, is signed out and must sign in again. Your own session stays.',
+      confirmLabel: 'End sessions',
+      danger: true,
+    })
+    if (!ok) return
+    endedMessage = ''
+    error = ''
+    try {
+      const { count } = await api.post<{ count: number }>('/users/sessions/revoke-all', {})
+      endedMessage = count === 1 ? '1 session ended.' : `${count} sessions ended.`
+    } catch (err) {
+      error = failureText(err, 'Failed to end the sessions')
+    }
+  }
+
+  async function saveWords() {
+    const words = wordsInput
+      .split('\n')
+      .map((word) => word.trim())
+      .filter(Boolean)
+    wordsError = ''
+    saving = true
+    try {
+      const settings = await saveSystemSettings({ password_context_words: words })
+      wordsSaved = settings.password_context_words.join('\n')
+      wordsInput = wordsSaved
+    } catch (err) {
+      wordsError = failureText(err, 'Failed to update the words')
+    } finally {
+      saving = false
+    }
+  }
+
   async function savePolicy() {
     if (!policyDraft) return
     policyError = ''
@@ -106,6 +179,56 @@
 </script>
 
 <SystemSettingsPage title="Sign-in security" {apply} {error}>
+  <section class="card">
+    <h2 class="section-title">Sessions</h2>
+    <div class="setting-row column">
+      <div>
+        <div class="setting-name">End unused sessions after</div>
+        <p class="hint">
+          A session nobody used for this long ends, and its user signs in again. Any request counts
+          as use, a running Tail included. 0 keeps sessions until they expire.
+        </p>
+      </div>
+      {#if idleError}
+        <p class="error">{idleError}</p>
+      {/if}
+      <div class="interval-row">
+        <input
+          class="input interval-input"
+          type="number"
+          min="0"
+          max="720"
+          step="1"
+          aria-label="End unused sessions after, in minutes"
+          bind:value={idleInput}
+        />
+        <span class="hint">minutes</span>
+        <button
+          type="button"
+          class="btn btn-ghost"
+          on:click={saveIdle}
+          disabled={saving || Number(idleInput) === idleSaved}
+        >
+          Save
+        </button>
+      </div>
+    </div>
+    {#if $currentUser?.is_super_admin}
+      <div class="setting-row column">
+        <div>
+          <div class="setting-name">End every other session</div>
+          <p class="hint">Signs out everyone, on every device, except you. Super admins only.</p>
+          {#if endedMessage}
+            <p class="hint" role="status">{endedMessage}</p>
+          {/if}
+        </div>
+        <button type="button" class="btn btn-ghost" on:click={endEveryOtherSession}>
+          End every other session
+        </button>
+      </div>
+    {/if}
+  </section>
+
   <section class="card">
     <h2 class="section-title">Two-factor authentication</h2>
     <div class="setting-row">
@@ -282,6 +405,36 @@
       </div>
     </div>
   {/if}
+
+  <section class="card">
+    <h2 class="section-title">Words passwords can't contain</h2>
+    <div class="setting-row column">
+      <div>
+        <p class="hint">
+          One per line, 3 to 64 characters each, up to 50: your organization's name, for example. A
+          new password containing one, in any case, is refused, and so is one containing
+          "perchtail".
+        </p>
+      </div>
+      {#if wordsError}
+        <p class="error">{wordsError}</p>
+      {/if}
+      <textarea
+        class="input words-input"
+        rows="4"
+        aria-label="Words passwords can't contain, one per line"
+        bind:value={wordsInput}
+      ></textarea>
+      <button
+        type="button"
+        class="btn btn-ghost"
+        on:click={saveWords}
+        disabled={saving || wordsInput.trim() === wordsSaved.trim()}
+      >
+        Save words
+      </button>
+    </div>
+  </section>
 </SystemSettingsPage>
 
 <style>
@@ -296,6 +449,11 @@
   }
   .policy-input {
     width: 7rem;
+  }
+  .words-input {
+    width: 100%;
+    max-width: 28rem;
+    font-family: inherit;
   }
   .check {
     display: flex;

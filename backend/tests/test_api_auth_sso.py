@@ -251,6 +251,39 @@ def test_callback_provisions_a_new_user_and_sets_a_session_cookie(client, sessio
     assert user.role_id == no_access.id
 
 
+def test_callback_ends_the_session_the_browser_had(client, session, monkeypatch):
+    from app.auth.models import AuthSession
+    from app.auth.sessions import create_session, hash_token
+
+    seed_no_access_role(session)
+    _make_enabled_provider(session)
+    role = Role(name="viewers")
+    session.add(role)
+    session.commit()
+    previous_owner = User(username="earlier@example.com", role_id=role.id)
+    session.add(previous_owner)
+    session.commit()
+    _, old_token = create_session(session, previous_owner)
+    session.commit()
+    client.cookies.set("perchtail_session", old_token)
+    state, nonce = _get_state_and_nonce(client, session, monkeypatch)
+    key_set, id_token = _key_set_and_token(nonce=nonce)
+    _patch_token_and_jwks(monkeypatch, key_set=key_set, id_token=id_token)
+
+    response = client.get("/auth/sso/callback", params={"code": "the-code", "state": state})
+
+    assert response.status_code == 302
+    gone = session.exec(
+        select(AuthSession).where(AuthSession.token_hash == hash_token(old_token))
+    ).first()
+    assert gone is None
+    signed_in = session.exec(select(User).where(User.auth_provider == AuthProviderType.oidc)).one()
+    [entry] = session.exec(select(AuditLog).where(AuditLog.action == "session.revoke")).all()
+    assert entry.target_id == previous_owner.id and entry.user_id == signed_in.id
+    assert entry.event_metadata["reason"] == "signed_in_again"
+    assert entry.event_metadata["count"] == 1
+
+
 def test_the_flow_uses_pkce_s256_end_to_end(client, session, monkeypatch):
     seed_no_access_role(session)
     _make_enabled_provider(session)

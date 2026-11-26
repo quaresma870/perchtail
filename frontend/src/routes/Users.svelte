@@ -177,6 +177,26 @@
     }
   }
 
+  // How many sessions "End sessions" ended, for the status line.
+  let sessionsEnded = ''
+
+  async function endSessions(user: AppUser) {
+    const ok = await confirmAction({
+      title: 'End sessions',
+      message: `End every session of ${user.username}? They're signed out on every device and sign in again.`,
+      confirmLabel: 'End sessions',
+      danger: true,
+    })
+    if (!ok) return
+    sessionsEnded = ''
+    try {
+      const { count } = await api.post<{ count: number }>(`/users/${user.id}/sessions/revoke`)
+      sessionsEnded = `${user.username}: ${count === 1 ? '1 session ended' : `${count} sessions ended`}.`
+    } catch (err) {
+      error = err instanceof ApiError ? err.detail : 'Failed to end the sessions'
+    }
+  }
+
   async function resetPassword(user: AppUser) {
     const ok = await confirmAction({
       title: 'Reset password',
@@ -251,6 +271,9 @@
   {:else}
     {#if error}
       <p class="error">{error}</p>
+    {/if}
+    {#if sessionsEnded}
+      <p class="hint" role="status">{sessionsEnded}</p>
     {/if}
 
     <div class="filters">
@@ -342,6 +365,7 @@
                     <button class="btn btn-ghost btn-sm" on:click={() => resetPassword(user)}>Reset password</button>
                   {/if}
                   {#if user.active}
+                    <button class="btn btn-ghost btn-sm" on:click={() => endSessions(user)}>End sessions</button>
                     <button class="btn btn-danger btn-sm" on:click={() => toggleActive(user)}>Deactivate</button>
                   {:else}
                     <button class="btn btn-ghost btn-sm" on:click={() => toggleActive(user)}>Reactivate</button>
