@@ -67,12 +67,12 @@ On a development machine with Docker, from the repository root. On Windows, use 
    docker compose -f docker-compose.yml -f loadtest/compose.sources.yml up -d --build
    ```
 
-3. Point the kit at it, and set up the admin account. On first start PerchTail logs a one-time password for `admin`; `admin-init` reads it from the logs on stdin, signs in and replaces it with a random password kept in the instance's state (`loadtest/.state/instances/localhost-8080/admin.json`). Nothing is printed:
+3. Point the kit at it, and set up the admin account. On first start PerchTail writes a one-time password for `admin` to `/data/db/initial-admin-password`; `admin-init` reads it on stdin, signs in, replaces it with a random password and turns MFA on (PerchTail requires it of super admins), keeping the password and the TOTP secret in the instance's state (`loadtest/.state/instances/localhost-8080/admin.json`). Nothing is printed:
 
    ```bash
    export LOADTEST_BASE_URL=http://localhost:8080
    export LOADTEST_ALLOWED_HOSTS=localhost
-   docker compose logs perchtail | python loadtest/seed/seed.py admin-init
+   docker compose exec -T perchtail cat /data/db/initial-admin-password | python loadtest/seed/seed.py admin-init
    ```
 
 4. Run the profile, and clean up afterwards:
@@ -112,7 +112,8 @@ Each phase's folder in `loadtest/results/<date>-<profile>/` holds `k6-<phase>.js
 
 | File | What it holds |
 |---|---|
-| `admin.json` | The admin account `admin-init` set up. |
+| `admin.json` | The admin account `admin-init` set up, with its TOTP secret. |
+| `totp-steps.json` | The last TOTP time step each account used: PerchTail takes each step's code once, so the kit waits for the next step when it signs in again within the same 30 seconds. |
 | `ledger.json` | The id of every object the kit created, by prefix, kind and name. |
 | `users.json` | The test users' passwords. |
 | `seeded.json`, `catalog.json` | The seeded sources and the file paths, for the scenarios. |
@@ -128,7 +129,7 @@ Every file records the URL it was written for (normalized: scheme, host, explici
 
 ```bash
 python loadtest/seed/seed.py init                    # the state directory and the test servers' account
-docker compose logs perchtail | python loadtest/seed/seed.py admin-init   # fresh instance only
+docker compose exec -T perchtail cat /data/db/initial-admin-password | python loadtest/seed/seed.py admin-init   # fresh instance only
 python loadtest/seed/seed.py apply --profile small   # customers, folders, sources, role, users, agent tokens
 python loadtest/seed/seed.py index                   # run the file-name index on the seeded sources, and wait
 python loadtest/seed/seed.py status                  # count the kit's objects, and any other objects with its prefix
@@ -150,7 +151,7 @@ What it creates (with the default prefix):
 
 `clean` only acts on ledger objects of the current prefix that still have the kit's exact name (`lt-customer-NN[-name]`, `lt-cNN-folder-NN[-name]`, `lt-(ssh|smb|local|winrm|agent)-NNN`, `lt-role[-kind]`, `lt-user-NNN`, `lt-alert-NN`, with `lt` being the prefix): it deletes the alerts, sources, folders, customers and roles, and puts back only the System settings the kit changed. An object renamed since is left alone and forgotten; a folder or customer that still holds something else is kept (PerchTail refuses to delete it) and stays in the ledger. PerchTail's API can only deactivate users, never delete them (accounts are kept for the audit trail), so the kit's users are moved to the built-in no-access role and deactivated, and stay in the ledger: a later `apply` reactivates them. The audit log keeps its entries, and a monitoring token the kit generated stays configured (PerchTail has no way to remove one; it can be regenerated from Settings → Monitoring). From the instance's state it removes the agents' enrollment tokens (`agent-tokens.json`), the Windows agents' bundle (`windows-agents/`, whose start script holds their tokens), `seeded.json`, `production-plan.json`, and a restore copy a `protocol_matrix` run left in the PerchTail container (`restore-copy.json`). `--files` deletes `shared/` and `agents/` in the logs directory, and only when `gen_logs.py`'s marker file `.perchtail-loadtest` is there; nothing else in that directory is touched. Each object is handled on its own: when one can't be removed or deactivated (or the settings can't be put back), `clean` notes it and carries on with the rest, then lists what it couldn't clean and exits with a non-zero code. What wasn't removed stays in the ledger, so running `clean` again retries it.
 
-The admin account comes from `LOADTEST_ADMIN_USERNAME` and `LOADTEST_ADMIN_PASSWORD` when they are set (an instance in a dedicated test environment), otherwise from `admin-init`. It must be a super admin without MFA.
+The admin account comes from `LOADTEST_ADMIN_USERNAME`, `LOADTEST_ADMIN_PASSWORD` and `LOADTEST_ADMIN_TOTP_SECRET` (the base32 secret of its MFA) when they are set (an instance in a dedicated test environment), otherwise from `admin-init`. It must be a super admin. The kit's users sign in with a password only: on an instance that requires MFA of every local account (`require_mfa_local_accounts`), `apply` turns that off for the run and `clean` puts it back.
 
 ### Source servers
 

@@ -47,6 +47,7 @@ from common import (  # noqa: E402
     change_settings,
     check_state,
     fail,
+    fresh_totp,
     load_profile,
     logs_dir,
     name_prefix,
@@ -218,31 +219,43 @@ _USERNAME = re.compile(r'"username"\s*:\s*"([^"]+)"')
 
 def cmd_admin_init(_args: argparse.Namespace) -> None:
     """For a fresh instance: reads the first super admin's one-time
-    password from the container logs on stdin, signs in, and replaces it
-    with a random one kept in the instance's admin.json."""
+    password on stdin, signs in, replaces it with a random one and turns
+    MFA on (PerchTail requires it of super admins), keeping the password
+    and the TOTP secret in the instance's admin.json. Stdin is the password
+    file (`docker compose exec -T perchtail cat /data/db/initial-admin-password`),
+    or, from PerchTail before 0.7, the container logs with the password."""
     saved = read_state("admin.json")
     if saved:
         client = Client()
         try:
-            client.login(saved["username"], saved["password"])
-            print(
-                f"admin account {saved['username']!r} already set up ({state_dir() / 'admin.json'})"
-            )
-            return
+            client.login(saved["username"], saved["password"], saved.get("totp_secret"))
         except ApiError as exc:
             fail(
                 f"the saved admin credentials don't work any more ({exc.status}); remove admin.json"
             )
+        if not saved.get("totp_secret"):
+            # An earlier admin-init changed the password but stopped before MFA.
+            _enable_admin_mfa(client, saved["username"], saved["password"])
+        print(f"admin account {saved['username']!r} already set up ({state_dir() / 'admin.json'})")
+        return
 
     username = temporary = None
-    for line in sys.stdin:
+    lines = [line.strip() for line in sys.stdin if line.strip()]
+    for line in lines:
         if "initial_super_admin.seeded" in line:
             pw = _TEMP_PASSWORD.search(line)
             user = _USERNAME.search(line)
             if pw and user:
                 username, temporary = user.group(1), pw.group(1)
+    if not temporary and len(lines) == 1 and not lines[0].startswith("{"):
+        # The password file: one line, the password itself.
+        username = os.environ.get("LOADTEST_ADMIN_USERNAME", "admin")
+        temporary = lines[0]
     if not temporary:
-        fail("no initial_super_admin.seeded line on stdin (pipe `docker compose logs perchtail`)")
+        fail(
+            "no first admin password on stdin: pipe "
+            "`docker compose exec -T perchtail cat /data/db/initial-admin-password`"
+        )
 
     client = Client()
     client.login(username, temporary)
@@ -251,8 +264,21 @@ def cmd_admin_init(_args: argparse.Namespace) -> None:
         "/auth/change-password",
         {"current_password": temporary, "new_password": new_password},
     )
-    path = write_state("admin.json", {"username": username, "password": new_password})
-    print(f"admin account {username!r} ready; credentials in {path}")
+    # Kept before MFA is turned on, so a failure from here on loses nothing:
+    # admin-init again picks up where this one stopped.
+    write_state("admin.json", {"username": username, "password": new_password})
+    path = _enable_admin_mfa(client, username, new_password)
+    print(f"admin account {username!r} ready, with MFA; credentials in {path}")
+
+
+def _enable_admin_mfa(client: Client, username: str, password: str) -> Path:
+    """Turns MFA on for the signed-in admin and keeps its TOTP secret with
+    the password in admin.json."""
+    secret = client.post("/auth/mfa/enroll", {"password": password})["secret"]
+    client.post("/auth/mfa/confirm", {"code": fresh_totp(username, secret)})
+    return write_state(
+        "admin.json", {"username": username, "password": password, "totp_secret": secret}
+    )
 
 
 # --- apply ----------------------------------------------------------------
@@ -799,6 +825,17 @@ def preflight(client: Client, ledger: Ledger, profile: dict) -> None:
         )
 
 
+def _no_mfa_for_kit_users(client: Client) -> None:
+    """The kit's users sign in with a password only. On an instance that
+    requires MFA of every local account (`require_mfa_local_accounts`, on
+    by default on installs from 1.0), that requirement is turned off for
+    the run; change_settings saves the instance's value and `clean` puts
+    it back. Administrators keep needing MFA whatever the setting."""
+    current = client.get("/system-settings")
+    if current.get("require_mfa_local_accounts"):
+        change_settings(client, {"require_mfa_local_accounts": False})
+
+
 def cmd_apply(args: argparse.Namespace) -> None:
     profile = load_profile(args.profile)
     client = admin_client()
@@ -808,6 +845,7 @@ def cmd_apply(args: argparse.Namespace) -> None:
     folders = ensure_folders(client, ledger, customers, profile)
     sources = ensure_sources(client, ledger, profile, _placements(customers, folders))
     count = int(profile["users"])
+    _no_mfa_for_kit_users(client)
     if "production" in profile:
         roles = ensure_persona_roles(client, ledger, profile, customers, folders)
         usernames = [f"{name_prefix()}user-{i:03d}" for i in range(1, count + 1)]
