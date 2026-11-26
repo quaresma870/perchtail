@@ -73,13 +73,38 @@ A delegated administrator (a role with `manage_users`, `manage_roles` or `manage
 - An SSO user whose groups match no mapping gets the "No Access" role at sign-in, also when they had another role before; the last active super admin keeps theirs. A delegated administrator only creates, changes or deletes a group mapping whose role is within their authority, placed before every mapping whose role isn't (the last matching mapping wins), and the mappings to a role beyond their authority don't show them its name; only a super admin deletes or turns off the SSO provider.
 - Customer names are unique across the installation, so renaming a customer to a name already in use is refused (409) even when that other customer is outside the admin's reach: the refusal tells a delegated admin that the name exists, and nothing else about it.
 
+### Rules on individual fields
+
+Some fields follow rules of their own, whoever may otherwise read or change the object they belong to:
+
+- **Secrets are written, never read back.** A source's saved credential, the SSO provider's client secret, the SMTP password and an alert's webhook URL are stored encrypted, and no answer of the API ever carries them: it says only whether one is saved (and, for a webhook, its scheme, host and port). Password hashes, TOTP secrets and token hashes are never returned either.
+- **An SSO account's name and email come from the identity provider.** They are set at every sign-in, shown read-only in My profile, and an administrator can't change them (only a local account's). Its role is set by the group mappings at every sign-in, so a role given in Settings → Users lasts until its next sign-in.
+- **A username never changes** once the account exists, so audit entries keep naming the same account.
+- **A user changes only their own profile fields**: display name, email (with the current password, since password-reset links go there), password and MFA. Their role, and whether the account is active, are an administrator's to change.
+- **Roles and grants stay within the administrator's authority**, as described above: a role, a grant or a group mapping beyond it can't be assigned, created or edited by a delegated administrator.
+- **A few settings are a super admin's only**, even for someone with `manage_system_settings`: those listed under [Roles and grants](#roles-and-grants), and lengthening or turning off **End unused sessions after**.
+
 ### Signing in
 
 - **Local accounts** sign in with a username and password. Passwords are hashed with argon2id and follow the password policy under Settings → Sign-in security (12 to 128 characters by default, simple, common or leaked and personal passwords rejected, optional history, character classes and maximum age). A password never contains "perchtail" or any word of the **Words passwords can't contain** list. Accounts an administrator creates must change their password at first sign-in.
 - **SSO** uses OpenID Connect with one provider at a time: the authorization code flow with PKCE (S256), an `https://` issuer (and `https://` endpoints in its discovery document) that must match its discovery document's `issuer`, the identity provider reached only at public addresses, at the address checked and without following redirects (`SSO_ALLOW_HTTP_LOCALHOST=true` lets through `http://` on a loopback address, for local development only), and the ID token's signature (only asymmetric algorithms the provider announces, or RS256 when it announces none), issuer, audience (with `azp` when there are several), expiry, issue time and nonce checked. Starting an SSO sign-in is limited to 20 a minute per client address. A new SSO account takes its username from `email` only when the ID token says `email_verified: true`. SSO accounts can't sign in with a password, and an administrator can't give them one.
-- **Two-factor authentication** (TOTP, with 10 single-use backup codes) is required of super admins and of every role with a global capability, and of every local account when **Require MFA for local accounts** is on (the default on a new install). Until a covered account sets it up, it can do nothing else. Turning one's own MFA off needs the current password and a code; confirming MFA only completes an enrollment in progress. SSO accounts rely on the identity provider's MFA.
+- **Two-factor authentication** (TOTP, with 10 single-use backup codes) is required of super admins and of every role with a global capability, and of every local account when **Require MFA for local accounts** is on (the default on a new install). Until a covered account sets it up, it can do nothing else. Turning one's own MFA off needs the current password and a code; confirming MFA only completes an enrollment in progress. A TOTP code is accepted in its own 30-second step and in the step before or after it, so a phone or host clock off by up to about 30 seconds still works; each code is accepted once, and never after a later code has been used. SSO accounts rely on the identity provider's MFA.
 - **Failed sign-ins** lock the username for `LOGIN_LOCKOUT_SECONDS` (5 minutes) after `LOGIN_MAX_ATTEMPTS` (5) failures, and lock a client address that fails as often, whatever the usernames (an IPv6 address counts with its /64). A wrong current password or code when changing one's password, email or MFA counts the same way. An active local super admin with MFA is locked only from the address that failed, so an attacker can't lock the emergency account out from elsewhere.
 - **Password recovery by email** is off by default. When on, it never serves super admins, roles with a global capability, SSO accounts or accounts without an email.
+
+### Ways to authenticate
+
+Every way into PerchTail, by people and by machines:
+
+| Way | Who uses it | Factors | Limits | Where it is recorded |
+|---|---|---|---|---|
+| Local username and password, with TOTP | Local accounts, including the emergency super admins | Password, plus a TOTP or backup code when the account has MFA (required of administrators, and of every local account when **Require MFA for local accounts** is on) | 5 failures lock the username, and as many from one address lock the address, for 5 minutes (`LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCKOUT_SECONDS`); the password policy | Audit log: `user.login`, `user.login_failed`, `user.login_throttled`, `user.mfa_required` |
+| SSO (OpenID Connect) | SSO accounts | Whatever the identity provider asks for; PerchTail checks the ID token, not how the user proved who they are | 20 sign-in starts a minute per client address; the sign-in must finish within 10 minutes | Audit log: `user.login`, `user.sso_login_failed`, `user.sso_role_synced`; application log: `sso.callback.*`, `sso.login.*` |
+| Password recovery by email | Local accounts without a global capability, with an email, while a super admin has turned it on | Access to the account's mailbox, through a single-use link; it sets a new password and signs nobody in, so the next sign-in still asks for the password and, when the account has MFA, a code | 10 requests per client address in 15 minutes, 3 emails per account an hour, 20 link checks per address in 15 minutes; the link lasts 5 to 60 minutes (30 by default) | Audit log: `user.password_reset_requested`, `user.password_reset_completed`, `user.password_reset_failed` |
+| Agent enrollment token | Push agents, on their WebSocket connection and when downloading an upgrade | One random 256-bit token per agent source, shown once, stored as a SHA-256 hash | No lockout: a token that random can't be guessed. A wrong token closes the connection without saying why; a second connection with the same token replaces the first | Audit log: `source.agent_token_regenerate`, `agent.connection_replaced`; application log: `agent.connected`, `agent.disconnected` |
+| Monitoring token | The monitoring system, on `/monitoring/health` and `/metrics`, and on `/healthz` and `/readyz` for a caller that isn't on loopback or in `PROBE_ALLOWED_NETWORKS` | One random 256-bit token for the installation, stored as a SHA-256 hash | `MONITORING_ALLOWED_NETWORKS` limits the addresses `/monitoring/health` and `/metrics` answer; a wrong token gets a bare 401 | Audit log: `monitoring_token.regenerate` |
+
+There are no API keys or other long-lived user tokens: people use the web interface with a session.
 
 ### The emergency account
 
@@ -88,22 +113,36 @@ The first start creates a local super admin (`admin` by default) with a random p
 ### Sessions and the browser
 
 - A session is a random 256-bit token in the `__Host-perchtail_session` cookie (`HttpOnly`, `SameSite=Strict`, `Secure`, `Path=/`, no `Domain`). The `__Host-` prefix makes a browser accept the cookie only from PerchTail's own host over HTTPS, so a site on a sibling subdomain or a page over plain HTTP can't plant or replace it. With `SESSION_COOKIE_SECURE=false` (local tests over HTTP only) the cookie is `perchtail_session`, without `Secure`. Only its SHA-256 is stored. It lasts `SESSION_TTL_HOURS` (12), ends sooner when unused for **End unused sessions after** (60 minutes by default, recorded to the minute; what the web interface asks on its own doesn't count as use), and is checked on the server at every request. Signing in ends the session the browser had before.
-- Signing out deletes the session and sends `Clear-Site-Data: "cache"`, so the browser drops what it kept of PerchTail's pages. Changing one's password ends the user's other sessions and gives the current one a new token; turning one's own MFA on or off ends the other sessions; an administrator's password reset, a password reset by email and deactivating the account end all of them. Users see and end their own sessions in My profile. An administrator with Manage users ends all of a user's sessions (only a super admin for an account that manages users or roles), and a super admin can end every session but their own.
+- An account may hold any number of sessions at once, one for each browser or device it signs in from. There is no limit, because each user sees all of theirs in My profile (when each started, was last used and expires, and its browser) and can end any of them there. Ending one of one's own sessions asks for no password or code: it only takes access away.
+- An SSO sign-in starts a PerchTail session like a local one, with the same lifetime and idle timeout, independent of the session at the identity provider: signing out of PerchTail doesn't sign the user out of the identity provider, and signing out of the identity provider, or being disabled there, doesn't end a PerchTail session already open (deactivate the account in Settings → Users to end it at once). PerchTail doesn't read the `acr` or `amr` claims of the ID token, so it assumes nothing about how the user signed in at the identity provider: whether a second factor was asked is the identity provider's policy ([sso-setup.md](sso-setup.md#sessions-and-the-identity-provider)).
+- Signing out deletes the session and sends `Clear-Site-Data: "cache"`, so the browser drops what it kept of PerchTail's pages. Changing one's password ends the user's other sessions and gives the current one a new token; turning one's own MFA on or off ends the other sessions; an administrator's password reset, a password reset by email and deactivating the account end all of them. An administrator with Manage users ends all of a user's sessions (only a super admin for an account that manages users or roles), and a super admin can end every session but their own.
 - **CSRF**: the `SameSite=Strict` cookie is never sent with a cross-site request; on top of it, a state-changing request whose `Origin` (or `Referer`) names another host than the request's is refused.
-- **Response headers**: a Content-Security-Policy that allows only PerchTail's own scripts (`script-src 'self'`, no inline script; inline styles are allowed because the viewer's editor injects them; `form-action 'self'`), `frame-ancestors 'none'` and `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, a Permissions-Policy turning off camera, microphone, location and other unused features, and `Cross-Origin-Opener-Policy: same-origin`. HSTS is set by the reverse proxy that terminates TLS.
+- **Response headers**: a Content-Security-Policy that allows only PerchTail's own scripts (`script-src 'self'`, no inline script; inline styles are allowed because the viewer's editor injects them; `form-action 'self'`), `frame-ancestors 'none'` and `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, a Permissions-Policy turning off camera, microphone, location and other unused features, and `Cross-Origin-Opener-Policy: same-origin`. HSTS is set by the reverse proxy that terminates TLS, preferably with `includeSubDomains`, which also makes browsers use HTTPS on every subdomain of PerchTail's host name ([hardening.md](hardening.md#network)).
 - Every API answer, file content included, is sent with `Cache-Control: no-store` (unless the answer sets its own), so neither the browser nor a proxy keeps a copy. The web interface's static files keep their caching.
 - A download is always `application/octet-stream` with `Content-Disposition: attachment`, so a downloaded `.html` or `.svg` file is saved, never shown or run in PerchTail's origin.
+- Files from sources aren't scanned for malware. PerchTail shows them as text in the viewer, never runs or renders them, and sends downloads as attachments with `nosniff`, as above; a downloaded file is the workstation's to check, with its own antivirus, like any other file saved from a server.
 - A request refused as invalid (422) is logged as `request.validation_failed` with the names of the fields at fault, never their values.
 - The web interface loads nothing from other sites: no CDN, web font, analytics or telemetry.
 - The interactive API documentation (`/docs`, `/redoc`, `/openapi.json`) answers 404 unless `API_DOCS=true`.
 
-## Keys and encryption
+## Cryptography
 
-| Secret | Protects | Where it lives |
-|---|---|---|
-| `CREDENTIAL_ENCRYPTION_KEY` with the per-install salt | Source credentials, the SSO provider's configuration, users' TOTP secrets, the SMTP password and alert webhook URLs (Fernet: AES-128-CBC with HMAC-SHA256, key derived with PBKDF2-HMAC-SHA256, 600,000 iterations); and, through keys derived separately, the audit log's hash chain (HMAC-SHA256) and the keyed hash by which Tail and alerts recognise a file's start (one key per source) | The key in the environment (`.env`), never in the database; the salt in `DATA_DIR/credential_salt` |
-| `BACKUP_ENCRYPTION_KEY` (optional) | Backups (AES-256-GCM in authenticated blocks, key derived with HKDF-SHA256). Without it, backups use `CREDENTIAL_ENCRYPTION_KEY`. | The environment |
-| Push-agent release key | Agent binaries: an agent installs an upgrade only if `SHA256SUMS` carries a valid Ed25519 signature from the key built into it | The public key in the agent; the private key with the release process |
+Every key and algorithm PerchTail uses:
+
+| Key or secret | Algorithm | What it is for | Where it lives | How it is rotated | If it is lost |
+|---|---|---|---|---|---|
+| `CREDENTIAL_ENCRYPTION_KEY` and the per-install salt | Fernet (AES-128-CBC with HMAC-SHA256), under a key derived with PBKDF2-HMAC-SHA256 (600,000 iterations) from the key and a random 16-byte salt | Encrypts source credentials, the SSO provider's configuration, users' TOTP secrets, the SMTP password and alert webhook URLs | The key in the environment (`.env`) or in the file `CREDENTIAL_ENCRYPTION_KEY_FILE` names, never in the database; the salt in `DATA_DIR/credential_salt` | `python -m app.rotate_credential_key` re-encrypts everything under a new key ([credential-key-rotation.md](credential-key-rotation.md)); the salt stays for the life of the installation | Every stored secret must be entered again, and users with MFA finish signing in with a backup code ([backup-and-restore.md](backup-and-restore.md#what-the-keys-and-the-salt-protect)) |
+| Audit chain key | HMAC-SHA256, under a key derived from `CREDENTIAL_ENCRYPTION_KEY` and the salt with PBKDF2-HMAC-SHA256 and a label of its own | Signs each audit entry together with the previous entry's hash | Never stored: derived at every start | With `CREDENTIAL_ENCRYPTION_KEY`; the rotation re-signs every entry in the same transaction | Entries signed before fail the integrity check; their content stays readable |
+| File-start keys | HMAC-SHA256, under one key per source, derived with HKDF-SHA256 from a root derived like the audit chain key | Lets Tail and alerts recognise that a file was replaced, without keeping its bytes | Never stored: derived when needed | With `CREDENTIAL_ENCRYPTION_KEY` | Alerts read the files they watch again from the top, once, and may send lines they had already sent |
+| `BACKUP_ENCRYPTION_KEY` (optional; `CREDENTIAL_ENCRYPTION_KEY` when it isn't set) | AES-256-GCM in 1 MiB authenticated blocks, under a key derived for each file with HKDF-SHA256 and a random 16-byte salt | Encrypts backups | The environment | Set a new value: new backups use it, and older ones still need the old value, so keep it as long as those backups | Backups made with it can't be opened; the running installation doesn't use it |
+| Release signing key | Ed25519 | Signs the agent binaries' `SHA256SUMS` and the image's digest (`perchtail-image.json`): an agent installs an upgrade from the portal only with a valid signature from the public key built into it | The public key in every agent and in the repository at each release's tag; the private key with the project's release process, never in the repository or the image | A release whose agents carry a new public key, signed with the old key, moves agents over to it; an agent that only knows a key no longer used is upgraded by hand | Agents already installed can't be upgraded from the portal; installing by hand, after checking the release ([verifying-releases.md](verifying-releases.md)), still works |
+| Local passwords, previous passwords and MFA backup codes | argon2id (the `argon2-cffi` defaults), with a random salt in each hash | Checks a password or code without keeping it | The database, as hashes only | No key. A password hash made with older parameters is replaced at the next successful sign-in | Nothing can be lost: a forgotten password is reset |
+| Session, password-reset, agent enrollment and monitoring tokens | 256 random bits from the operating system's generator, stored as SHA-256 | Recognises a token without keeping it | The database, as hashes only; the token itself only with its holder | Sessions and reset links expire; agent and monitoring tokens are regenerated in Settings, which ends the old one | A lost token is generated again; the database alone signs nobody in |
+| TLS | TLS 1.2 or later | Users to the reverse proxy; PerchTail's own connections to the identity provider, `https://` webhooks, the SMTP server, WinRM over HTTPS, a PostgreSQL server off its host (unless `DATABASE_REQUIRE_VERIFIED_TLS=false`) and the release check, and push agents' connections to PerchTail, all with the certificate checked | The proxy's certificate and key on the proxy; CA certificates given to WinRM sources in `DATA_DIR/winrm_ca/`, the SMTP server's in the database | As your certificate authority requires; the proxy's settings are in [hardening.md](hardening.md#network) | A lapsed or lost certificate stops connections until it is replaced |
+
+SSH, SMB and WinRM connections to sources use their own protocols' encryption, described under [Connections to sources](#connections-to-sources).
+
+Every algorithm above comes from a maintained library (`cryptography`, `argon2-cffi`, Python's `hashlib`, `hmac` and `secrets`, Go's `crypto/ed25519`); PerchTail implements none itself. What it encrypts carries a version (a Fernet token its version byte, a backup the format version in its header), so a change of algorithm or of its parameters is never a setting: it comes in a PerchTail release with a migration that re-encrypts or re-signs what is stored, as the key rotation does, and the release notes say so. argon2id is the exception: each hash carries its parameters, and hashes move to new ones as users sign in.
 
 What is never stored in a form that can be read back: local passwords, previous passwords and MFA backup codes (argon2id hashes), and session tokens, password-reset tokens, agent enrollment tokens and the monitoring token (SHA-256 hashes).
 
@@ -127,6 +166,38 @@ Every administrative change, every sign-in and sign-out, every file opened, foll
 | Local | Files on the PerchTail host, only under `LOCAL_SOURCE_ROOTS` (empty by default, which disables them) | Mount host logs read-only |
 
 On every protocol, paths are checked to stay inside the source's folders, and reads are bounded in size, time and concurrency (`MAX_FETCH_MB`, `MAX_DECOMPRESSED_MB`, `REMOTE_READ_TIMEOUT_SECONDS` and the limits under Settings → Explorer and limits). An archive is read at most 50,000 entries deep: a `.tar.gz` lists its first 50,000, and a `.zip` stating or holding more is refused before its index is loaded, on the server and on push agents. On local, SSH and push-agent sources, the rules see both the path asked for and where it really leads, and a push agent reads a file only once the server has checked the rules on its target; SMB and WinRM sources refuse junctions and symlinks, and a WinRM source reads only paths on a drive of its host. Regular expressions and globs from users that run on the server (rules, the file-name search, alerts, redaction patterns) run in linear time (RE2). Severity indicators are saved in the same syntax and run in the browser, in a Web Worker, where one that takes too long is turned off.
+
+## Input limits
+
+Everything a request sends is checked on the server against a typed model of that request, whatever the web interface already checked: a value of the wrong type, out of range or too long answers 422 (logged as `request.validation_failed`, with the names of the fields at fault and never their values), and fields the request doesn't define are ignored. On top of that, these limits apply:
+
+| What | Limit |
+|---|---|
+| Display name, email | 100 and 254 characters |
+| Password | Between the policy's minimum and maximum (12 and 128 by default; the maximum can be set from 64 to 1,024); a longer one is refused before it is hashed or checked |
+| Words passwords can't contain | 50 words |
+| Visibility rules | 500 per source, 1,000 characters each, globs or RE2 regular expressions |
+| Severity indicators | 1,000 characters each, globs or RE2 regular expressions |
+| Redaction rules | 50 per scope (the system's, or a source's own), a name of 48 characters, a pattern of 1,000 characters in RE2 with a bounded compiled size and memory |
+| Alerts | 100 per account; the query is plain text or an RE2 regular expression |
+| File-name search | 500 characters |
+| Folders a source reads | 20 by default (`source_max_roots`), never more than 100 |
+| CA certificates (WinRM sources, the SMTP server) | 64 KiB |
+| YAML import | 1,000,000 bytes and 5,000 sources per file |
+| Folder listing | `listing_max_entries` entries (5,000 by default, 100 to 20,000); a push agent lists at most 50,000 entries of a folder |
+| Archives | A `.tar.gz` is listed up to its first 50,000 entries; a `.zip` stating or holding more than 50,000 is refused |
+| File size | `MAX_FETCH_MB` fetched and `MAX_DECOMPRESSED_MB` decompressed (2,048 each); over either, 413 |
+| Concurrent work | Connector slots in all, per source and per user, and downloads per user (Settings → Explorer and limits); over a limit, 503 with `Retry-After` |
+
+PerchTail sets no overall size on a request body: the reverse proxy's applies (nginx's `client_max_body_size` is 1 MB by default; 2 MB leaves room for a YAML import at its limit).
+
+Some checks look at several values together:
+
+- A source in a folder belongs to that folder's customer, and a folder nests only under a folder of the same customer, never under itself or one of its own subfolders.
+- A role holds at most one grant per scope, and a grant at least one capability.
+- An alert watches one source, folder or customer at most, and its webhook URL must be `https://` and resolve only to public addresses.
+- A WinRM source reads only paths on a drive of its host, and a local source only folders under `LOCAL_SOURCE_ROOTS`.
+- A regular expression RE2 can't compile (backreferences, lookaround) is refused when it is saved, so none reaches the server's matching.
 
 ## What PerchTail expects from its environment
 
