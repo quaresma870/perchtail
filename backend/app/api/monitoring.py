@@ -124,8 +124,9 @@ def _require_monitoring_bearer_token(
 class DatabaseHealth(BaseModel):
     reachable: bool
     latency_ms: float | None
-    # The SQLite file and its write-ahead log (#346); None for another
-    # database, or when the file can't be read.
+    # The SQLite file and its write-ahead log (#346), or on PostgreSQL the
+    # database's pg_database_size and no WAL (#306); None when it can't be
+    # read.
     size_bytes: int | None = None
     wal_bytes: int | None = None
 
@@ -413,7 +414,7 @@ def compute_health(session: Session) -> DetailedHealth:
     elif agent_configured > 0 and agent_connected == 0:
         overall = "degraded"
 
-    size_bytes, wal_bytes = _database_size()
+    size_bytes, wal_bytes = _database_size(session) if db_reachable else (None, None)
     return DetailedHealth(
         status=overall,
         version=APP_VERSION,
@@ -468,7 +469,17 @@ def _file_size(path: Path) -> int | None:
         return None
 
 
-def _database_size() -> tuple[int | None, int | None]:
+def _database_size(session: Session) -> tuple[int | None, int | None]:
+    """(size, WAL size) in bytes. PostgreSQL's own write-ahead log is the
+    server's, shared by every database on it, so it is left out (None)."""
+    if session.get_bind().dialect.name == "postgresql":
+        try:
+            with session.begin_nested():
+                size = session.execute(text("SELECT pg_database_size(current_database())")).scalar()
+        except Exception:
+            logger.exception("monitoring.health.db_size_failed")
+            return None, None
+        return (int(size) if size is not None else None), None
     path = sqlite_file()
     if path is None:
         return None, None

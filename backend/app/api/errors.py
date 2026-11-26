@@ -12,6 +12,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DataError
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -253,6 +254,8 @@ async def read_cancelled(request: Request, exc: FetchCancelledError) -> JSONResp
 
 
 _SQLITE_INTEGER_OVERFLOW = "too large to convert to SQLite INTEGER"
+# PostgreSQL's numeric_value_out_of_range: its INTEGER columns hold 32 bits.
+_POSTGRESQL_OUT_OF_RANGE = "22003"
 
 
 async def integer_out_of_range(request: Request, exc: OverflowError) -> JSONResponse:
@@ -261,6 +264,19 @@ async def integer_out_of_range(request: Request, exc: OverflowError) -> JSONResp
     # is a bug and stays a 500.
     if _SQLITE_INTEGER_OVERFLOW not in str(exc):
         raise exc
+    return _out_of_range(request)
+
+
+async def database_value_out_of_range(request: Request, exc: DataError) -> JSONResponse:
+    # The same on PostgreSQL (#306), whose INTEGER columns already refuse a
+    # number from 2**31 up: the database answers numeric_value_out_of_range.
+    # Any other data error stays a 500.
+    if getattr(exc.orig, "sqlstate", None) != _POSTGRESQL_OUT_OF_RANGE:
+        raise exc
+    return _out_of_range(request)
+
+
+def _out_of_range(request: Request) -> JSONResponse:
     route = request.scope.get("route")
     logger.warning(
         "api.integer_out_of_range",
@@ -310,3 +326,4 @@ def install(app: FastAPI) -> None:
     app.add_exception_handler(FetchCancelledError, read_cancelled)
     app.add_exception_handler(OverflowError, integer_out_of_range)
     app.add_exception_handler(RequestValidationError, validation_failed)
+    app.add_exception_handler(DataError, database_value_out_of_range)

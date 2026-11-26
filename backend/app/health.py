@@ -28,7 +28,11 @@ READY_DB_TIMEOUT_MS = 2000
 
 def _database_writable(engine) -> bool:
     """A real write that's rolled back (#330): it needs SQLite's write lock,
-    so a locked or read-only database fails it, and leaves nothing behind."""
+    so a locked or read-only database fails it, and leaves nothing behind.
+    On PostgreSQL the write waits at most READY_DB_TIMEOUT_MS for a lock
+    (`lock_timeout`) and runs at most as long (`statement_timeout`), both set
+    for its transaction only, so a locked table, a read-only database or
+    one in recovery fails it as quickly."""
     from sqlalchemy import insert
 
     from app.logging_config import get_logger
@@ -40,6 +44,9 @@ def _database_writable(engine) -> bool:
             if sqlite:
                 previous = connection.exec_driver_sql("PRAGMA busy_timeout").scalar()
                 connection.exec_driver_sql(f"PRAGMA busy_timeout={READY_DB_TIMEOUT_MS}")
+            elif engine.dialect.name == "postgresql":
+                connection.exec_driver_sql(f"SET LOCAL lock_timeout = {READY_DB_TIMEOUT_MS}")
+                connection.exec_driver_sql(f"SET LOCAL statement_timeout = {READY_DB_TIMEOUT_MS}")
             try:
                 connection.execute(insert(JobRun.__table__).values(job_id="__readyz__"))
                 connection.rollback()

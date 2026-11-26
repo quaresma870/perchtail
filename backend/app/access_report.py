@@ -134,10 +134,11 @@ class Snapshot:
 
 
 @contextmanager
-def _one_read_transaction(session: Session) -> Iterator[None]:
-    """Runs the reads inside it in one database transaction, so they all see
-    the same committed state: a grant or source committed by someone else
-    halfway through can't end up half in the report.
+def _one_read_transaction(session: Session) -> Iterator[Session]:
+    """Yields the session to run the reads with, in one database
+    transaction, so they all see the same committed state: a grant or
+    source committed by someone else halfway through can't end up half in
+    the report.
 
     pysqlite only opens a transaction before a write, so each SELECT would
     otherwise see the latest commit. Here, and only here, a deferred `BEGIN`
@@ -147,22 +148,52 @@ def _one_read_transaction(session: Session) -> Iterator[None]:
     caller writes next starts a write transaction of its own instead of
     upgrading a stale snapshot. When the connection is already inside a
     transaction (the session wrote something), its reads already share one
-    view and it is left alone."""
+    view and it is left alone.
+
+    On PostgreSQL each statement of a READ COMMITTED transaction sees the
+    latest commit, and the session's transaction has usually begun already
+    (its isolation can no longer change). So, unless that transaction wrote
+    something (it then keeps its own reads, which see its writes), the reads
+    run on a connection of their own from the pool, in a REPEATABLE READ
+    READ ONLY transaction: one snapshot for all of them, taken at the first,
+    without blocking writers, rolled back once they are done
+    (`_postgres_read_view`)."""
     session.flush()  # pending writes go out now, not inside the read transaction
     connection = session.connection()
+    if connection.dialect.name == "postgresql":
+        with _postgres_read_view(session, connection) as reader:
+            yield reader
+        return
     if connection.dialect.name != "sqlite":
-        yield
+        yield session
         return
     driver = connection.connection.driver_connection
     if driver.in_transaction:
-        yield
+        yield session
         return
     connection.exec_driver_sql("BEGIN")
     try:
-        yield
+        yield session
     finally:
         if driver.in_transaction:
             connection.exec_driver_sql("COMMIT")
+
+
+@contextmanager
+def _postgres_read_view(session: Session, connection) -> Iterator[Session]:
+    """See _one_read_transaction. The rows come back detached from the
+    reading session (closed, not committed, so their loaded columns stay
+    as read); the report only reads their columns."""
+    wrote = connection.exec_driver_sql(
+        "SELECT pg_current_xact_id_if_assigned() IS NOT NULL"
+    ).scalar()
+    if wrote:
+        yield session
+        return
+    with connection.engine.connect() as own:
+        own = own.execution_options(isolation_level="REPEATABLE READ", postgresql_readonly=True)
+        with Session(bind=own) as reader:
+            yield reader
 
 
 def load_snapshot(session: Session) -> Snapshot:
@@ -170,8 +201,8 @@ def load_snapshot(session: Session) -> Snapshot:
     one read transaction (six queries, whatever their size), so the report
     is one consistent view of access. Only the columns the report needs are
     read."""
-    with _one_read_transaction(session):
-        return _read_snapshot(session)
+    with _one_read_transaction(session) as reader:
+        return _read_snapshot(reader)
 
 
 def _read_snapshot(session: Session) -> Snapshot:

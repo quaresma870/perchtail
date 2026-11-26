@@ -2,6 +2,8 @@
 without the chain key become ordinary signed entries at the end of the
 chain; anything else in it is refused and audited."""
 
+import json
+
 import pytest
 from app.audit import record_audit_event
 from app.audit_integrity import verify_chain
@@ -174,6 +176,23 @@ def test_a_source_given_its_folder_customer_is_recorded_against_the_source(sessi
     assert verify_chain(KEY, session).ok
 
 
+def test_metadata_stored_as_a_json_string_is_refused(session):
+    """The metadata as JSON text inside a JSON string: on SQLite the column
+    reads back as a string, on PostgreSQL the driver already decodes it to
+    one; neither decodes it a second time into the object it spells."""
+    session.add(AuditOutbox(action="system_settings.update", event_metadata=json.dumps(RAISED)))
+    session.commit()
+
+    assert drain_audit_outbox(session) == (0, 1)
+    assert _last(session).action == REJECTED_ACTION
+    assert (
+        session.exec(select(AuditLog).where(AuditLog.action == "system_settings.update")).all()
+        == []
+    )
+
+
+# PostgreSQL refuses to store the invalid JSON and timestamp in the first place.
+@pytest.mark.sqlite_only
 def test_values_that_dont_parse_are_refused_without_stopping(session):
     session.execute(
         text(

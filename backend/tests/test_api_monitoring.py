@@ -9,6 +9,7 @@ from app.db import get_session
 from app.models import MonitoringToken, Protocol, Source
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlmodel import select
 
 
@@ -469,6 +470,18 @@ def test_health_reports_the_name_index_and_source_checks(session, admin_client):
     assert body["status"] == "ok"
 
 
+@pytest.mark.postgres_only
+def test_health_reports_the_postgresql_database_size_and_no_wal(admin_client, session):
+    expected = session.execute(text("SELECT pg_database_size(current_database())")).scalar()
+    database = _health(admin_client)["database"]
+    assert database["wal_bytes"] is None
+    # Within a few pages of what the database itself says: the request may
+    # have written to it since.
+    assert database["size_bytes"] > 0
+    assert abs(database["size_bytes"] - expected) < 1024 * 1024
+
+
+@pytest.mark.sqlite_only  # the SQLite file and its -wal; PostgreSQL has neither
 def test_health_reports_the_sqlite_file_and_wal_sizes(admin_client, monkeypatch, tmp_path):
     db_file = tmp_path / "perchtail.db"
     db_file.write_bytes(b"x" * 4096)

@@ -6,6 +6,7 @@ scripts those tests run in a subprocess."""
 
 import json
 
+from app import system_settings
 from app.audit import record_audit_event
 from app.audit_purge import _purge_chunk
 from app.auth.models import (
@@ -45,6 +46,10 @@ BIG = 2**40
 def populate(session: Session, engine) -> dict:
     """Fills the database `session` and `engine` are on, commits, and
     returns what the tests compare after the migration."""
+    # The reader signs in with a password only: a new install requires MFA
+    # of every local account (require_mfa_local_accounts), so turn it off
+    # here, as an install upgraded from before 1.0 has it.
+    system_settings.set_bool(session, "require_mfa_local_accounts", False)
     customer = Customer(name="Migrated customer")
     session.add(customer)
     session.flush()

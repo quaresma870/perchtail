@@ -19,9 +19,10 @@ Note on concurrency: two requests writing audit rows at once must not both
 chain from the same tip, or verification reports a break that is no
 tampering at all (#213; e2e caught it once SQLite ran in WAL mode, where
 readers no longer wait for writers). So chain_new_entry first takes
-SQLite's write lock for the caller's transaction (a no-op UPDATE), then
-reads the tip: a second writer blocks at that UPDATE until the first
-commits, and then sees its row. The process-wide lock is taken only after
+SQLite's write lock for the caller's transaction (a no-op UPDATE), or on
+PostgreSQL a transaction-level advisory lock, then reads the tip: a second
+writer blocks there until the first commits, and then sees its row. The
+process-wide lock is taken only after
 the database lock, so it can't deadlock against a transaction that already
 holds the write lock and audits a second time.
 """
@@ -41,6 +42,11 @@ from sqlmodel import Session, select
 from app.auth.models import AuditChainState, AuditLog
 
 _chain_write_lock = threading.Lock()
+
+# The transaction-level advisory lock audit writers take on PostgreSQL
+# (_take_write_lock): "PTAUDITC" in ASCII, apart from the instance lock's
+# key (app/instance_lock.py, DATABASE_LOCK_KEY).
+AUDIT_CHAIN_ADVISORY_LOCK = 0x50544155_44495443
 
 # Held by a verification for its whole walk (app/audit_integrity.py) and by
 # the audit purge for each chunk it deletes (app/audit_purge.py): the walk
@@ -147,9 +153,19 @@ def _take_write_lock(session: Session) -> None:
     """Starts (or joins) the caller's write transaction before the tip is
     read, so the tip can't change under it before it commits. On SQLite an
     UPDATE matching no rows still takes the write lock, which is then held
-    until the caller's commit or rollback."""
-    if session.get_bind().dialect.name == "sqlite":
+    until the caller's commit or rollback. On PostgreSQL a transaction-level
+    advisory lock does the same: a second writer, in this process or in
+    another one on the same database, waits for it until the first commits,
+    and under READ COMMITTED its next statement then sees the first one's
+    row. The new row's id is drawn when it is flushed, still under the lock,
+    so ids follow the chain's order."""
+    dialect = session.get_bind().dialect.name
+    if dialect == "sqlite":
         session.execute(text("UPDATE audit_chain_state SET id = id WHERE 0"))
+    elif dialect == "postgresql":
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"), {"key": AUDIT_CHAIN_ADVISORY_LOCK}
+        )
 
 
 def chain_new_entry(key: bytes, session: Session, entry: AuditLog) -> None:

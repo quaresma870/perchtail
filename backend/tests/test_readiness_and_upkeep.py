@@ -102,6 +102,59 @@ def test_readyz_is_not_ready_once_the_database_lock_was_lost(ready_app, monkeypa
     assert response.json()["failed"] == ["database_lock"]
 
 
+@pytest.mark.postgres_only
+def test_readyz_on_postgresql_gives_up_on_a_locked_table_within_three_seconds(
+    session, monkeypatch, tmp_path
+):
+    """The probe's write waits at most READY_DB_TIMEOUT_MS (2 s) for the lock
+    another connection holds, instead of until it is released (here after
+    8 s)."""
+    import threading
+    import time
+
+    from app.config import get_settings
+
+    engine = session.get_bind()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr("app.main.engine", engine)
+    monkeypatch.setattr("app.main.scheduler", _Scheduler())
+    monkeypatch.setattr(get_settings(), "data_dir", str(data_dir))
+    client = TestClient(app, client=("127.0.0.1", 50000))
+    assert client.get("/readyz").status_code == 200
+
+    holder_engine = create_engine(engine.url)
+    locked = threading.Event()
+    release = threading.Event()
+
+    def hold_the_lock():
+        with holder_engine.connect() as holder:
+            holder.exec_driver_sql("LOCK TABLE job_run IN ACCESS EXCLUSIVE MODE")
+            locked.set()
+            release.wait(timeout=8)
+            holder.rollback()
+
+    worker = threading.Thread(target=hold_the_lock)
+    worker.start()
+    try:
+        assert locked.wait(timeout=10)
+        started = time.monotonic()
+        response = client.get("/readyz")
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        worker.join(timeout=15)
+        holder_engine.dispose()
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready", "failed": ["database"]}
+    assert elapsed <= 3
+    assert client.get("/readyz").status_code == 200
+    # The timeouts were for the probe's transaction only.
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql("SHOW lock_timeout").scalar() == "0"
+        assert connection.exec_driver_sql("SHOW statement_timeout").scalar() == "0"
+
+
 def test_healthz_stays_liveness_only(ready_app, monkeypatch):
     monkeypatch.setattr("app.main.scheduler", _Scheduler(running=False))
     assert ready_app.get("/healthz").json() == {"status": "ok"}

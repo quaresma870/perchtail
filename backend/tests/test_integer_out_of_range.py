@@ -68,6 +68,29 @@ def test_source_port_out_of_range_is_422(app_and_client):
     assert response.json() == MESSAGE
 
 
+@pytest.mark.postgres_only  # SQLite's INTEGER holds 64 bits: there it's just a missing id
+def test_an_id_past_postgresqls_32_bit_integer_is_422(app_and_client):
+    _, client = app_and_client
+    response = client.get(f"/sources/{2**31}")
+    assert response.status_code == 422
+    assert response.json() == MESSAGE
+
+
+def test_other_database_data_errors_stay_server_errors(app_and_client):
+    from sqlalchemy.exc import DataError
+
+    app, client = app_and_client
+
+    class _Orig(Exception):
+        sqlstate = "22001"  # string_data_right_truncation
+
+    @app.get("/data-error")
+    def _data_error():
+        raise DataError("INSERT ...", {}, _Orig("value too long"))
+
+    assert client.get("/data-error").status_code == 500
+
+
 def test_other_overflow_errors_stay_server_errors(app_and_client):
     app, client = app_and_client
 

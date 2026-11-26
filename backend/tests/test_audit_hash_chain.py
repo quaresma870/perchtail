@@ -1,3 +1,4 @@
+import pytest
 from app.audit_hash_chain import (
     backfill_chain_if_needed,
     chain_new_entry,
@@ -274,3 +275,131 @@ def test_concurrent_writers_never_chain_from_the_same_tip(tmp_path):
     with Session(engine) as check:
         result = verify_chain(KEY, check)
     assert result.ok and result.checked_count == 2
+
+
+def _postgres_engines(session, count):
+    """`count` engines of their own on the test database, as separate
+    PerchTail processes on one database would have."""
+    from sqlmodel import create_engine
+
+    return [create_engine(session.get_bind().url) for _ in range(count)]
+
+
+@pytest.mark.postgres_only
+def test_a_second_postgresql_writer_waits_for_the_first_to_commit(session):
+    """The advisory lock is per transaction and per database: a writer on
+    another connection, as another process would be, waits for it."""
+    import threading
+    import time
+
+    from app.audit_integrity import verify_chain
+    from sqlmodel import Session
+
+    first_engine, second_engine = _postgres_engines(session, 2)
+    first = Session(first_engine)
+    try:
+        row = AuditLog(user_id=None, action="first", timestamp=utcnow())
+        chain_new_entry(KEY, first, row)
+        first.add(row)
+        first.flush()  # written, not committed
+
+        done = threading.Event()
+
+        def second_writer():
+            with Session(second_engine) as second:
+                other = AuditLog(user_id=None, action="second", timestamp=utcnow())
+                chain_new_entry(KEY, second, other)
+                second.add(other)
+                second.commit()
+            done.set()
+
+        worker = threading.Thread(target=second_writer)
+        worker.start()
+        time.sleep(0.5)
+        assert not done.is_set(), "the second writer must wait for the first to commit"
+        first.commit()
+        worker.join(timeout=10)
+        assert done.is_set()
+
+        result = verify_chain(KEY, session)
+        assert result.ok and result.checked_count == 2
+        actions = [r.action for r in session.exec(select(AuditLog).order_by(AuditLog.id)).all()]
+        assert actions == ["first", "second"]
+    finally:
+        first.close()  # also when it failed before its commit, so nothing stays locked
+        first_engine.dispose()
+        second_engine.dispose()
+
+
+@pytest.mark.postgres_only
+def test_a_rolled_back_postgresql_write_leaves_a_gap_verification_accepts(session):
+    """A sequence value drawn by a write that is rolled back is never given
+    out again: the ids have a gap, and the chain, which follows prev_hash in
+    id order, doesn't mind it."""
+    from app.audit_integrity import verify_chain
+
+    def write(action):
+        entry = AuditLog(user_id=None, action=action, timestamp=utcnow())
+        chain_new_entry(KEY, session, entry)
+        session.add(entry)
+        session.flush()
+        return entry.id
+
+    first = write("kept")
+    session.commit()
+    write("rolled back")
+    session.rollback()
+    last = write("after")
+    session.commit()
+
+    assert last == first + 2
+    result = verify_chain(KEY, session)
+    assert result.ok and result.checked_count == 2
+
+
+@pytest.mark.postgres_only
+def test_postgresql_writers_in_parallel_keep_one_unbroken_chain(session):
+    """Two connections, each its own engine, write 150 audit entries each at
+    once, one transaction per entry: verification finds one chain of 300
+    rows, in id order, with no break."""
+    import threading
+
+    from app.audit_integrity import verify_chain
+    from sqlmodel import Session
+
+    per_writer = 150
+    engines = _postgres_engines(session, 2)
+    start = threading.Barrier(len(engines))
+    errors = []
+
+    def writer(index, engine):
+        try:
+            start.wait()
+            for n in range(per_writer):
+                with Session(engine) as writing:
+                    entry = AuditLog(user_id=None, action=f"w{index}.{n}", timestamp=utcnow())
+                    chain_new_entry(KEY, writing, entry)
+                    writing.add(entry)
+                    writing.commit()
+        except Exception as exc:  # noqa: BLE001 - reported by the assertion below
+            errors.append(exc)
+
+    workers = [
+        threading.Thread(target=writer, args=(index, engine))
+        for index, engine in enumerate(engines)
+    ]
+    try:
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=120)
+    finally:
+        for engine in engines:
+            engine.dispose()
+
+    assert errors == []
+    result = verify_chain(KEY, session)
+    assert result.ok, result
+    assert result.checked_count == 2 * per_writer
+    rows = session.exec(select(AuditLog).order_by(AuditLog.id)).all()
+    assert [row.prev_hash for row in rows[1:]] == [row.row_hash for row in rows[:-1]]

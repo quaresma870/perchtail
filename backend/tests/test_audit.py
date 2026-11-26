@@ -39,7 +39,8 @@ def test_record_audit_event_does_not_commit(session):
 
 
 def test_record_audit_event_returned_entry_is_queryable_after_commit(session):
-    record_audit_event(session, user_id=3, action="role.create", target_type="role", target_id=1)
+    # No user: the audit log's user_id is a foreign key, enforced on PostgreSQL.
+    record_audit_event(session, user_id=None, action="role.create", target_type="role", target_id=1)
     session.commit()
     rows = session.exec(select(AuditLog)).all()
     assert len(rows) == 1

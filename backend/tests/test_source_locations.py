@@ -16,7 +16,8 @@ from app.collectors.base import DirEntry
 from app.collectors.smb_shares import Share
 from app.config import get_settings
 from app.db import get_session
-from app.models import AlertFileState, PatternKind, Protocol, Rule, RuleType, Source
+from app.models import Alert, AlertFileState, PatternKind, Protocol, Rule, RuleType, Source
+from app.timeutils import utcnow
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import select
@@ -146,7 +147,20 @@ def test_unchanged_base_path_is_not_revalidated(session, client):
 
 
 def _alert_position(session, source_id):
-    session.add(AlertFileState(alert_id=1, source_id=source_id, file_path="app.log", offset=5))
+    owner = session.exec(select(User)).first()
+    alert = Alert(
+        user_id=owner.id,
+        name="errors",
+        query="error",
+        source_id=source_id,
+        webhook_url_encrypted="not-read-here",
+        created_at=utcnow(),
+    )
+    session.add(alert)
+    session.commit()
+    session.add(
+        AlertFileState(alert_id=alert.id, source_id=source_id, file_path="app.log", offset=5)
+    )
     session.commit()
 
 

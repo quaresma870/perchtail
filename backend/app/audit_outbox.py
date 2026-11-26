@@ -123,7 +123,13 @@ ACCEPTED: dict[str, tuple[str, Callable[[object], bool], str | None]] = {
 }
 
 
-def _parse(raw: object) -> object:
+def _parse(raw: object, *, decoded: bool) -> object:
+    """The metadata column as read in raw SQL: JSON text on SQLite, already
+    decoded by the driver on PostgreSQL (`decoded`), where an object comes
+    back as a dict and a JSON string as a str, which is never decoded a
+    second time (it would be refused on SQLite too)."""
+    if decoded:
+        return raw
     if not isinstance(raw, str):
         return None
     try:
@@ -139,16 +145,18 @@ def _short(value: object) -> str | None:
 def drain_audit_outbox(session: Session) -> tuple[int, int]:
     """Records every outbox entry in the audit log, or refuses it, in id
     order, one transaction per entry (the audit entry and the deletion
-    together). Read as raw text, so an entry written outside a migration
-    with values that don't parse is refused rather than stopping the start.
+    together). Read in raw SQL (as text on SQLite), so an entry written
+    outside a migration with values that don't parse is refused rather than
+    stopping the start.
     Commits. Returns (recorded, rejected)."""
     recorded = rejected = 0
     rows = session.execute(
         text("SELECT id, action, metadata, created_at FROM audit_outbox ORDER BY id")
     ).all()
+    decoded = session.get_bind().dialect.name != "sqlite"
     for outbox_id, action, raw_metadata, created_at in rows:
         accepted = ACCEPTED.get(action) if isinstance(action, str) else None
-        metadata = _parse(raw_metadata)
+        metadata = _parse(raw_metadata, decoded=decoded)
         if accepted is not None and accepted[1](metadata):
             target_type, _check, target_key = accepted
             record_audit_event(
