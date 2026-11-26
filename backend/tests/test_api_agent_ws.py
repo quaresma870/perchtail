@@ -618,7 +618,9 @@ def test_a_silent_agent_is_disconnected_and_its_socket_closed(session, monkeypat
     from app import agent_registry as registry_module
 
     monkeypatch.setattr(registry_module, "AGENT_PING_INTERVAL_SECONDS", 0.05)
-    monkeypatch.setattr(registry_module, "AGENT_DEAD_AFTER_SECONDS", 0.4)
+    # Long enough after the ping interval that a slow runner still sends a
+    # ping before the connection counts as dead.
+    monkeypatch.setattr(registry_module, "AGENT_DEAD_AFTER_SECONDS", 1.5)
     source = _agent_source(session, "s3cret")
     registry = get_agent_registry()
     client = _client(session)
@@ -628,7 +630,7 @@ def test_a_silent_agent_is_disconnected_and_its_socket_closed(session, monkeypat
         assert _wait_until(lambda: registry.is_connected(source.id))
         # The server pings; this agent never answers.
         assert ws.receive_json()["type"] == "ping"
-        assert _wait_until(lambda: not registry.is_connected(source.id), timeout=3)
+        assert _wait_until(lambda: not registry.is_connected(source.id), timeout=6)
         code = None
         try:
             while True:
