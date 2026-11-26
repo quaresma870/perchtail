@@ -559,13 +559,26 @@ def ensure_role(client: Client, ledger: Ledger, customers: list[dict]) -> dict:
     return role
 
 
+MFA_STATE = "users-mfa.json"
+
+
 def _set_own_password(username: str, current: str) -> str:
     """Signs in as the user with the temporary password an admin set and
-    replaces it, as the forced first-login change requires."""
+    replaces it, as the forced first-login change requires. A user PerchTail
+    requires MFA of (a role with a global capability) then turns it on, and
+    its TOTP secret is kept in users-mfa.json for the k6 scenarios."""
     client = Client()
-    client.login(username, current)
+    # An account that already has MFA (an earlier run) signs in with it: an
+    # admin's password reset doesn't turn MFA off.
+    me = client.login(username, current, read_state(MFA_STATE, {}).get(username))
     final = random_password()
     client.post("/auth/change-password", {"current_password": current, "new_password": final})
+    if me.get("mfa_required") and not me.get("mfa_enabled"):
+        secret = client.post("/auth/mfa/enroll", {"password": final})["secret"]
+        client.post("/auth/mfa/confirm", {"code": fresh_totp(username, secret)})
+        secrets_by_user = read_state(MFA_STATE, {})
+        secrets_by_user[username] = secret
+        write_state(MFA_STATE, secrets_by_user)
     return final
 
 
@@ -591,7 +604,9 @@ def ensure_users(
             client.patch(f"/users/{user['id']}", {"active": True, "role_id": role["id"]})
         if username in saved:
             try:
-                me = Client().login(username, saved[username])
+                me = Client().login(
+                    username, saved[username], read_state(MFA_STATE, {}).get(username)
+                )
                 if not me.get("must_change_password"):
                     continue
             except ApiError:
