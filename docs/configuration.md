@@ -43,7 +43,7 @@ The defaults below are the code's defaults. Relative paths are relative to the w
 
 ### PostgreSQL
 
-SQLite in `DATA_DIR` is the default and needs nothing. To use PostgreSQL instead, give PerchTail an empty database on PostgreSQL 18 or later and point `DATABASE_URL` (or `DATABASE_URL_FILE`) at it; `alembic upgrade head`, which the Docker image runs before every start, creates the schema.
+SQLite in `DATA_DIR` is the default and needs nothing. To use PostgreSQL instead, give PerchTail an empty database on PostgreSQL 18 or later and point `DATABASE_URL` (or `DATABASE_URL_FILE`) at it; `alembic upgrade head`, which the Docker image runs before every start, creates the schema. To move an existing SQLite installation there, with its data, use `python -m app.migrate_database` ([upgrade.md](upgrade.md#moving-from-sqlite-to-postgresql)).
 
 - **The database.** Create it with the UTF8 encoding, owned by the role PerchTail connects as. PerchTail refuses to start on a server older than 18 (`startup.database_version_unsupported`) or a database in another encoding (`startup.database_encoding_unsupported`), both at `CRITICAL`. The `C.UTF-8` locale of the `builtin` provider is recommended, so that lists are sorted the same as on SQLite: `CREATE DATABASE perchtail OWNER perchtail ENCODING 'UTF8' LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' TEMPLATE template0;`.
 - **The `pg_trgm` extension.** The migration that creates the schema also creates it in the database (`CREATE EXTENSION IF NOT EXISTS pg_trgm`), with a trigram index on the file-name index's paths. It is a trusted extension, so the database's owner may create it; on a server where extensions are restricted, have an administrator create it first.

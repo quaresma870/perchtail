@@ -49,7 +49,7 @@ Routers in `app/api/`, by area: auth (login, logout, profile, password change, p
 
 The built frontend (`frontend/dist`) is served by the backend at `/` when it exists.
 
-Command-line tools run from `backend/`: `python -m alembic upgrade head` (migrations), `python -m app.backup create|verify|restore|list`, `python -m app.rotate_credential_key` and `python -m app.data_layout`.
+Command-line tools run from `backend/`: `python -m alembic upgrade head` (migrations), `python -m app.backup create|verify|restore|list`, `python -m app.rotate_credential_key`, `python -m app.data_layout` and `python -m app.migrate_database --from <SQLite URL> [--dry-run]` (`app/migrate_database.py`: copies a SQLite database at this version's revision into the empty PostgreSQL database `DATABASE_URL` names, in one transaction that also creates the schema, through `app/db_copy.py`, which copies every table of the models in foreign-key order with its ids and moves the id sequences past them; it refuses while either instance lock is held or the target holds a row other than the migration's own `update_check_state` row, and commits only once row counts, every stored secret and the audit chain check out, with a `database.migrate` audit entry).
 
 ### Frontend (`frontend/src/`)
 
@@ -229,7 +229,7 @@ backend/
     redaction/, redaction_rules.py   redaction engine and its rules
     alerts.py, name_index.py, name_index_store.py, source_status.py, email_delivery.py
     audit.py, audit_hash_chain.py, audit_integrity.py, audit_purge.py, audit_outbox.py, auth_events.py, access_report.py
-    crypto.py, rotate_credential_key.py, backup.py, config_transfer.py
+    crypto.py, rotate_credential_key.py, backup.py, config_transfer.py, db_copy.py, migrate_database.py
     agent_registry.py, agent_upgrades.py, agent_upgrade_policy.py
     monitoring_access.py, health.py, metrics.py, update_check.py
   migrations/         Alembic env.py and versions/
