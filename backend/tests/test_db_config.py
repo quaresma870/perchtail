@@ -330,5 +330,6 @@ def test_only_a_sqlite_file_adds_its_folder_to_the_protected_paths(tmp_path):
     postgres = Settings(data_dir=str(tmp_path / "db"), database_url=PG_URL)
     paths = protected_paths(postgres)
     assert Path(tmp_path / "db") in paths
-    assert not any("postgresql" in str(path) or "db.example.com" in str(path) for path in paths)
+    # Everything the SQLite settings protect except the database file's folder.
+    assert set(paths) == set(protected_paths(sqlite)) - {db_dir}
     assert len(paths) == len(protected_paths(sqlite)) - 1

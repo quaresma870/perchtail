@@ -67,8 +67,12 @@ def test_every_revision_before_the_baseline_runs_on_sqlite_only():
             body = source.split(f"def {function}() -> None:", 1)[1]
             # The guard comes first, after an optional docstring or comments.
             body = re.sub(r'^\s*""".*?"""', "", body, count=1, flags=re.S)
-            guard = r"(\s*#[^\n]*)*\s*if not sqlite_only\(\):\s*return\b"
-            assert re.match(guard, body), (path.name, function)
+            code = [
+                line.strip()
+                for line in body.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            assert code[:2] == ["if not sqlite_only():", "return"], (path.name, function)
 
 
 def test_the_baseline_is_the_only_head():
