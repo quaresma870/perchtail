@@ -67,7 +67,8 @@ jobs:
 
   # The backend suite again on PostgreSQL (#306): TEST_DATABASE_URL points the
   # tests at a throwaway PostgreSQL 18 service, reachable only inside the
-  # runner (trust authentication, no password to keep).
+  # runner. It has a password, a fixed test value, because the tests check
+  # that a database password never reaches the logs or an error.
   backend-postgres:
     runs-on: ubuntu-latest
     services:
@@ -76,7 +77,7 @@ jobs:
         env:
           POSTGRES_USER: perchtail_test
           POSTGRES_DB: perchtail_test
-          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_PASSWORD: perchtail_test
           POSTGRES_INITDB_ARGS: --locale-provider=builtin --locale=C.UTF-8
         ports:
           - 5432:5432
@@ -84,7 +85,7 @@ jobs:
           --health-cmd "pg_isready -U perchtail_test -d perchtail_test"
           --health-interval 5s --health-timeout 5s --health-retries 20
     env:
-      TEST_DATABASE_URL: postgresql://perchtail_test@127.0.0.1:5432/perchtail_test
+      TEST_DATABASE_URL: postgresql://perchtail_test:perchtail_test@127.0.0.1:5432/perchtail_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
