@@ -93,6 +93,15 @@ def test_readyz_is_not_ready_when_the_data_dir_is_not_writable(ready_app, monkey
     assert response.json()["failed"] == ["data_dir"]
 
 
+def test_readyz_is_not_ready_once_the_database_lock_was_lost(ready_app, monkeypatch):
+    from app import instance_lock
+
+    monkeypatch.setattr(instance_lock, "_lock_lost", True)
+    response = ready_app.get("/readyz")
+    assert response.status_code == 503
+    assert response.json()["failed"] == ["database_lock"]
+
+
 def test_healthz_stays_liveness_only(ready_app, monkeypatch):
     monkeypatch.setattr("app.main.scheduler", _Scheduler(running=False))
     assert ready_app.get("/healthz").json() == {"status": "ok"}

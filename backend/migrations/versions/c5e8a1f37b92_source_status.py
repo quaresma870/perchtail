@@ -13,6 +13,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "c5e8a1f37b92"
 down_revision: str | Sequence[str] | None = "b3d7e9f21c56"
@@ -21,6 +22,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("source") as batch_op:
         batch_op.add_column(sa.Column("status", sqlmodel.sql.sqltypes.AutoString(), nullable=True))
         batch_op.add_column(sa.Column("status_checked_at", sa.DateTime(), nullable=True))
@@ -30,6 +33,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("source") as batch_op:
         batch_op.drop_column("status_message")
         batch_op.drop_column("status_checked_at")

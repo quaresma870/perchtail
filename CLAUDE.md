@@ -8,11 +8,11 @@ PerchTail is a self-hosted web app for browsing, opening and downloading log fil
 
 PerchTail only reads from sources. It never writes, deletes or changes anything on them.
 
-Stack: Python 3.12, FastAPI, SQLModel/SQLAlchemy, Alembic and SQLite on the backend; Svelte 5, TypeScript, Vite and CodeMirror 6 on the frontend; Go for the push agent. Licensed under the AGPL-3.0 (`LICENSE`); contributions are accepted under the CLA (`CLA.md`).
+Stack: Python 3.12, FastAPI, SQLModel/SQLAlchemy, Alembic and SQLite (or PostgreSQL 18 through psycopg 3) on the backend; Svelte 5, TypeScript, Vite and CodeMirror 6 on the frontend; Go for the push agent. Licensed under the AGPL-3.0 (`LICENSE`); contributions are accepted under the CLA (`CLA.md`).
 
 ## What it stores and what it doesn't
 
-The SQLite database (`DATA_DIR/perchtail.db` unless `DATABASE_URL` is set) holds:
+The database holds the following: SQLite in `DATA_DIR/perchtail.db` by default, another SQLite file or a PostgreSQL 18 database with `DATABASE_URL` (or `DATABASE_URL_FILE`). `postgres://` and `postgresql://` are rewritten to `postgresql+psycopg://` (`app/config.py`, `normalize_database_url`), and the URL is only ever logged or shown without its password (`redacted_database_url`; `Settings` hides the input in its errors). On PostgreSQL the engine has a pool (`DATABASE_POOL_SIZE`, `DATABASE_MAX_OVERFLOW`, pre-ping, recycled after 30 minutes, `app/db.py`, `engine_options`), enum columns are VARCHAR (`native_enum=False`), byte sizes and offsets BIGINT (`models.BYTES`), and the file-name index uses a `pg_trgm` GIN index on `file_name_entry.path` instead of FTS5 (`app/name_index_store.py`, `ensure_name_index_schema`).
 
 - configuration: customers, folders, sources and their connection settings, rules, severity patterns, redaction rules, system settings (`system_setting`), the system SMTP server (`smtp_settings`), the SSO provider and the SSO group-to-role mappings;
 - encrypted secrets: source credentials (`Source.credential_ref`), the SSO provider configuration (`SSOProviderConfig.config`), users' TOTP secrets (`User.mfa_secret_encrypted`), the SMTP password (`SmtpSettings.password_encrypted`) and alert webhook URLs (`Alert.webhook_url_encrypted`, never returned by the API);
@@ -36,9 +36,9 @@ Some state is in memory only and is lost on restart: scratch bookkeeping, live a
 A FastAPI app (`app/main.py`). The lifespan, in order:
 
 1. refuses to start while `CREDENTIAL_ENCRYPTION_KEY` is the shipped default `changeme`, or is weak (`app/key_strength.py`), unless `CREDENTIAL_KEY_REFUSE_WEAK=false`, which only warns;
-2. takes an exclusive lock on `DATA_DIR/.perchtail.lock` (`app/instance_lock.py`), so only one process runs per `DATA_DIR`;
+2. takes an exclusive lock on `DATA_DIR/.perchtail.lock` (`app/instance_lock.py`), so only one process runs per `DATA_DIR`; on PostgreSQL it then refuses a server older than 18, a database not in UTF8, and, unless `DATABASE_REQUIRE_VERIFIED_TLS=false` (which only warns, also at the top of the system settings pages), a database off this host reached without `sslmode=verify-ca` or `verify-full` (`app/db.py`, `check_database_server`), and takes a session advisory lock in the database (`acquire_database`), so only one instance runs per database, checked every minute by the `database_lock_check` job; `alembic upgrade` does the same (`migrations/env.py`);
 3. moves a pre-0.5.0 data layout into `DATA_DIR` (`app/data_layout.py`) and refuses a database migrated by a newer PerchTail (`app/schema_version.py`);
-4. creates missing tables and the FTS5 index (`app/db.py`, `init_db`);
+4. creates missing tables and the FTS5 index, or on PostgreSQL the `pg_trgm` index (`app/db.py`, `init_db`);
 5. refuses to generate a new credential salt while encrypted data exists (`app/bootstrap.py`, `assert_credential_salt_present`), backfills the audit hash chain, signs into it the anchor of a purge made before 0.7.0, records the events waiting in the audit outbox, and records a restore if one is pending;
 6. seeds the system log source (moving it to a changed `LOG_DIR`), the first super admin (only when there are no users; its temporary password goes to `DATA_DIR/initial-admin-password`, mode 0600, deleted when it is changed, and the log only names the file), the "No Access" role, the default severity patterns and the built-in redaction rules (off), binds older SSO accounts to their issuer, and writes the audit chain marker once the chain has started;
 7. clears leftovers in `SCRATCH_DIR`, registers the scheduled jobs and starts the scheduler.
@@ -77,6 +77,7 @@ One in-process APScheduler `BackgroundScheduler` (`app/scheduler.py`; coalesce, 
 | `audit_integrity_check` | `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` (1 day), catch-up | Verifies the audit hash chain. |
 | `backup` | 5 min tick | Makes an encrypted backup once the backup interval (Settings → Backups and updates) has passed: 24 hours on a new install, 0 (off) kept on an install upgraded from before 0.7.0. |
 | `wal_checkpoint` | 1 h | Checkpoints and truncates the SQLite WAL (`app/db.py`). |
+| `database_lock_check` | 1 min | PostgreSQL only: confirms the instance lock's connection still holds the advisory lock (`pg_locks`); if not, takes it again on a new connection (`database.instance_lock_reacquired`), or, when another process holds it, logs `database.instance_lock_lost` and makes `/readyz` fail with `database_lock` until the process ends (`app/instance_lock.py`, `DatabaseLock.check`). PostgreSQL connections send TCP keepalives (`app/db.py`, `POSTGRESQL_KEEPALIVES`). |
 
 ### Connectors (`backend/app/collectors/`)
 
@@ -197,7 +198,7 @@ Auth tables (`backend/app/auth/models.py`):
 - `AuditChainState`: the hash chain's anchor and last verification result (single row).
 - `AuditOutbox`: an audit event a migration recorded without the chain key, signed into the chain and deleted by the next start (`app/audit_outbox.py`).
 
-Tables that other rows point at by id use `NO_ID_REUSE` (`sqlite_autoincrement`), so a deleted id is never reused. Timestamps are naive UTC (`app/timeutils.py`, `utcnow`). The schema is managed by Alembic (`backend/migrations/`); a schema change needs a migration.
+Tables that other rows point at by id use `NO_ID_REUSE` (`sqlite_autoincrement`), so a deleted id is never reused (a PostgreSQL sequence never reuses one either). Timestamps are naive UTC (`app/timeutils.py`, `utcnow`). The schema is managed by Alembic (`backend/migrations/`); a schema change needs a migration. The revisions up to `a7c3e9d2f514` are SQLite's history and start with `if not sqlite_only(): return` (`migrations/engines.py`); `c4e7a1d9b302` (pg_baseline) creates the whole schema on an empty PostgreSQL database, frozen as it was then, and does nothing on SQLite. There is one head, and every revision after it runs on both engines.
 
 ## Repository structure
 
@@ -248,7 +249,7 @@ README.md, CHANGELOG.md, ROADMAP.md, CONTRIBUTING.md, SECURITY.md, CLA.md, CODE_
 
 ## Deployment shape
 
-The Docker image builds the frontend with Node 22 and runs the backend on `python:3.12-slim` as an unprivileged user (uid 10001), with pip removed once the requirements are installed. `backend/docker-entrypoint.sh` runs `python -m app.data_layout`, `python -m alembic upgrade head` and `uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers` (the client address comes from `TRUSTED_PROXIES`, `app/request_context.py`). `docker-compose.yml` keeps state in the `/data` volume. The image carries `LICENSE` and `THIRD-PARTY-NOTICES.md` in `/app`. PerchTail is meant to sit behind a TLS-terminating reverse proxy. It runs as a single process per `DATA_DIR`; SQLite runs in WAL mode, so `DATA_DIR` must be on a local disk. `docker-compose.yml` publishes port 8080 on `127.0.0.1` only, with a read-only root filesystem, `no-new-privileges` and every capability dropped except the few the entrypoint's root step needs; running with `user: "10001:10001"` needs none. The image ships no test code (`.dockerignore`), and its entrypoint refuses the test hooks (`PERCHTAIL_TEST_PATCH_MODULE`, `PERCHTAIL_TEST_MODE`).
+The Docker image builds the frontend with Node 22 and runs the backend on `python:3.12-slim` as an unprivileged user (uid 10001), with pip removed once the requirements are installed. `backend/docker-entrypoint.sh` runs `python -m app.data_layout`, `python -m alembic upgrade head` and `uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers` (the client address comes from `TRUSTED_PROXIES`, `app/request_context.py`). `docker-compose.yml` keeps state in the `/data` volume. The image carries `LICENSE` and `THIRD-PARTY-NOTICES.md` in `/app`. PerchTail is meant to sit behind a TLS-terminating reverse proxy. It runs as a single process per `DATA_DIR` (and per database on PostgreSQL); SQLite runs in WAL mode, so `DATA_DIR` must be on a local disk. `docker-compose.yml` publishes port 8080 on `127.0.0.1` only, with a read-only root filesystem, `no-new-privileges` and every capability dropped except the few the entrypoint's root step needs; running with `user: "10001:10001"` needs none. The image ships no test code (`.dockerignore`), and its entrypoint refuses the test hooks (`PERCHTAIL_TEST_PATCH_MODULE`, `PERCHTAIL_TEST_MODE`).
 
 ## How to test
 
@@ -263,6 +264,8 @@ CI (`.github/workflows/ci.yml`) runs these on every push and pull request:
 
 Other workflows: `codeql.yml` (CodeQL, on pushes and pull requests to `dev`, `main` and `hotfix/**`, and weekly), `scorecard.yml` (OpenSSF Scorecard, on `main` and weekly) and `security-scan.yml` (the dependency and image vulnerability scans, every day; the image scan accepts the advisories listed in `.grype.yaml`, each with a reason and a review date checked by `.github/scripts/grype_exceptions.py`).
 
+With `TEST_DATABASE_URL` (a PostgreSQL 18 database whose role has `CREATEDB`), the backend tests run on PostgreSQL: `tests/conftest.py` creates the schema there once, empties every table after each test (`TRUNCATE ... RESTART IDENTITY CASCADE`), points `DATABASE_URL` at it, and gives the `empty_postgres_url` fixture a new database per test. Tests marked `sqlite_only` or `postgres_only` run on that engine only.
+
 Two backend tests cover every endpoint: `tests/test_every_endpoint_needs_auth.py` (each operation needs authentication unless it is listed in `PUBLIC_OPERATIONS`) and `tests/test_api_properties.py` (Schemathesis, no 5xx, no outbound connections).
 
 ## Conventions
@@ -273,6 +276,7 @@ Two backend tests cover every endpoint: `tests/test_every_endpoint_needs_auth.py
 - Regular expressions that come from users and run on the backend are compiled with RE2 (`app/rules.py`, `compile_linear`).
 - `record_audit_event` doesn't commit: the caller commits the change and its audit row in one transaction.
 - Store timestamps with `app.timeutils.utcnow()`.
+- Migrations after `c4e7a1d9b302` run on SQLite and PostgreSQL: no `sqlite_master`, `sqlite_sequence`, FTS5 or `PRAGMA` outside a dialect check; no `batch_alter_table(recreate="always")` without one; `sa.true()`/`sa.false()` for boolean defaults; BIGINT for byte sizes and offsets (`models.BYTES`); enum columns with `native_enum=False`. Check each one with `alembic upgrade head` and `alembic check` on both engines (`tests/test_migrations_postgresql.py`).
 - A new page or popup gets a test in `frontend/e2e/accessibility.spec.ts`.
 - Commits follow Conventional Commits, with a scope where it helps (`feat(rbac): ...`, `fix: ...`, `docs: ...`, `ci(release): ...`). Pull requests target `dev`.
 - User-visible changes get an entry under `[Unreleased]` in `CHANGELOG.md`.

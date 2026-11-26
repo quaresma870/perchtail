@@ -10,6 +10,7 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 import sqlmodel
+from migrations.engines import sqlite_only
 
 
 # revision identifiers, used by Alembic.
@@ -21,6 +22,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
+    if not sqlite_only():
+        return
     # Both nullable: rows written before this feature existed have neither
     # until app.audit_hash_chain.backfill_chain_if_needed runs once at
     # startup (app/main.py's lifespan) -- deliberately not done as a data
@@ -42,6 +45,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
+    if not sqlite_only():
+        return
     op.drop_table('audit_chain_state')
     op.drop_column('auditlog', 'row_hash')
     op.drop_column('auditlog', 'prev_hash')

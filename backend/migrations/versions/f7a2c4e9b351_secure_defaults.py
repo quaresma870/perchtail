@@ -28,6 +28,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "f7a2c4e9b351"
 down_revision: str | Sequence[str] | None = "e5c2a8d71f43"
@@ -127,6 +128,8 @@ def _plain_webhooks() -> list[tuple[int, str]]:
 
 def upgrade() -> None:
     # Before any change, so a refusal leaves the database as it was.
+    if not sqlite_only():
+        return
     if _plain_webhooks():
         _assert_credential_salt_present()
     _recover_interrupted_rebuild("source")
@@ -166,6 +169,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     bind = op.get_bind()
     rows = bind.execute(sa.text("SELECT id, webhook_url FROM alert")).all()
     encrypted = [row for row in rows if not row.webhook_url.startswith(_PLAIN_SCHEMES)]

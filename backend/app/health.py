@@ -79,4 +79,8 @@ def readiness_failures(engine, data_dir, scheduler) -> list[str]:
         failures.append("data_dir")
     if not scheduler.running:
         failures.append("scheduler")
+    from app.instance_lock import database_lock_lost
+
+    if database_lock_lost():
+        failures.append("database_lock")
     return failures

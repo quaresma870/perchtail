@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "e5c1b7a94d26"
 down_revision: str | Sequence[str] | None = "e5c1b7a93d24"
@@ -40,6 +41,8 @@ _audit_outbox = sa.table(
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     bind = op.get_bind()
     rows = bind.execute(
         sa.text(
@@ -71,4 +74,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     pass

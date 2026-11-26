@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "a8d3f5c27e14"
 down_revision: str | Sequence[str] | None = "d4a8f2c6b913"
@@ -99,6 +100,8 @@ def _as_list(value) -> list:
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     _recover_interrupted_rebuild("rolegrant")
     bind = op.get_bind()
     rows = bind.execute(
@@ -134,6 +137,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     _recover_interrupted_rebuild("rolegrant")
     if not _has_constraint():
         return

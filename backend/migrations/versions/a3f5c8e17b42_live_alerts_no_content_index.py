@@ -19,6 +19,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 # The rebuild keeps AUTOINCREMENT (see 47c9d392f28f): ids of deleted sources
 # are never handed out again.
@@ -31,6 +32,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     op.execute("DROP TABLE IF EXISTS search_index_fts")
     op.drop_table("search_index_state")
     with op.batch_alter_table("source", table_kwargs=NO_ID_REUSE) as batch_op:
@@ -92,6 +95,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # The index content is gone for good; the tables come back empty.
+    if not sqlite_only():
+        return
     op.drop_index("ix_alert_delivery_alert_id", table_name="alert_delivery")
     op.drop_table("alert_delivery")
     op.drop_table("alert_file_state")

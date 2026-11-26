@@ -69,11 +69,11 @@ from app.bootstrap import (
     seed_system_log_source,
 )
 from app.collectors.local import LocalPathNotAllowedError
-from app.config import get_settings
+from app.config import get_settings, redacted_database_url
 from app.crypto import audit_chain_key
 from app.data_layout import leftover_legacy_database
 from app.data_layout import report as report_data_layout
-from app.db import engine, init_db
+from app.db import check_database_server, engine, init_db
 from app.db import register_upkeep_jobs as register_db_upkeep_jobs
 from app.health import mark_started, readiness_failures
 from app.jobs import register as register_job
@@ -316,15 +316,47 @@ async def lifespan(app: FastAPI):
     except instance_lock.InstanceLockHeldError as exc:
         instance_lock.log_held(logger, exc)
         raise
+    database_lock = None
     try:
-        async with _started(app, settings):
+        # PostgreSQL (#306): a server that is too old, not UTF8 or reached
+        # without a verified certificate is refused before anything is read;
+        # then the same one-instance guard, in the database itself.
+        check_database_server(engine, logger, settings)
+        try:
+            database_lock = instance_lock.acquire_database(engine)
+        except instance_lock.DatabaseLockHeldError as exc:
+            instance_lock.log_database_held(logger, exc)
+            raise
+        async with _started(app, settings, database_lock):
             yield
     finally:
+        if database_lock is not None:
+            database_lock.release()
         lock.release()
 
 
+def protected_paths(settings) -> list[Path]:
+    """What clearing scratch at startup must never delete, wherever
+    SCRATCH_DIR points: the state directories, the salt and known_hosts,
+    which may live outside DATA_DIR (losing the salt makes every stored
+    credential unreadable), and the SQLite database's folder. A PostgreSQL
+    database has no file here."""
+    paths = [
+        Path(settings.data_dir),
+        Path(settings.log_dir),
+        Path(settings.backup_dir),
+        Path(settings.credential_salt_path),
+        Path(settings.ssh_known_hosts_path),
+    ]
+    if settings.database_url.startswith("sqlite:///"):
+        db_file = settings.database_url.removeprefix("sqlite:///")
+        if db_file and db_file != ":memory:":
+            paths.insert(3, Path(db_file).parent)
+    return paths
+
+
 @asynccontextmanager
-async def _started(app: FastAPI, settings):
+async def _started(app: FastAPI, settings, database_lock=None):
     report_data_layout(settings)
     # A database migrated by a newer PerchTail (#334): refuse before
     # init_db() touches it.
@@ -334,7 +366,7 @@ async def _started(app: FastAPI, settings):
         logger.warning(
             "startup.data_layout.legacy_database_left",
             legacy=str(leftover),
-            in_use=settings.database_url,
+            in_use=redacted_database_url(settings.database_url),
             hint="a database from before 0.5.0 is still in DATA_DIR's parent; "
             "if it holds your data, stop PerchTail and move it into DATA_DIR",
         )
@@ -383,19 +415,7 @@ async def _started(app: FastAPI, settings):
     store = get_scratch_store()
     # Nothing in scratch can be in use yet: whatever is there was left by a
     # crash or a killed container (#329).
-    db_file = settings.database_url.removeprefix("sqlite:///")
-    store.clear_leftovers(
-        # Also the salt and known_hosts, which may live outside DATA_DIR:
-        # losing the salt makes every stored credential unreadable.
-        protected=[
-            Path(settings.data_dir),
-            Path(settings.log_dir),
-            Path(settings.backup_dir),
-            Path(db_file).parent,
-            Path(settings.credential_salt_path),
-            Path(settings.ssh_known_hosts_path),
-        ]
-    )
+    store.clear_leftovers(protected=protected_paths(settings))
     sweep = timedelta(seconds=settings.scratch_sweep_interval_seconds)
     register_job(
         scheduler,
@@ -469,6 +489,9 @@ async def _started(app: FastAPI, settings):
     # (app/system_settings.py, backup_interval_hours).
     register_job(scheduler, "backup", "Scheduled backup", run_scheduled_backup, BACKUP_TICK)
     register_db_upkeep_jobs(scheduler)
+    # PostgreSQL (#306): the one-instance lock in the database is checked
+    # every minute and taken again if its connection was lost.
+    instance_lock.register_database_lock_check(scheduler, database_lock)
     scheduler.start()
     logger.info("startup.complete")
     yield

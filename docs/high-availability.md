@@ -17,6 +17,7 @@
 | `agent_upgrades` | every minute; ends timed-out upgrades and runs automatic ones inside the window |
 | `backup` | every 5 minutes; backs up once the interval in Settings → Backups and updates has gone by (24 hours on a new install; 0 turns it off) |
 | `wal_checkpoint` | every hour |
+| `database_lock_check` | every minute, on PostgreSQL only; checks the one-instance lock in the database and takes it again if its connection was lost |
 | `session_purge`, `update_check` | every hour |
 | `audit_purge` | every `AUDIT_PURGE_INTERVAL_SECONDS` (a day) |
 | `audit_integrity_check` | every `AUDIT_INTEGRITY_CHECK_INTERVAL_DAYS` (a day) |

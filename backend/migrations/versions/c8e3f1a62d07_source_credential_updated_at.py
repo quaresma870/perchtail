@@ -13,6 +13,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 # The rebuild keeps AUTOINCREMENT (see 47c9d392f28f): ids of deleted sources
 # are never handed out again.
@@ -25,10 +26,14 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("source", table_kwargs=NO_ID_REUSE) as batch_op:
         batch_op.add_column(sa.Column("credential_updated_at", sa.DateTime(), nullable=True))
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("source", table_kwargs=NO_ID_REUSE) as batch_op:
         batch_op.drop_column("credential_updated_at")

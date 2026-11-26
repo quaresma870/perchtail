@@ -9,8 +9,8 @@ Which releases get fixes, and for how long, is in [SECURITY.md](SECURITY.md#supp
 - PerchTail only reads from sources. It never writes, deletes or changes anything on them.
 - Nothing from the logs is kept. Content is fetched fresh into scratch and deleted; only file names, sizes and modification times are indexed.
 - Access is denied unless a grant allows it, and every grant is scoped to a customer, a folder or a source.
-- One process per `DATA_DIR`, on SQLite. SQLite stays the default database even once PostgreSQL is supported.
-- 0.7 is the last feature release before 1.0. 1.0 validates and hardens what is there, with the few viewer additions listed under 1.0.0.
+- One process per `DATA_DIR` and per database. SQLite stays the default database.
+- 0.7 is the last feature release before 1.0. 1.0 validates and hardens what is there, with PostgreSQL support and the few viewer additions listed under 1.0.0.
 - Every release goes through a release candidate retested in a lab with Linux, Windows and push-agent sources first.
 - The HTTP API is internal to the web UI and may change before 1.0.
 - Bulk import is additive: it never deletes anything and never exports credentials.
@@ -42,6 +42,7 @@ The last feature release before 1.0, released as 0.7.0 ([CHANGELOG.md](CHANGELOG
 
 Mostly validation. Besides what 0.7.x shipped, it carries what was finished after 0.7.1: large files that open at their end, with progress and Cancel when one opens whole; right-click menus on log lines, tabs, files, folders, sources and groups (#287); icons in the Settings sidebar; and one answer for every path that can't be read. Then:
 
+- PostgreSQL support (#306). SQLite stays supported; PostgreSQL recommended for production.
 - Load tests in a lab and a sizing guide, on SQLite (#277). The load-test kit is in `loadtest/`.
 - Security controls in CI and releases: OWASP ZAP, OpenSSF Scorecard, and a signed image with provenance and an SBOM. These are in place.
 - An internal penetration test.
@@ -52,7 +53,6 @@ Mostly validation. Besides what 0.7.x shipped, it carries what was finished afte
 For 1.1 and later releases:
 
 - One-click server upgrade for Docker installs, opt-in (#320).
-- PostgreSQL support (#306).
 - High availability on PostgreSQL (#336).
 - Notifications by email, Slack and Microsoft Teams (#251).
 - User groups with their own grants, and grants directly on a user (#246).

@@ -2,8 +2,15 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Optional
 
-from sqlalchemy import JSON, Column, String
+from sqlalchemy import JSON, BigInteger, Column, Enum, Integer, String
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
+
+# Enum columns are VARCHAR on every engine (native_enum=False): on PostgreSQL
+# a native enum type would need ALTER TYPE in a migration for each new value
+# (#306). SQLite has no enum type, so nothing changes there.
+# Sizes and offsets in bytes can pass 2 GiB: BIGINT on PostgreSQL, where
+# INTEGER is 32 bits; SQLite's INTEGER already holds 64.
+BYTES = BigInteger().with_variant(Integer(), "sqlite")
 
 
 class Protocol(StrEnum):
@@ -87,7 +94,7 @@ class Source(SQLModel, table=True):
     # Optional — a source can sit directly under its customer with no
     # folder, for simple setups that don't need grouping.
     folder_id: int | None = Field(default=None, foreign_key="folder.id")
-    protocol: Protocol
+    protocol: Protocol = Field(sa_type=Enum(Protocol, native_enum=False))
     host: str
     port: int | None = None
     # Encrypted at rest via app.crypto (SSH key, SMB/WinRM password, etc.);
@@ -189,9 +196,11 @@ class Rule(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     source_id: int = Field(foreign_key="source.id")
     order: int
-    type: RuleType
+    type: RuleType = Field(sa_type=Enum(RuleType, native_enum=False))
     pattern: str
-    pattern_kind: PatternKind = PatternKind.glob
+    pattern_kind: PatternKind = Field(
+        default=PatternKind.glob, sa_type=Enum(PatternKind, native_enum=False)
+    )
     notes: str | None = None
 
     source: Source = Relationship(back_populates="rules")
@@ -213,9 +222,11 @@ class SeverityPattern(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     source_id: int | None = Field(default=None, foreign_key="source.id")
-    level: SeverityLevel
+    level: SeverityLevel = Field(sa_type=Enum(SeverityLevel, native_enum=False))
     pattern: str
-    pattern_kind: PatternKind = PatternKind.glob
+    pattern_kind: PatternKind = Field(
+        default=PatternKind.glob, sa_type=Enum(PatternKind, native_enum=False)
+    )
     enabled: bool = True
     # Whether a match also tints the whole line, not just the matched
     # substring -- traditionally wanted for error/fatal-style markers, not
@@ -285,7 +296,7 @@ class FileNameEntry(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     source_id: int = Field(foreign_key="source.id", index=True)
     path: str
-    size: int
+    size: int = Field(sa_type=BYTES)
     mtime: float | None = None
     seen_at: datetime
 
@@ -343,7 +354,7 @@ class AlertFileState(SQLModel, table=True):
     alert_id: int = Field(foreign_key="alert.id", primary_key=True)
     source_id: int = Field(foreign_key="source.id", primary_key=True)
     file_path: str = Field(primary_key=True)
-    offset: int = 0
+    offset: int = Field(default=0, sa_type=BYTES)
     head: str | None = None
     checked_at: datetime | None = None
 

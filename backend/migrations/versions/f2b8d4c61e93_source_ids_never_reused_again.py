@@ -18,6 +18,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "f2b8d4c61e93"
 down_revision: str | Sequence[str] | None = "c8e3f1a62d07"
@@ -26,6 +27,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     bind = op.get_bind()
     if bind.dialect.name != "sqlite":
         return
@@ -56,4 +59,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Keeping AUTOINCREMENT is what every earlier revision wants too.
+    if not sqlite_only():
+        return
     pass

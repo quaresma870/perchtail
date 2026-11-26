@@ -6,7 +6,7 @@ Related guides: [admin-guide.md](admin-guide.md), [configuration.md](configurati
 
 PerchTail keeps three things that can't be rebuilt: the SQLite database, the credential salt (`credential_salt`) and SSH `known_hosts`, all in `DATA_DIR` (`/data/db` in the Docker image). The database holds the sources, rules, users, roles, settings and audit log; the salt and your `CREDENTIAL_ENCRYPTION_KEY` together decrypt every stored credential, SSO secret, MFA secret, alert webhook URL and the SMTP password, and key the audit log's hash chain, so each is useless without the other. Logs and scratch don't need a backup.
 
-`python -m app.backup` backs these up while PerchTail runs, into one encrypted file, checks a backup, and restores one. The sections below cover:
+`python -m app.backup` backs these up while PerchTail runs, into one encrypted file, checks a backup, and restores one. It works on SQLite only for now: on a PostgreSQL database ([configuration.md](configuration.md#postgresql)) it refuses, and the scheduled backup fails each time it is due. The sections below cover:
 
 - [Making a backup](#making-a-backup): by hand, on a schedule, and before an upgrade.
 - [What a backup holds](#what-a-backup-holds), and what you keep yourself.

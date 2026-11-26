@@ -22,11 +22,22 @@ def _isolate_state_dirs() -> None:
         ("BACKUP_DIR", "backups"),
     ):
         os.environ[name] = os.path.join(root, sub)
-    for name in ("DATABASE_URL", "CREDENTIAL_SALT_PATH", "SSH_KNOWN_HOSTS_PATH"):
+    for name in (
+        "DATABASE_URL",
+        "DATABASE_URL_FILE",
+        "CREDENTIAL_SALT_PATH",
+        "SSH_KNOWN_HOSTS_PATH",
+    ):
         os.environ.pop(name, None)
+    # TEST_DATABASE_URL (a PostgreSQL database, #306) is where app.db's
+    # engine points too, for the tests that go through it.
+    if os.environ.get("TEST_DATABASE_URL"):
+        os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
 
 
 _isolate_state_dirs()
+
+import uuid  # noqa: E402
 
 import pytest  # noqa: E402
 from app import (  # noqa: E402
@@ -36,11 +47,33 @@ from app import (  # noqa: E402
     request_context,
 )
 from app.auth import models as auth_models  # noqa: E402, F401  registers tables
+from app.config import normalize_database_url  # noqa: E402
 from app.name_index_store import ensure_name_index_schema  # noqa: E402
-from sqlalchemy.pool import StaticPool  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.engine import make_url  # noqa: E402
+from sqlalchemy.pool import NullPool, StaticPool  # noqa: E402
 from sqlmodel import Session, SQLModel, create_engine  # noqa: E402
 
 assert models and auth_models
+
+# Set: the suite runs on this PostgreSQL database instead of SQLite in
+# memory. Its role needs CREATEDB for the tests that migrate a database of
+# their own (empty_postgres_url).
+TEST_DATABASE_URL = normalize_database_url(os.environ.get("TEST_DATABASE_URL", ""))
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "sqlite_only: runs only without TEST_DATABASE_URL")
+    config.addinivalue_line("markers", "postgres_only: runs only with TEST_DATABASE_URL")
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if TEST_DATABASE_URL and item.get_closest_marker("sqlite_only"):
+            item.add_marker(pytest.mark.skip(reason="SQLite only; TEST_DATABASE_URL is set"))
+        if not TEST_DATABASE_URL and item.get_closest_marker("postgres_only"):
+            item.add_marker(pytest.mark.skip(reason="PostgreSQL only; set TEST_DATABASE_URL"))
+
 
 _FAKE_PUBLIC_IP = "93.184.216.34"
 
@@ -173,8 +206,45 @@ def _no_source_status_writes(monkeypatch):
     monkeypatch.setattr("app.source_status.ENABLED", False)
 
 
+_postgres_engine = None
+
+
+def _test_postgres_engine():
+    """The engine on TEST_DATABASE_URL, its schema created once per run from
+    the models on an emptied public schema."""
+    global _postgres_engine
+    if _postgres_engine is None:
+        engine = create_engine(TEST_DATABASE_URL)
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+        SQLModel.metadata.create_all(engine)
+        ensure_name_index_schema(engine)
+        _postgres_engine = engine
+    return _postgres_engine
+
+
+def _empty_postgres_tables(engine) -> None:
+    """Every table emptied and its ids starting at 1 again, as in a new
+    SQLite database in memory. A test that left a transaction open would
+    hold the TRUNCATE up: lock_timeout turns that into an error."""
+    quote = engine.dialect.identifier_preparer.quote
+    tables = ", ".join(quote(table.name) for table in SQLModel.metadata.sorted_tables)
+    with engine.begin() as connection:
+        connection.execute(text("SET LOCAL lock_timeout = '10s'"))
+        connection.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+
+
 @pytest.fixture()
 def session():
+    if TEST_DATABASE_URL:
+        engine = _test_postgres_engine()
+        try:
+            with Session(engine) as session:
+                yield session
+        finally:
+            _empty_postgres_tables(engine)
+        return
     # StaticPool: FastAPI's TestClient runs the app in a separate thread, and
     # the default SQLite in-memory pool is thread-affined — without this, the
     # endpoint sees a different, empty in-memory DB than the one this fixture
@@ -187,3 +257,21 @@ def session():
     ensure_name_index_schema(engine)
     with Session(engine) as session:
         yield session
+
+
+@pytest.fixture()
+def empty_postgres_url():
+    """A new, empty PostgreSQL database next to TEST_DATABASE_URL's, owned by
+    the same role, dropped after the test (needs CREATEDB)."""
+    if not TEST_DATABASE_URL:
+        pytest.skip("PostgreSQL only; set TEST_DATABASE_URL")
+    name = f"perchtail_t_{uuid.uuid4().hex[:12]}"
+    admin = create_engine(TEST_DATABASE_URL, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    try:
+        with admin.connect() as connection:
+            connection.execute(text(f"CREATE DATABASE {name} ENCODING 'UTF8' TEMPLATE template0"))
+        yield make_url(TEST_DATABASE_URL).set(database=name).render_as_string(hide_password=False)
+        with admin.connect() as connection:
+            connection.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+    finally:
+        admin.dispose()

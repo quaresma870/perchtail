@@ -12,7 +12,7 @@ from app.auth import password_reset
 from app.auth.models import GlobalCapability, User
 from app.auth.rbac import forbidden, require_global_capability
 from app.config import get_settings
-from app.db import get_session
+from app.db import TLS_ADVICE, database_tls_not_verified, get_session
 from app.source_roots import HARD_MAX_ROOTS, max_roots
 
 router = APIRouter(prefix="/system-settings", tags=["system-settings"])
@@ -254,7 +254,8 @@ def list_system_warnings(user: User = Depends(require_manage)):
     """Problems with how this instance is set up that only its operator can
     fix, shown at the top of each system settings page (Settings -> Source
     defaults, Sign-in security, Explorer and limits, Alerts, Backups and
-    updates, Monitoring)."""
+    updates, Monitoring): a weak CREDENTIAL_ENCRYPTION_KEY, a database
+    connection that doesn't verify the server's certificate."""
     warnings: list[SystemWarning] = []
     # No length or estimated bits here: manage_system_settings can be
     # delegated, and those numbers narrow the search for the root secret.
@@ -265,6 +266,17 @@ def list_system_warnings(user: User = Depends(require_manage)):
                 code="weak_credential_encryption_key",
                 message="CREDENTIAL_ENCRYPTION_KEY is weaker than recommended.",
                 advice=key_strength.WEAK_KEY_ADVICE,
+            )
+        )
+    # PostgreSQL reached without a verified certificate, which only
+    # DATABASE_REQUIRE_VERIFIED_TLS=false allows (app/db.py). No host or
+    # sslmode here: they are in the startup log.
+    if database_tls_not_verified():
+        warnings.append(
+            SystemWarning(
+                code="database_tls_not_verified",
+                message="The connection to the database doesn't verify its TLS certificate.",
+                advice=TLS_ADVICE,
             )
         )
     return warnings

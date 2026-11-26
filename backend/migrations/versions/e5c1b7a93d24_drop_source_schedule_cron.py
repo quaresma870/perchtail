@@ -19,6 +19,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "e5c1b7a93d24"
 down_revision: str | Sequence[str] | None = "d4a8f2c61e35"
@@ -97,6 +98,8 @@ def _restore_source_sequence(seq: int | None) -> None:
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     _recover_interrupted_rebuild("source")
     if "schedule_cron" not in _source_columns():
         return
@@ -107,6 +110,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     _recover_interrupted_rebuild("source")
     if "schedule_cron" in _source_columns():
         return

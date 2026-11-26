@@ -25,6 +25,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "d4a8f2c61e35"
 down_revision: str | Sequence[str] | None = "a8d3f5c27e14"
@@ -36,6 +37,8 @@ INDEX = "ix_redaction_rule_source_id"
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     inspector = sa.inspect(op.get_bind())
     if not inspector.has_table("redaction_rule"):
         _create_redaction_rule()
@@ -78,6 +81,8 @@ def _create_source_redaction_override() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     op.drop_table("source_redaction_override")
     with op.batch_alter_table("redaction_rule") as batch_op:
         batch_op.drop_index(batch_op.f("ix_redaction_rule_source_id"))

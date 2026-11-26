@@ -14,6 +14,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "d2b8e4f17a63"
 down_revision: str | Sequence[str] | None = "c3f9a2d4e815"
@@ -22,6 +23,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("audit_chain_state") as batch_op:
         batch_op.add_column(sa.Column("known_break_cutoff_row_id", sa.Integer(), nullable=True))
         batch_op.add_column(
@@ -53,6 +56,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("audit_chain_state") as batch_op:
         batch_op.drop_column("known_breaks_recorded_at")
         batch_op.drop_column("known_break_count")
