@@ -9,13 +9,18 @@ nothing here prints them.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import http.cookiejar
 import json
 import os
 import re
 import secrets
 import string
+import struct
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -366,8 +371,43 @@ class Client:
     def delete(self, path: str, **kw: Any) -> Any:
         return self.request("DELETE", path, **kw)
 
-    def login(self, username: str, password: str) -> dict:
-        return self.post("/auth/login", {"username": username, "password": password})
+    def login(self, username: str, password: str, totp_secret: str | None = None) -> dict:
+        """Signs in; with `totp_secret`, with a TOTP code of a time step the
+        account hasn't used yet (fresh_totp)."""
+        body = {"username": username, "password": password}
+        if totp_secret:
+            body["mfa_code"] = fresh_totp(username, totp_secret)
+        return self.post("/auth/login", body)
+
+
+def totp(secret: str, counter: int, digits: int = 6) -> str:
+    """The TOTP code (RFC 6238, SHA-1) of a base32 secret for a time step."""
+    key = base64.b32decode(secret.upper() + "=" * (-len(secret) % 8))
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = (struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF) % 10**digits
+    return f"{code:0{digits}d}"
+
+
+TOTP_STEP_SECONDS = 30
+TOTP_STEPS_STATE = "totp-steps.json"
+
+
+def fresh_totp(username: str, secret: str) -> str:
+    """A code for a time step this account hasn't used yet: PerchTail takes
+    each step's code once (replay protection), and the kit signs the admin
+    in from several commands in a row, so it waits for the next step when
+    the current one was already used. The last step used is kept in the
+    instance's state."""
+    used: dict = read_state(TOTP_STEPS_STATE, {})
+    step = int(time.time() // TOTP_STEP_SECONDS)
+    last = int(used.get(username, -1))
+    if step <= last:
+        time.sleep((last + 1) * TOTP_STEP_SECONDS - time.time() + 0.5)
+        step = last + 1
+    used[username] = step
+    write_state(TOTP_STEPS_STATE, used)
+    return totp(secret, step)
 
 
 def _detail(payload: bytes) -> str:
@@ -388,6 +428,7 @@ def admin_client() -> Client:
     (admin.json in the instance's state)."""
     username = os.environ.get("LOADTEST_ADMIN_USERNAME")
     password = os.environ.get("LOADTEST_ADMIN_PASSWORD")
+    totp_secret = os.environ.get("LOADTEST_ADMIN_TOTP_SECRET")
     if not (username and password):
         saved = read_state("admin.json")
         if not saved:
@@ -396,8 +437,9 @@ def admin_client() -> Client:
                 "or run `seed.py admin-init` on a fresh instance"
             )
         username, password = saved["username"], saved["password"]
+        totp_secret = saved.get("totp_secret")
     client = Client()
-    user = client.login(username, password)
+    user = client.login(username, password, totp_secret)
     if user.get("must_change_password"):
         raise KitError(f"the admin account {username!r} must change its password first")
     if not user.get("is_super_admin"):
