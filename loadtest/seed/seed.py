@@ -267,18 +267,17 @@ def cmd_admin_init(_args: argparse.Namespace) -> None:
     # Kept before MFA is turned on, so a failure from here on loses nothing:
     # admin-init again picks up where this one stopped.
     write_state("admin.json", {"username": username, "password": new_password})
-    path = _enable_admin_mfa(client, username, new_password)
-    print(f"admin account {username!r} ready, with MFA; credentials in {path}")
+    _enable_admin_mfa(client, username, new_password)
+    saved_in = state_dir() / "admin.json"
+    print(f"admin account {username!r} ready, with MFA; credentials in {saved_in}")
 
 
-def _enable_admin_mfa(client: Client, username: str, password: str) -> Path:
+def _enable_admin_mfa(client: Client, username: str, password: str) -> None:
     """Turns MFA on for the signed-in admin and keeps its TOTP secret with
     the password in admin.json."""
     secret = client.post("/auth/mfa/enroll", {"password": password})["secret"]
     client.post("/auth/mfa/confirm", {"code": fresh_totp(username, secret)})
-    return write_state(
-        "admin.json", {"username": username, "password": password, "totp_secret": secret}
-    )
+    write_state("admin.json", {"username": username, "password": password, "totp_secret": secret})
 
 
 # --- apply ----------------------------------------------------------------
