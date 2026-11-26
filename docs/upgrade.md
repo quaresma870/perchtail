@@ -1,10 +1,10 @@
 # Upgrading PerchTail
 
-This guide explains, for the administrators who run PerchTail, how to upgrade the server (Docker or an install from source) and its push agents, what happens to the database, and how to roll an upgrade back.
+This guide explains, for the administrators who run PerchTail, how to upgrade the server (Docker, Kubernetes or an install from source) and its push agents, what happens to the database, and how to roll an upgrade back.
 
 Related guides: [admin-guide.md](admin-guide.md), [configuration.md](configuration.md), [backup-and-restore.md](backup-and-restore.md), [agent-service.md](agent-service.md) (the push agent as a service), [troubleshooting.md](troubleshooting.md), [monitoring.md](monitoring.md), [install-from-source.md](install-from-source.md) and [user-guide.md](user-guide.md).
 
-**Contents:** [Before you upgrade](#before-you-upgrade) · [Upgrading with Docker](#upgrading-with-docker) · [Upgrading an install from source](#upgrading-an-install-from-source) · [Database migrations](#database-migrations) · [Upgrading push agents](#upgrading-push-agents) · [The Updates card](#the-updates-card) · [Rolling back](#rolling-back) · [Upgrading to 0.7.0](#upgrading-to-070)
+**Contents:** [Before you upgrade](#before-you-upgrade) · [Upgrading with Docker](#upgrading-with-docker) · [Upgrading on Kubernetes](#upgrading-on-kubernetes) · [Upgrading an install from source](#upgrading-an-install-from-source) · [Database migrations](#database-migrations) · [Upgrading push agents](#upgrading-push-agents) · [The Updates card](#the-updates-card) · [Rolling back](#rolling-back) · [Upgrading to 0.7.0](#upgrading-to-070)
 
 Which releases still get fixes, and for how long, is in [Support and end of life](../SECURITY.md#support-and-end-of-life).
 
@@ -62,6 +62,10 @@ On start, the container's entrypoint (`backend/docker-entrypoint.sh`):
 4. starts PerchTail.
 
 The upgrade is done when the log shows `startup.complete` and the **Updates** card shows the new version under **Running**. If the container stops instead, the log says why; [troubleshooting.md](troubleshooting.md) covers the startup refusals.
+
+## Upgrading on Kubernetes
+
+With the Helm chart: make a `pre-upgrade` backup with `kubectl exec`, then `helm upgrade` from a checkout of the new release with your own values file. The steps are in [kubernetes.md](kubernetes.md#upgrading), and rolling back in [kubernetes.md](kubernetes.md#rolling-back-an-upgrade).
 
 ## Upgrading an install from source
 
@@ -238,6 +242,8 @@ Migrations aren't undone with their data: a downgrade can't bring back a table o
 4. Start PerchTail.
 
 Everything changed since the upgrade (sources, rules, users, audit entries) is lost; it stays in the `before-restore` copy the restore leaves next to `DATA_DIR`.
+
+On Kubernetes, the restore runs in a pod of its own while the Deployment is stopped: see [kubernetes.md](kubernetes.md#rolling-back-an-upgrade).
 
 Going back to a release before 0.7.0, which has no restore command: stop PerchTail, put the copy of `DATA_DIR` made before the upgrade back in place, and start the previous version.
 

@@ -134,6 +134,8 @@ docker compose run --rm --user root --entrypoint chown perchtail -R 10001:10001 
 
 With `docker run`, the same is `--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp`, with the volumes owned by uid 10001.
 
+To run PerchTail on Kubernetes instead, with the Helm chart in `charts/perchtail/`, see [docs/kubernetes.md](docs/kubernetes.md).
+
 This builds the image from the checkout. To run a published release
 instead, replace `build: .` in `docker-compose.yml` with the image of that
 version (amd64 and arm64), for example:
@@ -282,6 +284,7 @@ The audit log records each request's client address. PerchTail only believes `X-
 Installing and running PerchTail:
 
 - [docs/install-from-source.md](docs/install-from-source.md) — running PerchTail on a Linux host without Docker, with a systemd unit
+- [docs/kubernetes.md](docs/kubernetes.md) — running PerchTail on Kubernetes with the Helm chart: the encryption key's Secret, the main values, ingress and TLS, backups, upgrading
 - [docs/upgrade.md](docs/upgrade.md) — upgrading PerchTail
 - [docs/verifying-releases.md](docs/verifying-releases.md) — checking a release before you run it: the image's cosign signature, the build provenance of the image and the agent binaries, the signed checksums and the SBOMs
 - [docs/configuration.md](docs/configuration.md) — configuration reference: environment variables and the system settings in each Settings section

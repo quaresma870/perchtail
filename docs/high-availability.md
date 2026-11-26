@@ -54,6 +54,8 @@ One pod, restarted automatically by Kubernetes if it crashes or the `/healthz` l
 
 Load balancing here is trivial: a Kubernetes `Service` + `Ingress` route to whichever single pod is `Ready`. No stickiness, no distribution logic — there's only ever one backend.
 
+The Helm chart in `charts/perchtail/` runs exactly this, and is the way to install PerchTail on Kubernetes: see [kubernetes.md](kubernetes.md). Its probes run inside the pod, so they need neither the monitoring token nor `PROBE_ALLOWED_NETWORKS`. The manifest below is only an illustration of the shape, written by hand, with `httpGet` probes from the node instead.
+
 ```yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -176,7 +178,7 @@ spec:
 
 Nothing here requires an application change. This is the recommended default for most self-hosted deployments, including a product organization running PerchTail as an internal tool.
 
-**Stop grace period.** On shutdown PerchTail stops starting background jobs and gives the running ones (an audit purge, an alert pass, a file-name index pass, source checks, a scheduled backup) up to `SHUTDOWN_TIMEOUT_SECONDS` (20 by default) to finish before it exits. The orchestrator must wait longer than that before it kills the container, or a rollout still cuts that work off mid-run: Docker's default is 10 seconds, so `docker-compose.yml` sets `stop_grace_period: 30s`; Kubernetes waits `terminationGracePeriodSeconds` (30 by default, set explicitly above). Raise both together if you raise `SHUTDOWN_TIMEOUT_SECONDS`.
+**Stop grace period.** On shutdown PerchTail stops starting background jobs and gives the running ones (an audit purge, an alert pass, a file-name index pass, source checks, a scheduled backup) up to `SHUTDOWN_TIMEOUT_SECONDS` (20 by default) to finish before it exits. The orchestrator must wait longer than that before it kills the container, or a rollout still cuts that work off mid-run: Docker's default is 10 seconds, so `docker-compose.yml` sets `stop_grace_period: 30s`; Kubernetes waits `terminationGracePeriodSeconds` (30 by default, set explicitly above and in the Helm chart). Raise both together if you raise `SHUTDOWN_TIMEOUT_SECONDS`.
 
 ## Solution 1: active-passive (warm standby)
 

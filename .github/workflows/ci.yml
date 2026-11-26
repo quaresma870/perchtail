@@ -304,6 +304,16 @@ jobs:
           load: true
           tags: perchtail:ci
 
+      # For the kubernetes job, which installs the Helm chart with this image.
+      - name: Save the image for the Kubernetes test
+        run: docker save perchtail:ci | gzip > "$RUNNER_TEMP/perchtail-ci.tar.gz"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perchtail-ci-image
+          path: ${{ runner.temp }}/perchtail-ci.tar.gz
+          retention-days: 1
+
       # Blocking, same as the dependency scans above -- HIGH/CRITICAL in the
       # published base image + OS packages is exactly the kind of thing that
       # should stop a merge, not just get noted somewhere.
@@ -471,6 +481,146 @@ jobs:
         with:
           name: perchtail-sbom
           path: sbom.cyclonedx.json
+
+  kubernetes:
+    # The Helm chart (charts/perchtail): lint, the rendered objects checked
+    # against the oldest Kubernetes it supports and the current one, then
+    # installed on a kind cluster with the image the docker-image job built:
+    # the sign-in page through a port-forward, a sign-in with the first super
+    # admin's temporary password, and a `helm upgrade` that keeps the data.
+    needs: docker-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.19.0
+
+      # The chart carries the app's version (CONTRIBUTING.md, releases, step 1):
+      # a chart left behind would install an older image on a newer database.
+      - name: The chart's version is the app's
+        run: |
+          set -euo pipefail
+          app="$(python3 -c "import re; print(re.search(r'APP_VERSION = \"([^\"]+)\"', open('backend/app/version.py').read()).group(1))")"
+          chart="$(sed -n 's/^version: *//p' charts/perchtail/Chart.yaml)"
+          appversion="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' charts/perchtail/Chart.yaml)"
+          echo "app $app, chart $chart, appVersion $appversion"
+          test "$chart" = "$app" && test "$appversion" = "$app"
+
+      - name: Lint the chart and validate what it renders (kubeconform)
+        run: |
+          set -euo pipefail
+          helm lint --strict charts/perchtail --set credentialEncryptionKey.existingSecret=perchtail-key
+          helm lint --strict charts/perchtail -f charts/perchtail/ci/full-values.yaml
+          for version in 1.29.0 1.36.0; do
+            helm template perchtail charts/perchtail -f charts/perchtail/ci/full-values.yaml \
+                --kube-version "$version" \
+              | docker run --rm -i \
+                  ghcr.io/yannh/kubeconform@sha256:85dbef6b4b312b99133decc9c6fc9495e9fc5f92293d4ff3b7e1b30f5611823c \
+                  -strict -summary -kubernetes-version "$version" -
+          done
+          # Without a key, the chart refuses to render, saying how to make one.
+          if helm template perchtail charts/perchtail > /dev/null 2> "$RUNNER_TEMP/no-key.txt"; then
+            echo "the chart rendered without a key"; exit 1
+          fi
+          grep -q "kubectl create secret generic perchtail-key" "$RUNNER_TEMP/no-key.txt"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: perchtail-ci-image
+          path: ${{ runner.temp }}
+
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          cluster_name: perchtail
+
+      - name: Load the image into the cluster
+        run: |
+          set -euo pipefail
+          gunzip -c "$RUNNER_TEMP/perchtail-ci.tar.gz" | docker load
+          kind load docker-image perchtail:ci --name perchtail
+
+      - name: Install the chart
+        run: |
+          set -euo pipefail
+          kubectl create namespace perchtail
+          kubectl -n perchtail create secret generic perchtail-key \
+            --from-literal=credential-encryption-key="$(openssl rand -base64 32)"
+          # A values file of its own, used again at the upgrade, as
+          # docs/kubernetes.md says (not --reuse-values).
+          cat > "$RUNNER_TEMP/values.yaml" <<'VALUES'
+          credentialEncryptionKey: { existingSecret: perchtail-key }
+          image: { registry: "", repository: perchtail, tag: ci, pullPolicy: Never }
+          persistence: { size: 1Gi }
+          env:
+            SESSION_COOKIE_SECURE: "false"
+            UPDATE_CHECK: "false"
+          VALUES
+          helm install perchtail charts/perchtail -n perchtail --wait --timeout 5m \
+            -f "$RUNNER_TEMP/values.yaml"
+          kubectl -n perchtail get pods,pvc
+          # A clean start: no warning or error in the log, but the one that
+          # says where the first admin's temporary password is.
+          if kubectl -n perchtail logs deploy/perchtail \
+              | grep -E '"level": "(warning|error|critical)"' \
+              | grep -v initial_super_admin.seeded; then
+            echo "the pod started with warnings or errors"; exit 1
+          fi
+
+      # Plain HTTP through the port-forward, hence SESSION_COOKIE_SECURE=false.
+      - name: Sign in, upgrade the release, and sign in again
+        run: |
+          set -euo pipefail
+          forward() {
+            kubectl -n perchtail port-forward svc/perchtail 8080:80 > "$RUNNER_TEMP/forward.log" 2>&1 &
+            for _ in $(seq 1 30); do
+              curl -fsS -o /dev/null http://127.0.0.1:8080/ && return 0
+              sleep 1
+            done
+            cat "$RUNNER_TEMP/forward.log"; return 1
+          }
+          login() {
+            curl -sS -c "$RUNNER_TEMP/jar" -o "$RUNNER_TEMP/login.json" -w '%{http_code}' \
+              -H 'Content-Type: application/json' \
+              -d "{\"username\": \"admin\", \"password\": \"$1\"}" http://127.0.0.1:8080/auth/login
+          }
+          forward
+          curl -fsS http://127.0.0.1:8080/ | grep -q '<title>PerchTail</title>'
+          echo "the sign-in page answers"
+          temporary="$(kubectl -n perchtail exec deploy/perchtail -- cat /data/db/initial-admin-password)"
+          echo "::add-mask::$temporary"
+          test "$(login "$temporary")" = 200
+          python3 -c "import json, sys; assert json.load(open(sys.argv[1]))['must_change_password'] is True" \
+            "$RUNNER_TEMP/login.json"
+          echo "signed in with the temporary password"
+          password="Kind$(openssl rand -hex 16)#9"
+          echo "::add-mask::$password"
+          curl -fsS -b "$RUNNER_TEMP/jar" -o /dev/null -H 'Content-Type: application/json' \
+            -d "{\"current_password\": \"$temporary\", \"new_password\": \"$password\"}" \
+            http://127.0.0.1:8080/auth/change-password
+          kill %1 || true
+
+          helm upgrade perchtail charts/perchtail -n perchtail --wait --timeout 5m \
+            -f "$RUNNER_TEMP/values.yaml" --set env.LOG_LEVEL=DEBUG
+          test "$(kubectl -n perchtail exec deploy/perchtail -- printenv LOG_LEVEL)" = DEBUG
+          echo "the upgrade changed the pod's environment"
+          forward
+          test "$(login "$password")" = 200
+          python3 -c "import json, sys; assert json.load(open(sys.argv[1]))['must_change_password'] is False" \
+            "$RUNNER_TEMP/login.json"
+          echo "after the upgrade, the account and its new password are still there"
+
+      - name: Show the pod on failure
+        if: failure()
+        run: |
+          kubectl -n perchtail get all,pvc || true
+          kubectl -n perchtail describe pods || true
+          kubectl -n perchtail logs deploy/perchtail --all-containers --tail=200 || true
 
   workflows:
     # Audits the workflows themselves: template injection, credentials left

@@ -130,6 +130,8 @@ docker compose up -d
 
 `--entrypoint python` keeps the container from starting PerchTail itself; `docker compose run` reads the same `.env`.
 
+Kubernetes: stop the Deployment and run the restore in a pod of its own on the same data volume, as in [kubernetes.md](kubernetes.md#restoring-a-backup).
+
 Install from source:
 
 ```bash
@@ -195,7 +197,7 @@ The audit chain marker, `DATA_DIR/.audit-chain-started`, records outside the dat
 An upgraded PerchTail migrates the database on its first start, and the previous version refuses to start on it (`startup.database_newer_than_app`). Migrations aren't undone with their data: go back by restoring the backup made before the upgrade ([upgrade.md](upgrade.md#rolling-back)).
 
 1. Stop PerchTail.
-2. Put the previous version back: the previous image tag in `docker-compose.yml`, or the previous tag checked out and installed as in [install-from-source.md](install-from-source.md#upgrading).
+2. Put the previous version back: the previous image tag in `docker-compose.yml`, or the previous tag checked out and installed as in [install-from-source.md](install-from-source.md#upgrading). On Kubernetes, follow [kubernetes.md](kubernetes.md#rolling-back-an-upgrade).
 3. Restore the `pre-upgrade` backup made before the upgrade (`python -m app.backup list` shows it), as in [Restoring](#restoring).
 4. Start PerchTail.
 
