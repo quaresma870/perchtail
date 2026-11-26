@@ -311,7 +311,7 @@ Download a subfolder instead.
 
 An archive inside an archive is listed as a file: it doesn't expand.
 
-A `.tar.gz` or `.tgz` with more than 50,000 entries (files, folders and links together), or more than 8 MiB of names, lists only its first entries, and the explorer says "This archive has more entries than were read; showing the N read." under it (or "Showing the first N entries; narrow with the search." when they fill the listing limit). The files past them can't be opened from it. A `.tar.gz` whose headers are too large, or chained deeper than PerchTail follows, can't be read at all.
+A `.tar.gz` or `.tgz` with more than 50,000 entries (files, folders and links together), or more than 8 MiB of names, lists only its first entries, and the explorer says "This archive has more entries than were read; showing the N read." under it (or "Showing the first N entries; narrow with the search." when they fill the listing limit). The files past them can't be opened from it. A `.tar.gz` whose headers are too large, or chained deeper than PerchTail follows, can't be read at all, and neither can a `.zip` with more than 50,000 entries.
 
 An archive that can't be read (damaged, or another kind of file under an archive's name) answers "This archive can't be read: it is damaged, or it isn't really a .zip or .tar.gz file." when you expand it or open or download a file inside it. A `.gz` file that can't be decompressed answers "This compressed file can't be read: it is damaged, or it isn't really a .gz file."
 

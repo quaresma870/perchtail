@@ -556,6 +556,8 @@ export interface Alert {
   // The webhook URL is never sent back: only its scheme, host and port
   // (`https://hooks.example.com/…`).
   webhook_url_masked: string
+  // The URL is plain http:// (saved before https:// was required).
+  webhook_insecure: boolean
   enabled: boolean
   last_checked_at: string | null
   last_fired_at: string | null

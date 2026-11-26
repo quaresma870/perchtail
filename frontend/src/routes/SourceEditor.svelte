@@ -82,7 +82,9 @@
   // SMB: signing required unless turned off for a server that can't sign;
   // encryption only when asked for.
   let smbRequireSigning = true
-  let smbEncrypt = false
+  // A new SMB source is encrypted unless turned off here; the API and the
+  // YAML import keep false as their default.
+  let smbEncrypt = isNew
   let enabled = true
   let nameIndexEnabled = true
   let username = ''
@@ -620,6 +622,12 @@
           </label>
         {/if}
       </div>
+      {#if protocol === 'winrm' && winrmScheme === 'http'}
+        <p class="warning small" role="status" data-testid="winrm-http-warning">
+          HTTP: the connection to this server doesn't use TLS, so the server's identity isn't
+          checked. Use HTTPS (port 5986) unless the server only offers HTTP.
+        </p>
+      {/if}
       {#if protocol === 'winrm' && winrmScheme === 'https'}
         <label>
           CA certificate (PEM, optional)

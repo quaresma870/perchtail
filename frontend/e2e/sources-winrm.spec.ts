@@ -48,3 +48,18 @@ test('WinRM source: create, add rule, browse over the mocked connector, delete',
   await confirmPopup(page, 'Delete')
   await expect(page.getByRole('row', { name: new RegExp(sourceName) })).toHaveCount(0)
 })
+
+test('WinRM source: HTTP is warned about, HTTPS is not', async ({ page }) => {
+  await page.goto('/#/settings/sources/new')
+  await page.getByRole('dialog').getByLabel('Protocol').selectOption('winrm')
+  const warning = page.getByTestId('winrm-http-warning')
+  await expect(page.getByLabel('Scheme')).toHaveValue('https')
+  await expect(warning).toHaveCount(0)
+
+  await page.getByLabel('Scheme').selectOption('http')
+  await expect(warning).toBeVisible()
+  await expect(warning).toContainText("doesn't use TLS")
+
+  await page.getByLabel('Scheme').selectOption('https')
+  await expect(warning).toHaveCount(0)
+})

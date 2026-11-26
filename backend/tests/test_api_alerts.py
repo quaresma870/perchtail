@@ -147,7 +147,7 @@ def test_the_webhook_test_is_limited_per_user(session, client_for, monkeypatch):
     from app.api import alerts as alerts_api
 
     sent = []
-    monkeypatch.setattr(alerts_api, "post_webhook", lambda url, payload: sent.append(url))
+    monkeypatch.setattr(alerts_api, "post_webhook", lambda url, payload, **_: sent.append(url))
     user, other = _make_user(session), _make_user(session)
 
     def alert_of(client):
@@ -318,7 +318,7 @@ def test_delete_alert_drops_its_per_file_progress(session, client_for):
 def test_test_endpoint_sends_a_synthetic_webhook(session, client_for, monkeypatch):
     posted = {}
     monkeypatch.setattr(
-        "app.api.alerts.post_webhook", lambda url, payload: posted.update(payload) or None
+        "app.api.alerts.post_webhook", lambda url, payload, **_: posted.update(payload) or None
     )
 
     user = _make_user(session)

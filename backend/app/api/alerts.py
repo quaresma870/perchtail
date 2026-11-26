@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 import re2
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator, model_validator
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from app.alerts import (
     compile_query,
@@ -14,6 +14,7 @@ from app.alerts import (
     masked_webhook_url,
     post_webhook,
     set_webhook_url,
+    webhook_is_insecure,
     webhook_url,
 )
 from app.api.auth import get_current_active_user
@@ -35,6 +36,10 @@ router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 _SCOPE_FIELDS = ("source_id", "folder_id", "customer_id")
 
+# The most alerts one account can own: each one is evaluated on every pass,
+# against every file of its scope.
+MAX_ALERTS_PER_OWNER = 100
+
 
 class AlertPublic(BaseModel):
     id: int
@@ -47,6 +52,9 @@ class AlertPublic(BaseModel):
     file_glob: str
     # The URL itself is never returned: only its scheme, host and port.
     webhook_url_masked: str
+    # The URL is plain http:// (saved before https:// was required): it
+    # still works, and the list says it isn't encrypted.
+    webhook_insecure: bool
     enabled: bool
     last_checked_at: str | None
     last_fired_at: str | None
@@ -65,6 +73,7 @@ class AlertPublic(BaseModel):
             customer_id=alert.customer_id,
             file_glob=alert.file_glob,
             webhook_url_masked=masked_webhook_url(webhook_url(alert)),
+            webhook_insecure=webhook_is_insecure(webhook_url(alert)),
             enabled=alert.enabled,
             last_checked_at=alert.last_checked_at.isoformat() if alert.last_checked_at else None,
             last_fired_at=alert.last_fired_at.isoformat() if alert.last_fired_at else None,
@@ -74,8 +83,10 @@ class AlertPublic(BaseModel):
 
 
 def _check_webhook_url(v: str) -> str:
-    if not (v.startswith("http://") or v.startswith("https://")):
-        raise ValueError("webhook_url must be an http:// or https:// URL")
+    # https:// only: the calls carry matched log lines, and often a secret
+    # in the URL itself.
+    if not v.startswith("https://"):
+        raise ValueError("webhook_url must be an https:// URL")
     try:
         assert_webhook_url_is_safe(v)
     except UnsafeWebhookURLError as exc:
@@ -208,6 +219,21 @@ def list_alerts(
     return [AlertPublic.from_model(a) for a in alerts]
 
 
+def _require_room_for_another_alert(session: Session, user: User) -> None:
+    """422 when the user already owns MAX_ALERTS_PER_OWNER alerts."""
+    owned = session.exec(
+        select(func.count()).select_from(Alert).where(Alert.user_id == user.id)
+    ).one()
+    if owned >= MAX_ALERTS_PER_OWNER:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"You already have {MAX_ALERTS_PER_OWNER} alerts, the most an account can "
+                "have. Delete one before adding another."
+            ),
+        )
+
+
 def _webhook_host(url: str) -> str | None:
     # Only the host goes into the audit log: the path or query string of a
     # webhook URL often carries a secret token.
@@ -225,6 +251,7 @@ def create_alert(
     session: Session = Depends(get_session),
 ):
     _require_valid_query(payload.query, payload.regex)
+    _require_room_for_another_alert(session, user)
     alert = Alert(
         user_id=user.id,
         created_at=utcnow(),
@@ -388,5 +415,6 @@ def test_alert_webhook(
                 }
             ],
         },
+        alert_id=alert.id,
     )
     return AlertTestResult(ok=error is None, error=error)

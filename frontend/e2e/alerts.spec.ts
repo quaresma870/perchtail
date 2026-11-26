@@ -58,3 +58,45 @@ test('alerts: create, edit, test webhook, toggle enabled, delete', async ({ page
   await confirmPopup(page, 'Delete')
   await expect(page.locator('.alert-row', { hasText: alertName })).toHaveCount(0)
 })
+
+test('alerts: an http:// webhook is refused, and an old one is flagged in the list', async ({
+  page,
+}) => {
+  await page.goto('/#/alerts')
+  await page.getByRole('button', { name: '+ New alert' }).click()
+  await page.getByLabel('Name').fill(`${alertName} plain`)
+  await page.getByLabel('Query').fill('connection refused')
+  await page.getByLabel('Webhook URL').fill('http://example.com/e2e-webhook-test')
+  await page.getByRole('button', { name: 'Create alert' }).click()
+  await expect(page.locator('.alert-form .error')).toContainText('must start with https://')
+
+  // An alert saved with http:// before https:// was required: no API makes
+  // one any more, so the list answer is stood in for.
+  await page.route('**/alerts', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    await route.fulfill({
+      json: [
+        {
+          id: 999999,
+          name: 'Old plain alert',
+          query: 'refused',
+          regex: false,
+          source_id: null,
+          folder_id: null,
+          customer_id: null,
+          file_glob: '**/*.log',
+          webhook_url_masked: 'http://example.com/…',
+          webhook_insecure: true,
+          enabled: true,
+          last_checked_at: null,
+          last_fired_at: null,
+          failed_deliveries: 0,
+          last_error: null,
+        },
+      ],
+    })
+  })
+  await page.reload()
+  const row = page.locator('.alert-row', { hasText: 'Old plain alert' })
+  await expect(row.locator('.insecure-warning')).toContainText("aren't encrypted")
+})

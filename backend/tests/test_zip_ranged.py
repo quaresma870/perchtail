@@ -191,9 +191,11 @@ def test_reading_ahead_grows_to_8_mib_and_never_passes_the_member(tmp_path):
     assert remote.transferred <= member.compress_size + 2 * MIB
 
 
-def test_a_zip64_archive_is_listed_and_read_in_place(tmp_path):
+def test_a_zip64_archive_is_listed_and_read_in_place(tmp_path, monkeypatch):
     """More entries than a classic end record holds: ZIP64 end record and
-    locator, and a member with a ZIP64 local header."""
+    locator, and a member with a ZIP64 local header. Above MAX_ZIP_ENTRIES
+    (test_zip_entry_ceiling.py), so the ceiling is raised for it."""
+    monkeypatch.setattr("app.archives.MAX_ZIP_ENTRIES", 70_000)
     path = tmp_path / "many.zip"
     with zipfile.ZipFile(path, "w") as zf:
         for index in range(65_537):

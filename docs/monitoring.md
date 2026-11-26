@@ -209,6 +209,7 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `audit_integrity.race_breaks_unrecorded` | warning | Breaks from the 0.5.x race wait to be recorded on the Audit Log page. |
 | `job.failed` | error | A background job raised an error (`job_id` names it); also in `scheduler.jobs[]`. |
 | `job.record_not_saved` | warning | A job's run couldn't be recorded (usually a locked or full database). |
+| `alert.webhook_insecure` | warning | A webhook call went to an `http://` URL, saved before `https://` was required (`alert_id`; never the URL). Give the alert an `https://` URL. |
 | `alert.webhook_failed` | warning | An alert's webhook call failed and will be retried. |
 | `alert.webhook_given_up` | warning | An alert's webhook call was given up on after an hour of retries. |
 | `alert.evaluate_failed` | error | An alert couldn't be evaluated in a pass. |

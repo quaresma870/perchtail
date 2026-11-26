@@ -246,6 +246,8 @@ A folder or an archive shows at most **Entries per listing** entries (**Settings
 
 A `.tar.gz` or `.tgz` is read in one pass, up to 50,000 entries (files, folders and links together) and 8 MiB of names. A bigger one says "This archive has more entries than were read; showing the N read." under it (or the message above, when what was read still fills **Entries per listing**), and its members past that point answer "Not found on the source". Its whole download is refused when the source has an exclude rule, and its redacted download is always refused. Split such archives into smaller ones. An archive with more than 1 MiB of headers for one entry, or of global pax headers in all, or with headers chained deeper than PerchTail follows, can't be read.
 
+A `.zip` with more than 50,000 entries (files and folders together) can't be read: it is refused before its index is loaded, as a damaged archive is ("This archive can't be read…", 409 `archive_unreadable`, audited), when it is expanded and when a file inside it is opened or downloaded, also on a push agent. Split such archives into smaller ones.
+
 ### Archive members and folder ZIPs refused
 
 - "This archive member is encrypted or compressed with a method PerchTail can't read, so it can't be opened." (409): a `.zip` member that is encrypted, or compressed with a method PerchTail can't read, to open or to download. Audited as `file.open_denied` or `file.download_denied` with the reason `member_encrypted` or `member_unsupported_compression`. On a push agent that reads archives on its host (every agent from 0.7, with or without redaction), an encrypted member gets the same answer; a member compressed with a method the agent can't read answers "The source returned an error".
