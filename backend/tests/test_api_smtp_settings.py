@@ -8,6 +8,7 @@ import uuid
 import pytest
 from app import email_delivery
 from app.api import smtp_settings
+from app.api.auth import session_cookie_name
 from app.auth.models import AuditLog, GlobalCapability, Role, User
 from app.auth.sessions import create_session
 from app.crypto import encrypt_secret
@@ -75,7 +76,7 @@ def _user(session, *, super_admin=False, capabilities=None, email=None) -> User:
 def _client(session, user) -> TestClient:
     _, token = create_session(session, user)
     client = TestClient(app)
-    client.cookies.set("perchtail_session", token)
+    client.cookies.set(session_cookie_name(), token)
     return client
 
 

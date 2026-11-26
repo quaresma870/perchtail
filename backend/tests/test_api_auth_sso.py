@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 from app.api.auth import router as auth_router
+from app.api.auth import session_cookie_name, sso_state_cookie_name
 from app.auth.models import (
     AuditLog,
     AuthProviderType,
@@ -142,7 +143,7 @@ def _assert_sso_error_redirect(response) -> None:
     error, as when the callback fails, not left on a JSON body."""
     assert response.status_code == 302
     assert response.headers["location"].endswith("/#/login?sso_error=1")
-    assert "perchtail_sso_state" not in response.cookies
+    assert sso_state_cookie_name() not in response.cookies
 
 
 @pytest.mark.parametrize(
@@ -204,7 +205,7 @@ def test_callback_refuses_a_discovery_document_for_another_issuer(client, sessio
 
     assert response.status_code == 302
     assert response.headers["location"].endswith("/#/login?sso_error=1")
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
     assert session.exec(select(User).where(User.auth_provider == AuthProviderType.oidc)).all() == []
     [entry] = _sso_login_failures(session)
     assert entry.event_metadata["reason"] == "issuer_mismatch"
@@ -241,7 +242,7 @@ def test_callback_provisions_a_new_user_and_sets_a_session_cookie(client, sessio
 
     assert response.status_code == 302
     assert response.headers["location"] == f"{get_settings().public_base_url}/"
-    assert "perchtail_session" in response.cookies
+    assert session_cookie_name() in response.cookies
 
     user = session.exec(select(User).where(User.auth_provider == AuthProviderType.oidc)).first()
     assert user is not None
@@ -273,7 +274,7 @@ def test_the_flow_uses_pkce_s256_end_to_end(client, session, monkeypatch):
     )
 
     assert response.status_code == 302
-    assert "perchtail_session" in response.cookies
+    assert session_cookie_name() in response.cookies
     # The token request proves it holds the verifier behind the challenge.
     assert oidc.code_challenge_s256(sent["code_verifier"]) == challenge
     assert sent["code_verifier"] not in location
@@ -345,7 +346,7 @@ def test_callback_redirects_to_login_error_on_idp_error_param(client, session):
     )
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
 
 
 def test_callback_cuts_the_idp_error_short_in_the_log(client, session):
@@ -422,7 +423,7 @@ def test_callback_redirects_to_login_error_on_invalid_state(client, session):
     )
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
 
 
 def test_callback_redirects_to_login_error_when_nonce_does_not_match(client, session, monkeypatch):
@@ -437,7 +438,7 @@ def test_callback_redirects_to_login_error_when_nonce_does_not_match(client, ses
 
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
 
 
 def test_callback_redirects_to_login_error_for_a_deactivated_account(client, session, monkeypatch):
@@ -463,7 +464,7 @@ def test_callback_redirects_to_login_error_for_a_deactivated_account(client, ses
 
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
 
 
 def test_callback_rejects_a_valid_code_and_state_with_no_matching_cookie(
@@ -489,7 +490,7 @@ def test_callback_rejects_a_valid_code_and_state_with_no_matching_cookie(
 
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
 
     users = session.exec(select(User).where(User.auth_provider == AuthProviderType.oidc)).all()
     assert users == []
@@ -512,7 +513,7 @@ def test_callback_rejects_a_state_that_does_not_match_the_cookie(client, session
 
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
 
 
 def test_callback_redirects_to_login_error_when_sso_disabled_mid_flow(client, session, monkeypatch):
@@ -576,7 +577,7 @@ def test_callback_with_unreadable_settings_fails_neutrally_and_is_audited(
 
     assert response.status_code == 302
     assert "sso_error=1" in response.headers["location"]
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
     assert [e.event_metadata["reason"] for e in _sso_failures(session)] == ["secret_unreadable"]
 
 
@@ -603,4 +604,4 @@ def test_local_login_still_works_with_an_sso_provider_enabled(client, session):
 
     assert response.status_code == 200
     assert response.json()["username"] == "admin@example.com"
-    assert "perchtail_session" in response.cookies
+    assert session_cookie_name() in response.cookies

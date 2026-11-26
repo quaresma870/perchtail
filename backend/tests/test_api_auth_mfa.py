@@ -4,6 +4,7 @@ import uuid
 import pyotp
 import pytest
 from app.api.auth import router as auth_router
+from app.api.auth import session_cookie_name
 from app.auth.models import AuditLog, Role, User
 from app.auth.providers.local import create_local_user
 from app.config import get_settings
@@ -180,7 +181,7 @@ def test_login_with_mfa_enabled_requires_a_code(client, session):
 
     assert response.status_code == 401
     assert response.json()["detail"]["error_code"] == "mfa_required"
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
 
 
 def test_login_with_mfa_enabled_and_a_valid_code_succeeds(client, session):
@@ -191,7 +192,7 @@ def test_login_with_mfa_enabled_and_a_valid_code_succeeds(client, session):
     response = _login(client, password="new-password!", mfa_code=_next_totp_code(secret))
 
     assert response.status_code == 200
-    assert "perchtail_session" in response.cookies
+    assert session_cookie_name() in response.cookies
 
 
 def test_login_with_mfa_enabled_and_an_invalid_code_fails(client, session):
@@ -203,7 +204,7 @@ def test_login_with_mfa_enabled_and_an_invalid_code_fails(client, session):
 
     assert response.status_code == 401
     assert response.json()["detail"]["error_code"] == "mfa_invalid_code"
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
 
 
 def test_login_with_mfa_enabled_accepts_a_backup_code(client, session):
@@ -214,7 +215,7 @@ def test_login_with_mfa_enabled_accepts_a_backup_code(client, session):
     response = _login(client, password="new-password!", mfa_code=codes[0])
 
     assert response.status_code == 200
-    assert "perchtail_session" in response.cookies
+    assert session_cookie_name() in response.cookies
 
 
 def test_login_with_mfa_enabled_rejects_a_reused_backup_code(client, session):

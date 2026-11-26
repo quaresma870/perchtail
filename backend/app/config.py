@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     # start with a warning instead (a private network such as Compose's).
     database_require_verified_tls: bool = True
     credential_encryption_key: str = "changeme"
+    # Or a file holding it (a Docker or Kubernetes secret mounted as a file):
+    # its content, without the final line break. Setting both is refused.
+    credential_encryption_key_file: str = ""
     # A key that fails the strength check (app/key_strength.py) stops
     # PerchTail from starting. false lets it start with a warning instead:
     # a temporary way out while the key is rotated.
@@ -319,6 +322,22 @@ class Settings(BaseSettings):
         if not self.backup_dir:
             parent = os.path.dirname(os.path.normpath(self.data_dir)) or "."
             self.backup_dir = os.path.join(parent, "backups")
+        return self
+
+    @model_validator(mode="after")
+    def _read_key_file(self) -> "Settings":
+        if not self.credential_encryption_key_file:
+            return self
+        # The field has a default ("changeme"), so only a key actually set
+        # in the environment counts as "both set".
+        explicit = (
+            self.credential_encryption_key
+            if "credential_encryption_key" in self.model_fields_set
+            else ""
+        )
+        self.credential_encryption_key = value_or_file(
+            "CREDENTIAL_ENCRYPTION_KEY", explicit, self.credential_encryption_key_file
+        )
         return self
 
     @model_validator(mode="after")

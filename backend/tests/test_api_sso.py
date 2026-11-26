@@ -2,7 +2,7 @@ import json
 import uuid
 
 import pytest
-from app.api.auth import get_current_active_user
+from app.api.auth import get_current_active_user, session_cookie_name
 from app.api.sso import router as sso_router
 from app.auth.models import AuditLog, GlobalCapability, Role, SSOProviderConfig, User
 from app.crypto import decrypt_secret
@@ -689,7 +689,7 @@ def test_a_delegated_sso_admin_cannot_override_a_super_admin_mapping_with_a_late
     app.dependency_overrides[get_session] = lambda: session
     try:
         client = TestClient(app)
-        client.cookies.set("perchtail_session", token)
+        client.cookies.set(session_cookie_name(), token)
         response = client.post(
             "/sso/group-mappings",
             json={"order": 999, "group_name": "everyone", "role_id": viewer_id},

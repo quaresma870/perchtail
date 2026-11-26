@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from app import password_reset_limits, system_settings
 from app.api import auth as auth_api
+from app.api.auth import session_cookie_name
 from app.auth import password_reset
 from app.auth.models import (
     AuditLog,
@@ -475,7 +476,7 @@ def test_an_admin_reset_kills_the_link(session, recovery_on, client):
     admin = _user(session, username="admin", email="admin@example.com", role=admin_role)
     _, admin_token = create_session(session, admin)
     admin_client = TestClient(app)
-    admin_client.cookies.set("perchtail_session", admin_token)
+    admin_client.cookies.set(session_cookie_name(), admin_token)
     assert admin_client.post(f"/users/{user.id}/reset-password").status_code == 200
 
     assert _complete(client, token).status_code == 400
@@ -636,7 +637,7 @@ def test_expired_links_are_purged(session):
 def _settings_client(session, user) -> TestClient:
     _, token = create_session(session, user)
     client = TestClient(app)
-    client.cookies.set("perchtail_session", token)
+    client.cookies.set(session_cookie_name(), token)
     return client
 
 

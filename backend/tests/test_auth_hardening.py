@@ -11,6 +11,7 @@ import pyotp
 import pytest
 from app import initial_admin_password, system_settings
 from app.api.auth import router as auth_router
+from app.api.auth import session_cookie_name
 from app.api.users import router as users_router
 from app.auth import mfa_policy
 from app.auth.models import (
@@ -277,7 +278,7 @@ def test_an_sso_account_with_a_password_cannot_sign_in_locally(session, make_cli
     # The same answer as a wrong password, and audited the same way.
     assert response.status_code == wrong.status_code == 401
     assert response.json() == wrong.json()
-    assert "perchtail_session" not in response.cookies
+    assert session_cookie_name() not in response.cookies
     failures = _audit(session, "user.login_failed")
     assert failures[0].event_metadata["reason"] == "bad_credentials"
 
@@ -557,12 +558,11 @@ def test_without_a_policy_maximum_the_limit_is_1024(session, monkeypatch):
 
 
 def test_changing_the_password_replaces_the_current_session_token(session, make_client):
-    from app.api.auth import SESSION_COOKIE_NAME
 
     _local_user(session, "ana")
     client = make_client()
     assert _login(client, "ana").status_code == 200
-    old_token = client.cookies[SESSION_COOKIE_NAME]
+    old_token = client.cookies[session_cookie_name()]
     other = make_client()
     assert _login(other, "ana").status_code == 200
 
@@ -572,13 +572,13 @@ def test_changing_the_password_replaces_the_current_session_token(session, make_
     )
 
     assert response.status_code == 200
-    new_token = client.cookies[SESSION_COOKIE_NAME]
+    new_token = client.cookies[session_cookie_name()]
     assert new_token != old_token
     # This browser goes on with the new token; the old one, and the other
     # session, stop working.
     assert client.get("/auth/me").status_code == 200
     stale = make_client()
-    stale.cookies.set(SESSION_COOKIE_NAME, old_token)
+    stale.cookies.set(session_cookie_name(), old_token)
     assert stale.get("/auth/me").status_code == 401
     assert other.get("/auth/me").status_code == 401
     session.expire_all()

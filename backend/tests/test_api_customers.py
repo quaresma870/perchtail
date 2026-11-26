@@ -88,6 +88,20 @@ def test_duplicate_customer_name_rejected(session, client_for):
     assert dupe.status_code == 409
 
 
+def test_renaming_a_customer_to_a_name_in_use_is_a_409(session, client_for):
+    user = _make_user(session, is_super_admin=True)
+    client = client_for(user)
+
+    client.post("/customers", json={"name": "Initech Cloud"})
+    other = client.post("/customers", json={"name": "Umbrella Logs"}).json()
+    renamed = client.patch(f"/customers/{other['id']}", json={"name": "Initech Cloud"})
+    assert renamed.status_code == 409
+    assert renamed.json()["detail"] == "Name already in use"
+    # Its own name again is no conflict.
+    same = client.patch(f"/customers/{other['id']}", json={"name": "Umbrella Logs"})
+    assert same.status_code == 200
+
+
 def test_update_and_delete_customer(session, client_for):
     user = _make_user(session, is_super_admin=True)
     client = client_for(user)

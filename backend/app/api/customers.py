@@ -127,6 +127,13 @@ def update_customer(
     customer = _get_customer_in_reach(session, user, customer_id)
     _require_manage_customer(session, user, customer)
 
+    # Checked before the name is set: the unique index would otherwise
+    # answer with a server error on the next query's autoflush.
+    taken = session.exec(
+        select(Customer).where(Customer.name == payload.name, Customer.id != customer.id)
+    ).first()
+    if taken is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Name already in use")
     customer.name = payload.name
     session.add(customer)
     record_audit_event(

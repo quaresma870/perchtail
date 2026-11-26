@@ -13,6 +13,7 @@ release ships (0.x releases may include breaking changes between minors).
 - To move an existing SQLite installation to PostgreSQL, upgrade and start it once on SQLite, make a backup, stop it, point `DATABASE_URL` at an empty PostgreSQL 18 database and run `python -m app.migrate_database --from sqlite:////data/db/perchtail.db` (`--dry-run` first). Keep `DATA_DIR` and `CREDENTIAL_ENCRYPTION_KEY`. See [docs/upgrade.md](docs/upgrade.md#moving-from-sqlite-to-postgresql).
 - **Alert webhooks need `https://`** when an alert is created or its URL changed. An alert saved with an `http://` URL keeps sending, with a warning in the list and `alert.webhook_insecure` in the log at each call, until it is given an `https://` URL.
 - **A `.zip` with more than 50,000 entries can't be read** any more (listed, opened or downloaded from), on the server and on push agents: split it into smaller archives. Push agents need upgrading for the same ceiling on their host.
+- **Everyone signs in again once after the upgrade**: with `SESSION_COOKIE_SECURE` on (the default), the session cookie is now `__Host-perchtail_session`, and the cookie of a session started before the upgrade is ignored.
 
 ### Added
 - **PostgreSQL as the database**: `DATABASE_URL=postgresql://...` (or `postgres://`) uses an empty PostgreSQL 18 database, which `alembic upgrade head` fills; SQLite stays the default and doesn't change. `DATABASE_URL_FILE` reads the URL from a file (a Docker or Kubernetes secret), `DATABASE_POOL_SIZE` (10) and `DATABASE_MAX_OVERFLOW` (20) size the connection pool, and the URL is never logged or shown with its password. PerchTail refuses to start on a server older than 18 (`startup.database_version_unsupported`), a database not in UTF8 (`startup.database_encoding_unsupported`), and a database off its host reached without a verified certificate (`startup.database_tls_not_verified`; `sslmode=verify-full` with `sslrootcert`, or `DATABASE_REQUIRE_VERIFIED_TLS=false` on a private network, which only warns, also at the top of the system settings pages). Only one instance may use a database at a time, whatever its `DATA_DIR` (`startup.instance_lock_held` with `lock` `database`). The schema creates the `pg_trgm` extension. See [docs/configuration.md](docs/configuration.md#postgresql).
@@ -21,6 +22,8 @@ release ships (0.x releases may include breaking changes between minors).
 - **Progress and Cancel when a file opens whole**: when opening a file whole takes more than a second (below **Open from the end above**, with **Load whole file**, or with the setting at 0), the viewer shows how much has been copied from the source ("128 MB of 300 MB", or "Redacting…" while redaction runs) with a **Cancel** button. Cancel stops the read on the source and frees what it held on the server, and closes what was opening without a message; a cancelled open isn't audited as `file.open`. Downloads, folder ZIPs and Tail don't show it.
 - The alerts list warns about an alert whose webhook URL is `http://`, and the alert answer has `webhook_insecure` (never the URL).
 - The source editor warns when a WinRM source uses HTTP: the connection doesn't use TLS.
+- `CREDENTIAL_ENCRYPTION_KEY_FILE`: the path of a file holding `CREDENTIAL_ENCRYPTION_KEY`, for a Docker or Kubernetes secret mounted as a file. Its final line break is ignored. Setting both, or naming a file that is missing, unreadable or empty, stops PerchTail from starting with a message naming the variable; the checks on the key itself are the same.
+- A request refused as invalid (422) logs `request.validation_failed` (INFO) with its method, path, user (when signed in) and the names of the fields at fault, never the values sent; the 422 answer no longer echoes them back either.
 - Right-click menus on log lines, tabs, files, folders, sources and groups of sources, with keyboard support (Menu key or Shift+F10); a middle-click closes a tab.
 
 ### Changed
@@ -41,6 +44,7 @@ release ships (0.x releases may include breaking changes between minors).
 - Switching tabs, coming back to the Viewer from another page, or highlighting patterns arriving no longer rebuilds the open file, which froze the page for seconds with large files; each tab also keeps its place and selection.
 - A push agent's old connection, closed when the agent reconnects (for example after an upgrade from the portal), no longer logs an error with a traceback.
 - Listing, opening or downloading from an archive that doesn't exist on a local-disk source answers 404 instead of a server error.
+- Renaming a customer to the name of another one answers 409 "Name already in use", as creating one does, instead of a server error.
 - With several large files opening at once, the progress of each now moves steadily (WinRM counts what has arrived, not only whole blocks), at most three open at a time with the others queued, and a file that hasn't started says so instead of showing 0 B.
 
 ### Security
@@ -48,6 +52,10 @@ release ships (0.x releases may include breaking changes between minors).
 - Every read of a path that can't be read (missing, hidden by the rules, a link to a hidden target, or a folder asked for as a file) now gets the same 404 response.
 - **A `.zip` with more than 50,000 entries is refused before its index is read**, like a `.tar.gz` past 50,000 entries: the count comes from the end-of-central-directory record (or its ZIP64 version), then the entries found are checked too, so neither the server nor a push agent loads a huge index into memory. It answers 409 `archive_unreadable`, audited, when the archive is listed and when a file inside it is opened or downloaded, whether it is read in place, copied whole or read on a push agent's host.
 - **Alert webhook URLs must be `https://`** when an alert is created or its URL is changed; `http://` is refused (422). Each call still sent to an `http://` URL logs `alert.webhook_insecure` (WARNING) with the alert's id, never the URL.
+- **`__Host-` cookie names**: with `SESSION_COOKIE_SECURE` on (the default), the session cookie is `__Host-perchtail_session` and the SSO sign-in cookie `__Host-perchtail_sso_state`, both with `Path=/` and no `Domain`. A browser accepts such cookies only from PerchTail's own host over HTTPS, so another site on a sibling subdomain, or a page over plain HTTP, can't set or replace them. With `SESSION_COOKIE_SECURE=false` the names stay `perchtail_session` and `perchtail_sso_state`, since browsers refuse a `__Host-` cookie without `Secure`.
+- **Every API answer is `Cache-Control: no-store`**, not only file content and the password-recovery pages, unless the answer sets its own. The web interface's static files keep their caching.
+- Signing out also sends `Clear-Site-Data: "cache"`, so the browser drops what it kept of PerchTail's pages.
+- A download is always sent as `application/octet-stream`, whatever the file's name, so a browser never shows or runs a downloaded `.html` or `.svg` file in PerchTail's origin.
 
 ## [0.7.1] - 2026-11-24
 

@@ -289,7 +289,20 @@ def test_download_over_a_remote_source_keeps_nothing_in_scratch(
     assert response.status_code == 200
     assert_no_secret(response.content)
     assert response.content == _redacted(SAMPLE_BYTES)
+    # Streamed while it is redacted: still sent as bytes to save.
+    assert response.headers["content-type"] == "application/octet-stream"
     assert _scratch_files(store) == []
+
+
+@pytest.mark.parametrize("name", ["page.html", "app.log"])
+def test_a_redacted_download_is_always_octet_stream(downloads, name):
+    _, client, source, folder = downloads
+    (folder / name).write_bytes(b"<script>alert(1)</script>\npassword=hunter2\n")
+    response = _download(client, source, name)
+    assert response.status_code == 200
+    assert response.headers["x-perchtail-redacted"] == "1"
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["content-disposition"].startswith("attachment")
 
 
 def test_download_of_a_gz_file_is_decompressed_and_redacted(downloads):

@@ -5,14 +5,12 @@ from typing import NoReturn
 from fastapi import (
     APIRouter,
     BackgroundTasks,
-    Cookie,
     Depends,
     HTTPException,
     Request,
     Response,
     status,
 )
-from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
 from fastapi.routing import APIRoute
@@ -94,6 +92,38 @@ SESSION_COOKIE_NAME = "perchtail_session"
 # list of valid states; not worth that complexity for what's normally a
 # single linear login action.
 SSO_STATE_COOKIE_NAME = "perchtail_sso_state"
+
+# With Secure cookies (the default), both names carry the __Host- prefix: a
+# browser then only accepts them from this host, over HTTPS, with Path=/ and
+# no Domain, so neither a sibling subdomain nor a plain-HTTP page can set or
+# overwrite them. Without Secure (SESSION_COOKIE_SECURE=false) a browser
+# refuses __Host- names, so the plain names above stay. A cookie under the
+# other name is ignored: everyone signs in once after the change.
+HOST_PREFIX = "__Host-"
+
+
+def session_cookie_name() -> str:
+    """The session cookie's name for this deployment."""
+    if get_settings().session_cookie_secure:
+        return HOST_PREFIX + SESSION_COOKIE_NAME
+    return SESSION_COOKIE_NAME
+
+
+def sso_state_cookie_name() -> str:
+    """The SSO state cookie's name for this deployment."""
+    if get_settings().session_cookie_secure:
+        return HOST_PREFIX + SSO_STATE_COOKIE_NAME
+    return SSO_STATE_COOKIE_NAME
+
+
+def session_cookie(request: Request) -> str | None:
+    """The session token the request carries, under this deployment's name."""
+    return request.cookies.get(session_cookie_name())
+
+
+def read_sso_state_cookie(request: Request) -> str | None:
+    return request.cookies.get(sso_state_cookie_name())
+
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -222,7 +252,7 @@ class UserPublic(BaseModel):
 
 def get_current_user(
     session: Session = Depends(get_session),
-    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    session_token: str | None = Depends(session_cookie),
 ) -> User:
     if session_token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
@@ -293,12 +323,13 @@ def require_super_admin(user: User = Depends(get_current_active_user)) -> User:
 def _set_session_cookie(response: Response, token: str) -> None:
     settings = get_settings()
     response.set_cookie(
-        key=SESSION_COOKIE_NAME,
+        key=session_cookie_name(),
         value=token,
         httponly=True,
         secure=settings.session_cookie_secure,
         samesite="strict",
         max_age=settings.session_ttl_hours * 3600,
+        path="/",
     )
 
 
@@ -308,8 +339,10 @@ def _clear_sso_state_cookie(response: Response) -> None:
     # clear a cookie that was set with secure=True.
     settings = get_settings()
     response.delete_cookie(
-        SSO_STATE_COOKIE_NAME,
+        sso_state_cookie_name(),
+        path="/",
         secure=settings.session_cookie_secure,
+        httponly=True,
         samesite="lax",
     )
 
@@ -451,7 +484,7 @@ def login(
 def logout(
     response: Response,
     session: Session = Depends(get_session),
-    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    session_token: str | None = Depends(session_cookie),
 ):
     if session_token is not None:
         # Audited only for a session that was still valid: a stale cookie
@@ -470,7 +503,19 @@ def logout(
             )
             session.commit()
         delete_session(session, session_token)
-    response.delete_cookie(SESSION_COOKIE_NAME)
+    settings = get_settings()
+    # With the attributes it was set with: a browser drops a __Host- cookie
+    # only from a Set-Cookie that is Secure, with Path=/.
+    response.delete_cookie(
+        session_cookie_name(),
+        path="/",
+        secure=settings.session_cookie_secure,
+        httponly=True,
+        samesite="strict",
+    )
+    # The browser's cache of this site goes too: pages and answers the user
+    # saw stay out of reach of the next person at the same browser.
+    response.headers["Clear-Site-Data"] = '"cache"'
 
 
 @router.get("/me", response_model=UserPublic)
@@ -484,7 +529,7 @@ def change_password_endpoint(
     response: Response,
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    session_token: str | None = Depends(session_cookie),
 ):
     require_password_length(session, payload.current_password, payload.new_password)
     # Throttled like /auth/login, so a stolen session can't be used to
@@ -757,7 +802,7 @@ def mfa_confirm(
     payload: MfaConfirmRequest,
     user: User = Depends(get_current_user_setting_up_mfa),
     session: Session = Depends(get_session),
-    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    session_token: str | None = Depends(session_cookie),
 ):
     """Confirms a pending enrollment (see /mfa/enroll) with a code from the
     new secret. Only a pending one: with MFA already on it's refused, and
@@ -796,7 +841,7 @@ def mfa_disable(
     payload: MfaDisableRequest,
     user: User = Depends(get_current_active_user),
     session: Session = Depends(get_session),
-    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    session_token: str | None = Depends(session_cookie),
 ):
     """Turns the caller's own MFA off. Needs the current password and, while
     MFA is on, a TOTP or backup code (MfaDisableRequest). With MFA only
@@ -879,7 +924,7 @@ class AuthSessionPublic(BaseModel):
 def list_sessions(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
-    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    session_token: str | None = Depends(session_cookie),
 ):
     """Self-service only -- a user's own active sessions, never another
     user's (see auth/sessions.py's list_sessions_for_user). Uses
@@ -1015,12 +1060,13 @@ def sso_login(request: Request, session: Session = Depends(get_session)):
     # login-CSRF gap (issue #61). Same TTL as the state token itself; no
     # point outliving what decode_state would accept anyway.
     response.set_cookie(
-        key=SSO_STATE_COOKIE_NAME,
+        key=sso_state_cookie_name(),
         value=state,
         httponly=True,
         secure=app_settings.session_cookie_secure,
         samesite="lax",
         max_age=STATE_TTL_SECONDS,
+        path="/",
     )
     return response
 
@@ -1040,7 +1086,7 @@ def sso_callback(
     state: str | None = None,
     error: str | None = None,
     error_description: str | None = None,
-    sso_state_cookie: str | None = Cookie(default=None, alias=SSO_STATE_COOKIE_NAME),
+    sso_state_cookie: str | None = Depends(read_sso_state_cookie),
     session: Session = Depends(get_session),
 ):
     app_settings = get_settings()
@@ -1160,7 +1206,11 @@ class _NoStoreRoute(APIRoute):
                 exc.headers = {**(exc.headers or {}), **_NO_STORE}
                 raise
             except RequestValidationError as exc:
-                response = await request_validation_exception_handler(request, exc)
+                # Handled here, not by the app's handler: logged the same way.
+                from app.api.errors import log_validation_failure, validation_response
+
+                log_validation_failure(request, exc)
+                response = validation_response(exc)
             response.headers.update(_NO_STORE)
             return response
 
