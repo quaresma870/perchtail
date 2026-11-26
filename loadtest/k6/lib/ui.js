@@ -98,7 +98,12 @@ export class Ui {
     const params = {
       tags: { name, flow, ...this.tags, ...(extra.tags || {}) },
       timeout: TIMEOUT,
-      headers: { Accept: 'application/json' },
+      headers: {
+        Accept: 'application/json',
+        // What the web interface asks on its own (the Explorer's refresh and
+        // source list) doesn't count as use for the idle session timeout.
+        ...(extra.background ? { 'X-PerchTail-Background': '1' } : {}),
+      },
       responseType: extra.responseType || 'text',
     }
     // Statuses besides 2xx that are a correct answer to this request (a
@@ -340,12 +345,13 @@ export class Ui {
           this.get(
             `/sources/${folder.sourceId}/browse?path=${enc(folder.path)}&refresh=true`,
             'GET browse refresh',
+            { background: true },
           )
         }
       }
       if (this.loggedIn && t >= this.lastStatus + statusMs) {
         this.lastStatus = t
-        this.get('/sources', 'GET /sources')
+        this.get('/sources', 'GET /sources', { background: true })
       }
       if (Date.now() >= end) return
     }
