@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "a7c3e9d2f514"
 down_revision: str | Sequence[str] | None = "f6a2d8c41b73"
@@ -53,6 +54,8 @@ _MISMATCHED = (
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     bind = op.get_bind()
     rows = bind.execute(sa.text(_MISMATCHED)).fetchall()
     for source_id, folder_id, old_customer_id, new_customer_id in rows:
@@ -81,4 +84,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     pass

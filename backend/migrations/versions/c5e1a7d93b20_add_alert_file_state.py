@@ -13,6 +13,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "c5e1a7d93b20"
 down_revision: str | Sequence[str] | None = "47c9d392f28f"
@@ -21,6 +22,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     op.create_table(
         "alert_file_state",
         sa.Column("alert_id", sa.Integer(), nullable=False),
@@ -34,4 +37,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     op.drop_table("alert_file_state")

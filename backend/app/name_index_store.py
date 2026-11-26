@@ -1,6 +1,6 @@
-"""Storage and search for the file-name index (#304): the SQLite-specific
-part, kept in one module. PostgreSQL support is planned for after 1.0
-(#306, ROADMAP.md); this is the module it would need its own version of.
+"""Storage and search for the file-name index (#304): the engine-specific
+part, kept in one module. On PostgreSQL (#306) the index is a pg_trgm GIN
+index on `path` instead (ensure_name_index_schema).
 
 `file_name_entry` (app/models.py FileNameEntry) holds one row per file; the
 `file_name_fts` FTS5 table indexes its `path` with the trigram tokenizer,
@@ -46,11 +46,28 @@ _SCHEMA = (
 _TRIGRAM = 3
 
 
+# PostgreSQL (#306): a trigram GIN index on file_name_entry.path, from the
+# pg_trgm extension (trusted: the database's owner may create it). Created by
+# the pg_baseline migration too; migrations/env.py keeps it out of
+# autogenerate and `alembic check`, since the models don't declare it.
+PG_TRGM_INDEX = "ix_file_name_entry_path_trgm"
+_PG_SCHEMA = (
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+    "CREATE INDEX IF NOT EXISTS ix_file_name_entry_path_trgm "
+    "ON file_name_entry USING gin (path gin_trgm_ops)",
+)
+
+
 def ensure_name_index_schema(target_engine) -> None:
-    """Creates the FTS5 table and its sync triggers if missing. Like
-    db.ensure_search_schema, FTS5 tables can't be declared as SQLModel
-    tables, so startup, the migration and the tests' session fixture call
-    this after create_all()."""
+    """Creates what narrows the search if missing: on SQLite the FTS5 table
+    and its sync triggers, on PostgreSQL the pg_trgm extension and its index.
+    Neither can be declared on the SQLModel tables, so startup, the
+    migrations and the tests' session fixture call this after create_all()."""
+    if target_engine.dialect.name == "postgresql":
+        with target_engine.begin() as conn:
+            for statement in _PG_SCHEMA:
+                conn.execute(text(statement))
+        return
     with target_engine.begin() as conn:
         exists = conn.execute(
             text("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :n"), {"n": FTS_TABLE}

@@ -15,6 +15,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 # The rebuild keeps AUTOINCREMENT (see 47c9d392f28f): ids of deleted sources
 # are never handed out again.
@@ -27,6 +28,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("source", table_kwargs=NO_ID_REUSE) as batch_op:
         batch_op.add_column(
             sa.Column("name_index_enabled", sa.Boolean(), nullable=False, server_default=sa.true())
@@ -73,6 +76,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     op.execute("DROP TRIGGER IF EXISTS file_name_entry_au")
     op.execute("DROP TRIGGER IF EXISTS file_name_entry_ad")
     op.execute("DROP TRIGGER IF EXISTS file_name_entry_ai")

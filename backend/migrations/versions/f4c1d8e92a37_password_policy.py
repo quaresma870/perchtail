@@ -15,6 +15,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "f4c1d8e92a37"
 down_revision: str | Sequence[str] | None = "e7a3c9d24b15"
@@ -23,6 +24,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("user") as batch_op:
         batch_op.add_column(sa.Column("password_changed_at", sa.DateTime(), nullable=True))
     op.execute(
@@ -43,6 +46,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     op.drop_index(op.f("ix_password_history_user_id"), table_name="password_history")
     op.drop_table("password_history")
     with op.batch_alter_table("user") as batch_op:

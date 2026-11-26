@@ -11,6 +11,7 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 import sqlmodel
+from migrations.engines import sqlite_only
 
 # revision identifiers, used by Alembic.
 revision: str = "b6a499319fc2"
@@ -21,6 +22,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
+    if not sqlite_only():
+        return
     # Autogenerate also proposed dropping the search_index_fts* shadow
     # tables -- it doesn't understand FTS5 virtual tables (see the
     # 4b176bcf39da migration for the same note). Stripped by hand; still
@@ -38,4 +41,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
+    if not sqlite_only():
+        return
     op.drop_table("sso_group_role_mapping")

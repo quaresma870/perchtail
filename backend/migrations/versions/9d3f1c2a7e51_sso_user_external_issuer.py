@@ -16,6 +16,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "9d3f1c2a7e51"
 down_revision: str | Sequence[str] | None = "c5e1a7d93b20"
@@ -24,6 +25,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("user") as batch_op:
         batch_op.add_column(
             sa.Column("external_issuer", sqlmodel.sql.sqltypes.AutoString(), nullable=True)
@@ -32,6 +35,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("user") as batch_op:
         batch_op.drop_index("ix_user_external_issuer")
         batch_op.drop_column("external_issuer")

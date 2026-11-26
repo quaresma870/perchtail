@@ -15,6 +15,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "b2e7c4a19f53"
 down_revision: str | Sequence[str] | None = "f7a2c4e9b351"
@@ -33,6 +34,8 @@ INDEXES = {
 # SQLite DDL isn't transactional: an upgrade or downgrade stopped half way
 # leaves some of these objects behind, so each step only runs when needed.
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     inspector = sa.inspect(op.get_bind())
     if not inspector.has_table(TABLE):
         _create_table()
@@ -58,6 +61,8 @@ def _create_table() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     inspector = sa.inspect(op.get_bind())
     if not inspector.has_table(TABLE):
         return

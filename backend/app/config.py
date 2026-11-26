@@ -1,12 +1,70 @@
 import ipaddress
 import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+
+# Query parameters of a database URL that carry a secret (libpq reads both),
+# hidden like the password whenever the URL is shown.
+_SECRET_URL_PARAMETERS = frozenset({"password", "sslpassword"})
+_POSTGRES_SCHEMES = ("postgres://", "postgresql://")
+
+
+def value_or_file(name: str, value: str, file: str) -> str:
+    """A setting that can also be read from a file named by NAME_FILE (a
+    Docker or Kubernetes secret): the file's content, without the trailing
+    line break, when only the file is set; the value otherwise. Setting both
+    is refused, as is a file that can't be read. The messages never carry
+    the value or the file's content."""
+    if not file:
+        return value
+    if value:
+        raise ValueError(f"{name} and {name}_FILE are both set; set only one of them")
+    try:
+        content = Path(file).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise ValueError(f"{name}_FILE names a file that doesn't exist: {file}") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{name}_FILE can't be read: {file} ({type(exc).__name__})") from None
+    content = content.rstrip("\r\n")
+    if not content.strip():
+        raise ValueError(f"{name}_FILE names an empty file: {file}")
+    return content
+
+
+def normalize_database_url(url: str) -> str:
+    """postgres:// and postgresql:// (what PostgreSQL's own tools and most
+    hosting providers hand out) use psycopg 3, the driver PerchTail ships;
+    SQLAlchemy would otherwise look for psycopg2."""
+    for scheme in _POSTGRES_SCHEMES:
+        if url.startswith(scheme):
+            return "postgresql+psycopg://" + url.removeprefix(scheme)
+    return url
+
+
+def redacted_database_url(url: str) -> str:
+    """The URL as it may be logged or shown: without the password, in the
+    user part or in the query. A URL that can't be parsed is not shown at
+    all, since where its password is can't be told."""
+    try:
+        parsed = make_url(url)
+    except ArgumentError:
+        return "<unparsable database URL>"
+    hidden = {key: "***" for key in parsed.query if key.lower() in _SECRET_URL_PARAMETERS}
+    if hidden:
+        parsed = parsed.update_query_dict(hidden)
+    return parsed.render_as_string(hide_password=True)
+
+
+def is_postgresql_url(url: str) -> bool:
+    return url.startswith("postgresql")
 
 
 @lru_cache(maxsize=8)
@@ -25,7 +83,9 @@ def parse_networks(raw: str) -> tuple[Network, ...]:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # hide_input_in_errors: a refused setting is reported without the values
+    # read, which include DATABASE_URL (with its password) and the keys.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     log_level: str = "INFO"
     log_dir: str = "./data/logs"
@@ -48,7 +108,21 @@ class Settings(BaseSettings):
     # fill the database's space (#172). Before 0.5.0 these files sat in
     # DATA_DIR's parent; see app/data_layout.py for the move.
     data_dir: str = "./data/db"
+    # Empty: SQLite in DATA_DIR/perchtail.db. postgresql:// (or postgres://)
+    # uses a PostgreSQL 18 database through psycopg 3; TLS and the other libpq
+    # options go in the URL's query (sslmode=verify-full&sslrootcert=...).
+    # DATABASE_URL_FILE reads it from a file instead (a secret), never both.
     database_url: str = ""
+    database_url_file: str = ""
+    # PostgreSQL only: connections kept open, and how many more a burst may
+    # open on top of them.
+    database_pool_size: int = 10
+    database_max_overflow: int = 20
+    # PostgreSQL only: a database that isn't on this host (loopback or a
+    # Unix socket) must be reached with sslmode=verify-ca or verify-full,
+    # or startup is refused (app/db.py, check_database_server). false lets it
+    # start with a warning instead (a private network such as Compose's).
+    database_require_verified_tls: bool = True
     credential_encryption_key: str = "changeme"
     # A key that fails the strength check (app/key_strength.py) stops
     # PerchTail from starting. false lets it start with a warning instead:
@@ -219,9 +293,22 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _derive_paths(self) -> "Settings":
         derived = set()
+        self.database_url = value_or_file(
+            "DATABASE_URL", self.database_url, self.database_url_file
+        ).strip()
         if not self.database_url:
             self.database_url = f"sqlite:///{os.path.join(self.data_dir, 'perchtail.db')}"
             derived.add("database")
+        self.database_url = normalize_database_url(self.database_url)
+        try:
+            make_url(self.database_url)
+        except ArgumentError:
+            # SQLAlchemy's own message quotes the URL, password included.
+            raise ValueError("DATABASE_URL is not a valid database URL") from None
+        if self.database_pool_size < 1 or self.database_max_overflow < 0:
+            raise ValueError(
+                "DATABASE_POOL_SIZE must be at least 1 and DATABASE_MAX_OVERFLOW at least 0"
+            )
         if not self.credential_salt_path:
             self.credential_salt_path = os.path.join(self.data_dir, "credential_salt")
             derived.add("credential_salt")

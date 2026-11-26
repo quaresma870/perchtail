@@ -5,7 +5,7 @@ PerchTail has four health endpoints, for different consumers:
 | Endpoint | Auth | Consumer | What it's for |
 |---|---|---|---|
 | `GET /healthz` | loopback, an allowed network, or bearer token | Docker healthcheck, liveness probe | "Is the process up and answering HTTP?" Fast, touches nothing else, always `{"status": "ok"}`. |
-| `GET /readyz` | loopback, an allowed network, or bearer token | Readiness probe, load balancer | "Can this instance take traffic?" A database write, `DATA_DIR` writable, the scheduler running. |
+| `GET /readyz` | loopback, an allowed network, or bearer token | Readiness probe, load balancer | "Can this instance take traffic?" A database write, `DATA_DIR` writable, the scheduler running, and on PostgreSQL the database lock not lost to another instance. |
 | `GET /monitoring/health` | bearer token, and an allowed network if set | Zabbix and other JSON pollers | The full operational report, worth polling and alerting on. |
 | `GET /metrics` | bearer token, and an allowed network if set | Prometheus | The same report in the Prometheus text format. |
 
@@ -24,11 +24,12 @@ None of the four answers the world. The bearer token is the monitoring token gen
 
 ## GET /readyz
 
-Answers `200 {"status": "ready"}` when all three checks pass, and `503 {"status": "not_ready", "failed": [...]}` naming the ones that didn't:
+Answers `200 {"status": "ready"}` when all the checks pass, and `503 {"status": "not_ready", "failed": [...]}` naming the ones that didn't:
 
 - `database`: an insert into a small table, rolled back at once, so it needs SQLite's write lock and leaves nothing behind. It waits at most 2 seconds for the lock (instead of the normal 30), so a probe on a locked database fails fast.
 - `data_dir`: a small temporary file is created, written and removed in `DATA_DIR`. A full disk or a read-only mount fails it.
 - `scheduler`: the background job scheduler runs.
+- `database_lock`: PostgreSQL only, and only once it has failed. Another PerchTail instance took the database's one-instance lock after this one lost its connection (`database.instance_lock_lost`); it stays failed until this instance is restarted.
 
 It returns nothing else. Callers need the same authorization as `/healthz` (see [Who may call them](#who-may-call-them)): an orchestrator that can't send the token belongs in `PROBE_ALLOWED_NETWORKS`.
 
@@ -167,7 +168,7 @@ Timestamps are UTC, without a time zone (`next_run_at` has one). Fields that can
 | `logs.size_limit_deleted_early`, `logs.size_limit_deleted_files`, `logs.size_limit_newest_deleted_day` | `true` once `LOG_MAX_TOTAL_MB` has deleted archives that `LOG_RETENTION_DAYS` would still have kept, usually because `LOG_LEVEL=DEBUG` was left on: you have less log history than configured. Lower the log level, set `LOG_QUIET_THIRD_PARTY=true` (the default) if it was turned off, or give the logs more space. |
 | `trusted_proxies_suspect` | `true` once a request since this process started carried `X-Forwarded-For` or `Forwarded` from a peer outside `TRUSTED_PROXIES` (the log has `client_address.untrusted_forwarded_header` with the peer's address). Usually a reverse proxy missing from `TRUSTED_PROXIES`: every client then has the proxy's address, so they share the per-address sign-in lockout ([troubleshooting.md](troubleshooting.md)). Add the proxy to `TRUSTED_PROXIES` and restart. Doesn't change `status`. |
 
-The background jobs are `scratch_idle_sweep`, `scratch_size_guard`, `alert_pass`, `name_index_sweep`, `source_checks`, `agent_upgrades`, `audit_purge`, `session_purge`, `update_check`, `audit_integrity_check`, `wal_checkpoint` and `backup` (the scheduled backup, see [backup-and-restore.md](backup-and-restore.md); it does nothing while its interval is 0, and after a failed attempt it tries again only once an hour has passed, or the interval if that's shorter, or straight away after a restart).
+The background jobs are `scratch_idle_sweep`, `scratch_size_guard`, `alert_pass`, `name_index_sweep`, `source_checks`, `agent_upgrades`, `audit_purge`, `session_purge`, `update_check`, `audit_integrity_check`, `wal_checkpoint`, `database_lock_check` (PostgreSQL only: every minute, checks the one-instance lock in the database and takes it again if its connection was lost) and `backup` (the scheduled backup, see [backup-and-restore.md](backup-and-restore.md); it does nothing while its interval is 0, and after a failed attempt it tries again only once an hour has passed, or the interval if that's shorter, or straight away after a restart).
 
 ## When the status degrades
 
@@ -195,7 +196,12 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `startup.insecure_credential_encryption_key` | critical | `CREDENTIAL_ENCRYPTION_KEY` is still the default; PerchTail refuses to start. |
 | `startup.weak_credential_encryption_key` | critical, warning with `CREDENTIAL_KEY_REFUSE_WEAK=false` | `CREDENTIAL_ENCRYPTION_KEY` is weaker than recommended (see [configuration.md](configuration.md#keys-security-and-sessions)): PerchTail refuses to start, unless `CREDENTIAL_KEY_REFUSE_WEAK=false`. |
 | `startup.weak_credential_key_allowed` | warning | PerchTail started with a weak key because `CREDENTIAL_KEY_REFUSE_WEAK=false`: rotate the key and remove the setting. |
-| `startup.instance_lock_held` | critical | Another PerchTail process is using the same `DATA_DIR`, so this one refuses to start, or `alembic upgrade` refuses to migrate, without touching the database. `holder_host`, `holder_pid`, `holder_version` and `holder_started_at` name the one running. Only one instance may run per `DATA_DIR`; the lock is released by the operating system when that process ends, however it ends. |
+| `startup.instance_lock_held` | critical | Another PerchTail process is using the same `DATA_DIR`, so this one refuses to start, or `alembic upgrade` refuses to migrate, without touching the database. `holder_host`, `holder_pid`, `holder_version` and `holder_started_at` name the one running. Only one instance may run per `DATA_DIR`; the lock is released by the operating system when that process ends, however it ends. On PostgreSQL, the same event with `lock` `database` says another instance holds the advisory lock in the database, even with another `DATA_DIR`; `holder_host` (its client address), `holder_pid` (its server process) and `holder_started_at` describe its connection. |
+| `database.instance_lock_reacquired` | warning | PostgreSQL: the connection holding the one-instance lock in the database was lost (a server restart, a failover, a cut idle connection) and the `database_lock_check` job took the lock again on a new connection. |
+| `database.instance_lock_lost` | critical | PostgreSQL: the connection holding the one-instance lock was lost and another PerchTail instance took the lock meanwhile; `holder_host`, `holder_pid` and `holder_started_at` describe its connection. `/readyz` fails with `database_lock` until this instance is restarted. Stop one of the two. |
+| `startup.database_version_unsupported` | critical | The PostgreSQL server is older than 18 (`server_version_num`): startup and `alembic upgrade` refuse, without touching the database. |
+| `startup.database_encoding_unsupported` | critical | The PostgreSQL database isn't in UTF8 (`server_encoding`): startup and `alembic upgrade` refuse. Create the database again with `ENCODING 'UTF8'` ([configuration.md](configuration.md#postgresql)). |
+| `startup.database_tls_not_verified` | critical, warning with `DATABASE_REQUIRE_VERIFIED_TLS=false` | The PostgreSQL database isn't on this host (`host`) and the connection doesn't verify its certificate (`sslmode`). Startup and `alembic upgrade` refuse, unless `DATABASE_REQUIRE_VERIFIED_TLS=false`, which lets them go on with this warning. Add `sslmode=verify-full` and `sslrootcert` to `DATABASE_URL`. |
 | `startup.database_newer_than_app` | critical | The database is at a migration (`database_revision`) this version (`app_version`) doesn't know: a newer PerchTail already migrated it. Startup and `alembic upgrade` refuse. Run the newer version again, or restore a backup taken before the upgrade. |
 | `audit_integrity.chain_broken` | error | The audit log hash chain is broken: a row was changed or deleted outside PerchTail. |
 | `audit_hash_chain.chain_reset` | error | At startup: the audit log's signatures were taken away or its first entries deleted, while `DATA_DIR/.audit-chain-started` says the chain had started ([audit-events.md](audit-events.md#integrity)). |

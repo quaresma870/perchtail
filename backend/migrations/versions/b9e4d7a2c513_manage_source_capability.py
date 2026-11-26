@@ -17,6 +17,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "b9e4d7a2c513"
 down_revision: str | Sequence[str] | None = "e3a9c5f17b28"
@@ -33,6 +34,8 @@ def _as_list(value) -> list:
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     conn = op.get_bind()
     roles = conn.execute(sa.text("SELECT id, global_capabilities FROM role")).fetchall()
     creators = {
@@ -55,6 +58,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     conn = op.get_bind()
     grants = conn.execute(sa.text("SELECT id, capabilities FROM rolegrant")).fetchall()
     for grant_id, caps in grants:

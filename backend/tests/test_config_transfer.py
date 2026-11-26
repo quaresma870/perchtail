@@ -2,6 +2,7 @@
 
 import re
 import textwrap
+from datetime import datetime
 
 import pytest
 import yaml
@@ -12,6 +13,7 @@ from app.auth.models import AuditLog, Role, User
 from app.crypto import decrypt_credential
 from app.db import get_session
 from app.models import (
+    Alert,
     AlertFileState,
     Customer,
     Folder,
@@ -233,7 +235,18 @@ def test_export_round_trips_without_secrets(session, client):
 def test_changes_are_updates_that_clear_alert_positions_on_a_move(session, client):
     _import(client)
     web01 = session.exec(select(Source).where(Source.name == "web01")).one()
-    session.add(AlertFileState(alert_id=1, source_id=web01.id, file_path="a.log", offset=10))
+    # A real alert: PostgreSQL enforces the foreign key, SQLite doesn't.
+    owner = session.exec(select(User)).first()
+    alert = Alert(
+        user_id=owner.id,
+        name="a",
+        query="x",
+        webhook_url_encrypted="encrypted",
+        created_at=datetime(2026, 11, 26),
+    )
+    session.add(alert)
+    session.commit()
+    session.add(AlertFileState(alert_id=alert.id, source_id=web01.id, file_path="a.log", offset=10))
     session.commit()
 
     changed = re.sub(

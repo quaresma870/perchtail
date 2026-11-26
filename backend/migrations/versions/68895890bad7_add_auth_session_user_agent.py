@@ -10,6 +10,7 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 import sqlmodel
+from migrations.engines import sqlite_only
 
 
 # revision identifiers, used by Alembic.
@@ -21,6 +22,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
+    if not sqlite_only():
+        return
     # Autogenerate also proposed dropping the search_index_fts* tables --
     # those are FTS5 virtual tables created via raw SQL in app.db's
     # ensure_search_schema(), not part of SQLModel.metadata, so autogenerate
@@ -34,4 +37,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
+    if not sqlite_only():
+        return
     op.drop_column('authsession', 'user_agent')

@@ -43,6 +43,7 @@ from datetime import UTC, datetime
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "c7f2a9e4d136"
 down_revision: str | Sequence[str] | None = "b9e4d7a2c513"
@@ -101,6 +102,8 @@ def _recover_interrupted_rebuild(table: str) -> None:
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     bind = op.get_bind()
     _recover_interrupted_rebuild("auditlog")
     existing = {column["name"] for column in sa.inspect(bind).get_columns("auditlog")}
@@ -166,6 +169,8 @@ def _raise_short_retention(bind) -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     op.drop_table("audit_outbox")
     _recover_interrupted_rebuild("auditlog")
     with op.batch_alter_table(

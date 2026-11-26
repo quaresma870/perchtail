@@ -12,6 +12,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "b3d7e9f21c56"
 down_revision: str | Sequence[str] | None = "a8e2f6c10d49"
@@ -20,10 +21,14 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("user") as batch_op:
         batch_op.add_column(sa.Column("preferences", sa.JSON(), nullable=True))
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     with op.batch_alter_table("user") as batch_op:
         batch_op.drop_column("preferences")

@@ -19,6 +19,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "47c9d392f28f"
 down_revision: str | Sequence[str] | None = "6ba4603526f4"
@@ -52,6 +53,8 @@ def _rebuild(autoincrement: bool) -> None:
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     bind = op.get_bind()
     for statement in _ORPHAN_CLEANUP:
         bind.execute(sa.text(statement))
@@ -86,4 +89,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     # The orphan cleanup isn't reversible (and nothing would want it back);
     # only the table definitions revert.
+    if not sqlite_only():
+        return
     _rebuild(autoincrement=False)

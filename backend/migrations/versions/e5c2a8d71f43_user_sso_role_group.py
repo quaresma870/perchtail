@@ -17,6 +17,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "e5c2a8d71f43"
 down_revision: str | Sequence[str] | None = "e5c1b7a94d26"
@@ -69,6 +70,8 @@ def _user_columns() -> set[str]:
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     _recover_interrupted_rebuild("user")
     if "sso_role_group" in _user_columns():
         return
@@ -77,6 +80,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     _recover_interrupted_rebuild("user")
     if "sso_role_group" not in _user_columns():
         return

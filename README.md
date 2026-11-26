@@ -27,7 +27,7 @@
 - **Operations:** settings in a sidebar in five sections (Sources, Access, Content, Operations, Audit), with an icon for each page, edited in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained, verified daily and records where each action came from, including refused requests, bulk YAML import and export, server-side limits on listings and downloads running at once (Settings → Explorer and limits), and a system SMTP server for email, always over verified TLS (Settings → Email).
 - **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, encrypted online backups, push agents upgraded from the portal only to binaries signed with the release key, signed images and release files, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
 
-**What's next.** 0.7 is the last feature release before 1.0. 1.0 adds no features: load tests and a sizing guide, security controls in CI and releases, and an internal pentest. PostgreSQL, high availability, user groups, temporary access, notifications, API tokens and an external pentest come after 1.0. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+**What's next.** 0.7 is the last feature release before 1.0. 1.0 adds PostgreSQL support and otherwise validates what is there: load tests and a sizing guide, security controls in CI and releases, and an internal pentest. High availability, user groups, temporary access, notifications, API tokens and an external pentest come after 1.0. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
 
 **Support.** Which releases get fixes, and for how long, is in [SECURITY.md](SECURITY.md#support-and-end-of-life).
 
@@ -176,6 +176,8 @@ on a local disk, not a network share: the database runs in SQLite's WAL
 mode, which needs one. Upgrading from a release before 0.5.0 moves the database, salt and
 `known_hosts` from `/data` into `/data/db` on first start; see the
 CHANGELOG's upgrade notes.
+
+SQLite is the default. PerchTail can also use an empty PostgreSQL 18 database, with `DATABASE_URL=postgresql://...` (or `DATABASE_URL_FILE` for a secret) and the server's certificate verified over a network; `/data/db` then still holds the salt and `known_hosts`. See [docs/configuration.md](docs/configuration.md#postgresql). `python -m app.backup` supports a SQLite database only.
 
 Back up with `python -m app.backup` while PerchTail runs: it puts a consistent copy of the database, the salt and `known_hosts` into one file, always encrypted (with a key derived from `CREDENTIAL_ENCRYPTION_KEY`, or from an optional `BACKUP_ENCRYPTION_KEY`), checks it, and restores it with PerchTail stopped. Settings → Backups and updates also makes one on a schedule: every 24 hours on a new install. The database and `credential_salt` are useless without each other, and so is the salt without your `CREDENTIAL_ENCRYPTION_KEY`: keep the keys somewhere you can reach without this host. Before an upgrade, make a `pre-upgrade` backup; restoring it, with the previous image, rolls the upgrade back:
 

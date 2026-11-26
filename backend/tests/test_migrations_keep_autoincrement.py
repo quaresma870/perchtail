@@ -13,6 +13,9 @@ from pathlib import Path
 
 import pytest
 
+# The revisions these test only run on SQLite (migrations/engines.py).
+pytestmark = pytest.mark.sqlite_only
+
 BACKEND = Path(__file__).resolve().parents[1]
 NO_ID_REUSE_TABLES = ("customer", "folder", "source", "role", "auditlog")
 

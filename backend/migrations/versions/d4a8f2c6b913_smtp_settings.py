@@ -14,6 +14,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "d4a8f2c6b913"
 down_revision: str | Sequence[str] | None = "c7f2a9e4d136"
@@ -22,6 +23,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if not sqlite_only():
+        return
     op.create_table(
         "smtp_settings",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -40,4 +43,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     op.drop_table("smtp_settings")

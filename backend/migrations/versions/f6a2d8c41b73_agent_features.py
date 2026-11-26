@@ -21,6 +21,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 import sqlmodel
 from alembic import op
+from migrations.engines import sqlite_only
 
 revision: str = "f6a2d8c41b73"
 down_revision: str | Sequence[str] | None = "b2e7c4a19f53"
@@ -101,6 +102,8 @@ def _restore_source_sequence(seq: int | None) -> None:
 def upgrade() -> None:
     # The upgrade doesn't rebuild source, but an earlier rebuild of it may
     # have been left half done.
+    if not sqlite_only():
+        return
     _recover_interrupted_rebuild("source")
     if "agent_features" in _source_columns():
         return
@@ -110,6 +113,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sqlite_only():
+        return
     _recover_interrupted_rebuild("source")
     if "agent_features" not in _source_columns():
         return

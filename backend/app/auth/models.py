@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, Enum
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 from app.timeutils import utcnow
@@ -93,7 +93,7 @@ class RoleGrant(SQLModel, table=True):
     role_id: int = Field(foreign_key="role.id")
     # scope_id points at either customer.id or source.id depending on scope_type,
     # so it can't carry a single FK constraint — validated in auth/rbac.py (M2).
-    scope_type: ScopeType
+    scope_type: ScopeType = Field(sa_type=Enum(ScopeType, native_enum=False))
     scope_id: int
     capabilities: list[Capability] = Field(default_factory=list, sa_column=Column(JSON))
 
@@ -117,7 +117,9 @@ class User(SQLModel, table=True):
     preferences: dict | None = Field(default=None, sa_column=Column(JSON))
     role_id: int = Field(foreign_key="role.id")
     active: bool = True
-    auth_provider: AuthProviderType = AuthProviderType.local
+    auth_provider: AuthProviderType = Field(
+        default=AuthProviderType.local, sa_type=Enum(AuthProviderType, native_enum=False)
+    )
     # An SSO account is identified by (external_issuer, external_id): the
     # IdP's `iss` and `sub` claims. `sub` is only unique within one issuer,
     # so matching on it alone would let a different IdP (after the provider's
@@ -218,7 +220,7 @@ class PasswordResetToken(SQLModel, table=True):
 
 class SSOProviderConfig(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
-    protocol: SSOProtocol
+    protocol: SSOProtocol = Field(sa_type=Enum(SSOProtocol, native_enum=False))
     name: str
     # Encrypted at rest via app.crypto (client id/secret, or SAML metadata).
     config: str
