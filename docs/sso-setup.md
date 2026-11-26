@@ -42,6 +42,13 @@ Whatever your IdP calls it ("application," "OAuth client," "OIDC integration"), 
 - **MFA is for local accounts only.** The TOTP second factor under **My profile** exists only for local accounts. SSO users get their second factor, if any, from the IdP. Changing the password in PerchTail is also for local accounts only: an SSO account can't sign in with the local form, and an admin can't give it a password.
 - A deactivated account can't sign in with SSO either.
 
+### Sessions and the identity provider
+
+- **The PerchTail session is its own.** A successful SSO sign-in starts a PerchTail session like a local sign-in does: it lasts `SESSION_TTL_HOURS` (12 hours) and ends sooner when unused for **End unused sessions after** (Settings → Sign-in security, 60 minutes by default). It doesn't follow the session at the IdP, and PerchTail doesn't check back with the IdP while it lasts.
+- **Signing out of PerchTail doesn't sign out of the IdP.** PerchTail doesn't call the IdP's logout endpoint, so while the user's IdP session lasts, the next **Sign in with …** may go through without asking for a password. On a shared computer, sign out of the IdP too.
+- **Signing out of the IdP, or being disabled there, doesn't end a PerchTail session.** PerchTail receives no logout from the IdP: the change takes effect at the user's next sign-in. To end someone's access at once, deactivate the account in **Settings → Users**, or end its sessions there (**End sessions**).
+- **How the user signed in is the IdP's business.** PerchTail doesn't ask for or read the ID token's `acr` and `amr` claims, so it assumes nothing about the factors the user gave: an SSO sign-in counts as one sign-in, as strong as the IdP's policy makes it. Require MFA for PerchTail's client at the IdP (Entra ID Conditional Access, an Okta sign-on policy, Keycloak's authentication flows), since PerchTail's own MFA is for local accounts only.
+
 ## 2. Group-claim to role mapping (optional)
 
 An SSO account's role comes from the group mappings at every sign-in. Without a group claim, or without a mapping that matches, an SSO account has the built-in no-access role, and a role assigned to it in **Settings → Users** lasts only until its next sign-in.

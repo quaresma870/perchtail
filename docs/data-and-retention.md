@@ -1,6 +1,18 @@
 # Data and retention
 
-This page lists everything PerchTail keeps, where, how it is protected, how long it stays and how it is removed, and everything that leaves the installation. Nothing from the logs PerchTail gives access to is kept: file content only passes through a short-lived scratch file (see [Scratch](#scratch)). How the stored secrets are encrypted is in [security-model.md](security-model.md#keys-and-encryption).
+This page lists everything PerchTail keeps, where, how it is protected, how long it stays and how it is removed, and everything that leaves the installation. Nothing from the logs PerchTail gives access to is kept: file content only passes through a short-lived scratch file (see [Scratch](#scratch)). How the stored secrets are encrypted is in [security-model.md](security-model.md#cryptography).
+
+## How the data is classified
+
+Everything PerchTail handles falls in one of these classes, from the most to the least sensitive; the tables below say which class each item belongs to by what it holds.
+
+| Class | What it covers | How it is protected |
+|---|---|---|
+| Secrets | Source credentials, the SSO client secret, the SMTP password, alert webhook URLs, users' TOTP secrets, `CREDENTIAL_ENCRYPTION_KEY`, `BACKUP_ENCRYPTION_KEY` and the credential salt; passwords, backup codes and tokens, which are kept only as hashes | Encrypted in the database or kept only as a hash ([security-model.md](security-model.md#cryptography)); never returned by the API, written to the logs or the audit log; the keys outside the database and, preferably, outside the host; files readable by PerchTail's user only; backups encrypted |
+| File content | What users open, follow and download from sources, and the matching lines an alert sends | Never stored: it passes through scratch (readable by PerchTail's user only, deleted when no longer used) and is sent with `Cache-Control: no-store`; reached only through a grant and the source's rules; redacted when redaction applies; a pending webhook call keeps its lines for an hour at most |
+| Personal data | About PerchTail's users: username, display name, email, the identity provider's identifiers, sign-in times, the browser of each session, and, in the audit log, what they did and from which address | Shown only to the user themselves and to administrators whose capabilities cover it (`manage_users`, `view_audit_log`, `view_access_report`); kept as long as the account or the audit retention says ([Users](#users)); sent outside only in the emails PerchTail sends that user |
+| Configuration | Customers, folders, sources (host, port, folders, options), rules, roles and grants, group mappings, severity patterns, redaction rules and system settings | Read and changed only within a role's grants and capabilities, every change audited; held in the database and in its encrypted backups |
+| Metadata | The file-name index (paths, sizes, times), alert reading positions, job runs, the audit chain's state and the application logs | Not encrypted by PerchTail (encrypt the disk); the index is filtered by grants and the current rules at every search; application logs readable by PerchTail's user and, in the web interface, by super admins only |
 
 ## The database
 
@@ -42,11 +54,26 @@ The database is `DATA_DIR/perchtail.db` (SQLite) unless `DATABASE_URL` points el
 
 A scratch file is deleted when the viewer closes it and no one else holds it open, when it has gone unused for `SCRATCH_IDLE_SECONDS` (5 minutes), when scratch is over `SCRATCH_MAX_GB` (oldest unused first), and at every start. A file still being fetched, redacted or sent is never deleted by the idle time or the size limit: its idle time counts from when that ends. Plain files of local sources are read in place and not copied to scratch, except their redacted copy when redaction applies; their `.gz` files and archive members are extracted there like any other source's. Scratch isn't encrypted: keep `SCRATCH_DIR` on a disk only the host can read, or in memory.
 
-## Application logs
+## Logs
+
+### Application logs
 
 `LOG_DIR` holds PerchTail's own logs: requests, background jobs, errors, and one line for each audit event (action, user, target, address and session). They never hold passwords, tokens, request bodies or file content; they do hold file paths, source names and error messages. The folder is readable by PerchTail's user only, and in the web interface by super admins only, through the built-in application-log source.
 
 The active file rotates at `LOG_MAX_FILE_MB` (100) or at midnight; rotated files are compressed and deleted after `LOG_RETENTION_DAYS` (30) or once all logs exceed `LOG_MAX_TOTAL_MB` (2048), oldest first. Logs also go to standard output, where the container runtime or the system journal keeps them under its own retention.
+
+### Every log, layer by layer
+
+| Log | What it records | Format | Where | Who can read it | How long |
+|---|---|---|---|---|---|
+| Audit log | Who did what, when, from which address and session, on which target, with the details of each action ([audit-events.md](audit-events.md)) | Database rows in an HMAC hash chain | The database | Users whose role has `view_audit_log`, in Settings → Audit log | 365 days by default (at least 90, or for ever) |
+| Application log | PerchTail's events: requests that need noting, background jobs, connector and delivery errors, warnings about settings, and one line per audit entry; never passwords, tokens, request bodies or file content | JSON lines with an ISO 8601 UTC timestamp, level, event name, the request's `request_id` and the event's fields | Standard output and `LOG_DIR/perchtail.log` | PerchTail's user on the host; super admins in the web interface; whoever can read the container's or the service's output | `LOG_DIR`: 30 days or 2,048 MB (above); standard output: the container runtime's or the journal's retention |
+| Web server | The web server's own messages (start, stop, unexpected errors) and one line per HTTP request: method, path with its query string (which can name a file path or a search), status and the address the request came from, which behind a proxy is the proxy's | Plain text | Standard output and standard error only, not `LOG_DIR` | Whoever can read the container's or the service's output | The container runtime's or the journal's retention |
+| Reverse proxy | Each request as the proxy logs it, usually with the client's address and the URL | The proxy's | The proxy's host | The proxy's administrators | The proxy's configuration |
+| Push agent | Its connection to PerchTail, upgrades and errors; never file content | Plain text, one line per event | Standard error on the agent's host, kept by its service manager (the journal, or a file with NSSM on Windows) | The host's administrators | The host's configuration |
+| PostgreSQL, when used | What the database server is set to log | The server's | The database server | Its administrators | Its configuration |
+
+To keep a copy outside the PerchTail host, send standard output, or `LOG_DIR`, to a syslog server or a SIEM ([hardening.md](hardening.md#sending-logs-off-the-host)).
 
 ## Backups
 
