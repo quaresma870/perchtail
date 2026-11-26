@@ -1,0 +1,21 @@
+apiVersion: v2
+name: perchtail
+description: PerchTail on Kubernetes - live, rule-scoped log browsing across Linux and Windows servers.
+type: application
+# The chart's version follows the app's (backend/app/version.py): both are
+# set at each release (CONTRIBUTING.md, "Releasing").
+version: 0.7.1
+appVersion: "0.7.1"
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/quaresma870/perchtail
+sources:
+  - https://github.com/quaresma870/perchtail
+icon: https://raw.githubusercontent.com/quaresma870/perchtail/main/frontend/public/favicon.svg
+keywords:
+  - logs
+  - log-viewer
+  - ssh
+  - smb
+  - winrm
+annotations:
+  artifacthub.io/license: AGPL-3.0-only

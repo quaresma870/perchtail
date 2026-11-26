@@ -1,0 +1,185 @@
+# PerchTail on Kubernetes (docs/kubernetes.md).
+#
+# PerchTail runs one process per data directory (an instance lock, the
+# scheduler and some state in memory), so the chart always runs one pod,
+# replaced with the Recreate strategy: there is no replica count to set.
+
+image:
+  registry: ghcr.io
+  repository: quaresma870/perchtail
+  # Empty: the chart's appVersion.
+  tag: ""
+  # A digest (sha256:...) pins the image; it wins over the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+  # For a registry that needs credentials (a mirror in a closed network).
+  pullSecrets: []
+  # - name: my-registry
+
+# The root secret: with the salt kept in the data volume, it encrypts the
+# stored credentials and keys the audit chain. The chart never makes one up
+# (another `helm template` would make another, and nothing could be
+# decrypted any more): give an existing Secret, or a value.
+credentialEncryptionKey:
+  # Name of an existing Secret holding the key. Create it with:
+  #   kubectl create secret generic perchtail-key \
+  #     --from-literal=credential-encryption-key="$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")"
+  existingSecret: ""
+  # The key inside that Secret.
+  existingSecretKey: credential-encryption-key
+  # Or the key itself, stored by the chart in a Secret of its own. It is
+  # then in your values: prefer existingSecret.
+  value: ""
+
+# Optional: the database URL, from an existing Secret. Without it, SQLite in
+# the data volume.
+database:
+  existingSecret: ""
+  existingSecretKey: database-url
+
+# The data volume (/data): the database (SQLite), the credential salt, the
+# pinned SSH host keys, the logs and the backups. Always needed. It must be
+# block storage local to the node (SQLite runs in WAL mode): never NFS or a
+# ReadWriteMany share.
+persistence:
+  size: 10Gi
+  # Empty: the cluster's default storage class.
+  storageClass: ""
+  # An existing PersistentVolumeClaim to use instead of making one.
+  existingClaim: ""
+  annotations: {}
+
+# Scratch (SCRATCH_DIR): files fetched for opening and downloading, deleted
+# when done and emptied at startup, so it lives in an emptyDir of its own,
+# mounted at /scratch, with SCRATCH_DIR at /scratch/files (a folder PerchTail
+# creates with mode 0700).
+scratch:
+  # The emptyDir's size limit, in GiB.
+  sizeLimitGi: 6
+  # SCRATCH_MAX_GB, below the size limit: PerchTail evicts and refuses
+  # fetches before the kubelet would evict the pod.
+  maxGb: 5
+
+# /tmp, an emptyDir in memory (the root filesystem is read-only).
+tmp:
+  sizeLimit: 256Mi
+
+# Plain settings, as environment variables (docs/configuration.md), for
+# example PUBLIC_BASE_URL, TRUSTED_PROXIES or LOG_LEVEL. SESSION_COOKIE_SECURE
+# keeps the app's default (true): serve PerchTail over HTTPS.
+env: {}
+  # PUBLIC_BASE_URL: https://perchtail.example.com
+  # TRUSTED_PROXIES: 10.244.0.0/16
+  # LOG_LEVEL: INFO
+
+# Anything else: full env entries and envFrom sources.
+extraEnv: []
+extraEnvFrom: []
+
+# Files the pod needs from a Secret or ConfigMap, for example the CA that
+# signed the PostgreSQL server's certificate (sslrootcert in DATABASE_URL) or
+# a file named by DATABASE_URL_FILE. Mounted read-only, outside /data.
+extraVolumes: []
+  # - name: pg-ca
+  #   secret:
+  #     secretName: perchtail-pg-ca
+extraVolumeMounts: []
+  # - name: pg-ca
+  #   mountPath: /etc/perchtail/pg-ca
+  #   readOnly: true
+
+# Requests for a small installation (up to 10 people and about 50 sources,
+# docs/sizing.md); raise them with the measured profiles there.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+service:
+  port: 80
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  # For ingress-nginx, the push agents' WebSocket (/agent/connect) needs
+  # long timeouts (docs/kubernetes.md):
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  #   nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  annotations: {}
+  hosts:
+    - host: perchtail.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # - secretName: perchtail-tls
+  #   hosts:
+  #     - perchtail.example.com
+
+networkPolicy:
+  enabled: false
+  # Traffic in is allowed only from pods in this namespace (the ingress
+  # controller's).
+  ingressControllerNamespace: ingress-nginx
+  # More sources of traffic in, as Kubernetes NetworkPolicy ingress rules.
+  # Without them, a monitoring system in another namespace can't reach
+  # /metrics or /monitoring/health (docs/monitoring.md). For example, a
+  # Prometheus in the "monitoring" namespace:
+  extraIngress: []
+  # - from:
+  #     - namespaceSelector:
+  #         matchLabels:
+  #           kubernetes.io/metadata.name: monitoring
+  #       podSelector:
+  #         matchLabels:
+  #           app.kubernetes.io/name: prometheus
+  #   ports:
+  #     - port: http
+  #       protocol: TCP
+  # Traffic out stays open (sources, the SSO provider, webhooks and email
+  # vary). Rules here restrict it to what they allow, for example:
+  egress: []
+  # - to:
+  #     - namespaceSelector: {}
+  #       podSelector:
+  #         matchLabels:
+  #           k8s-app: kube-dns
+  #   ports:
+  #     - port: 53
+  #       protocol: UDP
+  # - to:
+  #     - ipBlock:
+  #         cidr: 10.20.0.0/16
+  #   ports:
+  #     - port: 22
+  #     - port: 445
+  #     - port: 5986
+
+# A ServiceAccount to run as; empty uses the namespace's default one. The
+# pod never mounts its token: PerchTail doesn't talk to the Kubernetes API.
+serviceAccountName: ""
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+probes:
+  # The first start runs the database migrations: allow it up to
+  # startup.periodSeconds x startup.failureThreshold (5 minutes).
+  startup:
+    periodSeconds: 5
+    failureThreshold: 60
+  liveness:
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3

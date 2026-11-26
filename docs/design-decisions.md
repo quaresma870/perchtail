@@ -339,7 +339,6 @@ Why PerchTail is built the way it is. Each entry is a decision the code follows,
 Ideas and loose ends that no release plans yet. What is planned is in [ROADMAP.md](../ROADMAP.md).
 
 - **SAML.** Only if there is demand; OIDC covers the common identity providers.
-- **Kubernetes manifests.** Maintained manifests (Deployment, PVC, Service, Ingress) instead of the example in [high-availability.md](high-availability.md).
 - **A further high-availability tier.** Warm standby built in, or several replicas once PostgreSQL is supported (#306, #336), only when a real deployment needs it.
 - **External secret-manager references.** A `SecretResolver` for credential fields, Vault KV first, resolved at import or at each connection.
 - **Reachability history.** A short history of each source's checks, beyond the last status and failure count kept now.

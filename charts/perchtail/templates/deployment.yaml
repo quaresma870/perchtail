@@ -1,0 +1,156 @@
+{{- if ge (float64 .Values.scratch.maxGb) (float64 .Values.scratch.sizeLimitGi) -}}
+{{- fail "scratch.maxGb must be below scratch.sizeLimitGi, so PerchTail refuses fetches before the kubelet evicts the pod" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "perchtail.fullname" . }}
+  labels:
+    {{- include "perchtail.labels" . | nindent 4 }}
+spec:
+  # One process per data directory (instance lock, scheduler, state in
+  # memory): one replica, and the old pod gone before the new one starts.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "perchtail.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "perchtail.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A changed key Secret made by the chart restarts the pod.
+        checksum/key: {{ .Values.credentialEncryptionKey.value | sha256sum | trunc 16 | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      # As PerchTail's own user from the start, so the image's entrypoint
+      # skips its root step.
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: perchtail
+          image: {{ include "perchtail.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "perchtail.keySecretName" . }}
+                  key: {{ include "perchtail.keySecretKey" . }}
+            {{- with .Values.database.existingSecret }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ $.Values.database.existingSecretKey }}
+            {{- end }}
+            # A folder inside the scratch emptyDir, not its mount point: the
+            # kubelet makes the mount point root's and 0777, while PerchTail
+            # creates this folder itself, as its own user, with mode 0700.
+            - name: SCRATCH_DIR
+              value: /scratch/files
+            - name: SCRATCH_MAX_GB
+              value: {{ .Values.scratch.maxGb | quote }}
+            {{- range $name, $value := .Values.env }}
+            - name: {{ $name }}
+              value: {{ $value | toString | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # Without a token: /healthz and /readyz answer a loopback caller,
+          # which an exec probe inside the pod is.
+          startupProbe:
+            {{- include "perchtail.probe" "/healthz" | nindent 12 }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: 5
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          livenessProbe:
+            {{- include "perchtail.probe" "/healthz" | nindent 12 }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            {{- include "perchtail.probe" "/readyz" | nindent 12 }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: scratch
+              mountPath: /scratch
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "perchtail.claimName" . }}
+        - name: scratch
+          emptyDir:
+            sizeLimit: {{ printf "%vGi" .Values.scratch.sizeLimitGi }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.tmp.sizeLimit }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

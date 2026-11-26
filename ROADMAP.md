@@ -14,7 +14,7 @@ Which releases get fixes, and for how long, is in [SECURITY.md](SECURITY.md#supp
 - Every release goes through a release candidate retested in a lab with Linux, Windows and push-agent sources first.
 - The HTTP API is internal to the web UI and may change before 1.0.
 - Bulk import is additive: it never deletes anything and never exports credentials.
-- Work without an issue (SAML, maintained Kubernetes manifests, a further high-availability tier) waits for a real need; see the open items in [docs/design-decisions.md](docs/design-decisions.md).
+- Work without an issue (SAML, a further high-availability tier) waits for a real need; see the open items in [docs/design-decisions.md](docs/design-decisions.md).
 
 ## 0.7.0 (released)
 
@@ -40,7 +40,7 @@ The last feature release before 1.0, released as 0.7.0 ([CHANGELOG.md](CHANGELOG
 
 ## 1.0.0
 
-Mostly validation. Besides what 0.7.x shipped, it carries what was finished after 0.7.1: large files that open at their end, with progress and Cancel when one opens whole; right-click menus on log lines, tabs, files, folders, sources and groups (#287); icons in the Settings sidebar; and one answer for every path that can't be read. Then:
+Mostly validation. Besides what 0.7.x shipped, it carries what was finished after 0.7.1: large files that open at their end, with progress and Cancel when one opens whole; right-click menus on log lines, tabs, files, folders, sources and groups (#287); icons in the Settings sidebar; one answer for every path that can't be read; and a Helm chart for Kubernetes ([docs/kubernetes.md](docs/kubernetes.md)). Then:
 
 - PostgreSQL support (#306). SQLite stays supported; PostgreSQL recommended for production.
 - Load tests in a lab and a sizing guide, on SQLite (#277). The load-test kit is in `loadtest/`.

@@ -9,7 +9,7 @@ PerchTail has four health endpoints, for different consumers:
 | `GET /monitoring/health` | bearer token, and an allowed network if set | Zabbix and other JSON pollers | The full operational report, worth polling and alerting on. |
 | `GET /metrics` | bearer token, and an allowed network if set | Prometheus | The same report in the Prometheus text format. |
 
-Keep `/healthz` as the liveness probe and `/readyz` as the readiness probe: a locked database or a full disk should take the instance out of rotation, not get the container restarted in a loop. The Dockerfile's `HEALTHCHECK` uses `/healthz`; the Kubernetes example in [high-availability.md](high-availability.md) uses both.
+Keep `/healthz` as the liveness probe and `/readyz` as the readiness probe: a locked database or a full disk should take the instance out of rotation, not get the container restarted in a loop. The Dockerfile's `HEALTHCHECK` uses `/healthz`; the Helm chart uses both ([kubernetes.md](kubernetes.md)).
 
 ## Who may call them
 

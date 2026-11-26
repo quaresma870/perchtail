@@ -1,0 +1,28 @@
+PerchTail {{ .Chart.AppVersion }} is starting as {{ include "perchtail.fullname" . }} in {{ .Release.Namespace }}.
+{{- if .Release.IsInstall }}
+
+1. The first super admin ("admin" unless INITIAL_ADMIN_USERNAME says otherwise)
+   has a temporary password in the data volume, until it is changed:
+
+     kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "perchtail.fullname" . }} -- cat /data/db/initial-admin-password
+
+   Sign in with it, set your own password and two-factor authentication.
+{{- end }}
+
+2. Reach it:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+     http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/
+{{- end }}
+{{- else }}
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "perchtail.fullname" . }} 8080:{{ .Values.service.port }}
+   then http://127.0.0.1:8080/ (sign-in needs HTTPS unless SESSION_COOKIE_SECURE=false;
+   see docs/kubernetes.md).
+{{- end }}
+
+3. Back up both, and keep them apart:
+   - the data volume ({{ include "perchtail.claimName" . }}): the database, the
+     credential salt and the backups PerchTail makes;
+   - the key in Secret {{ include "perchtail.keySecretName" . }}: without it, nothing
+     encrypted in the volume can be read, and without the volume, the key is useless.
+   `helm uninstall` keeps the volume{{ if .Values.credentialEncryptionKey.value }} and the key's Secret{{ end }}.
