@@ -14,3 +14,6 @@ data/
 # Load-test kit: secrets, generated logs and results stay local
 loadtest/.state/
 loadtest/results/
+
+# Secret files of docker-compose.postgres.yml
+/secrets/

@@ -11,3 +11,5 @@ tests/
 backend/tests/
 backend/app/testing/
 backend/app/seed_e2e_admin.py
+# Secret files of docker-compose.postgres.yml stay out of the build context.
+secrets/
