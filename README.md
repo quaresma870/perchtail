@@ -13,7 +13,7 @@
 **Contents:** [Status](#status) · [What it is](#what-it-is) ·
 [Why not just use X](#why-not-just-use-x) ·
 [Feature comparison](#feature-comparison) · [Screenshots](#screenshots) ·
-[Quick start](#quick-start) ·
+[Requirements](#requirements) · [Installation](#installation) · [Quick start](#quick-start) ·
 [Deployment: reverse proxy + TLS](#deployment-reverse-proxy-nginx--tls) ·
 [Documentation](#documentation) · [License](#license)
 
@@ -23,11 +23,12 @@
 
 - **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
 - **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks. One search box finds sources and file names across every source, from a file-name index that stores no content. Live alerts read only what was appended and call a webhook. Redaction hides secrets, card numbers and personal data in what users open, Tail and download, on the server or on the push agent's host.
-- **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults), TOTP, required for administrators and optionally for everyone, and optional password recovery by email; OIDC single sign-on with group-to-role mapping; an access report of who holds what, where, with flags for privileged, inactive and MFA-less accounts, on its own Settings page and as JSON or CSV, for access reviews.
+- **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults) that refuses common and leaked passwords, TOTP, required for administrators and, on new installs, for every local account, and optional password recovery by email; sessions that end after an idle timeout (60 minutes by default) and that admins can end for a user or for everyone; OIDC single sign-on with group-to-role mapping; an access report of who holds what, where, with flags for privileged, inactive and MFA-less accounts, on its own Settings page and as JSON or CSV, for access reviews.
+- **Deployment:** SQLite by default or PostgreSQL 18, with `python -m app.migrate_database` to move a SQLite installation to PostgreSQL; Docker Compose files for both, and a Helm chart for Kubernetes published with every release.
 - **Operations:** settings in a sidebar in five sections (Sources, Access, Content, Operations, Audit), with an icon for each page, edited in popups, an update check, liveness and readiness probes, a detailed health endpoint with Prometheus metrics and Zabbix templates, an audit log that is hash-chained, verified daily and records where each action came from, including refused requests, bulk YAML import and export, server-side limits on listings and downloads running at once (Settings → Explorer and limits), and a system SMTP server for email, always over verified TLS (Settings → Email).
-- **Security work so far:** login lockout, CSP and security headers, credential encryption with key rotation, SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher, encrypted online backups, push agents upgraded from the portal only to binaries signed with the release key, signed images and release files, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
+- **Security work so far:** login lockout, CSP and security headers, `__Host-` session cookies, `Cache-Control: no-store` on every API answer, credential encryption with key rotation and the key readable from a file (`CREDENTIAL_ENCRYPTION_KEY_FILE`), SSH host-key pinning, session revocation, a DNS-rebind-safe webhook fetcher that sends only to `https://` URLs, limits on `.zip` entries and on alerts per account, encrypted online backups, push agents upgraded from the portal only to binaries signed with the release key, signed images and release files, CodeQL, gosec, Bandit, zizmor, fuzz and property tests in CI.
 
-**What's next.** 0.7 is the last feature release before 1.0. 1.0 adds PostgreSQL support and otherwise validates what is there: load tests and a sizing guide, security controls in CI and releases, and an internal pentest. High availability, user groups, temporary access, notifications, API tokens and an external pentest come after 1.0. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+**What's next.** 0.7 is the last feature release before 1.0. 1.0 adds PostgreSQL 18 next to SQLite, a Helm chart for Kubernetes and the sign-in, session and security changes above, and otherwise validates what is there: a load-test kit and a sizing guide, and security controls in CI and releases. High availability, user groups, temporary access, notifications, API tokens and an external pentest come after 1.0. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
 
 **Support.** Which releases get fixes, and for how long, is in [SECURITY.md](SECURITY.md#support-and-end-of-life).
 
@@ -68,7 +69,7 @@ nothing sitting around afterward for someone to leak or for disk to fill up with
 | Customer/environment-scoped RBAC | ✅ built in | limited / enterprise | role-based, not scoped this way | ❌ | limited |
 | SSO | ✅ OIDC (SAML 🚧 if needed) | enterprise tier | ✅ | ❌ | via Grafana |
 | Code-editor-style viewer | ✅ CodeMirror | search UI, not a file viewer | search UI | depends which browser | Grafana Explore |
-| Setup | single docker-compose | multi-service | multi-service | multiple tools glued together | multi-service |
+| Setup | Docker Compose or a Helm chart | multi-service | multi-service | multiple tools glued together | multi-service |
 
 This table reflects the design as of this writing and each project evolves —
 verify anything that matters to your decision against current docs.
@@ -92,6 +93,21 @@ Settings, in five sections in the sidebar, each page with its own icon, here Exp
 ![Settings, Explorer and limits: the sidebar with the Sources, Access, Content, Operations and Audit sections and an icon for each page, the Explorer card with the connections view, file order, folder refresh and Tail interval, and the Limits card with the concurrency limits and entries per listing](docs/images/screenshot-settings.png)
 
 A grant gives, in its customer, folder or source, any of `view` (browse and open files), `download` (whole files and folder ZIPs), `manage_rules` (edit the visibility rules) and `manage_source` (shown as "Manage sources": change the sources and folders there). The `create_source` global capability adds sources and folders where the role has `manage_source`; changing, moving or deleting an existing source (its settings, agent token, saved credential and agent upgrades), or moving or deleting a folder, also needs `manage_source` on it (and, to move it, where it goes), and a move can't give the person moving it more access than they had; renaming a folder needs `manage_source` on it, and renaming or deleting a customer needs `manage_source` in a grant on that customer. Only a super admin creates customers, and everyone else sees only the customers and folders their grants reach. `manage_rules` only governs the rules. Short of super admin, someone with `manage_users` or `manage_roles` can't change their own role or edit the role they hold, and can only hand out roles and grants within their own: no global capability they lack, and no capability in a customer, folder or source that they don't hold there themselves.
+
+## Requirements
+
+- **To run it:** Docker with Docker Compose, or Kubernetes 1.29 or later with Helm 3.8 or later. The image is built for amd64 and arm64. To run it without Docker, see [docs/install-from-source.md](docs/install-from-source.md).
+- **A database:** SQLite, built in and the default, on a local disk (not a network share); or an empty PostgreSQL 18 database in UTF8, reached with a verified certificate when it is on another host.
+- **In front of it:** a reverse proxy that terminates TLS for anything beyond the host it runs on ([Deployment: reverse proxy + TLS](#deployment-reverse-proxy-nginx--tls)).
+- **Sources:** SSH/SFTP, SMB or WinRM reachable from PerchTail, with an account that can read the logs ([docs/source-setup.md](docs/source-setup.md)), or the push agent on Linux (amd64, arm64) or Windows (amd64) for hosts PerchTail can't reach inbound ([agent/README.md](agent/README.md)).
+
+## Installation
+
+**Docker Compose with SQLite.** `docker-compose.yml` runs PerchTail with its SQLite database in the `perchtail-data` volume, port 8080 on `127.0.0.1` only. This is the [Quick start](#quick-start) below.
+
+**Docker Compose with PostgreSQL.** `docker-compose.postgres.yml` runs PerchTail with a PostgreSQL 18 server of its own, the database's password and connection URL in secret files. See [Running on PostgreSQL with Docker Compose](#running-on-postgresql-with-docker-compose), and [docs/configuration.md](docs/configuration.md#postgresql) for a PostgreSQL server you already run. An existing SQLite installation moves there with `python -m app.migrate_database` ([docs/upgrade.md](docs/upgrade.md#moving-from-sqlite-to-postgresql)).
+
+**Kubernetes with Helm.** The Helm chart is published with every release to `oci://ghcr.io/quaresma870/charts/perchtail` and as a release asset: one pod with its data volume, the encryption key (and optionally the PostgreSQL URL) from Secrets you create, and an optional Ingress and NetworkPolicy. See [docs/kubernetes.md](docs/kubernetes.md).
 
 ## Quick start
 
@@ -133,8 +149,6 @@ docker compose run --rm --user root --entrypoint chown perchtail -R 10001:10001 
 ```
 
 With `docker run`, the same is `--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp`, with the volumes owned by uid 10001.
-
-To run PerchTail on Kubernetes instead, with the Helm chart published with every release (`oci://ghcr.io/quaresma870/charts/perchtail`), see [docs/kubernetes.md](docs/kubernetes.md).
 
 This builds the image from the checkout. To run a published release
 instead, replace `build: .` in `docker-compose.yml` with the image of that
