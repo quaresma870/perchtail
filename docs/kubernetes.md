@@ -246,7 +246,7 @@ The data volume is kept (`helm.sh/resource-policy: keep`), and so is a key Secre
 
 ## PostgreSQL
 
-SQLite in the data volume is the default. To use PostgreSQL, prepare the database as [configuration.md](configuration.md#postgresql) says (PostgreSQL 18 or later, UTF8, verified TLS over the network), put the connection URL in a Secret, and name it in `database.existingSecret`:
+SQLite in the data volume is the default. (Outside Kubernetes, `docker-compose.postgres.yml` runs PerchTail with a PostgreSQL of its own in Docker Compose: see the [README](../README.md#running-on-postgresql-with-docker-compose).) To use PostgreSQL, prepare the database as [configuration.md](configuration.md#postgresql) says (PostgreSQL 18 or later, UTF8, verified TLS over the network), put the connection URL in a Secret, and name it in `database.existingSecret`:
 
 ```bash
 kubectl -n perchtail create secret generic perchtail-database \

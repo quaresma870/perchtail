@@ -1,0 +1,114 @@
+# PerchTail on PostgreSQL 18, in one Compose project. Use it on its own:
+#
+#   docker compose -f docker-compose.postgres.yml up -d
+#
+# Before the first start, create the two secret files this file reads (README,
+# "Running on PostgreSQL with Docker Compose"): secrets/db_password, the
+# database's password, and secrets/database_url, PerchTail's connection URL
+# with that password in it:
+#   postgresql://perchtail:<password>@postgres:5432/perchtail
+# They stay out of git (.gitignore) and out of .env.
+
+services:
+  postgres:
+    # Pinned by digest, as in CI (.github/workflows/ci.yml, backend-postgres).
+    image: postgres:18@sha256:c699303802144847d238196173655dbbecf7a96aeca1565f2b02eb671a1f0b6b
+    restart: unless-stopped
+    # Time for a clean shutdown (a checkpoint) on a stop.
+    stop_grace_period: 60s
+    environment:
+      POSTGRES_USER: perchtail
+      POSTGRES_DB: perchtail
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      # A UTF8 database with the C.UTF-8 locale of the builtin provider, as
+      # docs/configuration.md recommends: lists sort as on SQLite.
+      POSTGRES_INITDB_ARGS: --locale-provider=builtin --locale=C.UTF-8
+    secrets:
+      - db_password
+    security_opt:
+      - no-new-privileges:true
+    # No published port: only PerchTail, on this project's network, reaches it.
+    healthcheck:
+      # Over TCP, so it only passes once the real server is up, not the
+      # temporary one the image runs on a Unix socket during the first start.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "perchtail", "-d", "perchtail"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    volumes:
+      # The postgres:18 image keeps its data under /var/lib/postgresql
+      # (in a folder per major version), not /var/lib/postgresql/data.
+      - perchtail-postgres:/var/lib/postgresql
+
+  perchtail:
+    build: .
+    restart: unless-stopped
+    # Longer than SHUTDOWN_TIMEOUT_SECONDS (20 s), so running background jobs
+    # can finish on a stop (docs/high-availability.md).
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # Published on this host's loopback address only: other machines reach
+      # PerchTail through a reverse proxy on this host that terminates TLS
+      # (README, "Quick start").
+      - "127.0.0.1:8080:8000"
+    env_file:
+      - .env
+    environment:
+      # The whole URL, password included, comes from a secret file. Leave
+      # DATABASE_URL unset in .env: setting both is refused.
+      DATABASE_URL_FILE: /run/secrets/database_url
+      # The two containers talk over this project's private network only, and
+      # the postgres image has no TLS certificate. PerchTail refuses a database
+      # on another host reached without a verified certificate (app/db.py) unless
+      # this is false; it then starts with the warning
+      # startup.database_tls_not_verified. For a database on another host, use
+      # sslmode=verify-full and sslrootcert in the URL and remove this line.
+      DATABASE_REQUIRE_VERIFIED_TLS: "false"
+    secrets:
+      - database_url
+    # The preferred way to run it: as PerchTail's own user from the start,
+    # with no step as root (README). With it set, remove the cap_add list
+    # below: nothing in the container needs a capability then.
+    # user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Only for the entrypoint's first step, when the container starts as
+    # root: CHOWN and DAC_READ_SEARCH to hand /data over to PerchTail's user,
+    # SETUID, SETGID and SETPCAP to switch to that user and drop every
+    # capability before the app starts. The app itself runs with none.
+    cap_add:
+      - CHOWN
+      - DAC_READ_SEARCH
+      - SETUID
+      - SETGID
+      - SETPCAP
+    # The image is read-only; everything PerchTail writes is under /data or
+    # in /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      # Still needed on PostgreSQL: the credential salt, the pinned SSH host
+      # keys, the audit chain marker, the instance lock and the first super
+      # admin's password (/data/db), the logs (/data/logs), scratch
+      # (/data/scratch) and backups (/data/backups).
+      - perchtail-data:/data
+
+secrets:
+  # Compose mounts these files as they are on the host, with their owner and
+  # mode: PerchTail reads database_url as uid 10001, so the files must be
+  # readable by it (mode 0644 inside a folder only you can open, mode 0700).
+  db_password:
+    file: ./secrets/db_password
+  database_url:
+    file: ./secrets/database_url
+
+volumes:
+  perchtail-postgres:
+  perchtail-data:
