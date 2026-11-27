@@ -3,7 +3,8 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlmodel import Session
+from sqlalchemy import func
+from sqlmodel import Session, select
 
 from app import backup, key_strength, password_policy, system_settings
 from app.api.auth import get_current_active_user
@@ -13,6 +14,7 @@ from app.auth.models import GlobalCapability, User
 from app.auth.rbac import forbidden, require_global_capability
 from app.config import get_settings
 from app.db import TLS_ADVICE, database_tls_not_verified, get_session
+from app.models import Protocol, Source
 from app.source_roots import HARD_MAX_ROOTS, max_roots
 
 router = APIRouter(prefix="/system-settings", tags=["system-settings"])
@@ -274,7 +276,8 @@ def list_system_warnings(
     fix, shown at the top of each system settings page (Settings -> Source
     defaults, Sign-in security, Explorer and limits, Alerts, Backups and
     updates, Monitoring): a weak CREDENTIAL_ENCRYPTION_KEY, a database
-    connection that doesn't verify the server's certificate."""
+    connection that doesn't verify the server's certificate, WinRM sources
+    (deprecated)."""
     warnings: list[SystemWarning] = []
     # No length or estimated bits here: manage_system_settings can be
     # delegated, and those numbers narrow the search for the root secret.
@@ -305,6 +308,23 @@ def list_system_warnings(
                 message="Two-factor authentication isn't required of every local account.",
                 advice="A super admin can require it under Settings → Sign-in security."
                 " Administrators always need it; SSO accounts use their identity provider's.",
+            )
+        )
+    # WinRM is deprecated: it keeps working through 1.x and goes in a later
+    # major release. Only the count, not the names: delegated admins see
+    # this banner whatever their source grants.
+    winrm_sources = session.exec(
+        select(func.count()).select_from(Source).where(Source.protocol == Protocol.winrm)
+    ).one()
+    if winrm_sources:
+        noun = "source uses" if winrm_sources == 1 else "sources use"
+        warnings.append(
+            SystemWarning(
+                code="winrm_deprecated",
+                message=f"{winrm_sources} {noun} WinRM, which is deprecated.",
+                advice="WinRM keeps working in PerchTail 1.x and will be removed in a later major"
+                " release. Move these sources to the push agent, SMB or OpenSSH: see"
+                ' "Moving a WinRM source" in docs/source-setup.md.',
             )
         )
     return warnings

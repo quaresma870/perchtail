@@ -50,6 +50,7 @@ Mostly validation and hardening of what 0.7.x shipped. Merged so far:
 - The load-test kit in `loadtest/` and the sizing guide in [docs/sizing.md](docs/sizing.md) (#277), whose figures are still to be measured.
 - Security controls in CI and releases: OWASP ZAP, OpenSSF Scorecard, and a signed image with provenance and an SBOM.
 - Security documentation: every way to authenticate, input limits and the keys and algorithms in [docs/security-model.md](docs/security-model.md), and TLS, rate limiting and logs in [docs/hardening.md](docs/hardening.md).
+- WinRM deprecated: it keeps working through 1.x, with a warning in the source editor, a label in the sources list and a banner on the system settings pages, and [docs/source-setup.md](docs/source-setup.md#choosing-how-to-reach-a-host) explains how to choose between the push agent, SSH, SMB and local disk and how to move a WinRM source.
 
 ## After 1.0
 
@@ -66,3 +67,4 @@ For 1.1 and later releases:
 - Masking that depends on the user's role, on top of the redaction every user gets (#249).
 - Viewer: split view with synchronized scrolling (#288), bookmark and tab shortcuts (#289), and several files merged into one timeline (#250).
 - An external penetration test (#124).
+- WinRM sources removed in the first major release after the 1.x support window ([SECURITY.md](SECURITY.md#support-and-end-of-life)); until then they keep working, deprecated since 1.0.

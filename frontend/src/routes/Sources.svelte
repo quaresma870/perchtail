@@ -25,6 +25,7 @@
   } from '../lib/credential-age'
   import { systemSettings } from '../lib/settings'
   import type { Customer, Protocol, Source } from '../lib/types'
+  import { isDeprecatedProtocol } from '../lib/winrm-deprecation'
 
   let sources: Source[] = []
   let customers: Customer[] = []
@@ -374,6 +375,13 @@
               <td class="place">{placeOf(source) || '—'}</td>
               <td>
                 <span class="badge protocol-{source.protocol}">{PROTOCOL_LABEL[source.protocol]}</span>
+                {#if isDeprecatedProtocol(source.protocol)}
+                  <span
+                    class="badge badge-muted"
+                    title="WinRM is deprecated and will be removed in a future major release"
+                    data-testid="protocol-deprecated">deprecated</span
+                  >
+                {/if}
               </td>
               <td>
                 {#if !source.enabled}

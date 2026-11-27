@@ -41,6 +41,10 @@ test('WinRM source: create, add rule, browse over the mocked connector, delete',
   await expect(page.locator('.cm-content')).toContainText('winrm hello world log line 1')
 
   await page.goto('/#/settings/sources')
+  // Deprecated, but listed like any other source (WinRM keeps working in 1.x).
+  await expect(
+    page.getByRole('row', { name: new RegExp(sourceName) }).getByTestId('protocol-deprecated'),
+  ).toHaveText('deprecated')
   await page
     .getByRole('row', { name: new RegExp(sourceName) })
     .getByRole('button', { name: 'Delete' })
@@ -61,5 +65,26 @@ test('WinRM source: HTTP is warned about, HTTPS is not', async ({ page }) => {
   await expect(warning).toContainText("doesn't use TLS")
 
   await page.getByLabel('Scheme').selectOption('https')
+  await expect(warning).toHaveCount(0)
+})
+
+test('WinRM source: the editor says WinRM is deprecated and links to the migration guide', async ({
+  page,
+}) => {
+  await page.goto('/#/settings/sources/new')
+  const warning = page.getByTestId('winrm-deprecated-warning')
+  await expect(warning).toHaveCount(0)
+
+  await page.getByRole('dialog').getByLabel('Protocol').selectOption('winrm')
+  await expect(warning).toBeVisible()
+  await expect(warning).toContainText(
+    'WinRM is deprecated and will be removed in a future major release.',
+  )
+  await expect(warning.getByRole('link', { name: 'How to move a WinRM source' })).toHaveAttribute(
+    'href',
+    /docs\/source-setup\.md#moving-a-winrm-source$/,
+  )
+
+  await page.getByRole('dialog').getByLabel('Protocol').selectOption('agent')
   await expect(warning).toHaveCount(0)
 })

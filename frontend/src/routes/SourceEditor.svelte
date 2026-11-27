@@ -31,6 +31,12 @@
     Source,
     SourceRoot,
   } from '../lib/types'
+  import {
+    PROTOCOL_CHOICE_GUIDE,
+    WINRM_ALTERNATIVES_TEXT,
+    WINRM_DEPRECATED_TEXT,
+    WINRM_MIGRATION_GUIDE,
+  } from '../lib/winrm-deprecation'
 
   // The WinRM part of the source setup guide, which explains the read-only
   // JEA endpoint.
@@ -585,11 +591,27 @@
         <select class="input" bind:value={protocol} disabled={!isNew}>
           <option value="ssh">SSH / SFTP</option>
           <option value="smb">SMB</option>
-          <option value="winrm">WinRM</option>
+          <option value="winrm">WinRM (deprecated)</option>
           <option value="local">Local disk</option>
           <option value="agent">Agent (push)</option>
         </select>
       </label>
+      {#if isNew}
+        <p class="hint small">
+          <a href={PROTOCOL_CHOICE_GUIDE} target="_blank" rel="noopener noreferrer"
+            >Which protocol to choose</a
+          >: the push agent when you can install it on the host, SSH or SMB when you can't.
+        </p>
+      {/if}
+      {#if protocol === 'winrm'}
+        <p class="warning small" role="status" data-testid="winrm-deprecated-warning">
+          <strong>{WINRM_DEPRECATED_TEXT}</strong>
+          {WINRM_ALTERNATIVES_TEXT}
+          <a href={WINRM_MIGRATION_GUIDE} target="_blank" rel="noopener noreferrer"
+            >How to move a WinRM source</a
+          >.
+        </p>
+      {/if}
 
       <div class="row">
         <label class="grow">

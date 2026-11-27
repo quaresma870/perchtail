@@ -75,7 +75,7 @@ Adding, renaming, moving and deleting folders needs **Create new sources** and t
 
 ## Sources
 
-A source is one host and how to reach it: SSH/SFTP, SMB, WinRM, a push agent, or a local directory on the PerchTail host. [Preparing a source server](source-setup.md) explains what each protocol needs on the server, the **Base path** field, several folders in one source, and the **Browse…** folder picker.
+A source is one host and how to reach it: a push agent, SSH/SFTP, SMB, WinRM (deprecated), or a local directory on the PerchTail host. [Preparing a source server](source-setup.md) helps you [choose between them](source-setup.md#choosing-how-to-reach-a-host) and explains what each protocol needs on the server, how to [move a WinRM source](source-setup.md#moving-a-winrm-source), the **Base path** field, several folders in one source, and the **Browse…** folder picker.
 
 **Settings → Sources** lists the sources you can view, with their customer and folder, protocol, status, credential age and number of rules. Use the filter box and the **Protocol**, **Status** and credential-age lists to narrow it, and click a column header to sort.
 
