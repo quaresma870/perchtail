@@ -86,6 +86,12 @@ spec:
               value: /scratch/files
             - name: SCRATCH_MAX_GB
               value: {{ .Values.scratch.maxGb | quote }}
+            {{- if not (hasKey .Values.env "PERCHTAIL_INSTALL") }}
+            # The upgrade steps Settings -> Backups and updates shows: helm
+            # upgrade from the chart's registry (docs/kubernetes.md).
+            - name: PERCHTAIL_INSTALL
+              value: kubernetes
+            {{- end }}
             {{- range $name, $value := .Values.env }}
             - name: {{ $name }}
               value: {{ $value | toString | quote }}

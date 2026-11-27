@@ -314,6 +314,28 @@ def test_the_updates_api_reports_the_running_version_and_install(session, monkey
     assert body["latest_version"] is None and body["update_available"] is False
 
 
+@pytest.mark.parametrize(
+    "value, method",
+    [
+        ("docker", "docker"),
+        ("Docker", "docker"),
+        ("kubernetes", "kubernetes"),
+        (" Kubernetes ", "kubernetes"),
+        ("", "source"),
+        ("helm", "source"),
+    ],
+)
+def test_the_install_method_comes_from_perchtail_install(monkeypatch, value, method):
+    monkeypatch.setattr(update_check.get_settings(), "perchtail_install", value)
+    assert update_check.install_method() == method
+
+
+def test_the_updates_api_reports_a_kubernetes_install(session, monkeypatch):
+    monkeypatch.setattr(update_check.get_settings(), "perchtail_install", "kubernetes")
+    body = _client(session, _user(session, super_admin=True)).get("/system/update").json()
+    assert body["install_method"] == "kubernetes"
+
+
 def test_check_now_runs_the_check_and_is_refused_when_off(session, monkeypatch):
     calls = []
     monkeypatch.setattr(update_check, "check_now", lambda s: calls.append(1))

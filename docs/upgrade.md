@@ -211,7 +211,7 @@ See [agent/README.md](../agent/README.md#upgrades-from-the-portal) for the detai
 
 Once a day (when the switch is on and `UPDATE_CHECK` isn't `false`), PerchTail asks the GitHub releases API for the latest release. Nothing about the installation is sent, and pre-releases are never offered. The card shows:
 
-- **Running**: the running version, and "Docker image" or "installed from source", from `PERCHTAIL_INSTALL` (the image sets it to `docker`).
+- **Running**: the running version, and "Docker image", "Kubernetes, Helm chart" or "installed from source", from `PERCHTAIL_INSTALL` (the image sets it to `docker`, the Helm chart to `kubernetes`).
 - **Latest release**: its version, publication date and a **release notes** link, or "not known yet".
 - **Last check**: when the last check ran, "couldn't check" with the error (`update_check.failed` in the log), or "off".
 - When a newer release exists: "Version X is available", a reminder to read its release notes first, and the upgrade steps for the install method. Otherwise: "This is the latest release."
@@ -229,6 +229,15 @@ docker compose pull && docker compose up -d
 ```
 
 They assume `docker-compose.yml` uses the published image. If yours builds from a checkout (`build: .`), follow [Upgrading with Docker](#upgrading-with-docker) instead.
+
+The steps shown on Kubernetes, with a link to [kubernetes.md](kubernetes.md#upgrading):
+
+```text
+# On SQLite (on PostgreSQL, back the database up with its own tools):
+kubectl -n <namespace> exec deploy/perchtail -- python -m app.backup create --reason pre-upgrade
+# With the values file you installed with:
+helm upgrade perchtail oci://ghcr.io/quaresma870/charts/perchtail --version <version> -n <namespace> -f <your values file>
+```
 
 The steps shown for an install from source follow [Upgrading an install from source](#upgrading-an-install-from-source), with the paths of [install-from-source.md](install-from-source.md) and `pip install --require-hashes`; adjust them if your paths differ.
 

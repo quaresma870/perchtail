@@ -6,8 +6,14 @@
   import { onMount } from 'svelte'
   import { api, ApiError } from '../api'
   import { systemSettings } from '../settings'
-  import type { SystemSettings, UpdateStatus } from '../types'
-  import { upgradeSteps } from '../upgrade-steps'
+  import type { InstallMethod, SystemSettings, UpdateStatus } from '../types'
+  import { upgradeGuide, upgradeSteps } from '../upgrade-steps'
+
+  const INSTALL_LABELS: Record<InstallMethod, string> = {
+    docker: 'Docker image',
+    kubernetes: 'Kubernetes, Helm chart',
+    source: 'installed from source',
+  }
 
   let status: UpdateStatus | null = null
   let error = ''
@@ -56,6 +62,9 @@
   onMount(load)
 
   $: steps = status?.latest_version ? upgradeSteps(status.install_method, status.latest_version) : ''
+  $: guide = status?.latest_version
+    ? upgradeGuide(status.install_method, status.latest_version)
+    : null
 </script>
 
 <div class="card updates">
@@ -92,7 +101,7 @@
       <dt>Running</dt>
       <dd>
         <strong>{status.running_version}</strong>
-        ({status.install_method === 'docker' ? 'Docker image' : 'installed from source'})
+        ({INSTALL_LABELS[status.install_method] ?? INSTALL_LABELS.source})
       </dd>
       <dt>Latest release</dt>
       <dd>
@@ -128,6 +137,12 @@
         <strong>Version {status.latest_version} is available.</strong> Read its release notes first:
         they say when an upgrade needs more than this (a migration, upgrading the push agents).
         <pre class="steps">{steps}</pre>
+        {#if guide}
+          <p class="hint">
+            The whole procedure, with rolling back:
+            <a href={guide} target="_blank" rel="noopener noreferrer">Upgrading on Kubernetes</a>.
+          </p>
+        {/if}
       </div>
     {:else if status.latest_version}
       <p class="hint ok">✓ This is the latest release.</p>

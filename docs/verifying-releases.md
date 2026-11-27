@@ -1,6 +1,6 @@
 # Verifying a release
 
-Every release from 0.7.0 on can be checked before you run it: the container image is signed with [cosign](https://docs.sigstore.dev/cosign/) without a long-lived key, the image and the push-agent binaries carry GitHub build provenance, and the release lists what is inside each part in CycloneDX SBOMs. This page shows how to check each of them. Releases before 0.7.0 have only the agents' `SHA256SUMS`, the image's SBOM and the image's BuildKit provenance in the registry: the Ed25519 signatures, the cosign signature and the GitHub build provenance (`gh attestation verify`) start with 0.7.0.
+Every release from 0.7.0 on can be checked before you run it: the container image is signed with [cosign](https://docs.sigstore.dev/cosign/) without a long-lived key, the image, the push-agent binaries and (from 1.0.0 on) the Helm chart carry GitHub build provenance, and the release lists what is inside each part in CycloneDX SBOMs. This page shows how to check each of them. Releases before 0.7.0 have only the agents' `SHA256SUMS`, the image's SBOM and the image's BuildKit provenance in the registry: the Ed25519 signatures, the cosign signature and the GitHub build provenance (`gh attestation verify`) start with 0.7.0.
 
 The examples use version `0.7.0`; put the version you are installing in its place.
 
@@ -11,7 +11,8 @@ The examples use version `0.7.0`; put the version you are installing in its plac
 | `ghcr.io/quaresma870/perchtail:<version>` | The container image (amd64, arm64) | cosign signature and build provenance |
 | `perchtail-image.json`, `perchtail-image.json.sig` | The image's digest, signed with the release key | Ed25519 signature |
 | `perchtail-agent-<version>-<os>-<arch>` | The push-agent binaries: `linux-amd64`, `linux-arm64` and `windows-amd64.exe` | build provenance, `SHA256SUMS` and its Ed25519 signature |
-| `SHA256SUMS`, `SHA256SUMS.sig` | Checksums of the agent binaries, signed with the release key | Ed25519 signature |
+| `oci://ghcr.io/quaresma870/charts/perchtail:<version>`, `perchtail-<version>.tgz` | The Helm chart for Kubernetes, in the registry and as a release asset (from 1.0.0 on) | build provenance, `SHA256SUMS` and its Ed25519 signature |
+| `SHA256SUMS`, `SHA256SUMS.sig` | Checksums of the agent binaries and of the Helm chart, signed with the release key | Ed25519 signature |
 | `perchtail-<version>.sbom.cyclonedx.json` | SBOM of the image | |
 | `perchtail-backend-…`, `perchtail-frontend-…`, `perchtail-agent-<version>.sbom.cyclonedx.json` | SBOMs of the backend, frontend and agent dependencies | |
 
@@ -67,6 +68,33 @@ gh attestation verify perchtail-agent-0.7.0-linux-amd64 --repo quaresma870/perch
 ```
 
 The Ed25519 signature is the one agents check themselves before they install an upgrade from the portal, against the public key built into them.
+
+## The Helm chart
+
+From 1.0.0 on, every release, release candidates included, publishes the Helm chart ([kubernetes.md](kubernetes.md)) at `oci://ghcr.io/quaresma870/charts/perchtail` with the release's version, and attaches the same package, `perchtail-<version>.tgz`, to the release. The examples use `1.0.0`.
+
+The chart carries a GitHub build provenance attestation, in the registry next to it and for the file. Check the chart in the registry:
+
+```bash
+gh attestation verify oci://ghcr.io/quaresma870/charts/perchtail:1.0.0 --repo quaresma870/perchtail
+```
+
+or the file, from the release or from `helm pull`, which downloads the same file:
+
+```bash
+helm pull oci://ghcr.io/quaresma870/charts/perchtail --version 1.0.0
+gh attestation verify perchtail-1.0.0.tgz --repo quaresma870/perchtail
+```
+
+The file is also listed in `SHA256SUMS`, so the release key's signature covers it too (as for the agent binaries above):
+
+```bash
+sha256sum --ignore-missing -c SHA256SUMS
+openssl pkeyutl -verify -pubin -inkey upgrade_signing_key.pub -rawin \
+  -in SHA256SUMS -sigfile SHA256SUMS.sig
+```
+
+To install exactly what you verified, install that file: `helm install perchtail ./perchtail-1.0.0.tgz -n perchtail -f values.yaml`. The chart installs the release's image by tag; to pin it by digest, set `image.digest` to the digest in `perchtail-image.json`, after checking the image as above.
 
 ## SBOMs
 

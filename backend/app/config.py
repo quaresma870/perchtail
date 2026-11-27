@@ -231,8 +231,9 @@ class Settings(BaseSettings):
     # (air-gapped installs), whatever the switch on that page says.
     update_check: bool = True
     # How this instance was installed, for the upgrade steps it shows. The
-    # Docker image sets PERCHTAIL_INSTALL=docker; anything else counts as an
-    # install from source.
+    # Docker image sets PERCHTAIL_INSTALL=docker and the Helm chart
+    # PERCHTAIL_INSTALL=kubernetes; anything else counts as an install from
+    # source.
     perchtail_install: str = ""
     # Push-agent upgrades from the portal (#319): the folder holding the
     # signed agent binaries of this server's version (the release's
