@@ -10,7 +10,7 @@ Which releases get fixes, and for how long, is in [SECURITY.md](SECURITY.md#supp
 - Nothing from the logs is kept. Content is fetched fresh into scratch and deleted; only file names, sizes and modification times are indexed.
 - Access is denied unless a grant allows it, and every grant is scoped to a customer, a folder or a source.
 - One process per `DATA_DIR` and per database. SQLite stays the default database.
-- 0.7 is the last feature release before 1.0. 1.0 validates and hardens what is there, with PostgreSQL support and the few viewer additions listed under 1.0.0.
+- 0.7 is the last feature release before 1.0. 1.0 validates and hardens what is there, with PostgreSQL support, a Helm chart and the few viewer additions listed under 1.0.0.
 - Every release goes through a release candidate retested in a lab with Linux, Windows and push-agent sources first.
 - The HTTP API is internal to the web UI and may change before 1.0.
 - Bulk import is additive: it never deletes anything and never exports credentials.
@@ -40,13 +40,16 @@ The last feature release before 1.0, released as 0.7.0 ([CHANGELOG.md](CHANGELOG
 
 ## 1.0.0
 
-Mostly validation. Besides what 0.7.x shipped, it carries what was finished after 0.7.1: large files that open at their end, with progress and Cancel when one opens whole; right-click menus on log lines, tabs, files, folders, sources and groups (#287); icons in the Settings sidebar; one answer for every path that can't be read; and a Helm chart for Kubernetes ([docs/kubernetes.md](docs/kubernetes.md)). Then:
+Mostly validation and hardening of what 0.7.x shipped. Merged so far:
 
-- PostgreSQL support (#306). SQLite stays supported; PostgreSQL recommended for production.
-- Load tests in a lab and a sizing guide, on SQLite (#277). The load-test kit is in `loadtest/`.
-- Security controls in CI and releases: OWASP ZAP, OpenSSF Scorecard, and a signed image with provenance and an SBOM. These are in place.
-- An internal penetration test.
-- Fixes for what those find, and documentation.
+- PostgreSQL 18 as a database engine (#306), with SQLite still the default: `DATABASE_URL` (or `DATABASE_URL_FILE`) points at an empty database, `python -m app.migrate_database` moves a SQLite installation there with its data, and `docker-compose.postgres.yml` runs PerchTail with a PostgreSQL server of its own ([docs/configuration.md](docs/configuration.md#postgresql), [docs/upgrade.md](docs/upgrade.md#moving-from-sqlite-to-postgresql)).
+- A Helm chart for Kubernetes, published with every release to `oci://ghcr.io/quaresma870/charts/perchtail` and as a signed release asset ([docs/kubernetes.md](docs/kubernetes.md)).
+- Sign-in and sessions: `__Host-` cookie names, an idle session timeout (60 minutes by default), MFA required of every local account on new installs, common and leaked passwords refused, and admins ending a user's sessions or everyone else's.
+- Other security changes: `Cache-Control: no-store` on every API answer, the encryption key readable from a file (`CREDENTIAL_ENCRYPTION_KEY_FILE`), a weak key refused at startup by default, alert webhooks only to `https://` URLs, at most 50,000 entries in a `.zip` and 100 alerts per account, and downloads always sent as `application/octet-stream`.
+- Viewer: large files that open at their end, with progress and Cancel when one opens whole; right-click menus on log lines, tabs, files, folders, sources and groups (#287); `.zip` files on SSH, SMB and WinRM sources read in place instead of copied whole; one answer for every path that can't be read; and icons in the Settings sidebar.
+- The load-test kit in `loadtest/` and the sizing guide in [docs/sizing.md](docs/sizing.md) (#277), whose figures are still to be measured.
+- Security controls in CI and releases: OWASP ZAP, OpenSSF Scorecard, and a signed image with provenance and an SBOM.
+- Security documentation: every way to authenticate, input limits and the keys and algorithms in [docs/security-model.md](docs/security-model.md), and TLS, rate limiting and logs in [docs/hardening.md](docs/hardening.md).
 
 ## After 1.0
 
@@ -58,7 +61,7 @@ For 1.1 and later releases:
 - User groups with their own grants, and grants directly on a user (#246).
 - Temporary access to a customer, folder or source, with a reason and an expiry (#247).
 - Audit log export and forwarding (#252), and logs in Elastic Common Schema fields (#383).
-- Session policies for admins: idle timeout, lifetime, sessions per user and required MFA (#349).
+- Session policies for admins: session lifetime, sessions per user and a sign-in banner (#349).
 - Personal API tokens (#253).
 - Masking that depends on the user's role, on top of the redaction every user gets (#249).
 - Viewer: split view with synchronized scrolling (#288), bookmark and tab shortcuts (#289), and several files merged into one timeline (#250).
