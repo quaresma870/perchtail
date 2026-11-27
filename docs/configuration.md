@@ -19,7 +19,7 @@ PerchTail reads its settings with pydantic-settings (`backend/app/config.py`, cl
 - **Names** are matched without regard to case. A variable PerchTail doesn't know is ignored without a warning, so check the spelling of anything you set.
 - **Values.** Booleans accept `true` or `false` (also `1`/`0`, `yes`/`no`, `on`/`off`). Sizes in MB or GB accept decimals. A value of the wrong type, or outside a fixed list, stops PerchTail at startup with an error that names the variable.
 - **Applying a change.** Restart PerchTail. With Docker Compose, run `docker compose up -d`: it recreates the container with the new `.env`, while `docker compose restart` keeps the old environment. For an install from source, `sudo systemctl restart perchtail`.
-- **The Docker image sets** `DATA_DIR=/data/db`, `LOG_DIR=/data/logs`, `SCRATCH_DIR=/data/scratch`, `BACKUP_DIR=/data/backups`, `AGENT_BINARIES_DIR=/app/agent-binaries` and `PERCHTAIL_INSTALL=docker` (`Dockerfile`). Leave these unset in `.env` unless you mount a volume somewhere else.
+- **The Docker image sets** `DATA_DIR=/data/db`, `LOG_DIR=/data/logs`, `SCRATCH_DIR=/data/scratch`, `BACKUP_DIR=/data/backups`, `AGENT_BINARIES_DIR=/app/agent-binaries` and `PERCHTAIL_INSTALL=docker` (`Dockerfile`). Leave these unset in `.env` unless you mount a volume somewhere else. The Helm chart sets `PERCHTAIL_INSTALL=kubernetes` ([kubernetes.md](kubernetes.md)).
 - **Variables read by other programs** (`HTTPS_PROXY`, `TZ`, `SMB_EXPERIMENTAL_TRANSPORT_RECEIVE_TIMEOUT`) must be in the process environment. Docker Compose and the systemd unit put them there; a `.env` file read only by PerchTail's own settings, as when you start `uvicorn` by hand in `backend/`, doesn't.
 
 The defaults below are the code's defaults. Relative paths are relative to the working directory: `backend/` for a checkout, `/opt/perchtail/backend` with the install guide's paths.
@@ -140,7 +140,7 @@ See [backup-and-restore.md](backup-and-restore.md) for how backups are made, che
 | Variable | Default | Accepted values | Effect |
 |---|---|---|---|
 | `UPDATE_CHECK` | `true` | `true`, `false` | `true` allows the daily release check (one request to `api.github.com`, nothing about the install sent), which the **Updates** switch can still turn off. `false` means PerchTail never makes that request, and the switch is disabled. Use `false` on a network without internet access. |
-| `PERCHTAIL_INSTALL` | empty (`docker` in the image) | `docker`, or anything else | Which upgrade steps the **Updates** card shows: `docker` (any case) shows the Docker steps, anything else the steps for an install from source. See [upgrade.md](upgrade.md#the-updates-card). |
+| `PERCHTAIL_INSTALL` | empty (`docker` in the image, `kubernetes` with the Helm chart) | `docker`, `kubernetes`, or anything else | Which upgrade steps the **Updates** card shows: `docker` (any case) shows the Docker steps, `kubernetes` the `helm upgrade` steps, anything else the steps for an install from source. See [upgrade.md](upgrade.md#the-updates-card). |
 | `AGENT_BINARIES_DIR` | empty (`/app/agent-binaries` in the image) | A directory path | The folder holding the signed push-agent binaries of this server's version (`perchtail-agent-<version>-<os>-<arch>`, `SHA256SUMS`, `SHA256SUMS.sig`), served to connected agents that are upgraded from the portal. Empty, or a folder without them for this version, means agents download the release from GitHub instead; **Settings → Agents** says so. Release images carry the binaries; an image built from a checkout doesn't. |
 
 ## Other variables

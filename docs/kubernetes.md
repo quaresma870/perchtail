@@ -1,6 +1,6 @@
 # Kubernetes
 
-PerchTail installs on Kubernetes with the Helm chart in [`charts/perchtail/`](../charts/perchtail). This page covers what the cluster needs, installing, the main values, an ingress with TLS, backups and restoring, upgrading, uninstalling and PostgreSQL.
+PerchTail installs on Kubernetes with its Helm chart, published with every release at `oci://ghcr.io/quaresma870/charts/perchtail` (its source is [`charts/perchtail/`](../charts/perchtail)). This page covers what the cluster needs, installing, verifying the chart, the main values, an ingress with TLS, backups and restoring, upgrading, uninstalling and PostgreSQL.
 
 ## What the chart runs
 
@@ -14,7 +14,7 @@ PerchTail installs on Kubernetes with the Helm chart in [`charts/perchtail/`](..
 
 ## Requirements
 
-- Kubernetes 1.29 or later, and Helm 3.
+- Kubernetes 1.29 or later, and Helm 3.8 or later (charts from an OCI registry).
 - A storage class for block volumes (`ReadWriteOnce`), the cluster's default or one you name.
 - An ingress controller to reach PerchTail from outside the cluster, with a TLS certificate: session cookies are only sent over HTTPS (`SESSION_COOKIE_SECURE` stays `true`).
 
@@ -41,11 +41,18 @@ env:
   PUBLIC_BASE_URL: https://perchtail.example.com
 ```
 
-From a checkout of the repository, with the Secret above:
+With the Secret above, install the chart of the release you want from the registry:
 
 ```bash
-helm install perchtail charts/perchtail -n perchtail -f perchtail-values.yaml
+helm install perchtail oci://ghcr.io/quaresma870/charts/perchtail --version 1.0.0 -n perchtail -f perchtail-values.yaml
 ```
+
+Always give `--version`: the chart's version is the release's, and the chart installs that release's image. Release candidates (`1.0.0-rc.1`) are published too, and only installed when `--version` names them.
+
+Other ways to get the same chart:
+
+- **The release asset.** Every release has the packaged chart, `perchtail-<version>.tgz`, listed in its signed `SHA256SUMS`: `helm install perchtail ./perchtail-1.0.0.tgz -n perchtail -f perchtail-values.yaml`. This is also the way to install exactly the file you verified ([Verifying the chart](#verifying-the-chart)), or to install in a network without access to `ghcr.io` (copy the file in, or push it to your own registry with `helm push`).
+- **A checkout of the repository**, at the release's tag (`git checkout v1.0.0`): `helm install perchtail charts/perchtail -n perchtail -f perchtail-values.yaml`.
 
 The notes Helm prints say how to read the first super admin's temporary password, which stays in the data volume until it is changed:
 
@@ -54,6 +61,23 @@ kubectl -n perchtail exec deploy/perchtail -- cat /data/db/initial-admin-passwor
 ```
 
 Sign in with it, set your own password and two-factor authentication. Until an ingress is set up, `kubectl -n perchtail port-forward svc/perchtail 8080:80` reaches PerchTail at `http://127.0.0.1:8080`; signing in over that plain HTTP needs `env.SESSION_COOKIE_SECURE=false`, for a test only.
+
+## Verifying the chart
+
+From 1.0.0 on, the chart carries GitHub build provenance, which records the repository, the commit and the workflow that built it, both as a file and in the registry. Check it with the [GitHub CLI](https://cli.github.com/), in the registry:
+
+```bash
+gh attestation verify oci://ghcr.io/quaresma870/charts/perchtail:1.0.0 --repo quaresma870/perchtail
+```
+
+or on the file, downloaded with `helm pull` (the same file as the release asset):
+
+```bash
+helm pull oci://ghcr.io/quaresma870/charts/perchtail --version 1.0.0
+gh attestation verify perchtail-1.0.0.tgz --repo quaresma870/perchtail
+```
+
+The file is also listed in the release's `SHA256SUMS`, signed with the release key. Install the file you verified with `helm install perchtail ./perchtail-1.0.0.tgz ...`. More on what each check proves: [verifying-releases.md](verifying-releases.md#the-helm-chart).
 
 ## Main values
 
@@ -67,7 +91,7 @@ The full list, with comments, is in [`values.yaml`](../charts/perchtail/values.y
 | `image.registry`, `.repository`, `.tag`, `.digest`, `.pullSecrets` | `ghcr.io`, `quaresma870/perchtail`, the chart's `appVersion`, none, none | Where the image comes from: a mirror in a closed network, a pinned digest (which wins over the tag), pull credentials. |
 | `persistence.size`, `.storageClass`, `.existingClaim` | `10Gi`, the cluster's default, none | The data volume, or an existing claim to use. |
 | `scratch.sizeLimitGi`, `scratch.maxGb` | `6`, `5` | Scratch's `emptyDir` size limit and `SCRATCH_MAX_GB`, which must be below it. Raise both for large files ([sizing.md](sizing.md)). |
-| `env` | none | Plain settings as environment variables ([configuration.md](configuration.md)), for example `PUBLIC_BASE_URL`, `TRUSTED_PROXIES`, `LOG_LEVEL`. |
+| `env` | none | Plain settings as environment variables ([configuration.md](configuration.md)), for example `PUBLIC_BASE_URL`, `TRUSTED_PROXIES`, `LOG_LEVEL`. The chart sets `PERCHTAIL_INSTALL=kubernetes`, so the Updates card shows the `helm upgrade` steps; an `env.PERCHTAIL_INSTALL` of your own replaces it. |
 | `extraEnv`, `extraEnvFrom` | none | Full environment entries and `envFrom` sources, for anything else (another Secret, a ConfigMap). |
 | `resources` | requests 250m CPU and 512Mi, memory limit 1Gi | Sized for a small installation; see [sizing.md](sizing.md). |
 | `ingress.*` | off | An Ingress: `className`, `annotations`, `hosts`, `tls`. |
@@ -216,7 +240,7 @@ A restore needs PerchTail stopped: it takes the same instance lock as PerchTail,
 
 ### Rolling back an upgrade
 
-The previous version refuses a database the new one migrated, so a rollback restores the `pre-upgrade` backup ([upgrade.md](upgrade.md#rolling-back)): stop PerchTail (step 2 above), run the restore (step 3) with the previous version's image, put the previous release back (`helm rollback perchtail -n perchtail`, or `helm upgrade` from the previous checkout with your values file), then start it (step 4) if it isn't running yet.
+The previous version refuses a database the new one migrated, so a rollback restores the `pre-upgrade` backup ([upgrade.md](upgrade.md#rolling-back)): stop PerchTail (step 2 above), run the restore (step 3) with the previous version's image, put the previous release back (`helm rollback perchtail -n perchtail`, or `helm upgrade` with the previous version's `--version` and your values file), then start it (step 4) if it isn't running yet.
 
 ## Upgrading
 
@@ -226,15 +250,17 @@ Make a backup first:
 kubectl -n perchtail exec deploy/perchtail -- python -m app.backup create --reason pre-upgrade
 ```
 
-Then, from a checkout of the new release, with the same values file as at the install:
+On PostgreSQL, back the database up with PostgreSQL's own tools instead ([PostgreSQL](#postgresql)). Then upgrade to the new release's chart, with the same values file as at the install:
 
 ```bash
-helm upgrade perchtail charts/perchtail -n perchtail -f perchtail-values.yaml
+helm upgrade perchtail oci://ghcr.io/quaresma870/charts/perchtail --version 1.0.1 -n perchtail -f perchtail-values.yaml
 ```
+
+From the release asset or a checkout of the new release's tag, put `./perchtail-<version>.tgz` or `charts/perchtail` in place of the `oci://` reference. **Settings → Backups and updates** shows these steps with the new version once it is out (the Updates card, [upgrade.md](upgrade.md#the-updates-card)).
 
 Prefer your values file to `--reuse-values`: that option takes only the values of the previous release and ignores the defaults of the new chart, so a value a newer chart adds is missing from the upgrade.
 
-The pod is replaced (the old one stops before the new one starts) and the new one runs the database migrations as it starts. The chart's version is the app's: a chart from a newer checkout installs that release's image unless `image.tag` or `image.digest` says otherwise.
+The pod is replaced (the old one stops before the new one starts) and the new one runs the database migrations as it starts. The chart's version is the app's: the new chart installs that release's image unless `image.tag` or `image.digest` says otherwise.
 
 ## Uninstalling
 

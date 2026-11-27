@@ -134,7 +134,7 @@ docker compose run --rm --user root --entrypoint chown perchtail -R 10001:10001 
 
 With `docker run`, the same is `--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp`, with the volumes owned by uid 10001.
 
-To run PerchTail on Kubernetes instead, with the Helm chart in `charts/perchtail/`, see [docs/kubernetes.md](docs/kubernetes.md).
+To run PerchTail on Kubernetes instead, with the Helm chart published with every release (`oci://ghcr.io/quaresma870/charts/perchtail`), see [docs/kubernetes.md](docs/kubernetes.md).
 
 This builds the image from the checkout. To run a published release
 instead, replace `build: .` in `docker-compose.yml` with the image of that

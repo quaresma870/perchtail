@@ -465,12 +465,16 @@ export interface PasswordPolicy {
   max_age_days: number
 }
 
+// How this instance was installed, from PERCHTAIL_INSTALL: the Docker image
+// sets docker, the Helm chart kubernetes; anything else is source.
+export type InstallMethod = 'docker' | 'kubernetes' | 'source'
+
 // Settings -> Backups and updates -> Updates (#215), super admins only.
 export interface UpdateStatus {
   enabled: boolean
   disabled_by_env: boolean
   running_version: string
-  install_method: 'docker' | 'source'
+  install_method: InstallMethod
   latest_version: string | null
   latest_name: string | null
   latest_url: string | null

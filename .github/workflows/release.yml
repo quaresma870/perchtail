@@ -14,6 +14,12 @@ name: Release
 #     (#350);
 #   - SBOMs (CycloneDX) for the image, the backend, the frontend and the
 #     agent;
+#   - the Helm chart (charts/perchtail), packaged as perchtail-<version>.tgz,
+#     listed in the signed SHA256SUMS, pushed to
+#     oci://ghcr.io/<owner>/charts/perchtail with that version (pre-releases
+#     too) and carrying GitHub build provenance, as a file and in the
+#     registry. A commit without the chart (a hotfix for a line before
+#     1.0.0) releases without one;
 #   - perchtail-image.json, naming that image by digest, and
 #     perchtail-image.json.sig, its Ed25519 signature with the same release
 #     key: the updater (#320) only installs an image a signed manifest names;
@@ -68,6 +74,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
       sha: ${{ steps.meta.outputs.sha }}
+      chart: ${{ steps.meta.outputs.chart }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -130,6 +137,22 @@ jobs:
             echo "::error::$tag doesn't match the code at ${sha:0:7}: backend/app/version.py says '$app_version', frontend/package.json says '$ui_version'"
             exit 1
           fi
+          # The Helm chart carries the same version, and installs that
+          # release's image (appVersion). A line released before the chart
+          # existed (a hotfix for 0.7.x) has none, and publishes none.
+          chart=false
+          if git cat-file -e "$sha:charts/perchtail/Chart.yaml" 2>/dev/null; then
+            chart_yaml="$(git show "$sha:charts/perchtail/Chart.yaml")"
+            chart_version="$(sed -n 's/^version: *//p' <<<"$chart_yaml")"
+            chart_app_version="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' <<<"$chart_yaml")"
+            if [ "$chart_version" != "$version" ] || [ "$chart_app_version" != "$version" ]; then
+              echo "::error::$tag doesn't match the chart at ${sha:0:7}: charts/perchtail/Chart.yaml says version '$chart_version', appVersion '$chart_app_version'"
+              exit 1
+            fi
+            chart=true
+          else
+            echo "::notice::${sha:0:7} has no charts/perchtail: this release publishes no Helm chart."
+          fi
           # Read the whole file first: `git show | grep -q` stops reading at
           # the first match, git show then dies of SIGPIPE, and with pipefail
           # that fails the check at random once the CHANGELOG is large.
@@ -150,11 +173,56 @@ jobs:
             echo "version=$version"
             echo "prerelease=$prerelease"
             echo "sha=$sha"
+            echo "chart=$chart"
           } >> "$GITHUB_OUTPUT"
-          echo "Release $tag at ${sha:0:7} (pre-release: $prerelease)"
+          echo "Release $tag at ${sha:0:7} (pre-release: $prerelease, Helm chart: $chart)"
+
+  # The Helm chart, packaged once, here, in a job without the signing key:
+  # the agent job lists this very file in SHA256SUMS before signing it, and
+  # chart-publish pushes it to the registry. On a release without a chart
+  # its steps are skipped rather than the job, so the jobs after it still
+  # run.
+  chart:
+    needs: meta
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - if: needs.meta.outputs.chart == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.meta.outputs.sha }}
+
+      - if: needs.meta.outputs.chart == 'true'
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.19.0
+
+      - name: Package the chart
+        if: needs.meta.outputs.chart == 'true'
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm lint --strict charts/perchtail --set credentialEncryptionKey.existingSecret=perchtail-key
+          helm package charts/perchtail --destination chart
+          if [ ! -f "chart/perchtail-${VERSION}.tgz" ]; then
+            echo "::error::helm package didn't write chart/perchtail-${VERSION}.tgz"
+            ls -l chart
+            exit 1
+          fi
+          sha256sum "chart/perchtail-${VERSION}.tgz"
+
+      - if: needs.meta.outputs.chart == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: chart
+          path: chart/
+          if-no-files-found: error
 
   agent:
-    needs: meta
+    needs: [meta, chart]
     runs-on: ubuntu-latest
     # AGENT_SIGNING_KEY is a secret of this environment, not of the
     # repository, so only a job that names it -- on the branches the
@@ -178,11 +246,20 @@ jobs:
           # the published binaries (zizmor cache-poisoning).
           cache: false
 
+      # The packaged chart goes into SHA256SUMS too, so the release key's
+      # signature covers it.
+      - if: needs.meta.outputs.chart == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: chart
+          path: dist
+
       - name: Build agent binaries
         working-directory: agent
         env:
           CGO_ENABLED: "0"
           VERSION: ${{ needs.meta.outputs.version }}
+          CHART: ${{ needs.meta.outputs.chart }}
         run: |
           set -euo pipefail
           mkdir -p ../dist
@@ -196,7 +273,11 @@ jobs:
               -o "$out" .
           done
           cd ../dist
-          sha256sum perchtail-agent-* > SHA256SUMS
+          files=(perchtail-agent-*)
+          if [ "$CHART" = true ]; then
+            files+=("perchtail-${VERSION}.tgz")
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
 
       # Every release is signed (#319). The key never reaches the log or the
@@ -239,10 +320,15 @@ jobs:
         with:
           subject-path: dist/perchtail-agent-*
 
+      # Without the chart, which the image doesn't carry: it has its own
+      # artifact.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agent
-          path: dist/
+          path: |
+            dist/perchtail-agent-*
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
           if-no-files-found: error
 
   image:
@@ -451,8 +537,78 @@ jobs:
           path: manifest/
           if-no-files-found: error
 
+  # The chart goes to the registry after the image it installs, so it never
+  # names an image that isn't there yet. It is the file listed in the signed
+  # SHA256SUMS, and carries GitHub build provenance as a file (the release
+  # asset, or what `helm pull` downloads) and in the registry.
+  chart-publish:
+    needs: [meta, chart, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push the chart and its attestation to ghcr.io
+      id-token: write # keyless signing of the build provenance (Sigstore)
+      attestations: write # store the provenance with the repository
+    steps:
+      - if: needs.meta.outputs.chart == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: chart
+          path: chart
+
+      - if: needs.meta.outputs.chart == 'true'
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.19.0
+
+      # For the attestation pushed next to the chart.
+      - if: needs.meta.outputs.chart == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Push the chart
+        id: push
+        if: needs.meta.outputs.chart == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
+          helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN"
+          trap 'helm registry logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          out="$(helm push "chart/perchtail-${VERSION}.tgz" "oci://$registry" 2>&1)"
+          echo "$out"
+          digest="$(sed -n 's/^Digest: *//p' <<<"$out")"
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::helm push didn't report a digest for $registry/perchtail:$VERSION"
+            exit 1
+          fi
+          # The registry serves this version: what an install pulls.
+          helm show chart "oci://$registry/perchtail" --version "$VERSION" >/dev/null
+          {
+            echo "name=$registry/perchtail"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
+          echo "oci://$registry/perchtail:$VERSION -> $digest" >> "$GITHUB_STEP_SUMMARY"
+
+      - if: needs.meta.outputs.chart == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: chart/perchtail-${{ needs.meta.outputs.version }}.tgz
+
+      - if: needs.meta.outputs.chart == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
   draft:
-    needs: [meta, agent, image, image-manifest]
+    needs: [meta, agent, image, image-manifest, chart-publish]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create or update the draft release
@@ -479,10 +635,17 @@ jobs:
           name: image-manifest
           path: assets
 
+      - if: needs.meta.outputs.chart == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: chart
+          path: assets
+
       - name: Release notes from CHANGELOG.md
         env:
           VERSION: ${{ needs.meta.outputs.version }}
           IMAGE: ghcr.io/${{ github.repository }}
+          CHART: ${{ needs.meta.outputs.chart }}
         run: |
           set -euo pipefail
           awk -v v="$VERSION" '
@@ -494,11 +657,14 @@ jobs:
             echo
             echo "### Install"
             echo "- Docker: \`${IMAGE,,}:${VERSION}\` (amd64, arm64); \`perchtail-image.json\` names it by digest, and \`perchtail-image.json.sig\` is its Ed25519 signature with the release key"
-            echo "- Push agent: the binaries below; check them with \`sha256sum -c SHA256SUMS\` (\`SHA256SUMS.sig\` is its Ed25519 signature with the release key)"
+            if [ "$CHART" = true ]; then
+              echo "- Kubernetes: \`helm install perchtail oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts/perchtail --version ${VERSION} -n perchtail -f values.yaml\`, or \`perchtail-${VERSION}.tgz\` below; see [docs/kubernetes.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/kubernetes.md)"
+            fi
+            echo "- Push agent: the binaries below; check them with \`sha256sum --ignore-missing -c SHA256SUMS\` (\`SHA256SUMS.sig\` is its Ed25519 signature with the release key)"
             echo "- From source: [docs/install-from-source.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/install-from-source.md)"
             echo
             echo "### Verify"
-            echo "The image is signed with cosign (keyless), and the image and the agent binaries carry GitHub build provenance; the SBOMs (CycloneDX) list what is in the image, the backend, the frontend and the agent. How to check them: [docs/verifying-releases.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/verifying-releases.md)."
+            echo "The image is signed with cosign (keyless), and the image, the agent binaries and the Helm chart carry GitHub build provenance; the SBOMs (CycloneDX) list what is in the image, the backend, the frontend and the agent. How to check them: [docs/verifying-releases.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/verifying-releases.md)."
           } >> notes.md
           cat notes.md
 

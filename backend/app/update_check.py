@@ -56,10 +56,15 @@ def is_enabled(session: Session) -> bool:
     return enabled_by_env() and system_settings.get_bool(session, "update_check_enabled")
 
 
+INSTALL_METHODS = ("docker", "kubernetes")
+
+
 def install_method() -> str:
     """ "docker" for the official image (it sets PERCHTAIL_INSTALL=docker),
+    "kubernetes" for the Helm chart (it sets PERCHTAIL_INSTALL=kubernetes),
     "source" otherwise."""
-    return "docker" if get_settings().perchtail_install.strip().lower() == "docker" else "source"
+    value = get_settings().perchtail_install.strip().lower()
+    return value if value in INSTALL_METHODS else "source"
 
 
 def get_state(session: Session) -> UpdateCheckState:

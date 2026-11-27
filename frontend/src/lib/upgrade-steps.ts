@@ -1,12 +1,31 @@
 // The upgrade steps the Updates card shows (#215), matching how this
-// instance was installed. Kept in step with the README (Docker) and the
-// "Upgrading" section of docs/install-from-source.md. Both start with an
-// encrypted pre-upgrade backup (#334, docs/backup-and-restore.md), the one
-// to restore to roll the upgrade back.
+// instance was installed. Kept in step with the README (Docker), the
+// "Upgrading" sections of docs/kubernetes.md and
+// docs/install-from-source.md. All start with an encrypted pre-upgrade
+// backup (#334, docs/backup-and-restore.md), the one to restore to roll the
+// upgrade back.
+
+import type { InstallMethod } from './types'
 
 const IMAGE = 'ghcr.io/quaresma870/perchtail'
+const CHART = 'oci://ghcr.io/quaresma870/charts/perchtail'
+const DOCS = 'https://github.com/quaresma870/perchtail/blob'
 
-export function upgradeSteps(installMethod: 'docker' | 'source', version: string): string {
+// The guide the card links to under the steps, at the new version's tag;
+// null when the steps are all there is.
+export function upgradeGuide(installMethod: InstallMethod, version: string): string | null {
+  return installMethod === 'kubernetes' ? `${DOCS}/v${version}/docs/kubernetes.md#upgrading` : null
+}
+
+export function upgradeSteps(installMethod: InstallMethod, version: string): string {
+  if (installMethod === 'kubernetes') {
+    return [
+      '# On SQLite (on PostgreSQL, back the database up with its own tools):',
+      'kubectl -n <namespace> exec deploy/perchtail -- python -m app.backup create --reason pre-upgrade',
+      '# With the values file you installed with:',
+      `helm upgrade perchtail ${CHART} --version ${version} -n <namespace> -f <your values file>`,
+    ].join('\n')
+  }
   if (installMethod === 'docker') {
     return [
       '# In the folder with docker-compose.yml:',
