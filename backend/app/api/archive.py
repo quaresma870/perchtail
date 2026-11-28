@@ -1313,6 +1313,7 @@ def _resolve_content(
     owner: str,
     redaction: CompiledRules | None = None,
     agent_rules: list[dict] | None = None,
+    bulk: bool = False,
 ) -> _Resolved:
     """Returns (path_to_serve, filename, scratch_key, redacted). With
     `redaction`, the content is redacted (_resolve_redacted), on the agent
@@ -1326,7 +1327,8 @@ def _resolve_content(
     bytes that must live somewhere) goes through the scratch store.
 
     A fetch takes a connector slot while it runs (#344, 503 when none is
-    free) and is refused up front (507) when scratch or its disk is full
+    free; a download, `bulk`, never the last one of the source or the last
+    global one) and is refused up front (507) when scratch or its disk is full
     (#345). A returned scratch entry is busy (ScratchStore.acquire), so
     neither the idle sweep nor the size guard deletes it while it is being
     fetched and served: the caller calls end_busy once the response is over
@@ -1352,7 +1354,7 @@ def _resolve_content(
         return _Resolved(resolved, filename, None)
 
     store = get_scratch_store()
-    with get_limiter().connector(limits, source.id):
+    with get_limiter().connector(limits, source.id, bulk=bulk):
         store.ensure_room()
         key = _scratch_key(owner, source.id, path, member)
         destination = store.acquire(key, busy=True)
@@ -1425,6 +1427,7 @@ def _resolve_content_audited(
     denied_action: str,
     redaction: CompiledRules | None = None,
     agent_rules: list[dict] | None = None,
+    bulk: bool = False,
 ) -> _Resolved:
     """_resolve_content, recording a refused whole archive (or content
     redaction can't read) in the audit log (`denied_action`) before the
@@ -1434,7 +1437,15 @@ def _resolve_content_audited(
     any, belongs to `user`'s session (_scratch_owner)."""
     try:
         return _resolve_content(
-            source, path, member, rules, limits, _scratch_owner(user), redaction, agent_rules
+            source,
+            path,
+            member,
+            rules,
+            limits,
+            _scratch_owner(user),
+            redaction,
+            agent_rules,
+            bulk=bulk,
         )
     except AuditedRefusal as exc:
         refused_path = path if member is None else f"{path}/{normalize_member_name(member)}"
@@ -2656,7 +2667,7 @@ def _prepare_on_agent(
         raise WholeArchiveRefused(_AUDIT_REDACTION_ARCHIVE_REASON)
     connector = _connector(source)
     store = get_scratch_store()
-    with get_limiter().connector(limits, source.id):
+    with get_limiter().connector(limits, source.id, bulk=True):
         store.ensure_room()
         work_dir = make_scratch_dir("perchtail-download-")
         try:
@@ -2772,7 +2783,7 @@ def _prepare_redacted_download(
         and not is_transparent_gzip(filename)
     )
     store = get_scratch_store()
-    with get_limiter().connector(limits, source.id):
+    with get_limiter().connector(limits, source.id, bulk=True):
         store.ensure_room()
         work_dir = make_scratch_dir("perchtail-download-")
         try:
@@ -3004,7 +3015,7 @@ def download_file(
     transfer = get_limiter().transfer(limits, user.id)
     try:
         served_path, filename, key, _ = _resolve_content_audited(
-            source, path, member, rules, limits, user, session, "file.download_denied"
+            source, path, member, rules, limits, user, session, "file.download_denied", bulk=True
         )
     except BaseException:
         transfer.release()
@@ -3637,7 +3648,7 @@ def _download_folder_zip_redacted(
 
     tmp_dir: Path | None = None
     try:
-        slots.append(get_limiter().connector(limits, source.id))
+        slots.append(get_limiter().connector(limits, source.id, bulk=True))
         limit = max_fetch_bytes()
         try:
             entries = _zip_entries(connector, source, rules, path)
@@ -3780,7 +3791,7 @@ def download_folder_zip(
 
     tmp_dir: Path | None = None
     try:
-        slots.append(get_limiter().connector(limits, source.id))
+        slots.append(get_limiter().connector(limits, source.id, bulk=True))
         limit = max_fetch_bytes()
         try:
             entries = _zip_entries(connector, source, rules, path)

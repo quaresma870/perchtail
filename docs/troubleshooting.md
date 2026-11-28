@@ -238,7 +238,13 @@ PerchTail limits how much connector work runs at once: listings, opens, Tail che
 - "This source is busy with other requests right now. Try again in a few seconds."
 - "You already have as many downloads and folder ZIPs in progress as this server allows. Wait for one to finish, then try again."
 
-The limits are in **Settings → Explorer and limits → Limits**: **Listings and downloads at once** (16 by default), **At once on one source** (4) and **Downloads per user** (2). The log has `limits.busy` with the `scope`, and `/monitoring/health` shows what's in use (see [monitoring.md](monitoring.md)). Raise a limit if users see these messages often and the server and the sources have room.
+The limits are in **Settings → Explorer and limits → Limits**: **Listings and downloads at once** (16 by default), **At once on one source** (4) and **Downloads per user** (2). Downloads and folder ZIPs never take the last slot of a source nor the last one in all (when that limit is 2 or more), so a source busy with downloads still answers listings, opens and Tail; a download can be told the source is busy while one slot is still free. The log has `limits.busy` with the `scope`, and `/monitoring/health` shows what's in use (see [monitoring.md](monitoring.md)). Raise a limit if users see these messages often and the server and the sources have room.
+
+### A large ZIP is cut short behind the proxy
+
+A folder ZIP (or a large download) ends early, and the archive won't open: unzip tools say the end-of-central-directory record or the central directory is missing. A folder ZIP is streamed one file at a time, and while PerchTail copies a large file from the source into scratch it sends nothing; a reverse proxy whose read timeout passes in that time closes the response. The proxy's error log then has the timeout (nginx: `upstream timed out ... while reading upstream`). When the ZIP failed on PerchTail's side instead (a read from the source failed or timed out part way), PerchTail's log has `archive.zip_stream_failed` with the source, the folder and the error.
+
+Raise the proxy's timeout for `/sources/<id>/download` and `/sources/<id>/download-zip` to 600 seconds or more ([hardening.md](hardening.md#timeouts-for-downloads) has the settings for nginx, ingress-nginx, Apache, Caddy and Traefik), or download smaller folders.
 
 ### Listing truncated
 

@@ -16,6 +16,7 @@ A checklist for running PerchTail in production. Each item says what to do and w
 - [ ] **Put a reverse proxy in front that terminates TLS** (TLS 1.2 or later), and send HTTP to HTTPS. The README has an nginx example ([Deployment: reverse proxy + TLS](../README.md#deployment-reverse-proxy-nginx--tls)). Use the protocols and cipher suites of Mozilla's "intermediate" profile ([TLS settings](#tls-settings)).
 - [ ] **Set HSTS on the proxy**, with `includeSubDomains`: `Strict-Transport-Security: max-age=31536000; includeSubDomains`. PerchTail doesn't set it because it doesn't terminate TLS. `includeSubDomains` makes browsers that visited PerchTail use HTTPS for every subdomain of its host name as well (for `perchtail.example.com`, also `a.perchtail.example.com`), for a year: leave it out only if such a subdomain must still be reached over plain HTTP.
 - [ ] **Limit request rates at the proxy.** PerchTail limits sign-ins, SSO sign-in starts, password-recovery requests and webhook tests itself, holds each account to 100 alerts, and bounds connector work in all, per source and per user, but it doesn't limit how many requests a signed-in user sends. A limit per client address at the proxy bounds that ([Rate limiting](#rate-limiting)).
+- [ ] **Give downloads and folder ZIPs a long read timeout at the proxy** (600 seconds suggested), so a folder ZIP isn't cut short while it copies a large file from the source ([Timeouts for downloads](#timeouts-for-downloads)).
 - [ ] **Keep PerchTail itself unreachable except through the proxy.** `docker-compose.yml` publishes it on `127.0.0.1` only; with the proxy in another container, publish no port at all and share a Docker network. A source install listens where its `ExecStart` line says ([install-from-source.md](install-from-source.md)). On Kubernetes, the chart's Service is `ClusterIP`: reach it through the ingress, and turn on its NetworkPolicy so only the ingress controller's namespace can ([kubernetes.md](kubernetes.md#ingress-tls-and-the-clients-address)).
 - [ ] **Set `TRUSTED_PROXIES`** to the proxy's address when it isn't on the same host. Otherwise every audit entry and every failed sign-in carries the proxy's address, and failed sign-ins from everyone count against one address. Never set it to a range that holds clients ([audit-events.md](audit-events.md#client-address)). On Kubernetes, that is the network the ingress controller's pods get their addresses from. When a request carries `X-Forwarded-For` or `Forwarded` from an address outside it, the log has `client_address.untrusted_forwarded_header` once and `/monitoring/health` reports `trusted_proxies_suspect: true` until the next restart.
 - [ ] **Allow only the outbound connections you use** from the PerchTail host: the sources (SSH 22, SMB 445, WinRM 5986), the identity provider and the SMTP server over HTTPS and SMTP, the webhook receivers of your alerts, and `api.github.com` for the release check. Inbound, only the proxy needs to reach PerchTail, and push agents need to reach the proxy. The list of everything PerchTail connects to is in [data-and-retention.md](data-and-retention.md#what-leaves-the-installation).
@@ -122,6 +123,31 @@ http:
 ```
 
 Attach it, and the `perchtail-hsts` middleware above, to PerchTail's router.
+
+### Timeouts for downloads
+
+A folder ZIP is streamed one file at a time, and each file is first copied whole from the source into scratch: while it copies a large file, the ZIP sends no bytes to the browser. A download of a single remote file is copied into scratch before its first byte, too. A proxy that closes a response quiet for longer than its read timeout cuts the ZIP short: the browser gets a ZIP without its central directory, which won't open, and the proxy's error log has the timeout ([troubleshooting.md](troubleshooting.md#a-large-zip-is-cut-short-behind-the-proxy)). Give the download paths, `/sources/<id>/download` and `/sources/<id>/download-zip`, a timeout of 600 seconds, or more when large files come from slow sources.
+
+nginx (its default is 60 seconds; the README's example already sets `proxy_read_timeout 3600s` for every path, which covers this):
+
+```nginx
+# In the server block that listens on 443:
+location ~ ^/sources/[0-9]+/download(-zip)?$ {
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+    # ... the proxy settings of the README's example
+}
+```
+
+On Kubernetes with ingress-nginx, the `nginx.ingress.kubernetes.io/proxy-read-timeout` and `nginx.ingress.kubernetes.io/proxy-send-timeout` annotations ([kubernetes.md](kubernetes.md)) set them for the whole Ingress; the values given there for push agents (3600) cover downloads as well.
+
+Apache (`mod_proxy`, whose timeout defaults to the server's `Timeout`, 60 seconds), in PerchTail's virtual host:
+
+```apache
+ProxyTimeout 600
+```
+
+Caddy's `reverse_proxy` and Traefik set no limit on how long a response may stay quiet by default. If you have set one (Caddy's `transport http { read_timeout }`, Traefik's `respondingTimeouts.writeTimeout` on the entry point, which bounds the whole response), raise it to at least 600 seconds, or leave Traefik's at 0 (no limit), for the download paths.
 
 ## The host and its files
 
