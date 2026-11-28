@@ -21,7 +21,7 @@
 
 🟢 **v0.7.1** is the current release: usable today, still pre-1.0.
 
-- **Sources:** SSH/SFTP, SMB and WinRM without installing anything on the server (WinRM also through a read-only JEA endpoint that needs no administrator account), and a Go push agent for hosts that can't be reached inbound. A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
+- **Sources:** a Go push agent for Linux and Windows that dials out (no inbound port, no stored login, redaction on the host, signed upgrades from the portal), or SSH/SFTP and SMB without installing anything on the server. WinRM still works but is deprecated and will be removed in a later major release ([choosing how to reach a host](docs/source-setup.md#choosing-how-to-reach-a-host)). A source can read several folders. Every open is a fresh fetch; nothing is mirrored.
 - **Viewer:** one explorer across every source, as a list or a tree, with each file's size, a status dot per source, folders that refresh themselves and an advanced filter across sources and folders. A CodeMirror editor with tabs from several servers, Tail that fetches only the new lines, one find bar with Find all over files of any size, compare, beautify, highlights and bookmarks. One search box finds sources and file names across every source, from a file-name index that stores no content. Live alerts read only what was appended and call a webhook. Redaction hides secrets, card numbers and personal data in what users open, Tail and download, on the server or on the push agent's host.
 - **Access:** roles scoped by customer, folder and source; local accounts with a password policy (NIST defaults) that refuses common and leaked passwords, TOTP, required for administrators and, on new installs, for every local account, and optional password recovery by email; sessions that end after an idle timeout (60 minutes by default) and that admins can end for a user or for everyone; OIDC single sign-on with group-to-role mapping; an access report of who holds what, where, with flags for privileged, inactive and MFA-less accounts, on its own Settings page and as JSON or CSV, for access reviews.
 - **Deployment:** SQLite by default or PostgreSQL 18, with `python -m app.migrate_database` to move a SQLite installation to PostgreSQL; Docker Compose files for both, and a Helm chart for Kubernetes published with every release.
@@ -40,7 +40,7 @@ PerchTail gives support and ops engineers one place to browse, open, and downloa
 log files live from a mix of Linux and Windows servers — without installing
 anything on those servers, and without permanently copying their content anywhere.
 
-You configure **sources** (a host and how to reach it — SSH/SFTP, SMB, WinRM, or a push agent), attach **rules** (which files and folders are visible, glob or regex, evaluated in order), and PerchTail lists and fetches matching files live, opened in a Notepad++/VS-Code-style viewer and downloadable as single files or zipped folders. A `.zip`, `.tar.gz` or `.tgz` archive opens as a folder whose files go through the same rules; an archive with a file whose last matching rule is an exclude can't be downloaded whole (its other files still open and download one by one; with [redaction](docs/redaction.md) applied to downloads, it is rebuilt without them instead), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Nothing is proactively mirrored or cached across views — every open is a fresh fetch, because the logs behind it are still being written.
+You configure **sources** (a host and how to reach it — a push agent, SSH/SFTP, SMB, or WinRM, which is deprecated), attach **rules** (which files and folders are visible, glob or regex, evaluated in order), and PerchTail lists and fetches matching files live, opened in a Notepad++/VS-Code-style viewer and downloadable as single files or zipped folders. A `.zip`, `.tar.gz` or `.tgz` archive opens as a folder whose files go through the same rules; an archive with a file whose last matching rule is an exclude can't be downloaded whole (its other files still open and download one by one; with [redaction](docs/redaction.md) applied to downloads, it is rebuilt without them instead), and a folder's ZIP leaves it out and lists it in `SKIPPED.txt`. Nothing is proactively mirrored or cached across views — every open is a fresh fetch, because the logs behind it are still being written.
 
 RBAC is built in from day one: access is scoped per customer/environment, not just
 per user, so a support engineer working one account can't accidentally browse
@@ -65,7 +65,7 @@ nothing sitting around afterward for someone to leak or for disk to fill up with
 | | PerchTail | Graylog | Wazuh | rclone + a file browser | Loki |
 |---|---|---|---|---|---|
 | Live view, nothing stored | ✅ | ❌ ingests a copy | ❌ ingests a copy | ❌ mirrors to disk | ❌ ingests a copy |
-| Agentless Linux + Windows | ✅ SSH/SFTP, SMB, WinRM | needs Beats/NXLog agents | needs an agent | rclone remotes | needs Promtail agent |
+| Agentless Linux + Windows | ✅ SSH/SFTP, SMB (WinRM deprecated) | needs Beats/NXLog agents | needs an agent | rclone remotes | needs Promtail agent |
 | Customer/environment-scoped RBAC | ✅ built in | limited / enterprise | role-based, not scoped this way | ❌ | limited |
 | SSO | ✅ OIDC (SAML 🚧 if needed) | enterprise tier | ✅ | ❌ | via Grafana |
 | Code-editor-style viewer | ✅ CodeMirror | search UI, not a file viewer | search UI | depends which browser | Grafana Explore |
@@ -99,7 +99,7 @@ A grant gives, in its customer, folder or source, any of `view` (browse and open
 - **To run it:** Docker with Docker Compose, or Kubernetes 1.29 or later with Helm 3.8 or later. The image is built for amd64 and arm64. To run it without Docker, see [docs/install-from-source.md](docs/install-from-source.md).
 - **A database:** SQLite, built in and the default, on a local disk (not a network share); or an empty PostgreSQL 18 database in UTF8, reached with a verified certificate when it is on another host.
 - **In front of it:** a reverse proxy that terminates TLS for anything beyond the host it runs on ([Deployment: reverse proxy + TLS](#deployment-reverse-proxy-nginx--tls)).
-- **Sources:** SSH/SFTP, SMB or WinRM reachable from PerchTail, with an account that can read the logs ([docs/source-setup.md](docs/source-setup.md)), or the push agent on Linux (amd64, arm64) or Windows (amd64) for hosts PerchTail can't reach inbound ([agent/README.md](agent/README.md)).
+- **Sources:** the push agent on Linux (amd64, arm64) or Windows (amd64), the recommended way to reach a host ([agent/README.md](agent/README.md)), or SSH/SFTP or SMB reachable from PerchTail, with an account that can read the logs; WinRM is deprecated ([docs/source-setup.md](docs/source-setup.md#choosing-how-to-reach-a-host)).
 
 ## Installation
 
@@ -343,7 +343,7 @@ Security:
 
 Connecting sources:
 
-- [docs/source-setup.md](docs/source-setup.md) — preparing a Linux or Windows server for PerchTail over SSH/SFTP, SMB or WinRM, the push agent, and local-disk sources
+- [docs/source-setup.md](docs/source-setup.md) — choosing how to reach a host, preparing a Linux or Windows server for the push agent, SSH/SFTP, SMB or WinRM (deprecated), local-disk sources, and moving a WinRM source
 - [docs/examples/jea](docs/examples/jea/README.md) — the read-only JEA endpoint for WinRM sources without a remote shell or administrator account
 - [agent/README.md](agent/README.md) — the push agent: configuration, download, upgrades from the portal and building it
 - [docs/agent-service.md](docs/agent-service.md) — running the push agent as a service

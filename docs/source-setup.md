@@ -1,6 +1,45 @@
 # Preparing a source server for PerchTail
 
-PerchTail is agentless by default — for SSH/SFTP, SMB, and WinRM sources, it never installs anything on the machines it reads from. Each of those needs a **dedicated, least-privilege account** reachable over the relevant protocol. For a host that can't be reached inbound at all, the push-agent (a small Go binary that dials *out* instead) covers that case without needing an inbound account or firewall rule on the source. This guide covers what to configure on the *source* side before you add it under **Settings → Sources**.
+PerchTail reaches a host through the push agent, a small Go binary that runs on the host and dials *out* to PerchTail, or without installing anything on it, over SSH/SFTP, SMB or WinRM (deprecated), each with a **dedicated, least-privilege account**. This guide helps you choose, and covers what to configure on the *source* side before you add it under **Settings → Sources**.
+
+## Choosing how to reach a host
+
+A source reaches its host in one of five ways. All of them read the same files under the same rules and send nothing ahead of time; they differ in what the host needs, which way the connection goes, how fast large files arrive and where redaction runs.
+
+| | Push agent | SSH / SFTP | SMB | WinRM (deprecated) | Local disk |
+|---|---|---|---|---|---|
+| Hosts | Linux (amd64, arm64) and Windows (amd64) | Linux, and Windows with its OpenSSH server | Windows shares (and Samba) | Windows | the PerchTail host |
+| Connection | outbound from the host to PerchTail over `wss://`: no inbound port on the host | inbound to the host, TCP 22 | inbound to the host, TCP 445 | inbound to the host, TCP 5986 (5985 over HTTP) | none |
+| What the host needs | the agent binary, run as a service | an SSH server and an account | a share of the log folder and an account | a WinRM HTTPS listener, an account and, recommended, the read-only JEA endpoint | nothing |
+| What PerchTail stores | the SHA-256 hash of the source's enrollment token: no login credential | the account's key or password, encrypted | the account's password, encrypted | the account's password, encrypted | nothing |
+| Large files | fastest: the agent reads its own disk and streams over its connection | fastest | fast | much slower: PowerShell sends each file as base64 text inside WS-Management responses | read in place |
+| Redaction | on the host (`redaction/1`): content leaves the host already redacted | on the PerchTail server, after the original arrives | on the server | on the server | on the server |
+| Archives | `.zip`, `.tar.gz` and `.tgz` listed and extracted on the host: only the file asked for travels | a `.zip` read in place (its index, then only the file asked for); a `.tar.gz` copied whole | as SSH | as SSH | read on the PerchTail host |
+| Links | symlinks, and junctions on Windows, followed only inside the base path to what the rules show (`links/1`) | symlinks followed only inside the base path to what the rules show | never followed | never followed | as SSH |
+| What it can read | only under `PERCHTAIL_BASE_PATH`, checked by the agent on every path | what the account can read (an SFTP chroot narrows it) | the share and its NTFS permissions | the NTFS permissions, and the JEA role's folders | under `LOCAL_SOURCE_ROOTS` |
+| Updates | from Settings → Agents, only to a newer binary signed with the release key | the host's own | the host's own | the host's own | none |
+
+### Why the push agent
+
+Wherever you can install it, the push agent is the best way to reach a host, on Linux and on Windows:
+
+- **No inbound port and no login account.** The agent dials out to PerchTail over `wss://` (it refuses a plain `ws://` URL unless told otherwise), so the host needs no listening service and no firewall rule for PerchTail. PerchTail keeps no password or key for the host, only the hash of a per-source enrollment token, shown once; regenerating it disconnects the agent that used the old one.
+- **It reads only its folder.** Every path is checked against `PERCHTAIL_BASE_PATH` on the host, whatever the server asks, and the agent only answers commands: it never sends files on its own.
+- **Content leaves the host redacted.** When redaction applies to the source, the agent redacts on its host with the source's rules, using a port of the server's engine checked against the same test vectors (`redaction/1`), and the server discards any answer that doesn't prove it was redacted with the rules it sent. Over SSH, SMB and WinRM the original crosses the network and is redacted on the server.
+- **Only what is asked for travels.** The agent lists `.zip`, `.tar.gz` and `.tgz` archives on its host and extracts there the one file asked for, so a large archive isn't sent to read one log inside it.
+- **Long reads keep going, and stop when they should.** While the agent reads far into a large archive before it can send anything, it reports its progress every 10 seconds (`progress/1`), so the read isn't given up as unanswered; a read that hangs still fails after 30 seconds. When the server gives up on a read, the agent stops reading the file.
+- **Links are checked where they lead.** The agent reports where each symlink or junction really leads, and reads a file only when it is where the server checked its rules (`links/1`), with the same open file, so a link swapped in between isn't followed.
+- **Upgrades from the portal, signed.** Settings → Agents upgrades an agent when asked, or by itself within an upgrade window; the agent installs a new binary only when `SHA256SUMS` carries a valid Ed25519 signature from the release key built into it and the version is newer than its own. `PERCHTAIL_REMOTE_UPGRADE=false` turns this off on a host.
+- **As fast as SSH.** The agent reads its own disk and streams the file over its one connection, so large files arrive as fast as over SSH, and far faster than over WinRM.
+
+See [Agent](#agent-push-agent-for-hosts-not-reachable-inbound) below and [agent-service.md](agent-service.md) to install it.
+
+### Which to use
+
+- **The push agent** wherever you can install it, on Linux and on Windows.
+- Where you can't: **SSH / SFTP** on Linux; on Windows, an **SMB** share of the log folder, or the **OpenSSH server** that comes with Windows (see [Moving a WinRM source](#moving-a-winrm-source) for its setup).
+- **Local disk** for logs already on the PerchTail host.
+- **WinRM** only for sources that already use it, until they are moved. WinRM is deprecated in PerchTail 1.0: it keeps working through 1.x, gets no further performance work, and will be removed in a later major release. The source editor says so when WinRM is chosen, the sources list labels WinRM sources **deprecated**, and the system settings pages show how many there are.
 
 ## At a glance
 
@@ -8,7 +47,7 @@ PerchTail is agentless by default — for SSH/SFTP, SMB, and WinRM sources, it n
 |---|---|---|---|---|
 | SSH/SFTP | Linux | 22 | dedicated OS user, key-based | SFTP-only chroot jail |
 | SMB | Windows shares | 445 | dedicated local/domain user | share + NTFS ACL scoped to one folder |
-| WinRM | Windows (fallback when SMB isn't open) | 5986 (HTTPS) / 5985 | dedicated account behind the read-only JEA endpoint (or, without it, remote-shell rights) | NTFS read ACLs; the JEA role's allowed folders |
+| WinRM (deprecated) | Windows, existing sources until they are [moved](#moving-a-winrm-source) | 5986 (HTTPS) / 5985 | dedicated account behind the read-only JEA endpoint (or, without it, remote-shell rights) | NTFS read ACLs; the JEA role's allowed folders |
 | Agent | Any host not reachable inbound | outbound only, no listener | enrollment token, not a login account | `PERCHTAIL_BASE_PATH` scopes what it can read |
 | Local disk | Directories on the PerchTail host (e.g. a read-only bind mount) | n/a | none | off unless the operator sets `LOCAL_SOURCE_ROOTS` |
 
@@ -159,6 +198,8 @@ Allow TCP 445 inbound from the PerchTail connector's IP only.
 
 ## WinRM (Windows, fallback when SMB isn't open)
 
+> **WinRM is deprecated.** It keeps working through PerchTail 1.x and will be removed in a later major release. Reads over WinRM are much slower than over the push agent, SSH or SMB (see [Large files](#4-large-files) below), and the push agent needs no inbound port or account. For a new Windows source use the agent, an SMB share or the OpenSSH server included with Windows ([Choosing how to reach a host](#choosing-how-to-reach-a-host)), and move existing WinRM sources when you can ([Moving a WinRM source](#moving-a-winrm-source)).
+
 > **Read this before choosing WinRM.** There are two ways to connect, and they differ a lot in what the stored credential can do:
 >
 > - **Through PerchTail's read-only JEA endpoint (recommended, 0.6+).** The source names the endpoint in **JEA endpoint (optional)**, and PerchTail speaks PSRP to it. The endpoint runs in `NoLanguage` mode and only exposes PerchTail's own functions, which list and read files under the folders you allow and refuse junctions and links. The account needs no administrator rights and no remote shell: if the credential leaks, it can read those logs and nothing else. See step 2, option A.
@@ -214,6 +255,39 @@ WinRM has no file transfer of its own: PerchTail reads a file through PowerShell
 A `.zip` is read in place: expanding it reads only its index at its end, and opening one of its files only that file's compressed bytes, a few PowerShell requests rather than the whole archive. A large `.zip` is therefore quick to expand and its small files quick to open; a large file inside it still takes as long as its compressed size. A `.tar.gz` is still read whole.
 
 Each response carries up to 500 KB (PerchTail asks for envelopes of 512000 bytes). A server whose `MaxEnvelopeSizekb` is below 500 refuses that size; PerchTail then asks again with 150 KB envelopes, which works but takes about three times as many responses, so reads are slower, and logs `winrm.envelope_fallback` each time. `MaxEnvelopeSizekb` is 500 by default since Windows Server 2012; to check it, run `winrm get winrm/config` as an administrator, and to restore it, `winrm set winrm/config '@{MaxEnvelopeSizekb="500"}'`.
+
+## Moving a WinRM source
+
+WinRM is deprecated (see [Which to use](#which-to-use)). A source's protocol can't be changed, so moving a WinRM source means adding a source over another protocol for the same folder, checking it, and then deleting the WinRM source. Nothing has to happen on the same day: both sources can exist side by side while you check the new one.
+
+### 1. Choose what replaces it
+
+- **The push agent (recommended).** Install it on the Windows host as a service, as in [agent-service.md](agent-service.md#5-install-on-windows-with-a-service-wrapper), with `PERCHTAIL_BASE_PATH` set to the WinRM source's base path (for example `D:\Logs\MyApp`), and run it as an account that can only read that folder. The host then needs no WinRM listener, no inbound port and no account in PerchTail. An agent serves one folder: for a WinRM source with several folders, add one agent source per folder, or set `PERCHTAIL_BASE_PATH` to a folder above them and let the rules show only what the WinRM source showed.
+- **SMB.** Share the log folder read-only to a dedicated account, as in [SMB](#smb-windows-shares). The source's base path is the share name, so share exactly the folder the WinRM source read, and the rules keep matching the same paths. A folder on another drive is another share, added as another folder of the same source.
+- **The OpenSSH server included with Windows.** On Windows Server 2019 and later, and Windows 10 and 11, install the **OpenSSH Server** optional feature (`Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`), start the `sshd` service and set it to start automatically. Give a dedicated local account read access to the log folders only, install its public key (for a member of Administrators, OpenSSH reads `administrators_authorized_keys` instead, so use an account that isn't one), and restrict it to SFTP in `%ProgramData%\ssh\sshd_config` with a `Match User` block holding `ForceCommand internal-sftp`. Allow TCP 22 inbound from PerchTail only. In PerchTail, add an **SSH / SFTP** source whose base path is the folder as the SFTP server names it, with forward slashes and a leading slash: `/D:/Logs/MyApp`.
+
+An SSH source doesn't know its host runs Windows, which matters for the rules: its include rules are case-sensitive, and PerchTail doesn't refuse the other spellings Windows accepts for a name (8.3 short names like `SECRET~1`, trailing dots or spaces), so an exclude rule can be sidestepped by spelling a path that way. Exclude rules still ignore case. On an SSH source to Windows, keep files that must stay hidden out of the account's reach with NTFS permissions rather than with exclude rules alone, or choose the agent or SMB, which PerchTail treats as Windows: the agent reports its operating system, and SMB and Windows agents get case-insensitive include rules and refuse those spellings, as WinRM did.
+
+### 2. Add the new source
+
+Add it under **Settings → Sources** in the same customer and folder as the WinRM source, so the grants on that customer or folder cover it too. Give it a name other than the WinRM source's, since a YAML import finds a source by its name within its customer. For an agent source, generate its enrollment token and start the agent with it.
+
+### 3. Copy the rules
+
+Rules are relative to the base path, so they carry over unchanged when the new source reads the same folder.
+
+- In the rule editor: open the WinRM source's rules in **Raw text**, copy them, and paste them into the new source's rule editor in **Raw text**.
+- With a YAML file (super admins): under **Settings → Import / export**, export the configuration, keep the WinRM source's entry, and change its `name`, `protocol`, `host`, `port` and `base_path` (or `roots`), remove `winrm_scheme` and `tls_ca_pem`, and add a `credential` for SMB or SSH, or set it in the source editor afterwards. Importing it creates the new source with the same `rules`, `redaction_rules` and `redaction_disable`, and leaves the WinRM source as it is. See [bulk-import.md](bulk-import.md).
+
+### 4. Grants and alerts
+
+Grants on the customer or on a folder above the source apply to the new source by themselves. Grants on the WinRM source itself, and alerts scoped to it, don't move: add them again on the new source (Settings → Roles, Alerts). Deleting the WinRM source deletes its own grants and the alerts scoped to it.
+
+### 5. Check it, then delete the WinRM source
+
+Use **Test connection** on the new source's page, browse it, and open a few of the files the WinRM source showed, including one the rules hide, which must stay hidden. The new source's file-name index fills on its next pass, and alerts read its files from where they are when they first see them. Then delete the WinRM source under **Settings → Sources**; its entries in the audit log stay.
+
+On the Windows host, remove what only PerchTail used: the JEA endpoint (see [the JEA README](examples/jea/README.md)), the WinRM HTTPS listener and its firewall rule if nothing else needs them, and the WinRM source's account.
 
 ## Agent (push-agent, for hosts not reachable inbound)
 

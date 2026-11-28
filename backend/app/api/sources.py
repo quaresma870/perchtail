@@ -371,7 +371,8 @@ def _validate_base_path(protocol: Protocol, base_path: str) -> str:
         if _DRIVE_PATH.match(path):
             raise _bad_request(
                 "SMB Base path is a share name, not a drive path like C:\\Logs. Share the log "
-                "folder on the server (see docs/source-setup.md), or use WinRM to read a drive path"
+                "folder on the server (see docs/source-setup.md), or use the push agent to read "
+                "a drive path"
             )
         if path.startswith(("\\\\", "//")):
             raise _bad_request(

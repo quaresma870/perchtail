@@ -8,11 +8,13 @@ PerchTail runs as a single process with a SQLite database (see [high-availabilit
 
 | Profile | Users (concurrent) | Sources | Push agents | CPU | RAM | Scratch disk | Database disk | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Small | up to 10 | about 50 (SSH, SMB, WinRM, local) | about 12 | to be measured | to be measured | to be measured | to be measured | to be measured |
+| Small | up to 10 | about 50 (SSH, SMB, local) | about 12 | to be measured | to be measured | to be measured | to be measured | to be measured |
 | Medium | up to 50 | about 250 | about 45 | to be measured | to be measured | to be measured | to be measured | to be measured |
 | Large | up to 200 | about 1000 | about 160 | to be measured | to be measured | to be measured | to be measured | to be measured |
 
 The exact mix of each profile (sources per protocol, file sizes, how long people read, follow and download) is in `loadtest/profiles/small.json`, `medium.json` and `large.json`. A deployment that differs a lot from them (much bigger files, many more people following at once, sources far away) should read the next sections and adjust.
+
+WinRM is deprecated in 1.0 and isn't measured: the figures here are taken with no WinRM sources (`"winrm": 0` in a profile's `sources`), though the kit can still seed and measure them. A WinRM read costs far more time, and CPU on both ends, than the same read over the push agent, SSH or SMB, since PowerShell sends the file as base64 text inside WS-Management responses; an installation that still has WinRM sources needs more headroom than these figures, and is better off [moving them](source-setup.md#moving-a-winrm-source).
 
 ## Measured results
 
@@ -56,7 +58,7 @@ To be measured.
 
 ### What each protocol and feature costs
 
-The `protocol_matrix` profile measures one thing at a time, so protocols and features can be compared: on one source of each protocol (SSH, SMB, WinRM, WinRM through JEA, push agents on Linux and Windows, local disk), listing folders of 100 to 10,000 entries, opening and downloading files of 1 to 200 MB and following a growing file, one at a time and with 5 and 20 at once, optionally with added network delay towards the source. For each cell it records latency, time to the first byte and throughput, PerchTail's CPU time, memory and network traffic, and the source server's CPU, memory and disk reads. It also measures the fixed cost of a source (a reachability check and a file-name index pass), features with and without their cost (the audit page, sign-in with MFA), a backup (and, when asked for, its restore into a separate copy), and how a slow or failing source affects the others. From these, `report.py costs` works out cost units per operation, per MB transferred, per source and, with a `production` run, per active user.
+The `protocol_matrix` profile measures one thing at a time, so protocols and features can be compared: on one source of each protocol (SSH, SMB, push agents on Linux and Windows, local disk, and WinRM with and without JEA when the instance has them, which the published figures leave out), listing folders of 100 to 10,000 entries, opening and downloading files of 1 to 200 MB and following a growing file, one at a time and with 5 and 20 at once, optionally with added network delay towards the source. For each cell it records latency, time to the first byte and throughput, PerchTail's CPU time, memory and network traffic, and the source server's CPU, memory and disk reads. It also measures the fixed cost of a source (a reachability check and a file-name index pass), features with and without their cost (the audit page, sign-in with MFA), a backup (and, when asked for, its restore into a separate copy), and how a slow or failing source affects the others. From these, `report.py costs` works out cost units per operation, per MB transferred, per source and, with a `production` run, per active user.
 
 To be measured.
 

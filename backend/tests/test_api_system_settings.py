@@ -7,6 +7,7 @@ from app.auth.models import GlobalCapability, Role, User
 from app.db import get_session
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlmodel import select
 
 
 def _make_user(session, *, is_super_admin=False, global_capabilities=None) -> User:
@@ -428,3 +429,62 @@ def test_limits_are_kept_within_their_ranges(session, client_for, payload, statu
     current = client.get("/system-settings").json()
     for key, value in payload.items():
         assert (current[key] == value) is (status == 200)
+
+
+def _winrm_warnings(client) -> list[dict]:
+    response = client.get("/system-settings/warnings")
+    assert response.status_code == 200
+    return [w for w in response.json() if w["code"] == "winrm_deprecated"]
+
+
+def test_winrm_sources_are_warned_about_by_count_only(session, client_for):
+    from app.models import Customer, Protocol, Source
+
+    client = client_for(_make_user(session, is_super_admin=True))
+    customer = Customer(name=f"customer-{uuid.uuid4().hex}")
+    session.add(customer)
+    session.commit()
+    ssh = Source(
+        name="ssh-box", customer_id=customer.id, protocol=Protocol.ssh, host="h", base_path="/"
+    )
+    session.add(ssh)
+    session.commit()
+    assert _winrm_warnings(client) == []
+
+    first = Source(
+        name="win-secret-name",
+        customer_id=customer.id,
+        protocol=Protocol.winrm,
+        host="win-secret-host",
+        base_path="C:\Logs",
+    )
+    session.add(first)
+    session.commit()
+    [warning] = _winrm_warnings(client)
+    assert warning["message"] == "1 source uses WinRM, which is deprecated."
+    assert "Moving a WinRM source" in warning["advice"]
+    assert "win-secret" not in str(warning)
+
+    session.add(
+        Source(
+            name="win-2",
+            customer_id=customer.id,
+            protocol=Protocol.winrm,
+            host="w2",
+            base_path="C:\Logs",
+            enabled=False,
+        )
+    )
+    session.commit()
+    [warning] = _winrm_warnings(client)
+    assert warning["message"] == "2 sources use WinRM, which is deprecated."
+
+    for source in session.exec(select(Source).where(Source.protocol == Protocol.winrm)).all():
+        session.delete(source)
+    session.commit()
+    assert _winrm_warnings(client) == []
+
+
+def test_the_winrm_warning_needs_the_system_settings_capability(session, client_for):
+    client = client_for(_make_user(session))
+    assert client.get("/system-settings/warnings").status_code == 403
