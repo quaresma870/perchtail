@@ -140,6 +140,29 @@ class BackupError(RuntimeError):
     why, for the person running the command."""
 
 
+class RestoreFailedError(BackupError):
+    """A restore that failed once it had started: the database's
+    transaction was rolled back and DATA_DIR put back (`undone`), or a step
+    of that couldn't be undone (logged as backup.restore_undo_failed).
+    `kind` is the error's type, for the log."""
+
+    def __init__(self, detail: str, *, kind: str, undone: bool = True):
+        self.kind = kind
+        self.undone = undone
+        if undone:
+            message = (
+                f"the restore failed and was undone, the database and DATA_DIR are as they "
+                f"were: {detail}"
+            )
+        else:
+            message = (
+                f"the restore failed and couldn't all be undone ({detail}): before starting "
+                "PerchTail, check DATA_DIR and its before-restore copy against the log's "
+                "backup.restore_undo_failed"
+            )
+        super().__init__(message)
+
+
 # --- Database dialects -----------------------------------------------------
 
 
@@ -283,7 +306,15 @@ def _head_revision() -> str:
     return ScriptDirectory(str(MIGRATIONS_DIR)).get_current_head()
 
 
-def _database_failure(exc: Exception) -> str:
+def _failure(exc: BaseException) -> str:
+    """What went wrong in a restore, without any value read from the
+    database: a file error says which file, a database error its kind."""
+    if isinstance(exc, OSError):
+        return str(exc)
+    return _database_failure(exc)
+
+
+def _database_failure(exc: BaseException) -> str:
     """A database error, described without the values of the statement or
     its rows (they may be secrets or password hashes)."""
     from sqlalchemy.exc import DBAPIError
@@ -443,9 +474,8 @@ class PostgresDialect(_SqliteCopy):
                         try:
                             self._replace(source, target)
                         except (SQLAlchemyError, db_copy.TableCopyError) as exc:
-                            raise BackupError(
-                                "couldn't restore the PostgreSQL database, which is as it was: "
-                                + _database_failure(exc)
+                            raise RestoreFailedError(
+                                _database_failure(exc), kind=type(exc).__name__
                             ) from None
                         yield transaction.commit
                     finally:
@@ -1116,15 +1146,18 @@ def _swap_data_dir(
         undo.append(lambda: os.rename(data_dir, staging))
 
 
-def _undo(undo: list[Callable[[], None]], path: Path) -> None:
+def _undo(undo: list[Callable[[], None]], path: Path) -> bool:
     """Puts DATA_DIR and the files outside it back after a restore that
     failed half-way, last step first. A step that fails is logged and the
-    others still run."""
+    others still run. Returns whether every step worked."""
+    undone = True
     for step in reversed(undo):
         try:
             step()
         except Exception as exc:  # noqa: BLE001 - every other step still runs
+            undone = False
             logger.error("backup.restore_undo_failed", file=path.name, error=str(exc))
+    return undone
 
 
 @dataclass
@@ -1140,11 +1173,24 @@ def restore_backup(
 ) -> RestoreResult:
     """Restores the backup at path into DATA_DIR, with PerchTail stopped.
     The previous DATA_DIR is kept as `<DATA_DIR>.before-restore-<time>`.
-    Raises BackupError, having changed nothing, when it refuses."""
+    Raises BackupError, having changed nothing, when it refuses, and
+    RestoreFailedError when it fails once started (undone as far as it
+    could be). Both are logged only: neither changed the current database,
+    so its audit log doesn't get an entry either."""
     settings = settings or get_settings()
     path = Path(path)
     try:
         return _restore(path, force, settings)
+    except RestoreFailedError as exc:
+        logger.error(
+            "backup.restore",
+            file=path.name,
+            reason=_reason_of(path),
+            result="failed",
+            error=exc.kind,
+            undone=exc.undone,
+        )
+        raise
     except BackupError as exc:
         # Logged only: a refused restore changes nothing, not even the
         # current database's audit log.
@@ -1156,6 +1202,18 @@ def restore_backup(
             error=str(exc),
         )
         raise
+    except Exception as exc:
+        # Before DATA_DIR was touched (reading the archive, laying out the
+        # new DATA_DIR, reaching the database): nothing to undo.
+        logger.error(
+            "backup.restore",
+            file=path.name,
+            reason=_reason_of(path),
+            result="failed",
+            error=type(exc).__name__,
+            undone=True,
+        )
+        raise RestoreFailedError(_failure(exc), kind=type(exc).__name__) from None
 
 
 def _restore(path: Path, force: bool, settings: Settings) -> RestoreResult:
@@ -1267,6 +1325,11 @@ def _restore(path: Path, force: bool, settings: Settings) -> RestoreResult:
                     _place_file(extracted, target)
                 dialect.clear_companions()
                 commit_database()
+            except Exception as exc:
+                undone = _undo(undo, path)
+                raise RestoreFailedError(
+                    _failure(exc), kind=type(exc).__name__, undone=undone
+                ) from None
             except BaseException:
                 _undo(undo, path)
                 raise

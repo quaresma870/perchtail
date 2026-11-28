@@ -833,6 +833,23 @@ def test_backup_list_for_whoever_manages_system_settings(env):
         assert _client(session, plain).get("/system-settings/backups").status_code == 403
 
 
+class _LogRecorder:
+    """backup.logger, recording (level, fields) per event."""
+
+    def __init__(self, monkeypatch):
+        self.records: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(backup, "logger", self)
+
+    def __getattr__(self, level):
+        def record(event, **fields):
+            self.records.append((level, event, fields))
+
+        return record
+
+    def events(self, name: str) -> list[tuple[str, dict]]:
+        return [(level, fields) for level, event, fields in self.records if event == name]
+
+
 # --- the database engine ---------------------------------------------------
 
 
@@ -894,11 +911,73 @@ def test_a_restore_that_fails_after_the_swap_puts_data_dir_back(env, monkeypatch
         raise OSError("the disk went away")
 
     monkeypatch.setattr(backup.SqliteDialect, "clear_companions", fail)
-    with pytest.raises(OSError, match="the disk went away"):
+    log = _LogRecorder(monkeypatch)
+    with pytest.raises(backup.RestoreFailedError, match="was undone.*the disk went away"):
         backup.restore_backup(path)
     assert _tree(env.data) == before
     assert not list(env.data.parent.glob("db.*"))
     instance_lock.acquire(env.settings).release()
+    assert log.events("backup.restore") == [
+        (
+            "error",
+            {
+                "file": path.name,
+                "reason": "manual",
+                "result": "failed",
+                "error": "OSError",
+                "undone": True,
+            },
+        )
+    ]
+
+
+def test_a_restore_whose_undo_fails_says_so(env, monkeypatch):
+    path = backup.create_backup("manual")
+    env.engine.dispose()
+    before = _tree(env.data)
+    swap = backup._swap_data_dir
+
+    def swap_with_a_stuck_step(data_dir, staging, previous, undo):
+        swap(data_dir, staging, previous, undo)
+
+        def stuck():
+            raise OSError("a file is held open")
+
+        undo.append(stuck)
+
+    def fail(self):
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(backup, "_swap_data_dir", swap_with_a_stuck_step)
+    monkeypatch.setattr(backup.SqliteDialect, "clear_companions", fail)
+    log = _LogRecorder(monkeypatch)
+    with pytest.raises(backup.RestoreFailedError, match="couldn't all be undone"):
+        backup.restore_backup(path)
+    assert log.events("backup.restore_undo_failed") == [
+        ("error", {"file": path.name, "error": "a file is held open"})
+    ]
+    assert log.events("backup.restore")[0][1]["undone"] is False
+    # The other steps still ran.
+    assert _tree(env.data) == before
+
+
+def test_a_restore_that_fails_before_the_swap_is_reported_in_one_line(env, monkeypatch, capsys):
+    path = backup.create_backup("manual")
+    env.engine.dispose()
+    before = _tree(env.data)
+
+    def fail(*args, **kwargs):
+        raise OSError("no space left on the device")
+
+    monkeypatch.setattr(backup, "credential_key_matches", fail)
+    monkeypatch.setattr("app.logging_config.configure_logging", lambda *a, **k: None)
+    assert backup.main(["restore", str(path)]) == 1
+    err = capsys.readouterr().err
+    assert err.splitlines() == [
+        "ERROR: the restore failed and was undone, the database and DATA_DIR are as they "
+        "were: no space left on the device"
+    ]
+    assert _tree(env.data) == before
 
 
 # --- PostgreSQL ------------------------------------------------------------
@@ -1133,7 +1212,7 @@ def test_postgresql_restore_that_fails_half_way_through_the_copy_changes_nothing
         return copy_table(source, target, table, **kwargs)
 
     monkeypatch.setattr(db_copy, "copy_table", copy_some)
-    with pytest.raises(BackupError, match="which is as it was: .*the network went away"):
+    with pytest.raises(backup.RestoreFailedError, match="was undone.*the network went away"):
         backup.restore_backup(path)
     assert len(copied) == 5
     assert _contents(pg.engine) == before
@@ -1152,7 +1231,7 @@ def test_postgresql_restore_that_fails_after_the_swap_changes_nothing(pg, monkey
         raise OSError("the disk went away")
 
     monkeypatch.setattr(backup.PostgresDialect, "clear_companions", fail)
-    with pytest.raises(OSError, match="the disk went away"):
+    with pytest.raises(backup.RestoreFailedError, match="was undone.*the disk went away"):
         backup.restore_backup(path)
     assert _contents(pg.engine) == before
     assert _tree(pg.data) == tree
@@ -1160,8 +1239,10 @@ def test_postgresql_restore_that_fails_after_the_swap_changes_nothing(pg, monkey
 
 
 @pytest.mark.postgres_only
-def test_postgresql_restore_whose_commit_fails_puts_data_dir_back(pg, monkeypatch):
+def test_postgresql_restore_whose_commit_fails_puts_data_dir_back(pg, monkeypatch, capsys):
     from contextlib import contextmanager
+
+    from sqlalchemy.exc import OperationalError
 
     path = backup.create_backup("manual")
     salt = Path(pg.settings.credential_salt_path).read_bytes()
@@ -1179,17 +1260,32 @@ def test_postgresql_restore_whose_commit_fails_puts_data_dir_back(pg, monkeypatc
             def fail():
                 # DATA_DIR is already the backup's when the commit fails.
                 reached.append(Path(pg.settings.credential_salt_path).read_bytes() == salt)
-                raise OSError("the connection went away")
+                raise OperationalError("COMMIT", {}, ConnectionError("server closed"))
 
             yield fail
 
     monkeypatch.setattr(backup.PostgresDialect, "loaded", failing_commit)
-    with pytest.raises(OSError, match="the connection went away"):
+    log = _LogRecorder(monkeypatch)
+    with pytest.raises(backup.RestoreFailedError, match="was undone") as refused:
         backup.restore_backup(path)
+    assert "server closed" not in str(refused.value)
     assert reached == [True]
     assert _contents(pg.engine) == before
     assert _tree(pg.data) == tree
     assert not list(pg.data.parent.glob("db.*"))
+    [(level, fields)] = log.events("backup.restore")
+    assert level == "error"
+    assert fields["result"] == "failed"
+    assert fields["error"] == "OperationalError"
+    assert fields["undone"] is True
+
+    # The command says it in one line, and exits with an error.
+    monkeypatch.setattr("app.logging_config.configure_logging", lambda *a, **k: None)
+    assert backup.main(["restore", str(path)]) == 1
+    [line] = capsys.readouterr().err.splitlines()
+    assert line.startswith("ERROR: the restore failed and was undone")
+    assert _contents(pg.engine) == before
+    assert _tree(pg.data) == tree
 
 
 @pytest.mark.postgres_only

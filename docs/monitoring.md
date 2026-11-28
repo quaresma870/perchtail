@@ -228,7 +228,7 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `shutdown.pool_still_running` | warning | Same for the file-name index or source-check workers. |
 | `db.wal_checkpoint` | warning when `busy` | The hourly WAL checkpoint couldn't finish because readers were busy; it's tried again next hour. |
 | `backup.create_failed` | error | A backup couldn't be made (`reason` says whether it was manual, scheduled or pre-upgrade); a scheduled one also fails the `backup` job. |
-| `backup.restore` | info, warning when `result` is `refused` | A backup was restored (`file`, `previous` names where the data before it went), or a restore was refused and changed nothing (`error` says why). |
+| `backup.restore` | info, warning when `result` is `refused`, error when it is `failed` | A backup was restored (`file`, `previous` names where the data before it went), a restore was refused and changed nothing (`error` says why), or a restore failed once started (`error` is the kind of error; `undone` is `true` when the database and `DATA_DIR` were put back as they were, `false` when `backup.restore_undo_failed` says what wasn't). |
 | `backup.restore_undo_failed` | error | A restore that failed after moving `DATA_DIR` aside couldn't put one of its steps back (`error` says which file); check `DATA_DIR` and the `before-restore` copy by hand before starting PerchTail. |
 | `readyz.database_not_writable`, `readyz.data_dir_not_writable` | warning | A readiness check failed. |
 | `update_check.failed` | warning | The update check couldn't reach GitHub. |
