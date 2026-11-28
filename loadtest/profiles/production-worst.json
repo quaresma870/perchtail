@@ -1,0 +1,49 @@
+{
+  "name": "production-worst",
+  "description": "The production profile with the incident's worst case, kept on purpose: its ZIP users download the folder of the intense growing log (1 GB or more by midday) instead of the rotated logs. Every ZIP copies that log whole to scratch, so the result depends on SCRATCH_MAX_GB and the connector slots of that one source; it is not a sizing limit. Needs a dedicated test environment.",
+  "customers": 5,
+  "customer_names": ["brightwater-retail", "kestrel-freight", "harbourline-bank", "orchard-health", "nordvale-energy"],
+  "folders_per_customer": 3,
+  "folder_names": ["production", "staging", "shared-services"],
+  "users": 40,
+  "sources": {"ssh": 60, "smb": 40, "local": 0, "winrm": 30},
+  "agents": {"running": 40, "stopped": 0, "windows": 10},
+  "files": {
+    "app_folders": 1,
+    "sizes_kb": [10],
+    "agent_sizes_kb": [10],
+    "per_size": 1,
+    "gz": 0,
+    "zip": 0,
+    "large_mb": 1,
+    "large_count": 0,
+    "growing": 0
+  },
+  "settings": {
+    "tail_interval_seconds": 2,
+    "explorer_refresh_seconds": 30,
+    "source_check_minutes": 10,
+    "name_index_enabled": true,
+    "name_index_minutes": 15,
+    "alerts_interval_seconds": 60,
+    "backup_interval_hours": 1
+  },
+  "production": {
+    "peak_users": 30,
+    "start_users": 3,
+    "end_users": 8,
+    "ramp_up_minutes": 30,
+    "peak_minutes": 60,
+    "ramp_down_minutes": 30,
+    "incident": {"minutes": 10, "users": 20, "zip_users": 4, "zip_folder": "active"},
+    "alerts": 10,
+    "rate_classes": {"calm": {"share": 0.7, "kb_s": [2, 8], "rotate_mb": 64}, "moving": {"share": 0.25, "kb_s": [100, 300], "rotate_mb": 64}, "intense": {"share": 0.05, "daily_size_gb": 3}},
+    "tree": {"app_folders": 3, "rotated": 3, "rotated_kb": [64, 512, 2048], "large_every": 10, "large_mb": 200}
+  },
+  "scenarios": {
+    "production": {"thresholds": {"error_rate": 0.01, "ops": {}}}
+  },
+  "phases": [
+    {"name": "production", "duration": "121m", "scenarios": ["production"]}
+  ]
+}

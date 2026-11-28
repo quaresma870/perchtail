@@ -23,6 +23,11 @@ services:
       # and SCRATCH_MAX_GB keep their defaults (2048 MB, 5 GB): the sizing
       # guide is measured with them.
       UPDATE_CHECK: "false"
+      # k6 talks to uvicorn directly, with no reverse proxy in between, and
+      # reuses idle connections. uvicorn closes one after 5 s idle by
+      # default; a POST sent on it just then fails with EOF, and Go never
+      # retries a POST. 75 s is a reverse proxy's usual keep-alive.
+      UVICORN_TIMEOUT_KEEP_ALIVE: "75"
     volumes:
       - ${LOADTEST_LOGS_DIR:-./loadtest/.state/logs}/shared:/srv/lt-local:ro
 

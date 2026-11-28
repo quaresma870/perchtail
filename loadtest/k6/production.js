@@ -17,32 +17,38 @@
 // - admin: System settings, sources, rules, roles, users, the audit log;
 // - occasional: signs in, opens a file, signs out.
 //
+// The admins' role needs MFA, and PerchTail takes each TOTP code once per
+// account: an admin is only ever used by one virtual user, the n-th admin
+// by virtual user n, and a virtual user without an admin of its own draws
+// among the other kinds (lib/personas.js).
+//
 // incident: in the middle of the run (production-plan.json), `users`
-// people open and follow the same big growing log, and `zip_users` of them
-// download its folder as a ZIP, for `duration` seconds.
+// people (investigators, whose role needs no MFA) open and follow the same
+// big growing log (an intense source's app-1/current.log), and `zip_users`
+// of them download folders of that source as ZIPs, one after another, for
+// `duration` seconds. Which folders is the profile's
+// production.incident.zip_folder (the plan's zip_paths):
+// - "rotated" (by default): the folders without the growing log (app-2 and
+//   app-3, in turn: rotated logs, a .gz and archive.zip), as people
+//   investigating download the rotated logs;
+// - "active" (profiles/production-worst.json): app-1, with the growing log
+//   of 1 GB or more. A worst case kept on purpose: every ZIP copies that
+//   log whole to scratch, so the result depends on scratch and the
+//   source's connector slots, not on a sizing limit.
 import exec from 'k6/execution'
 import { Counter, Trend } from 'k6/metrics'
-import { catalog, plan, seeded } from './lib/config.js'
+import { catalog, mfaSecrets, plan, seeded } from './lib/config.js'
 import { browseTo, downloadZip, fetchWhole, FollowTab, followTabs, openWhole } from './lib/growing.js'
 import { buildOptions, summary } from './lib/options.js'
+import { drawPersona, userFor, withMfa } from './lib/personas.js'
 import { between, pick, Ui } from './lib/ui.js'
 
 const SUITE = 'production'
 const sessions = new Counter('sessions')
 const sessionMinutes = new Trend('session_minutes')
 const ui = new Ui()
+const personas = plan ? withMfa(plan.personas, mfaSecrets) : {}
 let sessionCount = 0
-
-function weightedPersona() {
-  const entries = Object.entries(plan.personas).filter(([, p]) => p.users.length > 0)
-  const total = entries.reduce((n, [, p]) => n + p.weight, 0)
-  let roll = Math.random() * total
-  for (const [name, p] of entries) {
-    roll -= p.weight
-    if (roll < 0) return name
-  }
-  return entries[entries.length - 1][0]
-}
 
 /** The seeded sources this session can see (from GET /sources at sign-in). */
 function visibleSources(filter) {
@@ -204,10 +210,14 @@ function occasionalSession(p) {
 // --- sessions -----------------------------------------------------------------
 
 export function production() {
-  const persona = weightedPersona()
-  const p = plan.personas[persona]
+  const persona = drawPersona(personas, exec.vu.idInTest, Math.random())
+  if (!persona) {
+    as('background', () => ui.pause(60))
+    return
+  }
+  const p = personas[persona]
   sessionCount++
-  const username = p.users[(exec.vu.idInTest + sessionCount) % p.users.length]
+  const username = userFor(p, exec.vu.idInTest, sessionCount)
   ui.resetSession()
   ui.tags = { persona, gop: 'login' }
   if (!ui.ensureLogin(username)) return
@@ -246,9 +256,15 @@ export function incident() {
   try {
     as('browse', () => browseTo(ui, source, inc.path))
     if (zipper) {
+      // The plan's folders in turn, each ZIP user starting at its own; a
+      // plan written before zip_paths existed zips the growing log's folder.
+      const folders = inc.zip_paths && inc.zip_paths.length ? inc.zip_paths : [inc.path.split('/')[0]]
+      let turn = exec.vu.idInTest
       const end = Date.now() + left * 1000
       while (Date.now() < end) {
-        downloadZip(ui, SUITE, source, inc.path.split('/')[0])
+        const folder = folders[turn++ % folders.length]
+        as('browse', () => browseTo(ui, source, `${folder}/x`))
+        downloadZip(ui, SUITE, source, folder)
         as('background', () => ui.pause(Math.min(30, Math.max(0, (end - Date.now()) / 1000))))
       }
     } else {

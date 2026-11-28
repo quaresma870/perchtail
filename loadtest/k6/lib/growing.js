@@ -8,17 +8,23 @@
 // none of it counts in the browse or follow limits. A check that fails
 // adds 1 to integrity_errors and logs one line starting with INTEGRITY
 // (the file, the protocol, the operation and the first deviation), which
-// loadtest/report lists.
+// loadtest/report lists. A request whose k6 timeout passed (before any
+// answer, or while the body arrived) isn't an integrity error: it adds 1 to
+// transfer_timeouts and logs a TIMEOUT line; one without an answer for
+// another reason (status 0: refused, reset, EOF) logs a FAILED line with
+// k6's error (lib/failures.js).
 
 import exec from 'k6/execution'
 import { Counter, Trend } from 'k6/metrics'
 import { catalog, seeded } from './config.js'
+import { abortKind, k6Error, logLine } from './failures.js'
 import { checkWhole, Stream } from './integrity.js'
 import { listZip, readMember } from './zip.js'
 import { parentFolder, walkTo } from './flows.js'
 import { pick } from './ui.js'
 
 export const integrityErrors = new Counter('integrity_errors')
+export const transferTimeouts = new Counter('transfer_timeouts')
 export const growingBytes = new Counter('growing_bytes')
 export const followLagSeconds = new Trend('follow_lag_seconds')
 export const followLagBytes = new Trend('follow_lag_bytes', true)
@@ -120,17 +126,41 @@ function text(bytes) {
   return s
 }
 
-/** True when the transfer was cut off: no answer at all, or a 2xx whose
- * body couldn't be read to the end. */
-function aborted(res) {
-  return res.status === 0 || (res.status >= 200 && res.status < 300 && !!res.error)
+/** True when the transfer ended early, after counting it: k6's timeout
+ * passing in transfer_timeouts with a TIMEOUT line; no answer for another
+ * reason with a FAILED line (status 0, k6's error); a 2xx body that
+ * couldn't be read to the end for another reason as an integrity error. */
+function aborted(ui, res, suite, op, source, path, name) {
+  const kind = abortKind(res)
+  if (!kind) return false
+  if (kind === 'cut') {
+    failed(suite, op, source, path, `transfer cut short: ${res.error}`)
+    return true
+  }
+  if (kind === 'timeout') transferTimeouts.add(1, { suite, gop: op, protocol: source.protocol })
+  logLine(kind === 'timeout' ? 'TIMEOUT' : 'FAILED', {
+    scenario: exec.scenario.name,
+    persona: (ui.tags && ui.tags.persona) || null,
+    suite,
+    op,
+    protocol: source.protocol,
+    source: source.name,
+    path,
+    name,
+    status: res.status,
+    error: k6Error(res),
+  })
+  return true
 }
+
+const TRANSFERS = ['open', 'download', 'download-zip']
 
 function get(ui, suite, op, source, url, name, extra = {}) {
   // An open the caller counts apart (production's big files: `gopAs`).
   const tagged = op === 'open' && ui.tags.gopAs ? ui.tags.gopAs : op
   return ui.request('GET', url, null, name, {
     responseType: extra.responseType || 'binary',
+    transfer: TRANSFERS.includes(op),
     tags: tagsFor(suite, tagged, source, extra.tags),
     accept: extra.accept,
   })
@@ -161,10 +191,7 @@ export function fetchWhole(ui, suite, op, source, path, refusable = false, membe
   let url = `/sources/${source.id}/${route}?path=${enc(path)}`
   if (member) url += `&member=${enc(member)}`
   const res = get(ui, suite, op, source, url, `GET ${route}`, { accept: refusable ? [413] : [] })
-  if (aborted(res)) {
-    failed(suite, op, source, path, `transfer aborted: ${res.error || 'no answer'}`)
-    return null
-  }
+  if (aborted(ui, res, suite, op, source, path, `GET ${route}`)) return null
   if (res.status === 413 && refusable) {
     let detail = null
     try {
@@ -204,10 +231,7 @@ export function openWhole(ui, suite, source, path, refusable = false, member = n
  * may be skipped. */
 export function downloadZip(ui, suite, source, folder) {
   const res = get(ui, suite, 'download-zip', source, `/sources/${source.id}/download-zip?path=${enc(folder)}`, 'GET download-zip')
-  if (aborted(res)) {
-    failed(suite, 'download-zip', source, folder, `transfer aborted: ${res.error || 'no answer'}`)
-    return
-  }
+  if (aborted(ui, res, suite, 'download-zip', source, folder, 'GET download-zip')) return
   if (res.status !== 200) return
   const body = bytesOf(res)
   growingBytes.add(body.length, { suite, gop: 'download-zip', protocol: source.protocol })
@@ -293,8 +317,8 @@ export class FollowTab {
     const offset = Math.max(0, size - TAIL_START_BYTES)
     const url = `/sources/${source.id}/follow?path=${enc(path)}&offset=${offset}&start=true`
     const res = get(ui, suite, 'follow', source, url, 'GET follow')
-    if (aborted(res)) {
-      this.fail(`transfer aborted: ${res.error || 'no answer'}`)
+    if (aborted(ui, res, suite, 'follow', source, path, 'GET follow')) {
+      this.ok = false
       return false
     }
     if (res.status !== 200) return false
@@ -326,6 +350,12 @@ export class FollowTab {
     this.ok = false
   }
 
+  /** Stops the tab after a read that didn't come back (already counted,
+   * see `aborted`): what was read can't be continued from. */
+  stop() {
+    this.ok = false
+  }
+
   /** One tick: up to 8 reads while X-Follow-More says more is waiting. */
   tick() {
     if (!this.ok) return
@@ -338,7 +368,7 @@ export class FollowTab {
       if (!this.started) url += '&start=true'
       const res = get(ui, suite, 'follow', source, url, 'GET follow')
       this.started = true
-      if (aborted(res)) return this.fail(`transfer aborted: ${res.error || 'no answer'}`)
+      if (aborted(ui, res, suite, 'follow', source, path, 'GET follow')) return this.stop()
       if (res.status !== 200) break
       if (res.headers['X-Follow-Reset'] === '1') {
         followResets.add(1, { suite, protocol: source.protocol })
@@ -349,7 +379,7 @@ export class FollowTab {
           let probeUrl = `/sources/${source.id}/follow?path=${enc(path)}&offset=${this.offset}`
           if (this.head) probeUrl += `&head=${enc(this.head)}`
           const probe = get(ui, suite, 'follow', source, probeUrl, 'GET follow')
-          if (aborted(probe)) return this.fail(`transfer aborted: ${probe.error || 'no answer'}`)
+          if (aborted(ui, probe, suite, 'follow', source, path, 'GET follow')) return this.stop()
           const sizeNow = Number(probe.headers['X-File-Size'])
           if (!this.readEnd(Number.isFinite(sizeNow) ? sizeNow : this.offset)) {
             if (!this.ok) return

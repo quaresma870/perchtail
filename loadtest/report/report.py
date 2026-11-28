@@ -25,9 +25,16 @@ summary.md next to run.json and prints it:
   (growing_heavy, and from which rate it stops keeping up) and per hour of
   the day (daily_log), with the server's resources at each;
 - the production profile: latency and errors per kind of person and
-  operation, sessions, the incident, the server's resources over time
-  (also written as timeseries.csv), memory's trend per hour, and a
-  verdict: within the limits, or where not;
+  operation, sessions, the incident (with PerchTail's and k6's CPU and
+  memory over its window), the server's resources over time (also written
+  as timeseries.csv), the trend per hour of the memory as docker stats
+  reports it, of the container's anonymous memory and of the process's
+  (a leak is judged by the last), and a verdict: within the limits, or
+  where not;
+- per phase, the failed requests the k6 code logged, grouped: TIMEOUT
+  (k6's timeout passed), FAILED (no answer for another reason, status 0
+  with k6's error, apart; or an unexpected answer outside 2xx, with
+  PerchTail's error_code and scope) and LOGIN_FAILED;
 - protocol_matrix: every measured cell (see matrix/matrix.py);
 - a short table per scenario (p95, errors, the phase's CPU and memory
   peaks), the form docs/sizing.md uses per profile.
@@ -239,7 +246,9 @@ def ramp_markdown(phase_name: str, summary: dict, profile: dict) -> list[str]:
 
 GROWING_SUITES = ("growing_files", "growing_heavy", "daily_log")
 GROWING_OPS = ("open", "download", "download-zip", "follow")
-INTEGRITY_LINE = re.compile(r'msg="INTEGRITY ((?:[^"\\]|\\.)*)"')
+# The lines k6/lib/growing.js and k6/lib/failures.js log: `KIND {json}`.
+LOGGED_KINDS = ("INTEGRITY", "TIMEOUT", "FAILED", "LOGIN_FAILED")
+LOGGED_LINE = re.compile(r'msg="(INTEGRITY|TIMEOUT|FAILED|LOGIN_FAILED) ((?:[^"\\]|\\.)*)"')
 
 
 def _metric(summary: dict, key: str) -> dict:
@@ -276,19 +285,82 @@ def growing_rows(summary: dict, suite: str) -> list[dict]:
     return sorted(rows, key=lambda r: (r["protocol"], order.get(r["op"], 9)))
 
 
-def integrity_failures(k6_log: Path) -> list[dict]:
-    """The INTEGRITY lines k6/lib/growing.js logged (the first of each VU)."""
+def logged_lines(k6_log: Path, kind: str) -> list[dict]:
+    """The records of one kind of line the k6 code logged (at most 20 per
+    kind and virtual user), in order."""
     if not k6_log.exists():
         return []
     out = []
     for raw in k6_log.read_text(encoding="utf-8", errors="replace").splitlines():
-        match = INTEGRITY_LINE.search(raw)
-        if not match:
+        match = LOGGED_LINE.search(raw)
+        if not match or match.group(1) != kind:
             continue
         try:
-            out.append(json.loads(json.loads(f'"{match.group(1)}"')))
+            record = json.loads(json.loads(f'"{match.group(2)}"'))
         except json.JSONDecodeError:
             continue
+        if isinstance(record, dict):
+            out.append(record)
+    return out
+
+
+def integrity_failures(k6_log: Path) -> list[dict]:
+    """The INTEGRITY lines k6/lib/growing.js logged (the first of each VU)."""
+    return logged_lines(k6_log, "INTEGRITY")
+
+
+def failure_groups(k6_log: Path) -> list[dict]:
+    """The TIMEOUT, FAILED and LOGIN_FAILED lines, grouped by class,
+    scenario, request name, status and what the answer said (PerchTail's
+    error_code and scope, or k6's error for a timeout and for a request
+    without an answer), most frequent first; within FAILED, the requests
+    without an answer (status 0) come apart, before the error answers."""
+    groups: dict[tuple, int] = {}
+    for kind in ("TIMEOUT", "FAILED", "LOGIN_FAILED"):
+        for r in logged_lines(k6_log, kind):
+            if kind == "TIMEOUT" or (kind == "FAILED" and r.get("status") == 0):
+                why = r.get("error") or "no answer"
+                name = r.get("name") or r.get("op")
+            else:
+                why = "/".join(str(v) for v in (r.get("error_code"), r.get("scope")) if v) or "–"
+                name = r.get("name") or "POST /auth/login"
+            key = (kind, r.get("scenario") or "–", name, r.get("status"), why)
+            groups[key] = groups.get(key, 0) + 1
+    rows = [
+        {"kind": k[0], "scenario": k[1], "name": k[2], "status": k[3], "why": k[4], "count": n}
+        for k, n in groups.items()
+    ]
+    order = {kind: i for i, kind in enumerate(LOGGED_KINDS)}
+    return sorted(
+        rows,
+        key=lambda r: (order[r["kind"]], r["status"] != 0, -r["count"], r["scenario"], r["name"]),
+    )
+
+
+def failures_markdown(name: str, phase_dir: Path) -> list[str]:
+    """A table of the phase's failed requests by class, or nothing."""
+    rows = failure_groups(phase_dir / "k6.log")
+    if not rows:
+        return []
+    out = [
+        f"### Failed requests (phase `{name}`)",
+        "",
+        "From the lines k6 logged, at most 20 per class and virtual user, so the counts are a "
+        "lower bound: `TIMEOUT`, k6's timeout passed (before any answer, or while the body "
+        "arrived), not an integrity error; `FAILED` with status 0, no answer for another reason "
+        "(the connection refused, reset or closed, with k6's error); `FAILED`, an answer outside "
+        "2xx the request didn't expect, with PerchTail's `error_code` and `scope` when the body "
+        "was read; `LOGIN_FAILED`, a refused sign-in.",
+        "",
+        "| Class | Scenario | Request | Status | error_code / scope (or k6's error) | Lines |",
+        "|---|---|---|---:|---|---:|",
+    ]
+    for r in rows:
+        out.append(
+            f"| {r['kind']} | {r['scenario']} | {r['name']} | {r['status']} | {r['why']} | "
+            f"{r['count']:,} |"
+        )
+    out.append("")
     return out
 
 
@@ -315,16 +387,28 @@ def writer_events(phase_dir: Path) -> list[dict]:
 
 
 def window(server: list[dict], start: float, end: float) -> dict:
-    """CPU, memory and scratch of the collector's samples in [start, end)."""
+    """CPU, memory and scratch of the collector's samples in [start, end),
+    and the k6 container's CPU and memory when they were measured."""
     rows = [r for r in server if start <= (_epoch(r.get("timestamp")) or -1) < end]
     cpu = column(rows, "cpu_percent")
     mem = column(rows, "mem_bytes")
     scratch = column(rows, "scratch_bytes") or column(rows, "health_scratch_used_bytes")
+    k6_cpu = column(rows, "k6_cpu_percent")
+
+    def peak(name: str) -> float | None:
+        values = column(rows, name)
+        return max(values) if values else None
+
     return {
         "cpu_avg": sum(cpu) / len(cpu) if cpu else None,
         "cpu_max": max(cpu) if cpu else None,
         "mem_max": max(mem) if mem else None,
+        "mem_anon_max": peak("mem_anon_bytes"),
+        "rss_anon_max": peak("rss_anon_bytes"),
         "scratch_max": max(scratch) if scratch else None,
+        "k6_cpu_avg": sum(k6_cpu) / len(k6_cpu) if k6_cpu else None,
+        "k6_cpu_max": max(k6_cpu) if k6_cpu else None,
+        "k6_mem_max": peak("k6_mem_bytes"),
     }
 
 
@@ -358,12 +442,14 @@ def follow_refusal_lines(summary: dict, suite: str) -> list[str]:
 
 def growing_markdown(name: str, suite: str, summary: dict, phase_dir: Path) -> list[str]:
     total = int(_metric(summary, f"integrity_errors{{suite:{suite}}}").get("count", 0))
+    timeouts = int(_metric(summary, f"transfer_timeouts{{suite:{suite}}}").get("count", 0))
     errors = _metric(summary, f"http_req_failed{{suite:{suite}}}").get("rate")
     resets = int(_metric(summary, f"follow_resets{{suite:{suite}}}").get("count", 0))
     out = [
         f"### Growing files: `{suite}` (phase `{name}`)",
         "",
-        f"Integrity errors: **{total}**; HTTP errors: {_pct(errors)}; Follow resets (rotations "
+        f"Integrity errors: **{total}**; transfer timeouts (k6 gave up, not integrity errors): "
+        f"{timeouts}; HTTP errors: {_pct(errors)}; Follow resets (rotations "
         f"seen): {resets}; limits {'met' if _thresholds_ok(summary, suite) else '**not met**'}.",
         "",
         *follow_refusal_lines(summary, suite),
@@ -591,11 +677,16 @@ def time_series(server: list[dict], stages: list[dict], bucket: float) -> list[d
         rows = buckets[index]
         cpu = column(rows, "cpu_percent")
         mem = column(rows, "mem_bytes")
+        k6_cpu = column(rows, "k6_cpu_percent")
         refused = column(rows, "limit_rejections_total")
 
         def last(name: str, rows=rows):
             values = column(rows, name)
             return values[-1] if values else None
+
+        def peak(name: str, rows=rows):
+            values = column(rows, name)
+            return max(values) if values else None
 
         out.append(
             {
@@ -605,6 +696,9 @@ def time_series(server: list[dict], stages: list[dict], bucket: float) -> list[d
                 "cpu_max": max(cpu) if cpu else None,
                 "mem_avg": sum(mem) / len(mem) if mem else None,
                 "mem_max": max(mem) if mem else None,
+                "mem_anon_max": peak("mem_anon_bytes"),
+                "rss_anon_max": peak("rss_anon_bytes"),
+                "k6_cpu_avg": sum(k6_cpu) / len(k6_cpu) if k6_cpu else None,
                 "scratch_max": max(column(rows, "scratch_bytes") or [0]) or None,
                 "db": last("db_bytes"),
                 "wal": max(column(rows, "wal_bytes") or [0]) or None,
@@ -632,15 +726,26 @@ def write_series_csv(path: Path, series: list[dict]) -> None:
             writer.writerow({k: "" if v is None else round(v, 3) for k, v in row.items()})
 
 
-def memory_trend(server: list[dict]) -> dict:
-    """Memory's growth per hour, leaving out the first tenth of the run
-    (start-up and the first sign-ins), as MiB/h and as a share of the
-    median: a steady climb hints at a leak."""
+# The memory columns whose trend the production summary shows, and in
+# which order the verdict picks the one to judge a leak by: the process's
+# anonymous memory (PID 1's RssAnon), the cgroup's, then docker stats'
+# figure, which counts the active page cache (scratch files read again).
+MEMORY_COLUMNS = {
+    "rss_anon_bytes": "PerchTail's anonymous memory (RssAnon of PID 1)",
+    "mem_anon_bytes": "the container's anonymous memory (memory.stat anon)",
+    "mem_bytes": "the container's memory as docker stats reports it (with active page cache)",
+}
+
+
+def memory_trend(server: list[dict], name: str = "mem_bytes") -> dict:
+    """A memory column's growth per hour, leaving out the first tenth of
+    the run (start-up and the first sign-ins), as MiB/h and as a share of
+    the median: a steady climb hints at a leak."""
     points = []
     t0 = None
     for row in server:
         t = _epoch(row.get("timestamp"))
-        mem = _num(row.get("mem_bytes"))
+        mem = _num(row.get(name))
         if t is None or mem is None:
             continue
         t0 = t if t0 is None else t0
@@ -652,10 +757,21 @@ def memory_trend(server: list[dict]) -> dict:
     slope = slope_per_hour(kept)
     median = sorted(p[1] for p in kept)[len(kept) // 2] if kept else None
     return {
+        "column": name,
         "hours": span / 3600,
         "slope": slope,
         "share": slope / median if slope is not None and median else None,
     }
+
+
+def leak_trend(server: list[dict]) -> dict:
+    """The trend a leak is judged by: the first of MEMORY_COLUMNS the
+    collector measured (older runs only have mem_bytes)."""
+    for name in MEMORY_COLUMNS:
+        trend = memory_trend(server, name)
+        if trend.get("slope") is not None:
+            return trend
+    return {}
 
 
 def production_verdict(summary: dict, trend: dict, refused: float) -> list[str]:
@@ -673,13 +789,65 @@ def production_verdict(summary: dict, trend: dict, refused: float) -> list[str]:
                 problems.append(f"`{key}` {expr}")
     if trend.get("share") is not None and trend.get("hours", 0) >= 1:
         if trend["share"] > LEAK_SHARE_PER_HOUR:
+            column = trend.get("column")
             problems.append(
                 f"memory grew {trend['slope'] / MIB:,.1f} MiB per hour "
-                f"({trend['share'] * 100:.1f} % of its median), a possible leak"
+                f"({trend['share'] * 100:.1f} % of its median"
+                + (f", `{column}`" if column else "")
+                + "), a possible leak"
             )
     if refused:
         problems.append(f"{refused:,.0f} requests refused by PerchTail's limits (503)")
     return problems
+
+
+def memory_trend_lines(server: list[dict], judged: dict) -> list[str]:
+    """Each memory column's trend per hour, and which one the verdict
+    judges a leak by."""
+    out = []
+    for column, label in MEMORY_COLUMNS.items():
+        trend = memory_trend(server, column)
+        if trend.get("slope") is None:
+            continue
+        share = (
+            f" ({trend['share'] * 100:+.1f} % of its median per hour)"
+            if trend["share"] is not None
+            else ""
+        )
+        out.append(
+            f"- `{column}`, {label}: {trend['slope'] / MIB:+,.1f} MiB per hour over "
+            f"{trend['hours']:.1f} h{share}"
+            + ("; the verdict judges a leak by this one" if judged.get("column") == column else "")
+            + "."
+        )
+    if not out:
+        return []
+    note = "" if judged.get("hours", 0) >= 1 else " Too short a run to judge a leak."
+    return [f"Memory trend:{note}", "", *out, ""]
+
+
+def incident_lines(server: list[dict], run: dict, name: str, inc: dict) -> list[str]:
+    """PerchTail's and k6's CPU and memory during the incident, from the
+    phase's start (run.json) and the incident's place in the plan."""
+    phase = next((p for p in run.get("phases", []) if p.get("name") == name), None)
+    started = _epoch(phase.get("started")) if phase else None
+    if started is None or not inc.get("duration"):
+        return []
+    w = window(server, started + inc.get("start", 0), started + inc["start"] + inc["duration"])
+    if w["cpu_max"] is None:
+        return []
+    k6 = (
+        f"k6 CPU avg {_cpu(w['k6_cpu_avg'])}, peak {_cpu(w['k6_cpu_max'])}, memory peak "
+        f"{_mib(w['k6_mem_max'])} MiB"
+        if w["k6_cpu_max"] is not None
+        else "k6 not measured (k6 runs in Docker under run.py for that)"
+    )
+    return [
+        f"- During the incident: PerchTail CPU avg {_cpu(w['cpu_avg'])}, peak "
+        f"{_cpu(w['cpu_max'])}; memory peak {_mib(w['mem_max'])} MiB (anonymous: container "
+        f"{_mib(w['mem_anon_max'])} MiB, process {_mib(w['rss_anon_max'])} MiB); scratch peak "
+        f"{_mib(w['scratch_max'])} MiB; {k6}."
+    ]
 
 
 def production_markdown(name: str, summary: dict, phase_dir: Path, run: dict) -> list[str]:
@@ -691,7 +859,7 @@ def production_markdown(name: str, summary: dict, phase_dir: Path, run: dict) ->
     bucket = 600 if total >= 3 * 3600 else 300 if total >= 3600 else 60
     series = time_series(server, stages, bucket)
     write_series_csv(phase_dir / "timeseries.csv", series)
-    trend = memory_trend(server)
+    trend = leak_trend(server)
     refused = sum(r["refused"] or 0 for r in series)
     sessions = {
         p: int(_metric(summary, f"sessions{{persona:{p}}}").get("count", 0)) for p in personas
@@ -709,7 +877,13 @@ def production_markdown(name: str, summary: dict, phase_dir: Path, run: dict) ->
         f"{json.dumps(plan.get('classes', {}))}; alerts {json.dumps(plan.get('alerts', {}))}.",
         f"- Incident: {inc.get('users', 0)} users on `{inc.get('source')}` `{inc.get('path')}` "
         f"from minute {inc.get('start', 0) / 60:g} for {inc.get('duration', 0) / 60:g} minutes, "
-        f"{inc.get('zip_users', 0)} of them downloading its folder as a ZIP.",
+        f"{inc.get('zip_users', 0)} of them downloading "
+        + (
+            f"`{'`, `'.join(inc['zip_paths'])}` as ZIPs (`zip_folder` "
+            f"{inc.get('zip_folder', 'rotated')})."
+            if inc.get("zip_paths")
+            else "its folder as a ZIP."
+        ),
         "- Sessions per kind of person: "
         + ", ".join(f"{p} {n}" for p, n in sessions.items())
         + ".",
@@ -721,8 +895,12 @@ def production_markdown(name: str, summary: dict, phase_dir: Path, run: dict) ->
             f"{plan.get('windows_agents', {}).get('on', '?')}; reported OS: {', '.join(oses)}."
         )
     integrity = int(_metric(summary, "integrity_errors{suite:production}").get("count", 0))
+    timeouts = int(_metric(summary, "transfer_timeouts{suite:production}").get("count", 0))
     out += [
-        f"- Integrity errors (every open and download checked): **{integrity}**.",
+        f"- Integrity errors (every open and download checked): **{integrity}**; transfer "
+        "timeouts (k6 gave up waiting, not integrity errors; see the failed requests): "
+        f"{timeouts}.",
+        *incident_lines(server, run, name, inc),
         "",
         *follow_refusal_lines(summary, "production"),
         "| Kind | Operation | Requests | p50 (ms) | p95 (ms) | Errors |",
@@ -738,25 +916,22 @@ def production_markdown(name: str, summary: dict, phase_dir: Path, run: dict) ->
         f"Over time (every {bucket / 60:g} minutes; also in `{name}/timeseries.csv`):",
         "",
         "| Minute | Users (plan) | CPU avg | CPU peak | Memory avg (MiB) | Memory peak (MiB) "
+        "| Anonymous peak (MiB) | k6 CPU avg "
         "| Scratch peak (MiB) | DB (MiB) | WAL peak (MiB) | Audit rows | Slots (max) | Refused |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in series:
+        anon = r["rss_anon_max"] if r["rss_anon_max"] is not None else r["mem_anon_max"]
         out.append(
             f"| {r['minute']:g} | {r['users']:.0f} | {_cpu(r['cpu_avg'])} | {_cpu(r['cpu_max'])} | "
-            f"{_mib(r['mem_avg'])} | {_mib(r['mem_max'])} | {_mib(r['scratch_max'])} | "
+            f"{_mib(r['mem_avg'])} | {_mib(r['mem_max'])} | {_mib(anon)} | "
+            f"{_cpu(r['k6_cpu_avg'])} | {_mib(r['scratch_max'])} | "
             f"{_mib(r['db'])} | {_mib(r['wal'])} | "
             f"{'–' if r['audit_rows'] is None else f'{r["audit_rows"]:,.0f}'} | "
             f"{r['slots_max']:.0f} | {'–' if r['refused'] is None else f'{r["refused"]:.0f}'} |"
         )
     out.append("")
-    if trend.get("slope") is not None:
-        out.append(
-            f"Memory trend: {trend['slope'] / MIB:+,.1f} MiB per hour over {trend['hours']:.1f} h "
-            f"({trend['share'] * 100:+.1f} % of its median per hour)"
-            + ("." if trend["hours"] >= 1 else "; too short a run to judge a leak.")
-        )
-        out.append("")
+    out += memory_trend_lines(server, trend)
     problems = production_verdict(summary, trend, refused)
     if problems:
         out.append("**Verdict: not within the limits.** Where:")
@@ -928,6 +1103,7 @@ def build(run_dir: Path) -> str:
             growing_section += production_markdown(name, summary, run_dir / name, run)
         if "protocol_matrix" in phase["scenarios"]:
             growing_section += matrix_markdown(name, run_dir / name)
+        growing_section += failures_markdown(name, run_dir / name)
     return (
         "\n".join(lines + [""] + resources + [""] + ramp_section + growing_section + sizing) + "\n"
     )

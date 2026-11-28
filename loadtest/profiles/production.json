@@ -35,7 +35,7 @@
     "ramp_up_minutes": 30,
     "peak_minutes": 60,
     "ramp_down_minutes": 30,
-    "incident": {"minutes": 10, "users": 20, "zip_users": 4},
+    "incident": {"minutes": 10, "users": 20, "zip_users": 4, "zip_folder": "rotated"},
     "alerts": 10,
     "rate_classes": {"calm": {"share": 0.7, "kb_s": [2, 8], "rotate_mb": 64}, "moving": {"share": 0.25, "kb_s": [100, 300], "rotate_mb": 64}, "intense": {"share": 0.05, "daily_size_gb": 3}},
     "tree": {"app_folders": 3, "rotated": 3, "rotated_kb": [64, 512, 2048], "large_every": 10, "large_mb": 200}

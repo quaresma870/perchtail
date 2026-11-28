@@ -183,6 +183,14 @@ class K6CodeTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
+    def test_failure_classes_and_personas(self) -> None:
+        proc = subprocess.run(
+            [NODE, "--test", str(HERE / "failures.test.mjs")],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
     def test_a_zip_streamed_like_the_server_is_read_by_the_k6_code(self) -> None:
         class Sink(io.RawIOBase):
             """Unseekable, like the folder ZIP the server streams."""
