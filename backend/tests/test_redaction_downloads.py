@@ -226,6 +226,30 @@ def test_download_of_a_plain_file_is_redacted(session, downloads, store):
     assert (folder / "app.log").read_bytes() == content
 
 
+def test_redacted_transfers_never_take_the_last_slot_of_a_source(session, downloads):
+    from app.limits import current_limits, get_limiter
+
+    _, client, source, folder = downloads
+    (folder / "app.log").write_bytes(SAMPLE_BYTES)
+    system_settings.set_int(session, "concurrency_per_source", 4)
+    session.commit()
+    limits = current_limits(session)
+    held = [get_limiter().connector(limits, source.id, bulk=True) for _ in range(3)]
+
+    download = _download(client, source, "app.log")
+    assert download.status_code == 503
+    assert download.json()["detail"]["scope"] == "source"
+    folder_zip = _download_zip(client, source)
+    assert folder_zip.status_code == 503
+    assert folder_zip.json()["detail"]["scope"] == "source"
+    # The last slot is left for an open.
+    opened = client.get(f"/sources/{source.id}/open", params={"path": "app.log"})
+    assert opened.status_code == 200
+    for slot in held:
+        slot.release()
+    assert _download(client, source, "app.log").status_code == 200
+
+
 def test_download_without_the_suffix_keeps_the_name(session, downloads):
     _, client, source, folder = downloads
     system_settings.set_bool(session, "redaction_download_suffix", False)

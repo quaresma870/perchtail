@@ -10,6 +10,10 @@ while the rest of the app waits. Each such request takes a slot first:
 - a transfer slot, counted per user, for a download or a folder ZIP until
   the client has it all (or goes away).
 
+Downloads and folder ZIPs never take the last connector slot of a source nor
+the last global one (`bulk=True`), so a source busy with transfers still
+answers listings, opens and Tail polls.
+
 Slots never queue: when one isn't free the request is answered 503 with a
 Retry-After header, and the client tries again a few seconds later. The
 limits are System settings (Settings -> Explorer and limits); what's in use shows in
@@ -73,6 +77,12 @@ def busy(scope: str) -> HTTPException:
     )
 
 
+def _bulk_cap(limit: int) -> int:
+    """How many slots of `limit` a download or folder ZIP may take: all but
+    the last one, kept for interactive requests, when there are two or more."""
+    return limit - 1 if limit >= 2 else limit
+
+
 class Slot:
     """A slot taken from the limiter. release() is idempotent, so the
     `finally` of a streamed response and its background task can both call
@@ -110,12 +120,19 @@ class SlotLimiter:
         logger.warning("limits.busy", scope=scope, **context)
         return busy(scope)
 
-    def connector(self, limits: Limits, source_id: int) -> Slot:
-        """A connector slot (global and per source), or a 503."""
+    def connector(self, limits: Limits, source_id: int, bulk: bool = False) -> Slot:
+        """A connector slot (global and per source), or a 503.
+
+        A `bulk` request (a download or a folder ZIP) never takes the last
+        slot of a source, nor the last global one, so listings, opens and Tail
+        polls keep working while transfers run. A limit of 1 keeps no
+        reserve."""
+        global_cap = _bulk_cap(limits.global_max) if bulk else limits.global_max
+        source_cap = _bulk_cap(limits.per_source) if bulk else limits.per_source
         with self._lock:
-            if self._global >= limits.global_max:
+            if self._global >= global_cap:
                 raise self._reject("global", source_id=source_id)
-            if self._sources[source_id] >= limits.per_source:
+            if self._sources[source_id] >= source_cap:
                 raise self._reject("source", source_id=source_id)
             self._global += 1
             self._sources[source_id] += 1

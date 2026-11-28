@@ -53,6 +53,66 @@ def test_connector_slots_are_limited_globally_and_per_source():
     assert snapshot["rejected"] == {"global": 1, "source": 1, "user": 0}
 
 
+def test_transfers_never_take_the_last_slot_of_a_source():
+    limiter = SlotLimiter()
+    limits = Limits(global_max=16, per_source=4, per_user=2)
+    held = [limiter.connector(limits, 1, bulk=True) for _ in range(3)]
+    with pytest.raises(HTTPException) as busy_source:
+        limiter.connector(limits, 1, bulk=True)
+    assert busy_source.value.status_code == 503
+    assert busy_source.value.detail["scope"] == "source"
+    assert busy_source.value.headers["Retry-After"] == "5"
+    # The last slot is still there for a listing, an open or a Tail poll.
+    interactive = limiter.connector(limits, 1)
+    with pytest.raises(HTTPException) as full:
+        limiter.connector(limits, 1)
+    assert full.value.detail["scope"] == "source"
+    # Another source isn't affected.
+    limiter.connector(limits, 2, bulk=True).release()
+    interactive.release()
+    for slot in held:
+        slot.release()
+    assert limiter.snapshot(limits)["global_in_use"] == 0
+
+
+def test_transfers_never_take_the_last_global_slot():
+    limiter = SlotLimiter()
+    limits = Limits(global_max=3, per_source=10, per_user=2)
+    limiter.connector(limits, 1, bulk=True)
+    limiter.connector(limits, 2, bulk=True)
+    with pytest.raises(HTTPException) as busy_global:
+        limiter.connector(limits, 3, bulk=True)
+    assert busy_global.value.detail["scope"] == "global"
+    limiter.connector(limits, 3)
+    with pytest.raises(HTTPException) as full:
+        limiter.connector(limits, 4)
+    assert full.value.detail["scope"] == "global"
+
+
+def test_a_limit_of_one_keeps_no_reserve():
+    limiter = SlotLimiter()
+    limits = Limits(global_max=16, per_source=1, per_user=2)
+    held = limiter.connector(limits, 1, bulk=True)
+    with pytest.raises(HTTPException):
+        limiter.connector(limits, 1)
+    held.release()
+    one_global = Limits(global_max=1, per_source=4, per_user=2)
+    limiter.connector(one_global, 1, bulk=True)
+    with pytest.raises(HTTPException) as busy_global:
+        limiter.connector(one_global, 2)
+    assert busy_global.value.detail["scope"] == "global"
+
+
+def test_interactive_requests_still_use_every_slot():
+    limiter = SlotLimiter()
+    limits = Limits(global_max=16, per_source=4, per_user=2)
+    for _ in range(4):
+        limiter.connector(limits, 1)
+    with pytest.raises(HTTPException) as busy_source:
+        limiter.connector(limits, 1)
+    assert busy_source.value.detail["scope"] == "source"
+
+
 def test_transfer_slots_are_limited_per_user():
     limiter = SlotLimiter()
     limits = Limits(global_max=10, per_source=10, per_user=2)
@@ -221,6 +281,76 @@ def test_a_folder_zip_holds_and_then_releases_both_slots(session, client, tmp_pa
     snapshot = get_limiter().snapshot(limits)
     assert snapshot["global_in_use"] == 0
     assert snapshot["transfers_in_use"] == 0
+
+
+def _source_with_files(session, tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "a.log").write_text("a")
+    # A .gz goes through scratch, so its download takes a connector slot.
+    (tmp_path / "logs" / "b.log.gz").write_bytes(gzip.compress(b"b\n"))
+    return _local_source(session, tmp_path / "logs")
+
+
+def test_a_source_busy_with_transfers_still_answers_listings(session, client, tmp_path):
+    source = _source_with_files(session, tmp_path)
+    _set(session, concurrency_per_source=4, concurrency_user_transfers=4)
+    limits = current_limits(session)
+    held = [get_limiter().connector(limits, source.id, bulk=True) for _ in range(3)]
+
+    assert client.get(f"/sources/{source.id}/browse").status_code == 200
+    zip_response = client.get(f"/sources/{source.id}/download-zip")
+    assert zip_response.status_code == 503
+    assert zip_response.json()["detail"]["scope"] == "source"
+    assert zip_response.headers["Retry-After"] == "5"
+    download = client.get(f"/sources/{source.id}/download", params={"path": "b.log.gz"})
+    assert download.status_code == 503
+    assert download.json()["detail"]["scope"] == "source"
+    # An open is interactive: it takes the last slot.
+    assert client.get(f"/sources/{source.id}/open", params={"path": "b.log.gz"}).status_code == 200
+
+    held[0].release()
+    assert client.get(f"/sources/{source.id}/download-zip").status_code == 200
+    for slot in held[1:]:
+        slot.release()
+    assert get_limiter().snapshot(limits)["global_in_use"] == 0
+
+
+def test_transfers_never_take_the_last_global_slot_on_the_endpoints(session, client, tmp_path):
+    source = _source_with_files(session, tmp_path)
+    _set(session, concurrency_global=3, concurrency_per_source=4, concurrency_user_transfers=4)
+    limits = current_limits(session)
+    held = [get_limiter().connector(limits, 900 + i, bulk=True) for i in range(2)]
+
+    response = client.get(f"/sources/{source.id}/download-zip")
+    assert response.status_code == 503
+    assert response.json()["detail"]["scope"] == "global"
+    download = client.get(f"/sources/{source.id}/download", params={"path": "b.log.gz"})
+    assert download.json()["detail"]["scope"] == "global"
+    assert client.get(f"/sources/{source.id}/browse").status_code == 200
+    for slot in held:
+        slot.release()
+
+
+def test_with_one_slot_per_source_a_transfer_still_runs(session, client, tmp_path):
+    source = _source_with_files(session, tmp_path)
+    _set(session, concurrency_per_source=1)
+    assert client.get(f"/sources/{source.id}/download-zip").status_code == 200
+    response = client.get(f"/sources/{source.id}/download", params={"path": "b.log.gz"})
+    assert response.status_code == 200
+
+
+def test_an_interactive_request_on_a_source_full_of_them_is_still_refused(
+    session, client, tmp_path
+):
+    source = _source_with_files(session, tmp_path)
+    _set(session, concurrency_per_source=4)
+    limits = current_limits(session)
+    held = [get_limiter().connector(limits, source.id) for _ in range(4)]
+    response = client.get(f"/sources/{source.id}/browse")
+    assert response.status_code == 503
+    assert response.json()["detail"]["scope"] == "source"
+    for slot in held:
+        slot.release()
 
 
 # --- streamed folder ZIPs (#345) -------------------------------------------
