@@ -1269,7 +1269,10 @@ def test_postgresql_scheduled_backup(pg):
 
 
 @pytest.mark.postgres_only
-def test_postgresql_cli_create_list_and_restore(pg, capsys):
+def test_postgresql_cli_create_list_and_restore(pg, monkeypatch, capsys):
+    # As in test_cli_create_verify_list_and_errors: the root logger's
+    # handlers stay the test run's.
+    monkeypatch.setattr("app.logging_config.configure_logging", lambda *a, **k: None)
     assert backup.main(["create"]) == 0
     [info] = backup.list_backups()
     assert backup.main(["list"]) == 0
