@@ -114,8 +114,10 @@ function productionThresholds(thresholds) {
   for (const op of ['open', 'follow', 'download-zip']) {
     thresholds[`http_req_duration{scenario:incident,gop:${op}}`] = ['max>=0']
   }
+  thresholds['transfer_timeouts{suite:production}'] = ['count>=0']
   for (const op of ['open', 'open-large', 'download', 'download-zip', 'follow']) {
     thresholds[`integrity_errors{suite:production,gop:${op}}`] = ['count>=0']
+    thresholds[`transfer_timeouts{suite:production,gop:${op}}`] = ['count>=0']
     thresholds[`growing_bytes{suite:production,gop:${op}}`] = ['count>=0']
   }
   for (const persona of Object.keys(plan.personas)) {
@@ -172,6 +174,7 @@ function growingThresholds(thresholds, name) {
   }
   const ops = GROWING[name].ops
   thresholds[`integrity_errors{suite:${name}}`] = ['count<1']
+  thresholds[`transfer_timeouts{suite:${name}}`] = ['count>=0']
   thresholds[`http_req_failed{suite:${name}}`] = [`rate<${or(t.error_rate, 0.01)}`]
   for (const op of ops) thresholds[`http_req_duration{suite:${name},gop:${op}}`] = [`p(95)<${limits[op]}`]
   for (const protocol of growingProtocols(SUITE_FILES[name])) {
@@ -181,6 +184,7 @@ function growingThresholds(thresholds, name) {
       thresholds[`http_req_failed{${tags}}`] = ['rate>=0']
       thresholds[`growing_bytes{${tags}}`] = ['count>=0']
       thresholds[`integrity_errors{${tags}}`] = ['count>=0']
+      thresholds[`transfer_timeouts{${tags}}`] = ['count>=0']
     }
   }
   if (name === 'growing_heavy') {
@@ -299,10 +303,12 @@ export function summary(data) {
     const v = metric.values
     const integrity = data.metrics[`integrity_errors{suite:${m[1]}}`]
     const bad = integrity ? integrity.values.count : 0
+    const timeouts = data.metrics[`transfer_timeouts{suite:${m[1]}}`]
+    const gaveUp = timeouts ? timeouts.values.count : 0
     const ok = Object.values(metric.thresholds || {}).every((t) => t.ok)
     lines.push(
       `  ${m[1]} ${m[2]}: p50 ${fmt(v.med)} p95 ${fmt(v['p(95)'])} requests ${v.count}` +
-        ` (integrity errors in ${m[1]}: ${bad})${ok ? '' : '  THRESHOLD FAILED'}`,
+        ` (integrity errors in ${m[1]}: ${bad}, transfer timeouts: ${gaveUp})${ok ? '' : '  THRESHOLD FAILED'}`,
     )
   }
   out.stdout = [lines[0], ...lines.slice(1).sort()].join('\n') + '\n'

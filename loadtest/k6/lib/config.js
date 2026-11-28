@@ -81,6 +81,18 @@ function readOptionalState(name) {
   }
 }
 
+/** How long k6 waits for a whole open, download or folder ZIP
+ * (`timeouts.transfer_seconds` in the profile, 900 s by default); every
+ * other request waits 180 s (lib/ui.js). */
+export const TRANSFER_TIMEOUT_SECONDS = (() => {
+  const value = ((profile.timeouts || {}).transfer_seconds)
+  if (value === undefined || value === null) return 900
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`timeouts.transfer_seconds must be a positive number of seconds, got ${value}`)
+  }
+  return value
+})()
+
 export const plan = readOptionalState('production-plan.json')
 /** The TOTP secrets of the kit's users that must use MFA (users-mfa.json). */
 export const mfaSecrets = readOptionalState('users-mfa.json') || {}

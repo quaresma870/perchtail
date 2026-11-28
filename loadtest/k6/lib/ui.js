@@ -22,12 +22,20 @@
 // the request to a sign-in page) counts as an error, not as a fast answer.
 // A 401 after signing in (the session expired or was revoked) signs in
 // again, as the UI's login page would, and repeats the request once.
+//
+// An answer outside 2xx that a request doesn't expect logs a FAILED line,
+// a request without an answer a TIMEOUT line (k6's timeout passed) or a
+// FAILED line with status 0 and k6's error (refused, reset, EOF), and a
+// refused sign-in a LOGIN_FAILED line (lib/failures.js). Opens,
+// downloads and folder ZIPs wait TRANSFER_TIMEOUT_SECONDS (the profile's
+// timeouts.transfer_seconds), every other request 180 s.
 
 import http from 'k6/http'
 import { check, sleep } from 'k6'
 import exec from 'k6/execution'
 import { Counter } from 'k6/metrics'
-import { BASE_URL, ORIGIN, mfaSecrets, users, usernames } from './config.js'
+import { BASE_URL, ORIGIN, TRANSFER_TIMEOUT_SECONDS, mfaSecrets, users, usernames } from './config.js'
+import { errorFields, k6Error, logLine, noAnswerKind } from './failures.js'
 import { freshCode } from './totp.js'
 
 http.setResponseCallback(http.expectedStatuses({ min: 200, max: 299 }))
@@ -37,6 +45,7 @@ const FOLLOW_ROUNDS_PER_TICK = 8
 const MAX_EXPANDED_FOLDERS = 6
 const MAX_LISTED_SIZES = 20000
 const TIMEOUT = '180s'
+const TRANSFER_TIMEOUT = `${TRANSFER_TIMEOUT_SECONDS}s`
 
 export function between(range, fallback) {
   const [lo, hi] = Array.isArray(range) ? range : [fallback, fallback]
@@ -97,7 +106,8 @@ export class Ui {
     const flow = name === 'POST /auth/login' ? 'login' : name.startsWith('GET files') ? 'search' : 'ui'
     const params = {
       tags: { name, flow, ...this.tags, ...(extra.tags || {}) },
-      timeout: TIMEOUT,
+      // An open, a download or a folder ZIP is a transfer the user waits for.
+      timeout: extra.transfer ? TRANSFER_TIMEOUT : TIMEOUT,
       headers: {
         Accept: 'application/json',
         // What the web interface asks on its own (the Explorer's refresh and
@@ -118,6 +128,26 @@ export class Ui {
     if (method !== 'GET') params.headers.Origin = ORIGIN
     const res = http.request(method, `${BASE_URL}${path}`, payload, params)
     check(res, { [`${name} ok`]: (r) => (r.status >= 200 && r.status < 300) || accepted.includes(r.status) })
+    if (res.status >= 400 && !accepted.includes(res.status) && flow !== 'login') {
+      logLine('FAILED', {
+        scenario: exec.scenario.name,
+        persona: this.tags.persona || null,
+        name,
+        status: res.status,
+        ...errorFields(res.body),
+      })
+    }
+    // No answer at all: TIMEOUT when k6's timeout passed, FAILED otherwise
+    // (refused, reset, EOF). lib/growing.js logs its own requests' lines.
+    if (res.status === 0 && flow !== 'login' && params.tags.flow !== 'growing') {
+      logLine(noAnswerKind(res), {
+        scenario: exec.scenario.name,
+        persona: this.tags.persona || null,
+        name,
+        status: 0,
+        error: k6Error(res),
+      })
+    }
     if (res.status === 401 && this.loggedIn && !this.signingIn && !retried && flow !== 'login') {
       relogins.add(1)
       this.resetSession()
@@ -162,6 +192,14 @@ export class Ui {
     if (mfaSecrets[username]) body.mfa_code = freshCode(username, mfaSecrets[username])
     const res = this.request('POST', '/auth/login', body, 'POST /auth/login')
     if (res.status !== 200) {
+      // The user's kit name and why, never the password or the code.
+      logLine('LOGIN_FAILED', {
+        scenario: exec.scenario.name,
+        persona: this.tags.persona || null,
+        username,
+        status: res.status,
+        error_code: errorFields(res.body).error_code,
+      })
       sleep(5)
       return false
     }
@@ -249,6 +287,7 @@ export class Ui {
     if (member) url += `&member=${enc(member)}`
     const res = this.get(url, 'GET open', {
       responseType: 'none',
+      transfer: true,
       tags: { size_class: sizeClass(knownSize) },
     })
     const length = Number(res.headers['Content-Length'])
@@ -266,6 +305,7 @@ export class Ui {
   download(sourceId, path, knownSize) {
     return this.get(`/sources/${sourceId}/download?path=${enc(path)}`, 'GET download', {
       responseType: 'none',
+      transfer: true,
       tags: { size_class: sizeClass(knownSize) },
     })
   }
@@ -273,6 +313,7 @@ export class Ui {
   downloadZip(sourceId, path) {
     return this.get(`/sources/${sourceId}/download-zip?path=${enc(path)}`, 'GET download-zip', {
       responseType: 'none',
+      transfer: true,
     })
   }
 

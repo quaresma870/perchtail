@@ -816,6 +816,318 @@ class CollectorHealthTests(unittest.TestCase):
         self.assertEqual(collect.health_fields(None)["health_status"], "unreachable")
 
 
+MEMORY_STAT_V2 = """anon 314572800
+file 1073741824
+kernel 20971520
+shmem 4096
+file_mapped 1048576
+active_anon 209715200
+inactive_anon 104857600
+active_file 805306368
+inactive_file 268435456
+"""
+
+MEMORY_STAT_V1 = """cache 1073741824
+rss 314572800
+shmem 4096
+active_file 805306368
+inactive_file 268435456
+total_cache 2147483648
+total_rss 629145600
+total_shmem 8192
+total_active_file 1610612736
+total_inactive_file 536870912
+"""
+
+PROC_STATUS = """Name:\tuvicorn
+Pid:\t1
+VmRSS:\t  250000 kB
+RssAnon:\t  200000 kB
+RssFile:\t   49000 kB
+RssShmem:\t    1000 kB
+Threads:\t42
+"""
+
+
+class CollectorMemoryTests(unittest.TestCase):
+    def test_cgroup_v2_memory_stat(self) -> None:
+        self.assertEqual(
+            collect.parse_memory_stat(MEMORY_STAT_V2),
+            {
+                "mem_anon_bytes": 300 * 1024**2,
+                "mem_file_bytes": 1024**3,
+                "mem_active_file_bytes": 768 * 1024**2,
+                "mem_inactive_file_bytes": 256 * 1024**2,
+                "mem_shmem_bytes": 4096,
+            },
+        )
+
+    def test_cgroup_v1_memory_stat_takes_the_hierarchys_totals(self) -> None:
+        self.assertEqual(
+            collect.parse_memory_stat(MEMORY_STAT_V1),
+            {
+                "mem_anon_bytes": 600 * 1024**2,
+                "mem_file_bytes": 2 * 1024**3,
+                "mem_active_file_bytes": 1536 * 1024**2,
+                "mem_inactive_file_bytes": 512 * 1024**2,
+                "mem_shmem_bytes": 8192,
+            },
+        )
+        own = "\n".join(line for line in MEMORY_STAT_V1.splitlines() if "total_" not in line)
+        self.assertEqual(collect.parse_memory_stat(own)["mem_anon_bytes"], 300 * 1024**2)
+
+    def test_missing_memory_stat_leaves_the_columns_empty(self) -> None:
+        self.assertEqual(set(collect.parse_memory_stat("").values()), {None})
+        self.assertEqual(
+            collect.parse_proc_status(""), {"rss_anon_bytes": None, "rss_file_bytes": None}
+        )
+
+    def test_proc_status(self) -> None:
+        self.assertEqual(
+            collect.parse_proc_status(PROC_STATUS),
+            {"rss_anon_bytes": 200000 * 1024, "rss_file_bytes": 49000 * 1024},
+        )
+
+    def test_the_containers_script_output(self) -> None:
+        out = (
+            "1048576\n4096\n8192\n42\n@@memory.stat\n"
+            + MEMORY_STAT_V2
+            + "@@status\n"
+            + PROC_STATUS
+        )
+        row = collect.parse_disk_output(out)
+        self.assertEqual(
+            (row["scratch_bytes"], row["db_bytes"], row["wal_bytes"], row["audit_rows"]),
+            (1048576, 4096, 8192, 42),
+        )
+        self.assertEqual(row["mem_anon_bytes"], 300 * 1024**2)
+        self.assertEqual(row["rss_anon_bytes"], 200000 * 1024)
+        # No database, no cgroup file: empty columns, not a failed sample.
+        row = collect.parse_disk_output("1048576\n\n\n\n@@memory.stat\n@@status\n")
+        self.assertEqual(
+            (row["db_bytes"], row["mem_anon_bytes"], row["rss_anon_bytes"]), (None, None, None)
+        )
+        sampler = collect.DockerSampler("perchtail", "/data/scratch", "/data/db/perchtail.db")
+        with mock.patch.object(collect.subprocess, "run") as run_:
+            run_.return_value = mock.Mock(stdout=out)
+            self.assertEqual(sampler.disk()["rss_file_bytes"], 49000 * 1024)
+        script = run_.call_args.args[0][-1]
+        self.assertIn("/sys/fs/cgroup/memory.stat", script)
+        self.assertIn("/sys/fs/cgroup/memory/memory.stat", script)
+        self.assertIn("/proc/1/status", script)
+        self.assertTrue(set(row) <= set(collect.FIELDS))
+
+    def test_the_k6_container(self) -> None:
+        line = json.dumps(
+            {
+                "CPUPerc": "187.5%",
+                "MemUsage": "1.5GiB / 18GiB",
+                "NetIO": "1MB / 2MB",
+                "PIDs": "30",
+            }
+        )
+        with mock.patch.object(collect.subprocess, "run") as run_:
+            run_.return_value = mock.Mock(stdout=line + "\n")
+            self.assertEqual(
+                collect.k6_fields("lt-k6"),
+                {"k6_cpu_percent": 187.5, "k6_mem_bytes": int(1.5 * 1024**3)},
+            )
+            # Before it starts and after it ends, docker stats prints nothing.
+            run_.return_value = mock.Mock(stdout="")
+            self.assertEqual(collect.k6_fields("lt-k6"), {})
+        self.assertIn("k6_cpu_percent", collect.FIELDS)
+        self.assertIn("k6_mem_bytes", collect.FIELDS)
+
+    def test_run_names_the_k6_container(self) -> None:
+        name = run.k6_container_name("mixed index/off")
+        self.assertRegex(name, r"^perchtail-loadtest-k6-\d+-mixed-index-off$")
+        with (
+            mock.patch.object(run, "state_dir", return_value=Path("/state")),
+            mock.patch.object(run, "allowed_hosts", return_value={"localhost"}),
+        ):
+            cmd, _env = run.k6_command(
+                "docker",
+                "http://localhost:8080",
+                run.HERE / "profiles" / "tiny.json",
+                "mixed",
+                Path("/results"),
+                name,
+            )
+            self.assertEqual(cmd[cmd.index("--name") + 1], name)
+            cmd, _env = run.k6_command(
+                "native",
+                "http://localhost:8080",
+                run.HERE / "profiles" / "tiny.json",
+                "mixed",
+                Path("/results"),
+            )
+            self.assertNotIn("--name", cmd)
+
+
+def _k6_log(*lines: tuple[str, dict]) -> str:
+    return "".join(
+        f'time="2026-11-26T20:45:06Z" level=warning msg={json.dumps(kind + " " + json.dumps(r))} '
+        "source=console\n"
+        for kind, r in lines
+    )
+
+
+class FailureReportTests(unittest.TestCase):
+    def test_timeouts_and_failed_requests_are_grouped(self) -> None:
+        timeout = {
+            "scenario": "incident",
+            "persona": "incident",
+            "suite": "production",
+            "op": "download-zip",
+            "protocol": "ssh",
+            "source": "lt-ssh-005",
+            "path": "app-2",
+            "name": "GET download-zip",
+            "status": 0,
+            "error": "request timeout",
+        }
+        busy = {
+            "scenario": "incident",
+            "persona": "incident",
+            "name": "GET follow",
+            "status": 503,
+            "error_code": "busy",
+            "scope": "source",
+        }
+        login = {
+            "scenario": "production",
+            "persona": "admin",
+            "username": "lt-user-004",
+            "status": 429,
+            "error_code": None,
+        }
+        integrity = {"suite": "production", "op": "open", "error": "missing lines"}
+        closed = {
+            "scenario": "incident",
+            "persona": "incident",
+            "name": "GET download-zip",
+            "status": 0,
+            "error": "EOF",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "k6.log"
+            log.write_text(
+                'time="2026-11-26T20:43:23Z" level=warning msg="Request Failed" error="EOF"\n'
+                + _k6_log(
+                    ("TIMEOUT", timeout),
+                    ("FAILED", busy),
+                    ("FAILED", closed),
+                    ("FAILED", busy),
+                    ("TIMEOUT", timeout),
+                    ("TIMEOUT", timeout),
+                    ("LOGIN_FAILED", login),
+                    ("INTEGRITY", integrity),
+                ),
+                encoding="utf-8",
+            )
+            rows = report.failure_groups(log)
+            text = "\n".join(report.failures_markdown("production", Path(tmp)))
+            self.assertEqual(report.integrity_failures(log), [integrity])
+        self.assertEqual(
+            [(r["kind"], r["name"], r["status"], r["why"], r["count"]) for r in rows],
+            [
+                ("TIMEOUT", "GET download-zip", 0, "request timeout", 3),
+                # No answer without k6's timeout: a FAILED row of its own,
+                # before the error answers even when it is less frequent.
+                ("FAILED", "GET download-zip", 0, "EOF", 1),
+                ("FAILED", "GET follow", 503, "busy/source", 2),
+                ("LOGIN_FAILED", "POST /auth/login", 429, "–", 1),
+            ],
+        )
+        self.assertIn("| TIMEOUT | incident | GET download-zip | 0 | request timeout | 3 |", text)
+        self.assertIn("| FAILED | incident | GET download-zip | 0 | EOF | 1 |", text)
+        self.assertIn("| FAILED | incident | GET follow | 503 | busy/source | 2 |", text)
+        self.assertNotIn("lt-user-004", text)  # grouped, not listed per user
+
+    def test_nothing_logged_adds_no_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(report.failures_markdown("mixed", Path(tmp)), [])
+
+    def test_growing_summary_counts_timeouts_apart(self) -> None:
+        summary = {
+            "metrics": {
+                "integrity_errors{suite:growing_files}": {"values": {"count": 0}},
+                "transfer_timeouts{suite:growing_files}": {"values": {"count": 4}},
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            text = "\n".join(
+                report.growing_markdown("growing_files", "growing_files", summary, Path(tmp))
+            )
+        self.assertIn("Integrity errors: **0**; transfer timeouts (k6 gave up", text)
+        self.assertIn("integrity errors): 4;", text)
+
+
+class MemoryReportTests(unittest.TestCase):
+    def rows(self, minutes: int = 120) -> list[dict]:
+        # docker stats' figure climbs with the page cache, the process's
+        # anonymous memory stays level.
+        return [
+            {
+                "timestamp": f"2026-11-26T{10 + m // 60:02d}:{m % 60:02d}:00Z",
+                "mem_bytes": str(200 * MIB + m * 2 * MIB),
+                "mem_anon_bytes": str(150 * MIB + m * MIB // 10),
+                "rss_anon_bytes": str(120 * MIB),
+                "cpu_percent": "50",
+                "k6_cpu_percent": "300" if 60 <= m < 70 else "20",
+                "k6_mem_bytes": str(2 * 1024**3),
+            }
+            for m in range(minutes)
+        ]
+
+    def test_each_memory_column_has_its_trend(self) -> None:
+        rows = self.rows()
+        def slope(name: str) -> float:
+            return report.memory_trend(rows, name)["slope"] / MIB
+
+        self.assertAlmostEqual(slope("mem_bytes"), 120, delta=1)
+        self.assertAlmostEqual(slope("mem_anon_bytes"), 6, delta=1)
+        self.assertAlmostEqual(slope("rss_anon_bytes"), 0, delta=0.01)
+
+    def test_a_leak_is_judged_by_the_process_anonymous_memory(self) -> None:
+        rows = self.rows()
+        trend = report.leak_trend(rows)
+        self.assertEqual(trend["column"], "rss_anon_bytes")
+        self.assertEqual(report.production_verdict({"metrics": {}}, trend, 0), [])
+        # The same run judged by docker stats' figure would call a leak.
+        self.assertTrue(
+            any(
+                "possible leak" in p and "`mem_bytes`" in p
+                for p in report.production_verdict(
+                    {"metrics": {}}, report.memory_trend(rows), 0
+                )
+            )
+        )
+        # A run from before the new columns still gets a trend.
+        old = [{"timestamp": r["timestamp"], "mem_bytes": r["mem_bytes"]} for r in rows]
+        self.assertEqual(report.leak_trend(old)["column"], "mem_bytes")
+        lines = "\n".join(report.memory_trend_lines(rows, trend))
+        self.assertIn("`rss_anon_bytes`", lines)
+        self.assertIn("`mem_anon_bytes`", lines)
+        self.assertIn("`mem_bytes`", lines)
+        self.assertIn("the verdict judges a leak by this one", lines)
+
+    def test_the_incident_window_shows_k6_next_to_perchtail(self) -> None:
+        run_info = {"phases": [{"name": "production", "started": "2026-11-26T10:00:00Z"}]}
+        incident = {"start": 3600, "duration": 600}
+        lines = report.incident_lines(self.rows(), run_info, "production", incident)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("PerchTail CPU avg 50 %", lines[0])
+        self.assertIn("k6 CPU avg 300 %, peak 300 %, memory peak 2,048.0 MiB", lines[0])
+        self.assertIn("process 120.0 MiB", lines[0])
+        old = [{k: v for k, v in r.items() if not k.startswith("k6_")} for r in self.rows()]
+        lines = report.incident_lines(old, run_info, "production", incident)
+        self.assertIn("k6 not measured", lines[0])
+
+
+MIB = 1024 * 1024
+
+
 class AgentTests(StateTestCase):
     def test_agents_get_only_what_they_need(self) -> None:
         os.environ["LOADTEST_ADMIN_PASSWORD"] = "secret"

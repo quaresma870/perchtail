@@ -101,8 +101,19 @@ def k6_mode(requested: str) -> str:
     return "docker"
 
 
+def k6_container_name(phase: str) -> str:
+    """The name of the k6 container of a phase, which the collector
+    measures (its CPU and memory)."""
+    return f"perchtail-loadtest-k6-{os.getpid()}-{re.sub(r'[^A-Za-z0-9_.-]', '-', phase)}"
+
+
 def k6_command(
-    mode: str, url: str, profile_path: Path, phase: str, out_dir: Path
+    mode: str,
+    url: str,
+    profile_path: Path,
+    phase: str,
+    out_dir: Path,
+    container_name: str | None = None,
 ) -> tuple[list[str], dict]:
     env = {
         "LOADTEST_BASE_URL": url,
@@ -140,6 +151,7 @@ def k6_command(
         "docker",
         "run",
         "--rm",
+        *(["--name", container_name] if container_name else []),
         "--add-host",
         "host.docker.internal:host-gateway",
         "-v",
@@ -176,7 +188,9 @@ def apply_settings(settings: dict) -> None:
     change_settings(admin_client(), settings)
 
 
-def start_collector(args: argparse.Namespace, out_dir: Path) -> subprocess.Popen:
+def start_collector(
+    args: argparse.Namespace, out_dir: Path, k6_container: str | None = None
+) -> subprocess.Popen:
     cmd = [
         PY,
         str(HERE / "collect" / "collect.py"),
@@ -189,6 +203,8 @@ def start_collector(args: argparse.Namespace, out_dir: Path) -> subprocess.Popen
         cmd += ["--pid", str(args.pid), "--scratch-dir", args.scratch_dir, "--db", args.db]
     else:
         cmd += ["--container", args.container]
+    if k6_container:
+        cmd += ["--k6-container", k6_container]
     log = (out_dir / "collect.log").open("ab")
     return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
 
@@ -322,15 +338,21 @@ def run_phase(args, profile: dict, phase: dict, run_dir: Path, mode: str) -> dic
     settings = phase_settings(profile, phase)
     apply_settings(settings)
     step(f"phase {phase['name']}: scenarios {', '.join(phase['scenarios'])}")
-    collector = start_collector(args, out_dir)
+    matrix = phase["scenarios"] == ["protocol_matrix"]
+    # k6 in Docker gets a name, so the collector can measure what it takes
+    # from the machine (k6 on PATH isn't measured).
+    k6_container = k6_container_name(phase["name"]) if mode == "docker" and not matrix else None
+    collector = start_collector(args, out_dir, k6_container)
     writer = None
     try:
         writer, writer_started = start_writer(args, phase, out_dir)
         time.sleep(args.interval)  # one sample before the load starts
-        if phase["scenarios"] == ["protocol_matrix"]:
+        if matrix:
             cmd, env = matrix_command(args, out_dir), {}
         else:
-            cmd, env = k6_command(mode, base_url(), Path(profile["_path"]), phase["name"], out_dir)
+            cmd, env = k6_command(
+                mode, base_url(), Path(profile["_path"]), phase["name"], out_dir, k6_container
+            )
         if writer_started:
             env["LOADTEST_WRITER_START_MS"] = str(writer_started)
         started = time.time()

@@ -175,6 +175,115 @@ class PeopleTests(unittest.TestCase):
         self.assertIn("create_source", admin_body["global_capabilities"])  # to edit sources
 
 
+class PlanTests(unittest.TestCase):
+    """production-plan.json: who takes part in the incident, which kinds
+    need MFA, and which folders the incident's ZIP users download."""
+
+    def plan(self, profile: dict, with_mfa: dict | None = None) -> dict:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(
+                os.environ,
+                {
+                    "LOADTEST_STATE_DIR": tmp,
+                    "LOADTEST_BASE_URL": "http://localhost:8080",
+                    "LOADTEST_ALLOWED_HOSTS": "localhost",
+                    "LOADTEST_PREFIX": "lt",
+                },
+            ),
+        ):
+            if with_mfa is not None:
+                seed.write_state(seed.MFA_STATE, with_mfa)
+            sources = seed.planned_sources(profile)
+            users = {f"lt-user-{i:03d}": "x" for i in range(1, int(profile["users"]) + 1)}
+            seed.write_production_plan(profile, sources, users, {"created": 0})
+            return seed.read_state("production-plan.json")
+
+    def test_only_roles_with_a_global_capability_need_mfa(self) -> None:
+        self.assertTrue(production.requires_mfa("admin"))
+        for kind in ("support", "oncall", "investigation", "occasional"):
+            self.assertFalse(production.requires_mfa(kind), kind)
+
+    def test_the_incident_only_has_users_without_mfa(self) -> None:
+        profile = load("production")
+        plan = self.plan(profile)
+        kinds = production.user_personas(profile, plan["user_names"])
+        self.assertEqual(len(plan["incident_users"]), 8)
+        self.assertEqual({kinds[u] for u in plan["incident_users"]}, {"investigation"})
+        self.assertEqual(
+            {k: p["mfa"] for k, p in plan["personas"].items()},
+            {
+                "support": False,
+                "oncall": False,
+                "investigation": False,
+                "admin": True,
+                "occasional": False,
+            },
+        )
+        self.assertEqual(len(plan["personas"]["admin"]["users"]), 4)
+
+    def test_the_incident_leaves_out_users_with_mfa_from_an_earlier_run(self) -> None:
+        # A run with another number of users on the same instance made this
+        # investigator an admin, and its MFA stayed on (users-mfa.json).
+        for name in ("production", "production-mini"):
+            profile = load(name)
+            names = [f"lt-user-{i:03d}" for i in range(1, int(profile["users"]) + 1)]
+            kinds = production.user_personas(profile, names)
+            investigators = [u for u in names if kinds[u] == "investigation"]
+            earlier_admin = investigators[0]
+            others = investigators[1:]
+            if others:
+                plan = self.plan(profile, {earlier_admin: "SECRET"})
+                self.assertEqual(plan["incident_users"], others, name)
+            else:
+                with self.assertRaisesRegex(seed.KitError, "the incident needs users of a kind"):
+                    self.plan(profile, {earlier_admin: "SECRET"})
+            self.assertEqual(self.plan(profile)["incident_users"], investigators, name)
+            with self.assertRaisesRegex(seed.KitError, "the incident needs users of a kind"):
+                self.plan(profile, {u: "SECRET" for u in investigators})
+
+    def test_without_users_for_the_incident_the_seed_says_why(self) -> None:
+        profile = load("production-mini")
+        profile["production"]["personas"] = {"support": {}, "admin": {}}
+        with self.assertRaisesRegex(seed.KitError, "the incident needs users of a kind"):
+            self.plan(profile)
+        profile["production"]["incident"]["users"] = 0
+        self.assertEqual(self.plan(profile)["incident_users"], [])
+
+    def test_the_incident_zips_the_rotated_logs_by_default(self) -> None:
+        incident = self.plan(load("production"))["incident"]
+        self.assertEqual(incident["path"], "app-1/current.log")
+        self.assertEqual(incident["zip_folder"], "rotated")
+        self.assertEqual(incident["zip_paths"], ["app-2", "app-3"])
+        mini = load("production-mini")
+        del mini["production"]["incident"]["zip_users"]  # the default, 4
+        self.assertEqual(self.plan(mini)["incident"]["zip_paths"], ["app-2", "app-3"])
+
+    def test_the_worst_case_zips_the_growing_logs_folder(self) -> None:
+        incident = self.plan(load("production-worst"))["incident"]
+        self.assertEqual(incident["zip_folder"], "active")
+        self.assertEqual(incident["zip_paths"], ["app-1"])
+
+    def test_zip_folder_is_checked(self) -> None:
+        profile = load("production-mini")
+        profile["production"]["incident"]["zip_folder"] = "everything"
+        with self.assertRaisesRegex(seed.KitError, "zip_folder is 'everything'"):
+            self.plan(profile)
+        profile["production"]["incident"]["zip_folder"] = "rotated"
+        profile["production"]["tree"]["app_folders"] = 1
+        with self.assertRaisesRegex(seed.KitError, "no rotated folder to download"):
+            self.plan(profile)
+
+    def test_production_worst_is_production_with_the_active_folder(self) -> None:
+        base, worst = load("production"), load("production-worst")
+        self.assertEqual(worst["production"]["incident"].pop("zip_folder"), "active")
+        self.assertEqual(base["production"]["incident"].pop("zip_folder"), "rotated")
+        for key in ("name", "description"):
+            base.pop(key)
+            worst.pop(key)
+        self.assertEqual(worst, base)
+
+
 class DiskTests(unittest.TestCase):
     def test_disk_per_protocol_matches_the_readme(self) -> None:
         # loadtest/README.md, "Setting up 100 or more sources with a few test servers".

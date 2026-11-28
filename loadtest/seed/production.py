@@ -94,6 +94,25 @@ ROLES = {
 }
 
 
+def requires_mfa(persona: str) -> bool:
+    """Whether PerchTail requires MFA of this kind's users: a role with a
+    global capability (app/auth/mfa_policy.py; the kit turns
+    `require_mfa_local_accounts` off for the run)."""
+    return bool(ROLES.get(persona, ROLES["support"])["global"])
+
+
+# The kinds whose users take part in the incident: they see every customer
+# and may download, and their role needs no MFA (a TOTP code is taken once
+# per account, so an account shared by several virtual users would collide).
+INCIDENT_KINDS = ("investigation",)
+
+# What the incident's ZIP users download (`incident.zip_folder`): by default
+# the folders of the incident's source without the growing log, as people
+# investigating download the rotated logs; "active" is the worst case, the
+# folder of the growing log itself.
+ZIP_FOLDERS = ("rotated", "active")
+
+
 def settings(profile: dict) -> dict:
     return profile.get("production", {})
 
@@ -243,9 +262,15 @@ def peak_window(stages: list[dict]) -> tuple[int, int]:
 
 def incident_window(profile: dict, stages: list[dict]) -> dict:
     """The incident: `users` people open and follow the same big growing
-    file for `minutes`, and `zip_users` of them download its folder as a
-    ZIP. By default it starts in the middle of the peak."""
+    file for `minutes`, and `zip_users` of them download folders of its
+    source as ZIPs (`zip_folder`, see incident_zip_folders). By default it
+    starts in the middle of the peak."""
     p = settings(profile).get("incident", {})
+    zip_folder = p.get("zip_folder", "rotated")
+    if zip_folder not in ZIP_FOLDERS:
+        raise ValueError(
+            f"production.incident.zip_folder is {zip_folder!r}: use one of {', '.join(ZIP_FOLDERS)}"
+        )
     duration = int(float(p.get("minutes", 10)) * 60)
     if "at_minutes" in p:
         start = int(float(p["at_minutes"]) * 60)
@@ -260,7 +285,18 @@ def incident_window(profile: dict, stages: list[dict]) -> dict:
         "duration": min(duration, total),
         "users": int(p.get("users", 20)),
         "zip_users": int(p.get("zip_users", 4)),
+        "zip_folder": zip_folder,
     }
+
+
+def incident_zip_folders(profile: dict, zip_folder: str) -> list[str]:
+    """The folders the incident's ZIP users download, in turn: "rotated",
+    every `app-N/` folder but `app-1/` (rotated logs, a .gz and a .zip);
+    "active", `app-1/`, which holds the growing current.log. Empty when the
+    tree has no folder of that kind."""
+    count = int(settings(profile).get("tree", {}).get("app_folders", 3))
+    folders = [f"app-{f}" for f in range(1, count + 1)]
+    return folders[:1] if zip_folder == "active" else folders[1:]
 
 
 def tree(profile: dict, name: str, entry: dict, index: int) -> dict:

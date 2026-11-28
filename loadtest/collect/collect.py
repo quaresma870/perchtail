@@ -1,7 +1,8 @@
 """Records the server's resource use every few seconds while a load test
 runs.
 
-    python loadtest/collect/collect.py --out DIR --container perchtail-perchtail-1
+    python loadtest/collect/collect.py --out DIR --container perchtail-perchtail-1 \
+        [--k6-container NAME]
     python loadtest/collect/collect.py --out DIR --pid 1234 \
         --scratch-dir /data/scratch --db /data/db/perchtail.db
 
@@ -10,6 +11,16 @@ Each sample (every --interval seconds, 5 by default) has:
 - CPU, memory and bytes in and out (cumulative) of the server process:
   `docker stats` for a container, /proc/<pid> for a process on this
   machine (Linux, without the network counters);
+- what that memory is: for a container, its cgroup's memory.stat (v2, or
+  v1) split into anonymous memory, page cache (active and inactive) and
+  shmem, and the resident memory of its PID 1 (PerchTail's uvicorn) split
+  into anonymous and file-backed (RssAnon, RssFile of /proc/1/status); for
+  a process, its own RssAnon and RssFile. `docker stats` counts the page
+  cache that is active (files in scratch written and read again), so a
+  leak shows in rss_anon_bytes, not in mem_bytes;
+- with --k6-container, the CPU and memory of the k6 container, which
+  run.py names when it runs k6 in Docker, to see what k6 took from a
+  machine it shares with PerchTail;
 - bytes used under the scratch directory, the size of the SQLite database
   and its WAL, measured on disk, and the number of rows in the audit log,
   read-only (`docker exec` into the container, or the local paths);
@@ -70,6 +81,15 @@ FIELDS = [
     "agents_connected",
     "name_index_oldest_age_s",
     "source_checks_failing",
+    "mem_anon_bytes",
+    "mem_file_bytes",
+    "mem_active_file_bytes",
+    "mem_inactive_file_bytes",
+    "mem_shmem_bytes",
+    "rss_anon_bytes",
+    "rss_file_bytes",
+    "k6_cpu_percent",
+    "k6_mem_bytes",
 ]
 _UNITS = {
     "b": 1,
@@ -100,7 +120,107 @@ def monitoring_token() -> str:
     return token
 
 
+# --- memory -------------------------------------------------------------------
+
+# memory.stat keys per column. cgroup v2 names anonymous memory `anon` and
+# the page cache `file`; v1 names them `rss` and `cache`, and has each
+# counter for the whole hierarchy too (`total_*`), which is taken first.
+_MEMORY_STAT_V2 = {
+    "mem_anon_bytes": ("anon",),
+    "mem_file_bytes": ("file",),
+    "mem_active_file_bytes": ("active_file",),
+    "mem_inactive_file_bytes": ("inactive_file",),
+    "mem_shmem_bytes": ("shmem",),
+}
+_MEMORY_STAT_V1 = {
+    "mem_anon_bytes": ("total_rss", "rss"),
+    "mem_file_bytes": ("total_cache", "cache"),
+    "mem_active_file_bytes": ("total_active_file", "active_file"),
+    "mem_inactive_file_bytes": ("total_inactive_file", "inactive_file"),
+    "mem_shmem_bytes": ("total_shmem", "shmem"),
+}
+
+
+def parse_memory_stat(text: str) -> dict:
+    """A cgroup's memory.stat (v2 or v1) as the collector's columns, in
+    bytes; a column is None when its counter isn't there."""
+    values: dict[str, int] = {}
+    for line in (text or "").splitlines():
+        key, _, value = line.strip().partition(" ")
+        if value.strip().isdigit():
+            values[key] = int(value)
+    keys = _MEMORY_STAT_V2 if "anon" in values or "file" in values else _MEMORY_STAT_V1
+    return {
+        column: next((values[k] for k in names if k in values), None)
+        for column, names in keys.items()
+    }
+
+
+def parse_proc_status(text: str) -> dict:
+    """RssAnon and RssFile (kB) of /proc/<pid>/status, in bytes."""
+    out: dict = {}
+    for column, key in (("rss_anon_bytes", "RssAnon"), ("rss_file_bytes", "RssFile")):
+        match = re.search(rf"^{key}:\s+(\d+) kB", text or "", re.MULTILINE)
+        out[column] = int(match.group(1)) * 1024 if match else None
+    return out
+
+
+def parse_docker_stats(line: str) -> dict:
+    """One `docker stats --format '{{json .}}'` line."""
+    stats = json.loads(line)
+    used, _, limit = stats.get("MemUsage", "").partition("/")
+    rx, _, tx = stats.get("NetIO", "").partition("/")
+    return {
+        "cpu_percent": float(stats.get("CPUPerc", "0").rstrip("%") or 0),
+        "mem_bytes": _bytes(used),
+        "mem_limit_bytes": _bytes(limit),
+        "pids": int(stats.get("PIDs") or 0),
+        "net_rx_bytes": _bytes(rx),
+        "net_tx_bytes": _bytes(tx),
+    }
+
+
+def docker_stats(container: str) -> dict:
+    """`docker stats` of a container, or {} when it isn't running."""
+    out = subprocess.run(
+        ["docker", "stats", "--no-stream", "--format", "{{json .}}", container],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout.strip()
+    return parse_docker_stats(out.splitlines()[0]) if out else {}
+
+
+def k6_fields(container: str) -> dict:
+    """CPU and memory of the k6 container; empty before it starts and
+    after it ends."""
+    stats = docker_stats(container)
+    if not stats:
+        return {}
+    return {"k6_cpu_percent": stats["cpu_percent"], "k6_mem_bytes": stats["mem_bytes"]}
+
+
 # --- process samplers ---------------------------------------------------------
+
+# Markers between the parts of the script DockerSampler.disk runs.
+_MEMSTAT = "@@memory.stat"
+_STATUS = "@@status"
+
+
+def parse_disk_output(out: str) -> dict:
+    """What DockerSampler.disk's script printed: four numbers (scratch,
+    database, WAL, audit rows), then the cgroup's memory.stat and PID 1's
+    status, each after its marker."""
+    head, _, rest = out.partition(_MEMSTAT + "\n")
+    memstat, _, status = rest.partition(_STATUS + "\n")
+    lines = head.splitlines()
+    values = [int(v) if v.strip().isdigit() else None for v in (lines + ["", "", "", ""])[:4]]
+    keys = ("scratch_bytes", "db_bytes", "wal_bytes", "audit_rows")
+    return {
+        **dict(zip(keys, values, strict=True)),
+        **parse_memory_stat(memstat),
+        **parse_proc_status(status),
+    }
 
 
 class DockerSampler:
@@ -108,25 +228,7 @@ class DockerSampler:
         self.container, self.scratch_dir, self.db_path = container, scratch_dir, db_path
 
     def process(self) -> dict:
-        out = subprocess.run(
-            ["docker", "stats", "--no-stream", "--format", "{{json .}}", self.container],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout.strip()
-        if not out:
-            return {}
-        stats = json.loads(out.splitlines()[0])
-        used, _, limit = stats.get("MemUsage", "").partition("/")
-        rx, _, tx = stats.get("NetIO", "").partition("/")
-        return {
-            "cpu_percent": float(stats.get("CPUPerc", "0").rstrip("%") or 0),
-            "mem_bytes": _bytes(used),
-            "mem_limit_bytes": _bytes(limit),
-            "pids": int(stats.get("PIDs") or 0),
-            "net_rx_bytes": _bytes(rx),
-            "net_tx_bytes": _bytes(tx),
-        }
+        return docker_stats(self.container)
 
     def disk(self) -> dict:
         scratch, db, wal = (
@@ -136,17 +238,21 @@ class DockerSampler:
             f"du -sb {scratch} 2>/dev/null | cut -f1; "
             f"stat -c %s {db} 2>/dev/null || echo; "
             f"stat -c %s {wal} 2>/dev/null || echo; "
-            f"python3 -c {shlex.quote(AUDIT_COUNT)} {db} 2>/dev/null || echo"
+            f"python3 -c {shlex.quote(AUDIT_COUNT)} {db} 2>/dev/null || echo; "
+            # cgroup v2's file, or v1's memory controller.
+            f"echo {_MEMSTAT}; "
+            "cat /sys/fs/cgroup/memory.stat 2>/dev/null "
+            "|| cat /sys/fs/cgroup/memory/memory.stat 2>/dev/null; "
+            f"echo {_STATUS}; "
+            "cat /proc/1/status 2>/dev/null"
         )
         out = subprocess.run(
             ["docker", "exec", self.container, "sh", "-c", script],
             capture_output=True,
             text=True,
             timeout=60,
-        ).stdout.splitlines()
-        values = [int(v) if v.strip().isdigit() else None for v in (out + ["", "", "", ""])[:4]]
-        keys = ("scratch_bytes", "db_bytes", "wal_bytes", "audit_rows")
-        return dict(zip(keys, values, strict=True))
+        ).stdout
+        return parse_disk_output(out)
 
 
 # Rows in the audit log, read-only (WAL mode lets this run beside the
@@ -191,6 +297,7 @@ class ProcSampler:
             "cpu_percent": round(percent, 2) if percent is not None else None,
             "mem_bytes": int(rss.group(1)) * 1024 if rss else None,
             "pids": int(threads.group(1)) if threads else None,
+            **parse_proc_status(status),
         }
 
     def disk(self) -> dict:
@@ -401,12 +508,19 @@ def run(args: argparse.Namespace) -> None:
                 threading.Thread(target=sample, args=("disk", sampler.disk)),
                 threading.Thread(target=sample, args=("health", lambda: read_health(url, token))),
             ]
+            if args.k6_container:
+                threads.append(
+                    threading.Thread(
+                        target=sample, args=("k6", lambda: k6_fields(args.k6_container))
+                    )
+                )
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
             row.update(results.get("process") or {})
             row.update(results.get("disk") or {})
+            row.update(results.get("k6") or {})
             row.update(health_fields(results.get("health")))
             writer.writerow(row)
             csv_handle.flush()
@@ -429,6 +543,10 @@ def main() -> None:
     )
     parser.add_argument("--container", help="the PerchTail container (docker stats / docker exec)")
     parser.add_argument("--pid", type=int, help="the PerchTail process on this machine (/proc)")
+    parser.add_argument(
+        "--k6-container",
+        help="the k6 container, for its CPU and memory (run.py names the one it starts)",
+    )
     parser.add_argument("--scratch-dir", default="/data/scratch")
     parser.add_argument("--db", default="/data/db/perchtail.db")
     args = parser.parse_args()

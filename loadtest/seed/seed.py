@@ -772,23 +772,56 @@ def write_production_plan(
         if s["protocol"] != "agent" or (s.get("running") and not s.get("windows"))
     ]
     intense = [s for s in usable if rates[s["name"]]["class"] == "intense"] or usable
-    incident = production.incident_window(profile, stages)
+    try:
+        incident = production.incident_window(profile, stages)
+    except ValueError as exc:
+        raise KitError(str(exc)) from None
     if intense:
         incident.update(source=intense[0]["name"], path="app-1/current.log")
-    see_all = [u for u in names if personas_of[u] in ("investigation", "admin")] or names
+        zip_paths = production.incident_zip_folders(profile, incident["zip_folder"])
+        if incident["users"] > 0 and incident["zip_users"] > 0 and not zip_paths:
+            raise KitError(
+                f"the incident's ZIP users have no {incident['zip_folder']} folder to download: "
+                "production.tree.app_folders must be at least 2 for zip_folder \"rotated\""
+            )
+        incident["zip_paths"] = zip_paths
+    # Users with MFA are never shared between virtual users (a code is taken
+    # once per account, and each refusal counts toward the lockout of the
+    # load machine's address): the incident only has users without it, by
+    # role and in fact (an account keeps the MFA a previous run with another
+    # number of users turned on when it was an admin).
+    with_mfa = read_state(MFA_STATE, {})
+    incident_users = [
+        u
+        for u in names
+        if personas_of[u] in production.INCIDENT_KINDS
+        and not production.requires_mfa(personas_of[u])
+        and u not in with_mfa
+    ]
+    if incident["users"] > 0 and not incident_users:
+        raise KitError(
+            "the incident needs users of a kind whose role sees every source and needs no MFA, "
+            "without MFA on from an earlier run "
+            f"({', '.join(production.INCIDENT_KINDS)}), and the profile has none: raise `users` "
+            "or that kind's weight, or set production.incident.users to 0"
+        )
     windows = [s["name"] for s in sources if s.get("windows")]
     write_state(
         "production-plan.json",
         {
             "personas": {
-                p: {**spec, "users": [u for u in names if personas_of[u] == p]}
+                p: {
+                    **spec,
+                    "mfa": production.requires_mfa(p),
+                    "users": [u for u in names if personas_of[u] == p],
+                }
                 for p, spec in production.personas(profile).items()
             },
             "stages": stages,
             "duration": production.total_seconds(stages),
             "peak": production.peak_window(stages),
             "incident": incident,
-            "incident_users": see_all,
+            "incident_users": incident_users,
             "admin_role_target": f"{role_name()}-occasional",
             "user_names": names,
             "classes": {
