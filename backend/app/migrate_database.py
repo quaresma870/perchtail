@@ -130,7 +130,7 @@ def _sqlite_file(url: str) -> Path:
     return file
 
 
-def _read_only_engine(file: Path) -> Engine:
+def read_only_engine(file: Path) -> Engine:
     """The SQLite file, opened read-only (mode=ro): nothing can be written
     to it through this engine."""
     uri = file.resolve().as_uri() + "?mode=ro"
@@ -142,7 +142,9 @@ def _read_only_engine(file: Path) -> Engine:
     return create_engine("sqlite://", creator=connect, poolclass=NullPool, hide_parameters=True)
 
 
-def _target_engine(url: str) -> Engine:
+def postgresql_engine(url: str) -> Engine:
+    """The PostgreSQL database at url, without a pool, for a command that
+    runs once (this migration, a backup or a restore, app/backup.py)."""
     connect_args = engine_options(url).get("connect_args", {})
     return create_engine(url, poolclass=NullPool, connect_args=connect_args, hide_parameters=True)
 
@@ -176,7 +178,7 @@ def _clear_migration_seeds(connection: Connection) -> None:
         connection.execute(table.delete())
 
 
-def _upgrade_to_head(connection: Connection) -> None:
+def upgrade_to_head(connection: Connection) -> None:
     """This version's migrations, on the target's connection and in its
     open transaction (PostgreSQL's DDL is transactional), without
     migrations/env.py, whose locks this process already holds."""
@@ -306,7 +308,7 @@ def _copy(
     transaction = target.begin()
     try:
         if _revision(target) is None:
-            _upgrade_to_head(target)
+            upgrade_to_head(target)
         _clear_migration_seeds(target)
         expected = db_copy.table_counts(source)
         copied = db_copy.copy_tables(source, target)
@@ -364,8 +366,8 @@ def migrate(source_url: str, *, dry_run: bool, settings: Settings | None = None)
             "instance_running",
             f"PerchTail is running on this DATA_DIR ({exc.holder or exc.content}); stop it first",
         ) from None
-    source_engine = _read_only_engine(file)
-    target_engine = _target_engine(target_url)
+    source_engine = read_only_engine(file)
+    target_engine = postgresql_engine(target_url)
     try:
         head = _head_revision()
         with source_engine.connect() as source:

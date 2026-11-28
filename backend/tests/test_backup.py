@@ -331,8 +331,8 @@ def test_verify_detects_a_wrong_key(env, monkeypatch):
 
 def test_verify_detects_an_unknown_manifest_format(env, tmp_path):
     path = backup.create_backup("manual")
-    crafted = _recraft(env.settings, path, env.backups / "x.ptbackup", manifest={"format": 2})
-    with pytest.raises(BackupError, match="unknown manifest format 2"):
+    crafted = _recraft(env.settings, path, env.backups / "x.ptbackup", manifest={"format": 3})
+    with pytest.raises(BackupError, match="unknown manifest format 3"):
         backup.verify_backup(crafted)
 
 
@@ -831,3 +831,548 @@ def test_backup_list_for_whoever_manages_system_settings(env):
 
         plain = _user(session, [])
         assert _client(session, plain).get("/system-settings/backups").status_code == 403
+
+
+class _LogRecorder:
+    """backup.logger, recording (level, fields) per event."""
+
+    def __init__(self, monkeypatch):
+        self.records: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(backup, "logger", self)
+
+    def __getattr__(self, level):
+        def record(event, **fields):
+            self.records.append((level, event, fields))
+
+        return record
+
+    def events(self, name: str) -> list[tuple[str, dict]]:
+        return [(level, fields) for level, event, fields in self.records if event == name]
+
+
+# --- the database engine ---------------------------------------------------
+
+
+def test_a_sqlite_backup_names_its_engine(env):
+    manifest = backup.verify_backup(backup.create_backup("manual"))
+    assert manifest["format"] == 1
+    assert manifest["database"] == "sqlite"
+
+
+def test_a_backup_from_before_the_engine_was_named_is_sqlite(env):
+    path = backup.create_backup("manual")
+    members = _members(env.settings, path)
+    manifest = json.loads(members.pop("manifest.json"))
+    del manifest["database"]
+    old = _craft(
+        env.settings,
+        env.backups / "old.ptbackup",
+        [("manifest.json", json.dumps(manifest).encode())] + list(members.items()),
+    )
+    assert backup.verify_backup(old)["database"] == "sqlite"
+
+
+def test_a_manifest_whose_format_and_engine_disagree_is_refused(env):
+    path = backup.create_backup("manual")
+    crafted = _recraft(
+        env.settings, path, env.backups / "x.ptbackup", manifest={"database": "postgresql"}
+    )
+    with pytest.raises(BackupError, match="names the database 'postgresql' for format 1"):
+        backup.verify_backup(crafted)
+
+
+def test_a_postgresql_backup_is_refused_on_sqlite(env):
+    path = backup.create_backup("manual")
+    crafted = _recraft(
+        env.settings,
+        path,
+        env.backups / "x.ptbackup",
+        manifest={"format": 2, "database": "postgresql"},
+    )
+    with pytest.raises(BackupError, match="made on PostgreSQL and PerchTail runs on SQLite"):
+        backup.verify_backup(crafted)
+    env.engine.dispose()
+    before = _tree(env.data)
+    with pytest.raises(BackupError, match="made on PostgreSQL"):
+        backup.restore_backup(crafted)
+    assert _tree(env.data) == before
+    assert not list(env.data.parent.glob("db.*"))
+
+
+def test_a_restore_that_fails_after_the_swap_puts_data_dir_back(env, monkeypatch):
+    path = backup.create_backup("manual")
+    with Session(env.engine) as session:
+        session.add(Source(name="later", protocol=Protocol.ssh, host="h", base_path="/"))
+        session.commit()
+    env.engine.dispose()
+    before = _tree(env.data)
+
+    def fail(self):
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(backup.SqliteDialect, "clear_companions", fail)
+    log = _LogRecorder(monkeypatch)
+    with pytest.raises(backup.RestoreFailedError, match="was undone.*the disk went away"):
+        backup.restore_backup(path)
+    assert _tree(env.data) == before
+    assert not list(env.data.parent.glob("db.*"))
+    instance_lock.acquire(env.settings).release()
+    assert log.events("backup.restore") == [
+        (
+            "error",
+            {
+                "file": path.name,
+                "reason": "manual",
+                "result": "failed",
+                "error": "OSError",
+                "undone": True,
+            },
+        )
+    ]
+
+
+def test_a_restore_whose_undo_fails_says_so(env, monkeypatch):
+    path = backup.create_backup("manual")
+    env.engine.dispose()
+    before = _tree(env.data)
+    swap = backup._swap_data_dir
+
+    def swap_with_a_stuck_step(data_dir, staging, previous, undo):
+        swap(data_dir, staging, previous, undo)
+
+        def stuck():
+            raise OSError("a file is held open")
+
+        undo.append(stuck)
+
+    def fail(self):
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(backup, "_swap_data_dir", swap_with_a_stuck_step)
+    monkeypatch.setattr(backup.SqliteDialect, "clear_companions", fail)
+    log = _LogRecorder(monkeypatch)
+    with pytest.raises(backup.RestoreFailedError, match="couldn't all be undone"):
+        backup.restore_backup(path)
+    assert log.events("backup.restore_undo_failed") == [
+        ("error", {"file": path.name, "error": "a file is held open"})
+    ]
+    assert log.events("backup.restore")[0][1]["undone"] is False
+    # The other steps still ran.
+    assert _tree(env.data) == before
+
+
+def test_a_restore_that_fails_before_the_swap_is_reported_in_one_line(env, monkeypatch, capsys):
+    path = backup.create_backup("manual")
+    env.engine.dispose()
+    before = _tree(env.data)
+
+    def fail(*args, **kwargs):
+        raise OSError("no space left on the device")
+
+    monkeypatch.setattr(backup, "credential_key_matches", fail)
+    monkeypatch.setattr("app.logging_config.configure_logging", lambda *a, **k: None)
+    assert backup.main(["restore", str(path)]) == 1
+    err = capsys.readouterr().err
+    assert err.splitlines() == [
+        "ERROR: the restore failed and was undone, the database and DATA_DIR are as they "
+        "were: no space left on the device"
+    ]
+    assert _tree(env.data) == before
+
+
+# --- PostgreSQL ------------------------------------------------------------
+
+
+@pytest.fixture()
+def pg(monkeypatch, tmp_path, empty_postgres_url):
+    """A PerchTail installation on its own PostgreSQL database, migrated
+    with the app's migrations and filled with every kind of object."""
+    from app.migrate_database import upgrade_to_head
+    from sqlalchemy.pool import NullPool
+
+    from tests.migration_seed import populate
+
+    data = tmp_path / "db"
+    backups = tmp_path / "backups"
+    monkeypatch.setenv("DATA_DIR", str(data))
+    monkeypatch.setenv("BACKUP_DIR", str(backups))
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", KEY)
+    monkeypatch.setenv("DATABASE_URL", empty_postgres_url)
+    for name in (
+        "CREDENTIAL_SALT_PATH",
+        "SSH_KNOWN_HOSTS_PATH",
+        "BACKUP_ENCRYPTION_KEY",
+        "BACKUP_KEEP",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    _clear_caches()
+    settings = get_settings()
+    data.mkdir()
+    engine = create_engine(settings.database_url, poolclass=NullPool)
+    with engine.begin() as connection:
+        upgrade_to_head(connection)
+    with Session(engine) as session:
+        populate(session, engine)
+    Path(settings.ssh_known_hosts_path).write_text("app01.example.com ssh-ed25519 AAAA\n")
+    monkeypatch.setattr("app.db.engine", engine)
+    monkeypatch.setattr(backup, "_last_failed_attempt", None)
+    yield SimpleNamespace(settings=settings, engine=engine, data=data, backups=backups)
+    engine.dispose()
+    _clear_caches()
+
+
+def _contents(engine) -> dict[str, list[tuple]]:
+    """Every row of every table of the models, in key order."""
+    from app import db_copy
+
+    with engine.connect() as connection:
+        return {
+            table.name: [
+                tuple(row)
+                for row in connection.execute(
+                    table.select().order_by(*table.primary_key.columns)
+                ).all()
+            ]
+            for table in db_copy.app_tables()
+        }
+
+
+def _set_revision(engine, revision: str) -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE alembic_version SET version_num = %s", (revision,))
+
+
+def _previous_revision() -> str:
+    return ScriptDirectory(str(MIGRATIONS_DIR)).get_revision(HEAD).down_revision
+
+
+def _change_after_the_backup(engine) -> None:
+    from app.audit import record_audit_event
+
+    with Session(engine) as session:
+        session.add(Source(name="later", protocol=Protocol.ssh, host="h", base_path="/"))
+        session.add(Customer(name="later customer"))
+        record_audit_event(session, user_id=None, action="role.create")
+        session.commit()
+
+
+@pytest.mark.postgres_only
+def test_postgresql_create_verify_restore_and_the_app_starts_on_it(pg):
+    from app.audit_integrity import verify_chain
+    from app.logging_config import get_logger
+    from app.schema_version import check_database_revision
+
+    from tests.migration_seed import BIG, INDEXED_FILES
+    from tests.migration_seed import CREDENTIAL as SEEDED_CREDENTIAL
+
+    expected = _contents(pg.engine)
+    path = backup.create_backup("manual")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert path.read_bytes().startswith(b"PTBK\x01\x00")
+    assert [p.name for p in pg.backups.iterdir()] == [path.name]
+
+    manifest = backup.verify_backup(path)
+    assert manifest["format"] == 2
+    assert manifest["database"] == "postgresql"
+    assert manifest["alembic_revision"] == HEAD
+    assert set(manifest["files"]) == {"perchtail.db", "credential_salt", "ssh_known_hosts"}
+
+    copy = pg.backups / "copy.db"
+    copy.write_bytes(_members(pg.settings, path)["perchtail.db"])
+    with sqlite3.connect(copy) as connection:
+        assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (HEAD,)
+        indexed = connection.execute("SELECT count(*), max(size) FROM file_name_entry").fetchone()
+        assert indexed == (INDEXED_FILES, BIG + INDEXED_FILES - 1)
+    copy.unlink()
+
+    _change_after_the_backup(pg.engine)
+    salt = Path(pg.settings.credential_salt_path).read_bytes()
+    old_tree = _tree(pg.data)
+    result = backup.restore_backup(path)
+
+    assert _contents(pg.engine) == expected
+    assert _tree(result.previous) == old_tree
+    assert Path(pg.settings.credential_salt_path).read_bytes() == salt
+    assert not list(pg.data.parent.glob("db.restoring-*"))
+    assert [p.name for p in pg.backups.iterdir()] == [path.name]
+
+    # The app starts on it: the revision it knows, the credentials decrypt,
+    # the audit chain verifies, and new rows get new ids.
+    check_database_revision(pg.engine, get_logger(__name__))
+    _clear_caches()
+    with Session(pg.engine) as session:
+        [source] = session.exec(select(Source)).all()
+        assert crypto.decrypt_credential(source.credential_ref) == SEEDED_CREDENTIAL
+        assert verify_chain(crypto.audit_chain_key(), session).ok
+        assert backup.record_pending_restore(session)
+        session.commit()
+        assert verify_chain(crypto.audit_chain_key(), session).ok
+        session.commit()
+        highest = max(row[0] for row in expected["customer"])
+        customer = Customer(name="after the restore")
+        session.add(customer)
+        session.commit()
+        assert customer.id > highest
+    actions = _audit_actions(pg.engine)
+    assert actions[-1][0] == "backup.restore"
+    assert actions[-1][1]["file"] == path.name
+    assert actions[-1][1]["result"] == "ok"
+
+
+@pytest.mark.postgres_only
+def test_postgresql_create_while_writing_in_parallel(pg):
+    stop = threading.Event()
+    written = []
+
+    def writer():
+        while not stop.is_set():
+            with Session(pg.engine) as session:
+                session.add(Customer(name=f"c-{uuid.uuid4().hex}"))
+                session.commit()
+            written.append(1)
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        path = backup.create_backup("manual")
+    finally:
+        stop.set()
+        thread.join()
+    assert written
+    assert backup.verify_backup(path)["database"] == "postgresql"
+
+
+@pytest.mark.postgres_only
+def test_postgresql_snapshot_is_private_from_the_start(pg, tmp_path):
+    dest = tmp_path / "copy.db"
+    dialect = backup.PostgresDialect(pg.settings.database_url)
+    dialect.snapshot(dest)
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+    dialect.check(dest)
+    assert dialect.revision(dest) == HEAD
+
+
+@pytest.mark.postgres_only
+def test_postgresql_snapshot_reads_from_one_read_only_repeatable_read_transaction(
+    pg, monkeypatch, tmp_path
+):
+    from app import db_copy
+
+    seen = []
+    table_counts = db_copy.table_counts
+
+    def spy(connection, tables=None):
+        if connection.dialect.name == "postgresql":
+            seen.append(
+                (
+                    connection.exec_driver_sql("SHOW transaction_isolation").scalar(),
+                    connection.exec_driver_sql("SHOW transaction_read_only").scalar(),
+                )
+            )
+        return table_counts(connection, tables)
+
+    monkeypatch.setattr(db_copy, "table_counts", spy)
+    backup.PostgresDialect(pg.settings.database_url).snapshot(tmp_path / "copy.db")
+    assert seen == [("repeatable read", "on")]
+
+
+@pytest.mark.postgres_only
+def test_postgresql_restore_into_an_empty_database(pg):
+    expected = _contents(pg.engine)
+    path = backup.create_backup("manual")
+    with pg.engine.begin() as connection:
+        connection.exec_driver_sql("DROP SCHEMA public CASCADE")
+        connection.exec_driver_sql("CREATE SCHEMA public")
+
+    backup.restore_backup(path)
+
+    assert _contents(pg.engine) == expected
+    with pg.engine.connect() as connection:
+        revision = connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+    assert revision == HEAD
+
+
+@pytest.mark.postgres_only
+def test_postgresql_restore_that_fails_half_way_through_the_copy_changes_nothing(pg, monkeypatch):
+    from app import db_copy
+
+    path = backup.create_backup("manual")
+    _change_after_the_backup(pg.engine)
+    before = _contents(pg.engine)
+    tree = _tree(pg.data)
+    copy_table = db_copy.copy_table
+    copied = []
+
+    def copy_some(source, target, table, **kwargs):
+        if len(copied) == 5:
+            raise db_copy.TableCopyError(table.name, "the network went away")
+        copied.append(table.name)
+        return copy_table(source, target, table, **kwargs)
+
+    monkeypatch.setattr(db_copy, "copy_table", copy_some)
+    with pytest.raises(backup.RestoreFailedError, match="was undone.*the network went away"):
+        backup.restore_backup(path)
+    assert len(copied) == 5
+    assert _contents(pg.engine) == before
+    assert _tree(pg.data) == tree
+    assert not list(pg.data.parent.glob("db.*"))
+
+
+@pytest.mark.postgres_only
+def test_postgresql_restore_that_fails_after_the_swap_changes_nothing(pg, monkeypatch):
+    path = backup.create_backup("manual")
+    _change_after_the_backup(pg.engine)
+    before = _contents(pg.engine)
+    tree = _tree(pg.data)
+
+    def fail(self):
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(backup.PostgresDialect, "clear_companions", fail)
+    with pytest.raises(backup.RestoreFailedError, match="was undone.*the disk went away"):
+        backup.restore_backup(path)
+    assert _contents(pg.engine) == before
+    assert _tree(pg.data) == tree
+    assert not list(pg.data.parent.glob("db.*"))
+
+
+@pytest.mark.postgres_only
+def test_postgresql_restore_whose_commit_fails_puts_data_dir_back(pg, monkeypatch, capsys):
+    from contextlib import contextmanager
+
+    from sqlalchemy.exc import OperationalError
+
+    path = backup.create_backup("manual")
+    salt = Path(pg.settings.credential_salt_path).read_bytes()
+    _change_after_the_backup(pg.engine)
+    Path(pg.settings.credential_salt_path).write_bytes(b"0" * 16)
+    before = _contents(pg.engine)
+    tree = _tree(pg.data)
+    loaded = backup.PostgresDialect.loaded
+    reached = []
+
+    @contextmanager
+    def failing_commit(self, member, settings):
+        with loaded(self, member, settings):
+
+            def fail():
+                # DATA_DIR is already the backup's when the commit fails.
+                reached.append(Path(pg.settings.credential_salt_path).read_bytes() == salt)
+                raise OperationalError("COMMIT", {}, ConnectionError("server closed"))
+
+            yield fail
+
+    monkeypatch.setattr(backup.PostgresDialect, "loaded", failing_commit)
+    log = _LogRecorder(monkeypatch)
+    with pytest.raises(backup.RestoreFailedError, match="was undone") as refused:
+        backup.restore_backup(path)
+    assert "server closed" not in str(refused.value)
+    assert reached == [True]
+    assert _contents(pg.engine) == before
+    assert _tree(pg.data) == tree
+    assert not list(pg.data.parent.glob("db.*"))
+    [(level, fields)] = log.events("backup.restore")
+    assert level == "error"
+    assert fields["result"] == "failed"
+    assert fields["error"] == "OperationalError"
+    assert fields["undone"] is True
+
+    # The command says it in one line, and exits with an error.
+    monkeypatch.setattr("app.logging_config.configure_logging", lambda *a, **k: None)
+    assert backup.main(["restore", str(path)]) == 1
+    [line] = capsys.readouterr().err.splitlines()
+    assert line.startswith("ERROR: the restore failed and was undone")
+    assert _contents(pg.engine) == before
+    assert _tree(pg.data) == tree
+
+
+@pytest.mark.postgres_only
+def test_postgresql_restore_refuses_while_perchtail_holds_the_database(pg):
+    path = backup.create_backup("manual")
+    _change_after_the_backup(pg.engine)
+    before = _contents(pg.engine)
+    held = instance_lock.acquire_database(pg.engine)
+    try:
+        with pytest.raises(BackupError, match="PerchTail is running on this PostgreSQL database"):
+            backup.restore_backup(path)
+    finally:
+        held.release()
+    assert _contents(pg.engine) == before
+    assert not list(pg.data.parent.glob("db.*"))
+
+
+@pytest.mark.postgres_only
+def test_postgresql_restore_refuses_a_database_at_another_revision(pg):
+    path = backup.create_backup("manual")
+    _set_revision(pg.engine, _previous_revision())
+    before = _contents(pg.engine)
+    with pytest.raises(BackupError, match="restore into a new, empty database"):
+        backup.restore_backup(path)
+    assert _contents(pg.engine) == before
+    assert not list(pg.data.parent.glob("db.*"))
+
+
+@pytest.mark.postgres_only
+def test_postgresql_restore_refuses_a_backup_at_another_revision(pg):
+    path = backup.create_backup("manual")
+    older = _recraft(
+        pg.settings,
+        path,
+        pg.backups / "older.ptbackup",
+        manifest={"alembic_revision": _previous_revision()},
+    )
+    before = _contents(pg.engine)
+    with pytest.raises(BackupError, match="restores a PostgreSQL backup at revision"):
+        backup.restore_backup(older)
+    assert _contents(pg.engine) == before
+
+
+@pytest.mark.postgres_only
+def test_postgresql_create_refuses_a_database_at_another_revision(pg):
+    _set_revision(pg.engine, _previous_revision())
+    with pytest.raises(BackupError, match="backs up a database at revision"):
+        backup.create_backup("manual")
+    assert not list(pg.backups.iterdir())
+
+
+@pytest.mark.postgres_only
+def test_a_sqlite_backup_is_refused_on_postgresql(pg):
+    path = backup.create_backup("manual")
+    crafted = _recraft(
+        pg.settings, path, pg.backups / "x.ptbackup", manifest={"format": 1, "database": "sqlite"}
+    )
+    with pytest.raises(BackupError, match="made on SQLite and PerchTail runs on PostgreSQL"):
+        backup.verify_backup(crafted)
+    before = _contents(pg.engine)
+    tree = _tree(pg.data)
+    with pytest.raises(BackupError, match="made on SQLite"):
+        backup.restore_backup(crafted)
+    assert _contents(pg.engine) == before
+    assert _tree(pg.data) == tree
+
+
+@pytest.mark.postgres_only
+def test_postgresql_scheduled_backup(pg):
+    with Session(pg.engine) as session:
+        system_settings.set_int(session, "backup_interval_hours", 24)
+        session.commit()
+    path = backup.run_scheduled_backup()
+    assert path is not None
+    assert backup.verify_backup(path)["database"] == "postgresql"
+    assert backup.run_scheduled_backup() is None
+
+
+@pytest.mark.postgres_only
+def test_postgresql_cli_create_list_and_restore(pg, monkeypatch, capsys):
+    # As in test_cli_create_verify_list_and_errors: the root logger's
+    # handlers stay the test run's.
+    monkeypatch.setattr("app.logging_config.configure_logging", lambda *a, **k: None)
+    assert backup.main(["create"]) == 0
+    [info] = backup.list_backups()
+    assert backup.main(["list"]) == 0
+    assert info.name in capsys.readouterr().out
+    assert backup.main(["restore", str(pg.backups / info.name)]) == 0
+    out = capsys.readouterr().out
+    assert "into the PostgreSQL database, whose previous content was replaced" in out

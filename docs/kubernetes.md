@@ -201,6 +201,8 @@ A restore needs PerchTail stopped: it takes the same instance lock as PerchTail,
                secretKeyRef:
                  name: perchtail-key
                  key: credential-encryption-key
+           # On PostgreSQL, DATABASE_URL from database.existingSecret (and the
+           # CA's volume, if the URL names one), as the Deployment has it.
            # Add BACKUP_ENCRYPTION_KEY, and any env or extraEnv entry of your
            # values that changes a path, as the Deployment has them.
          securityContext:
@@ -303,4 +305,4 @@ extraVolumeMounts:
 
 and the URL ends with `?sslmode=verify-full&sslrootcert=/etc/perchtail/pg-ca/ca.crt`. A PostgreSQL in the same cluster is reached over the pod network, which isn't local to PerchTail: without a verified certificate PerchTail refuses to start, unless `DATABASE_REQUIRE_VERIFIED_TLS=false` (in `env`) turns the refusal into a warning. The same two values mount a file for `DATABASE_URL_FILE`, if you prefer it to `database.existingSecret`.
 
-The data volume stays needed with PostgreSQL, for the credential salt, the pinned SSH host keys, the audit chain marker, the instance lock and the logs. `python -m app.backup` works on SQLite only for now, so on PostgreSQL back the database up with PostgreSQL's own tools, and the data volume and the key as above ([backup-and-restore.md](backup-and-restore.md)).
+The data volume stays needed with PostgreSQL, for the credential salt, the pinned SSH host keys, the audit chain marker, the instance lock and the logs. `python -m app.backup` and the scheduled backup work on PostgreSQL too, with the restore steps above; back the PostgreSQL server up with its own tools as well ([backup-and-restore.md](backup-and-restore.md#postgresql)).

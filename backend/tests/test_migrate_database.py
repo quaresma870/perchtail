@@ -20,8 +20,8 @@ from app.db import configure_sqlite_connection
 from app.migrate_database import (
     MigrationRefusedError,
     VerificationFailedError,
-    _upgrade_to_head,
     migrate,
+    upgrade_to_head,
 )
 from app.models import Customer, Source, UpdateCheckState
 from app.name_index_store import PG_TRGM_INDEX, ensure_name_index_schema
@@ -159,7 +159,7 @@ def test_a_dry_run_leaves_the_target_as_it_was(tmp_path, settings, target):
 @pytest.mark.postgres_only
 def test_a_target_migrated_beforehand_but_empty_is_accepted(tmp_path, settings, target):
     with target.begin() as connection:
-        _upgrade_to_head(connection)
+        upgrade_to_head(connection)
     path, source_engine = _source(tmp_path)
     with Session(source_engine) as session:
         session.add(Customer(name="c"))
@@ -178,7 +178,7 @@ def test_a_target_migrated_beforehand_but_empty_is_accepted(tmp_path, settings, 
 @pytest.mark.postgres_only
 def test_a_target_with_rows_is_refused(tmp_path, settings, target):
     with target.begin() as connection:
-        _upgrade_to_head(connection)
+        upgrade_to_head(connection)
         connection.execute(text("INSERT INTO customer (name) VALUES ('already here')"))
     path, source_engine = _source(tmp_path)
     source_engine.dispose()
@@ -196,7 +196,7 @@ def test_a_target_with_rows_is_refused(tmp_path, settings, target):
 @pytest.mark.postgres_only
 def test_a_target_with_a_changed_seeded_row_is_refused(tmp_path, settings, target):
     with target.begin() as connection:
-        _upgrade_to_head(connection)
+        upgrade_to_head(connection)
         connection.execute(text("UPDATE update_check_state SET latest_version = '9.9.9'"))
     path, source_engine = _source(tmp_path)
     source_engine.dispose()
@@ -392,13 +392,13 @@ def test_a_value_too_long_fails_without_printing_its_values(
     # SQLite doesn't enforce VARCHAR lengths, PostgreSQL does. No column of
     # the models has a length a valid row can pass, so the target's is made
     # shorter than the source's names.
-    migrate_to_head = migrate_database._upgrade_to_head
+    migrate_to_head = migrate_database.upgrade_to_head
 
     def narrowed(connection):
         migrate_to_head(connection)
         connection.execute(text("ALTER TABLE source ALTER COLUMN name TYPE VARCHAR(2)"))
 
-    monkeypatch.setattr(migrate_database, "_upgrade_to_head", narrowed)
+    monkeypatch.setattr(migrate_database, "upgrade_to_head", narrowed)
     monkeypatch.setattr(migrate_database, "configure_logging", lambda: None)
     path, source_engine = _source(tmp_path)
     with Session(source_engine) as session:

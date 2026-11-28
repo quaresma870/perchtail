@@ -37,6 +37,7 @@ def _isolate_state_dirs() -> None:
 
 _isolate_state_dirs()
 
+import time  # noqa: E402
 import uuid  # noqa: E402
 
 import pytest  # noqa: E402
@@ -51,6 +52,7 @@ from app.config import normalize_database_url  # noqa: E402
 from app.name_index_store import ensure_name_index_schema  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.engine import make_url  # noqa: E402
+from sqlalchemy.exc import OperationalError  # noqa: E402
 from sqlalchemy.pool import NullPool, StaticPool  # noqa: E402
 from sqlmodel import Session, SQLModel, create_engine  # noqa: E402
 
@@ -271,7 +273,24 @@ def empty_postgres_url():
         with admin.connect() as connection:
             connection.execute(text(f"CREATE DATABASE {name} ENCODING 'UTF8' TEMPLATE template0"))
         yield make_url(TEST_DATABASE_URL).set(database=name).render_as_string(hide_password=False)
-        with admin.connect() as connection:
-            connection.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        _drop_database(admin, name)
     finally:
         admin.dispose()
+
+
+def _drop_database(admin, name: str) -> None:
+    """Drops a test's database. No new connection may reach it first (a
+    pool reconnecting while FORCE ends the others would make the drop
+    fail), and a drop that still meets a session ending is tried again
+    for a few seconds."""
+    with admin.connect() as connection:
+        connection.execute(text(f"ALTER DATABASE {name} ALLOW_CONNECTIONS false"))
+    for attempt in range(10):
+        try:
+            with admin.connect() as connection:
+                connection.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+            return
+        except OperationalError:
+            if attempt == 9:
+                raise
+            time.sleep(0.5)
