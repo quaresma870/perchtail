@@ -229,6 +229,7 @@ PerchTail logs JSON lines to stdout and to `LOG_DIR` (see the README). If you sh
 | `db.wal_checkpoint` | warning when `busy` | The hourly WAL checkpoint couldn't finish because readers were busy; it's tried again next hour. |
 | `backup.create_failed` | error | A backup couldn't be made (`reason` says whether it was manual, scheduled or pre-upgrade); a scheduled one also fails the `backup` job. |
 | `backup.restore` | info, warning when `result` is `refused` | A backup was restored (`file`, `previous` names where the data before it went), or a restore was refused and changed nothing (`error` says why). |
+| `backup.restore_undo_failed` | error | A restore that failed after moving `DATA_DIR` aside couldn't put one of its steps back (`error` says which file); check `DATA_DIR` and the `before-restore` copy by hand before starting PerchTail. |
 | `readyz.database_not_writable`, `readyz.data_dir_not_writable` | warning | A readiness check failed. |
 | `update_check.failed` | warning | The update check couldn't reach GitHub. |
 | `sso.login.discovery_failed`, `sso.login.insecure_idp_url`, `sso.login.issuer_mismatch`, `sso.callback.no_access_role_missing` | error | SSO sign-in can't work: the provider can't be reached or is on an address the policy refuses, its issuer or an endpoint isn't `https://`, its discovery document names another issuer, or the no-access role is missing. |

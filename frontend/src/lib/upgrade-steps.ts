@@ -20,7 +20,7 @@ export function upgradeGuide(installMethod: InstallMethod, version: string): str
 export function upgradeSteps(installMethod: InstallMethod, version: string): string {
   if (installMethod === 'kubernetes') {
     return [
-      '# On SQLite (on PostgreSQL, back the database up with its own tools):',
+      '# A backup to roll back to:',
       'kubectl -n <namespace> exec deploy/perchtail -- python -m app.backup create --reason pre-upgrade',
       '# With the values file you installed with:',
       `helm upgrade perchtail ${CHART} --version ${version} -n <namespace> -f <your values file>`,

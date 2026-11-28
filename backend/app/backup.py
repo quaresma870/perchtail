@@ -5,13 +5,17 @@
     python -m app.backup restore <file> [--force]
     python -m app.backup list
 
-`create` runs while PerchTail runs. It copies the database with SQLite's
-online backup API (one consistent snapshot, writers keep going), checks the
-copy with `PRAGMA quick_check`, and packs it in a tar with the credential
-salt, SSH known_hosts and a manifest (format, app version, Alembic
-revision, UTC time, reason and the SHA-256 of every file). The tar is
-always encrypted before it reaches the disk, and written under a temporary
-name renamed into place at the end, readable by PerchTail's user only.
+`create` runs while PerchTail runs. On SQLite it copies the database with
+SQLite's online backup API (one consistent snapshot, writers keep going).
+On PostgreSQL it copies every table of the models, with their ids, into a
+new SQLite file, from one `REPEATABLE READ READ ONLY` transaction (one
+consistent snapshot, writers keep going; app/db_copy.py). Either way the
+copy is checked with `PRAGMA quick_check` and packed in a tar with the
+credential salt, SSH known_hosts and a manifest (format, database engine,
+app version, Alembic revision, UTC time, reason and the SHA-256 of every
+file). The tar is always encrypted before it reaches the disk, and written
+under a temporary name renamed into place at the end, readable by
+PerchTail's user only.
 
 Archive format (`.ptbackup`, version 1):
 
@@ -32,15 +36,27 @@ an Alembic revision this version doesn't know, and checks that the current
 CREDENTIAL_ENCRYPTION_KEY decrypts a credential stored in the backup
 (`--force` skips only that check, never the archive's authentication).
 Then it moves DATA_DIR aside to `<DATA_DIR>.before-restore-<time>` and puts
-the backup's files in a fresh DATA_DIR. When it refuses, nothing changes.
+the backup's files in a fresh DATA_DIR. On PostgreSQL it also takes the
+database's own lock (no PerchTail on that database either) and, in one
+transaction, empties every table and fills it from the backup; that
+transaction is committed only once DATA_DIR has been swapped, and a failure
+anywhere rolls it back and puts DATA_DIR back as it was. The database must
+be empty (it is migrated first) or at this version's revision, and the
+backup made at this version's revision. When it refuses, nothing changes.
+
+A backup is restored on the database engine it was made on. The manifest
+says which (`database`), and its format is 1 on SQLite and 2 on PostgreSQL,
+so a version without PostgreSQL support refuses a PostgreSQL backup as an
+unknown format. `verify` and `restore` refuse a backup of the other engine;
+moving from SQLite to PostgreSQL is `python -m app.migrate_database`.
 
 Each action is audited (`backup.create`, `backup.verify`, `backup.restore`)
 with the file name, the reason and the result. A restore replaces the
 database it would be audited in, so it is logged, and the first instance
 that starts on the restored database writes the audit entry.
 
-The database is SQLite; the database part goes through a small per-dialect
-interface (DatabaseDialect)."""
+The database part goes through a small per-engine interface
+(DatabaseDialect): SqliteDialect and PostgresDialect."""
 
 import argparse
 import hashlib
@@ -56,7 +72,8 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -81,7 +98,12 @@ SUFFIX = ".ptbackup"
 
 MAGIC = b"PTBK"
 FORMAT_VERSION = 1
+# The manifest's format follows the database engine, so a version that
+# knows SQLite only refuses a PostgreSQL backup as an unknown format.
 MANIFEST_FORMAT = 1
+MANIFEST_FORMAT_POSTGRESQL = 2
+_MANIFEST_ENGINES = {MANIFEST_FORMAT: "sqlite", MANIFEST_FORMAT_POSTGRESQL: "postgresql"}
+_ENGINE_NAMES = {"sqlite": "SQLite", "postgresql": "PostgreSQL"}
 KEY_CREDENTIAL = 0
 KEY_BACKUP = 1
 _KEY_NAMES = {KEY_CREDENTIAL: "CREDENTIAL_ENCRYPTION_KEY", KEY_BACKUP: "BACKUP_ENCRYPTION_KEY"}
@@ -122,12 +144,17 @@ class BackupError(RuntimeError):
 
 
 class DatabaseDialect(Protocol):
-    """What a backup needs from the database (SqliteDialect implements it)."""
+    """What a backup needs from the database (SqliteDialect,
+    PostgresDialect). The database's copy in an archive is a SQLite file on
+    both engines, so the checks on it are the same."""
 
+    engine: str  # "sqlite" or "postgresql", as the manifest names it
+    manifest_format: int
     member: str  # the database's name inside the archive
 
-    def target(self) -> Path:
-        """Where the database lives."""
+    def target(self) -> Path | None:
+        """The database file a restore replaces, or None for a database
+        server."""
 
     def snapshot(self, dest: Path) -> None:
         """A consistent copy of the live database, written to dest."""
@@ -138,42 +165,28 @@ class DatabaseDialect(Protocol):
     def revision(self, path: Path) -> str | None:
         """The Alembic revision of the copy at path."""
 
-    def clear_companions(self, path: Path) -> None:
-        """Removes files the database engine keeps next to path."""
+    def clear_companions(self) -> None:
+        """Removes files the database engine keeps next to its file."""
 
     def audit_chain(self, path: Path) -> tuple[bool, int | None]:
         """Whether the copy at path holds a started audit hash chain (a
         signed row or a purge anchor), and its lowest signed row."""
 
+    def check_restorable(self, revision: str | None) -> None:
+        """Raises BackupError when a copy at this revision can't be
+        restored on this engine."""
 
-class SqliteDialect:
+    def loaded(self, path: Path, settings: Settings) -> Any:
+        """A context manager: the copy at path put into the database in an
+        open transaction, yielding the function that commits it. Leaving it
+        without that call, or with an exception, rolls it back."""
+
+
+class _SqliteCopy:
+    """The checks on the database's copy in an archive, a SQLite file on
+    both engines."""
+
     member = "perchtail.db"
-    _companions = ("-wal", "-shm", "-journal")
-    _busy_timeout = 30
-
-    def __init__(self, path: Path):
-        self._path = path
-
-    def target(self) -> Path:
-        return self._path
-
-    def snapshot(self, dest: Path) -> None:
-        if not self._path.is_file():
-            raise BackupError(f"the database {self._path} doesn't exist")
-        source = sqlite3.connect(self._path, timeout=self._busy_timeout)
-        try:
-            copy = sqlite3.connect(dest)
-            try:
-                # pages=-1: the whole database in one step, so the copy is one
-                # consistent snapshot while writers keep going (WAL).
-                source.backup(copy, pages=-1)
-                # A self-contained file, without a -wal to go with it; the app
-                # switches it back to WAL when it opens it.
-                copy.execute("PRAGMA journal_mode=DELETE")
-            finally:
-                copy.close()
-        finally:
-            source.close()
 
     def check(self, path: Path) -> None:
         try:
@@ -215,18 +228,288 @@ class SqliteDialect:
             connection.close()
         return first is not None or anchor is not None, first
 
-    def clear_companions(self, path: Path) -> None:
-        for suffix in self._companions:
-            path.with_name(path.name + suffix).unlink(missing_ok=True)
+
+_COMPANIONS = ("-wal", "-shm", "-journal")
+
+
+class SqliteDialect(_SqliteCopy):
+    engine = "sqlite"
+    manifest_format = MANIFEST_FORMAT
+    _busy_timeout = 30
+
+    def __init__(self, path: Path):
+        self._path = path
+
+    def target(self) -> Path:
+        return self._path
+
+    def snapshot(self, dest: Path) -> None:
+        if not self._path.is_file():
+            raise BackupError(f"the database {self._path} doesn't exist")
+        source = sqlite3.connect(self._path, timeout=self._busy_timeout)
+        try:
+            copy = sqlite3.connect(dest)
+            try:
+                # pages=-1: the whole database in one step, so the copy is one
+                # consistent snapshot while writers keep going (WAL).
+                source.backup(copy, pages=-1)
+                # A self-contained file, without a -wal to go with it; the app
+                # switches it back to WAL when it opens it.
+                copy.execute("PRAGMA journal_mode=DELETE")
+            finally:
+                copy.close()
+        finally:
+            source.close()
+
+    def clear_companions(self) -> None:
+        for suffix in _COMPANIONS:
+            self._path.with_name(self._path.name + suffix).unlink(missing_ok=True)
+
+    def check_restorable(self, revision: str | None) -> None:
+        """Any known revision: the file is put in place as it is, and the
+        next start migrates it."""
+
+    @contextmanager
+    def loaded(self, path: Path, settings: Settings) -> Iterator[Callable[[], None]]:
+        # The file is the database: it is moved into place with DATA_DIR.
+        yield lambda: None
+
+
+def _head_revision() -> str:
+    from alembic.script import ScriptDirectory
+
+    from app.schema_version import MIGRATIONS_DIR
+
+    return ScriptDirectory(str(MIGRATIONS_DIR)).get_current_head()
+
+
+def _database_failure(exc: Exception) -> str:
+    """A database error, described without the values of the statement or
+    its rows (they may be secrets or password hashes)."""
+    from sqlalchemy.exc import DBAPIError
+
+    from app import db_copy
+
+    if isinstance(exc, db_copy.TableCopyError):
+        return str(exc)
+    if isinstance(exc, DBAPIError):
+        return db_copy.describe_database_error(exc)
+    return type(exc).__name__
+
+
+class PostgresDialect(_SqliteCopy):
+    """PostgreSQL: the backup holds a SQLite file with every table of the
+    models (app/db_copy.py), written from one REPEATABLE READ READ ONLY
+    transaction, with alembic_version at the database's revision. Rows are
+    read and written through this version's models, so only a database, and
+    a backup, at this version's revision is copied."""
+
+    engine = "postgresql"
+    manifest_format = MANIFEST_FORMAT_POSTGRESQL
+    # A table locked by something else (a psql session left in a
+    # transaction) fails the restore instead of holding it forever.
+    _lock_timeout = "30s"
+
+    def __init__(self, url: str):
+        self._url = url
+
+    def target(self) -> None:
+        return None
+
+    def _engine(self) -> Any:
+        from app.migrate_database import postgresql_engine
+
+        return postgresql_engine(self._url)
+
+    def check_server(self, settings: Settings) -> None:
+        """Refuses a server PerchTail wouldn't start on (app/db.py)."""
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from app.db import DatabaseServerRefusedError, check_database_server
+
+        engine = self._engine()
+        try:
+            check_database_server(engine, logger, settings)
+        except DatabaseServerRefusedError as exc:
+            raise BackupError(str(exc)) from None
+        except SQLAlchemyError as exc:
+            raise BackupError(
+                f"couldn't reach the PostgreSQL database: {_database_failure(exc)}"
+            ) from None
+        finally:
+            engine.dispose()
+
+    def snapshot(self, dest: Path) -> None:
+        from alembic.runtime.migration import MigrationContext
+        from sqlalchemy import create_engine
+        from sqlalchemy.exc import SQLAlchemyError
+        from sqlalchemy.pool import NullPool
+        from sqlmodel import SQLModel
+
+        from app import db_copy
+
+        # An empty file is an empty SQLite database: created first, so it is
+        # readable by PerchTail's user only from the start.
+        _open_private(dest).close()
+
+        def connect():
+            connection = sqlite3.connect(dest, check_same_thread=False)
+            # A copy that fails half-way is deleted: it needs no journal.
+            connection.execute("PRAGMA journal_mode=OFF")
+            connection.execute("PRAGMA synchronous=OFF")
+            return connection
+
+        source_engine = self._engine()
+        copy_engine = create_engine(
+            "sqlite://", creator=connect, poolclass=NullPool, hide_parameters=True
+        )
+        try:
+            with source_engine.connect() as source:
+                # One snapshot of every table, which writers don't wait for.
+                source.execution_options(
+                    isolation_level="REPEATABLE READ", postgresql_readonly=True
+                )
+                with source.begin():
+                    revision = MigrationContext.configure(source).get_current_revision()
+                    head = _head_revision()
+                    if revision != head:
+                        raise BackupError(
+                            f"the PostgreSQL database is at revision {revision}, and PerchTail "
+                            f"{APP_VERSION} backs up a database at revision {head} only: run "
+                            "the backup with the version that runs on this database"
+                        )
+                    with copy_engine.begin() as copy:
+                        SQLModel.metadata.create_all(copy)
+                        copy.exec_driver_sql(
+                            "CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL, "
+                            "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+                        )
+                        copy.exec_driver_sql(
+                            "INSERT INTO alembic_version (version_num) VALUES (?)", (revision,)
+                        )
+                        expected = db_copy.table_counts(source)
+                        copied = db_copy.copy_tables(source, copy)
+                    if copied != expected:
+                        raise BackupError(
+                            "the copy of the PostgreSQL database doesn't hold the rows it read"
+                        )
+        except (SQLAlchemyError, db_copy.TableCopyError) as exc:
+            raise BackupError(
+                f"couldn't copy the PostgreSQL database: {_database_failure(exc)}"
+            ) from None
+        finally:
+            copy_engine.dispose()
+            source_engine.dispose()
+
+    def clear_companions(self) -> None:
+        """Nothing next to a database server."""
+
+    def check_restorable(self, revision: str | None) -> None:
+        head = _head_revision()
+        if revision != head:
+            raise BackupError(
+                f"the backup's database is at revision {revision}, and PerchTail {APP_VERSION} "
+                f"restores a PostgreSQL backup at revision {head} only: restore it with the "
+                "version that made it, into an empty database, then start this version"
+            )
+
+    @contextmanager
+    def loaded(self, path: Path, settings: Settings) -> Iterator[Callable[[], None]]:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from app import db_copy
+        from app.migrate_database import read_only_engine
+
+        self.check_server(settings)
+        engine = self._engine()
+        source_engine = read_only_engine(path)
+        try:
+            try:
+                database_lock = instance_lock.acquire_database(engine)
+            except instance_lock.DatabaseLockHeldError as exc:
+                who = ", ".join(f"{key}={value}" for key, value in exc.holder.items())
+                raise BackupError(
+                    f"PerchTail is running on this PostgreSQL database ({who or 'unknown'}); "
+                    "stop it before restoring"
+                ) from None
+            except SQLAlchemyError as exc:
+                raise BackupError(
+                    f"couldn't reach the PostgreSQL database: {_database_failure(exc)}"
+                ) from None
+            try:
+                with engine.connect() as target, source_engine.connect() as source:
+                    transaction = target.begin()
+                    try:
+                        try:
+                            self._replace(source, target)
+                        except (SQLAlchemyError, db_copy.TableCopyError) as exc:
+                            raise BackupError(
+                                "couldn't restore the PostgreSQL database, which is as it was: "
+                                + _database_failure(exc)
+                            ) from None
+                        yield transaction.commit
+                    finally:
+                        if transaction.is_active:
+                            transaction.rollback()
+            finally:
+                if database_lock is not None:
+                    database_lock.release()
+        finally:
+            source_engine.dispose()
+            engine.dispose()
+
+    def _replace(self, source: Any, target: Any) -> None:
+        """Every table of the models emptied and filled from the backup's
+        copy, in target's open transaction; an empty database is migrated
+        to this version's schema first."""
+        from alembic.runtime.migration import MigrationContext
+        from sqlalchemy import text
+
+        from app import db_copy
+        from app.migrate_database import upgrade_to_head
+
+        current = MigrationContext.configure(target).get_current_revision()
+        head = _head_revision()
+        if current is None:
+            upgrade_to_head(target)
+        elif current != head:
+            raise BackupError(
+                f"the PostgreSQL database is at revision {current}, not {head}: restore into a "
+                "new, empty database (drop and create it again), or start this version on it "
+                "once first"
+            )
+        target.execute(text(f"SET LOCAL lock_timeout = '{self._lock_timeout}'"))
+        tables = db_copy.existing_tables(target)
+        missing = sorted({t.name for t in db_copy.app_tables()} - {t.name for t in tables})
+        if missing:
+            raise BackupError(
+                "the PostgreSQL database lacks PerchTail's tables " + ", ".join(missing)
+            )
+        quote = target.dialect.identifier_preparer.quote
+        # Names from the models, quoted. No CASCADE: a table of something
+        # else that points at one of PerchTail's fails the restore rather
+        # than being emptied with it.
+        target.execute(
+            text("TRUNCATE " + ", ".join(quote(table.name) for table in tables))  # nosec B608
+        )
+        expected = db_copy.table_counts(source)
+        copied = db_copy.copy_tables(source, target)
+        db_copy.reset_sequences(target)
+        if copied != expected or db_copy.table_counts(target) != expected:
+            raise BackupError("the restored PostgreSQL database doesn't hold the backup's rows")
 
 
 def dialect_for(settings: Settings) -> DatabaseDialect:
+    from app.config import is_postgresql_url
+
     url = settings.database_url
     if url.startswith("sqlite:///"):
         path = url.removeprefix("sqlite:///")
         if path and path != ":memory:":
             return SqliteDialect(Path(path))
-    raise BackupError("backups support a SQLite database file only for now")
+    if is_postgresql_url(url):
+        return PostgresDialect(url)
+    raise BackupError("backups support a SQLite database file or PostgreSQL only")
 
 
 # --- Encryption ------------------------------------------------------------
@@ -568,7 +851,8 @@ def _create(reason: str, settings: Settings) -> Path:
             staged.append((name, path))
 
         manifest = {
-            "format": MANIFEST_FORMAT,
+            "format": dialect.manifest_format,
+            "database": dialect.engine,
             "app_version": APP_VERSION,
             "alembic_revision": dialect.revision(db_copy),
             "created_at": now.isoformat(timespec="seconds"),
@@ -613,14 +897,33 @@ def _check_manifest(raw: bytes) -> dict:
         raise BackupError("the backup's manifest isn't valid JSON") from None
     if not isinstance(manifest, dict):
         raise BackupError("the backup's manifest isn't an object")
-    if manifest.get("format") != MANIFEST_FORMAT:
+    engine = _MANIFEST_ENGINES.get(manifest.get("format"))
+    if engine is None:
         raise BackupError(f"unknown manifest format {manifest.get('format')!r}")
+    # Backups made before PostgreSQL support don't name the engine: SQLite.
+    if manifest.setdefault("database", "sqlite") != engine:
+        raise BackupError(
+            f"the backup's manifest names the database {manifest.get('database')!r} for "
+            f"format {manifest.get('format')}"
+        )
     files = manifest.get("files")
     if not isinstance(files, dict) or not all(
         isinstance(name, str) and isinstance(digest, str) for name, digest in files.items()
     ):
         raise BackupError("the backup's manifest has no valid file list")
     return manifest
+
+
+def _check_engine(manifest: dict, dialect: DatabaseDialect) -> None:
+    """A backup is restored on the engine it was made on."""
+    made_on = manifest["database"]
+    if made_on != dialect.engine:
+        raise BackupError(
+            f"this backup was made on {_ENGINE_NAMES[made_on]} and PerchTail runs on "
+            f"{_ENGINE_NAMES[dialect.engine]} here: a backup is restored on the database "
+            "engine it was made on (to move from SQLite to PostgreSQL, use "
+            "python -m app.migrate_database)"
+        )
 
 
 def _copy_hashed(reader: BinaryIO | None, target: Path) -> str:
@@ -654,6 +957,7 @@ def _open_archive(path: Path, settings: Settings, into: Path, dialect: DatabaseD
                             raise BackupError("the backup doesn't start with its manifest")
                         reader = tar.extractfile(member)
                         manifest = _check_manifest(reader.read() if reader else b"")
+                        _check_engine(manifest, dialect)
                         continue
                     if not member.isreg() or member.name not in allowed:
                         raise BackupError(f"unexpected entry {member.name!r} in the backup")
@@ -786,6 +1090,43 @@ def _place_file(source: Path, target: Path) -> None:
     os.replace(tmp, target)
 
 
+def _swap_data_dir(
+    data_dir: Path, staging: Path, previous: Path, undo: list[Callable[[], None]]
+) -> None:
+    """Moves DATA_DIR to `previous` and `staging` in its place, adding to
+    undo what puts it back. Each step's undo is added before the step when
+    the step can stop half-way (moving a mount point's content)."""
+    if data_dir.exists():
+        try:
+            os.rename(data_dir, previous)
+            undo.append(lambda: os.rename(previous, data_dir))
+        except OSError:
+            # DATA_DIR is a mount point (its own volume): move what's in it.
+            undo.append(lambda: (_move_children(previous, data_dir), previous.rmdir()))
+            _move_children(data_dir, previous)
+    else:
+        previous.mkdir(mode=0o700)
+        undo.append(previous.rmdir)
+    if data_dir.exists():
+        undo.append(lambda: _move_children(data_dir, staging))
+        _move_children(staging, data_dir)
+        staging.rmdir()
+    else:
+        os.rename(staging, data_dir)
+        undo.append(lambda: os.rename(data_dir, staging))
+
+
+def _undo(undo: list[Callable[[], None]], path: Path) -> None:
+    """Puts DATA_DIR and the files outside it back after a restore that
+    failed half-way, last step first. A step that fails is logged and the
+    others still run."""
+    for step in reversed(undo):
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001 - every other step still runs
+            logger.error("backup.restore_undo_failed", file=path.name, error=str(exc))
+
+
 @dataclass
 class RestoreResult:
     previous: Path
@@ -846,6 +1187,7 @@ def _restore(path: Path, force: bool, settings: Settings) -> RestoreResult:
                 f"{APP_VERSION} doesn't know (it was made by version "
                 f"{manifest.get('app_version')}); restore it with that version or newer"
             )
+        dialect.check_restorable(revision)
 
         key_check = credential_key_matches(
             opened.files[dialect.member],
@@ -873,9 +1215,12 @@ def _restore(path: Path, force: bool, settings: Settings) -> RestoreResult:
         _private_dir(staging)
         outside: list[tuple[Path, Path]] = []
         for name, extracted in opened.files.items():
-            relative = _inside(targets[name], data_dir)
+            target = targets[name]
+            if target is None:
+                continue  # a database server's copy: loaded into it below
+            relative = _inside(target, data_dir)
             if relative is None:
-                outside.append((extracted, targets[name]))
+                outside.append((extracted, target))
                 continue
             dest = staging / relative
             dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -902,30 +1247,29 @@ def _restore(path: Path, force: bool, settings: Settings) -> RestoreResult:
         previous = data_dir.with_name(f"{data_dir.name}.before-restore-{stamp}")
         if previous.exists():
             raise BackupError(f"{previous} already exists; try again in a second")
-        # From here on the current data is being replaced.
-        if data_dir.exists():
+        # On PostgreSQL the backup is now in the database, in a transaction
+        # committed only once DATA_DIR is in place.
+        with dialect.loaded(opened.files[dialect.member], settings) as commit_database:
+            undo: list[Callable[[], None]] = []
             try:
-                os.rename(data_dir, previous)
-            except OSError:
-                # DATA_DIR is a mount point (its own volume): move what's in it.
-                _move_children(data_dir, previous)
-        else:
-            previous.mkdir(mode=0o700)
-        if data_dir.exists():
-            _move_children(staging, data_dir)
-            staging.rmdir()
-        else:
-            os.rename(staging, data_dir)
-        for extracted, target in outside:
-            if target.exists():
-                os.replace(target, target.with_name(f"{target.name}.before-restore-{stamp}"))
-            if target == dialect.target():
-                for suffix in ("-wal", "-shm", "-journal"):
-                    old = target.with_name(target.name + suffix)
-                    if old.exists():
-                        os.replace(old, old.with_name(f"{old.name}.before-restore-{stamp}"))
-            _place_file(extracted, target)
-        dialect.clear_companions(dialect.target())
+                # From here on the current data is being replaced.
+                _swap_data_dir(data_dir, staging, previous, undo)
+                for extracted, target in outside:
+                    aside = [target]
+                    if target == dialect.target():
+                        aside += [target.with_name(target.name + suffix) for suffix in _COMPANIONS]
+                    for old in aside:
+                        if old.exists():
+                            kept = old.with_name(f"{old.name}.before-restore-{stamp}")
+                            os.replace(old, kept)
+                            undo.append(lambda old=old, kept=kept: os.replace(kept, old))
+                    undo.append(lambda target=target: target.unlink(missing_ok=True))
+                    _place_file(extracted, target)
+                dialect.clear_companions()
+                commit_database()
+            except BaseException:
+                _undo(undo, path)
+                raise
     finally:
         if staging_lock is not None:
             staging_lock.release()
@@ -937,6 +1281,7 @@ def _restore(path: Path, force: bool, settings: Settings) -> RestoreResult:
     logger.info(
         "backup.restore",
         file=path.name,
+        database=dialect.engine,
         reason=manifest.get("reason"),
         result=marker["result"],
         previous=str(previous),
@@ -1040,6 +1385,10 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     try:
         if args.command == "create":
+            dialect = dialect_for(settings)
+            if isinstance(dialect, PostgresDialect):
+                # The app checks its server when it starts; this run is its own.
+                dialect.check_server(settings)
             path = create_backup(args.reason, settings)
             print(f"Backup written: {path}")
         elif args.command == "verify":
@@ -1051,7 +1400,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "restore":
             result = restore_backup(args.file, force=args.force, settings=settings)
-            print(f"Restored {Path(args.file).name}. The previous data is in {result.previous}.")
+            if result.manifest.get("database") == "postgresql":
+                print(
+                    f"Restored {Path(args.file).name} into the PostgreSQL database, whose "
+                    f"previous content was replaced. The previous DATA_DIR is in {result.previous}."
+                )
+            else:
+                print(
+                    f"Restored {Path(args.file).name}. The previous data is in {result.previous}."
+                )
             if result.key_check is False:
                 print(
                     "The current CREDENTIAL_ENCRYPTION_KEY doesn't decrypt the restored "

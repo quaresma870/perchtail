@@ -114,7 +114,7 @@ Check `sudo journalctl -u perchtail` for `startup.complete`.
 ### Before you start
 
 - **Upgrade first.** The command copies a database at this version's revision only: upgrade PerchTail as usual and let it start once on SQLite, which migrates the file.
-- **Make a backup** while PerchTail still runs, and `verify` it ([backup-and-restore.md](backup-and-restore.md)): `docker compose exec -u perchtail perchtail python -m app.backup create`. `python -m app.backup` works on SQLite only for now, so this is the last backup it makes until it supports PostgreSQL.
+- **Make a backup** while PerchTail still runs, and `verify` it ([backup-and-restore.md](backup-and-restore.md)): `docker compose exec -u perchtail perchtail python -m app.backup create`. Keep it with the SQLite file, which the migration never changes, for as long as you may go back to SQLite: a SQLite backup is restored on SQLite only, and a PostgreSQL one on PostgreSQL only.
 - **Create the database**: empty, on PostgreSQL 18 or later, in UTF8, owned by the role PerchTail will connect as, ideally with the `C.UTF-8` locale of the `builtin` provider, and where that role may create the `pg_trgm` extension (see [configuration.md](configuration.md#postgresql)): `CREATE DATABASE perchtail OWNER perchtail ENCODING 'UTF8' LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' TEMPLATE template0;`. The command creates the schema itself. Plan for room for the whole database on the server; a large file-name index takes a while to copy.
 - **Check the audit chain.** The command refuses a database whose audit hash chain doesn't verify. In **Settings → Audit log**, click **Verify now** on the SQLite installation; if it reports breaks a super admin can record as known (**Mark as known**), record them first. A chain with any other break can't be migrated.
 - **Keep `DATA_DIR`.** PerchTail on PostgreSQL still needs it: the credential salt, the SSH host keys and the audit chain marker stay there, and the command refuses to run without the salt. Keep the same `CREDENTIAL_ENCRYPTION_KEY`.
@@ -164,7 +164,7 @@ Start PerchTail. It runs on PostgreSQL from now on (the log's `startup.complete`
 
 - **Settings → Audit log** shows the `database.migrate` entry with the rows copied per table, and no integrity problem at the top;
 - sign in with a local account and with SSO if you use it, open a file on a source of each protocol (its credential decrypts), and search for a file name;
-- make a backup once `python -m app.backup` supports PostgreSQL, and keep the SQLite file and its backup until then.
+- make a backup with `python -m app.backup create` and `verify` it ([backup-and-restore.md](backup-and-restore.md#postgresql)); keep the SQLite file and its last backup until you no longer want to go back.
 
 ### Going back
 
@@ -233,7 +233,7 @@ They assume `docker-compose.yml` uses the published image. If yours builds from 
 The steps shown on Kubernetes, with a link to [kubernetes.md](kubernetes.md#upgrading):
 
 ```text
-# On SQLite (on PostgreSQL, back the database up with its own tools):
+# A backup to roll back to:
 kubectl -n <namespace> exec deploy/perchtail -- python -m app.backup create --reason pre-upgrade
 # With the values file you installed with:
 helm upgrade perchtail oci://ghcr.io/quaresma870/charts/perchtail --version <version> -n <namespace> -f <your values file>
