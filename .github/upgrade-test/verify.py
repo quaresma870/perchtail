@@ -48,83 +48,34 @@ class Expected:
     changelog: str
 
 
-def removed(before: object, after: object) -> bool:
-    return after is MISSING
+# Nothing the CHANGELOG [Unreleased] ### Upgrading section announces changes
+# a value seed.py recorded: its entries add settings (checked by
+# check_new_settings), change defaults for new installs only, or change
+# behaviour. Every field must come back as it was. An announced difference
+# gets an entry here, with the CHANGELOG text that announces it.
+EXPECTED: list[Expected] = []
 
-
-def added_manage_source(before: object, after: object) -> bool:
-    return isinstance(before, list) and sorted(after) == sorted([*before, "manage_source"])
-
-
-EXPECTED: list[Expected] = [
-    Expected(
-        "/sources*",
-        "*search_indexing_enabled",
-        removed,
-        'CHANGELOG [Unreleased] ### Upgrading: "The content index and the Search page are gone'
-        ' (#303)"; ### Removed: "the per-source \\"indexed for search\\" option and the Search'
-        ' setting (#303)"',
-    ),
-    Expected(
-        "/system-settings",
-        "search_view_enabled",
-        removed,
-        'CHANGELOG [Unreleased] ### Upgrading: "The content index and the Search page are gone'
-        ' (#303)"; ### Removed: "the Search setting (#303)"',
-    ),
-    Expected(
-        "/system-settings",
-        "audit_retention_days",
-        lambda b, a: isinstance(b, int) and 1 <= b <= 89 and a == 90,
-        'CHANGELOG [Unreleased] ### Upgrading: "Audit retention is at least 90 days (#252, #383)'
-        ' [...] The migration raises a retention set between 1 and 89 days to 90"',
-    ),
-    Expected(
-        "/alerts",
-        "*.webhook_url",
-        removed,
-        'CHANGELOG [Unreleased] ### Upgrading: "Alert webhook URLs are encrypted and never'
-        " returned. [...] The alerts API returns `webhook_url_masked` (scheme, host and port)"
-        ' instead of `webhook_url`"',
-    ),
-    Expected(
-        "/roles/*/grants",
-        "*.capabilities",
-        added_manage_source,
-        'CHANGELOG [Unreleased] ### Upgrading: "Manage sources is a capability of its own. The'
-        " migration keeps what every role could do: in each role with the `create_source` global"
-        ' capability, every grant that has `manage_rules` also gets `manage_source`."',
-    ),
-    Expected(
-        "/sources*",
-        "*my_capabilities",
-        added_manage_source,
-        'CHANGELOG [Unreleased] ### Upgrading: "Manage sources is a capability of its own." The'
-        " admin's own capabilities on each source include it, as a super admin holds every one.",
-    ),
-    Expected(
-        "operator_view",
-        "sources.*",
-        added_manage_source,
-        'CHANGELOG [Unreleased] ### Upgrading: "Manage sources is a capability of its own. [...]'
-        ' every grant that has `manage_rules` also gets `manage_source`." (the operator holds'
-        " manage_rules on the folder Region North)",
-    ),
-    Expected(
-        "audit",
-        "*.timestamp",
-        lambda b, a: isinstance(a, str) and a.endswith("Z") and a[:-1].startswith(str(b)[:19]),
-        'CHANGELOG [Unreleased] ### Changed: "Audit times are unambiguous: the audit API returns'
-        ' them in UTC with their zone (`Z`)"',
-    ),
-]
-
-# Runtime state, not data the upgrade carries over: it changes by signing in
-# and by the background jobs, whatever the version.
+# Runtime state, not data the upgrade carries over: it changes by signing in,
+# by the background jobs and with the clock, or describes the running build,
+# whatever the version.
 VOLATILE = [
     ("/users", "*.last_login_at"),  # verify.py signs in
     ("/alerts", "*.last_checked_at"),  # the alert pass runs every minute
+    ("/agent-upgrades", "window_open"),  # the clock
+    ("/agent-upgrades", "next_window_start"),
+    ("/agent-upgrades", "last_window"),
+    ("/agent-upgrades", "version"),  # the running build's version
+    ("/agent-upgrades", "bundled"),
+    ("/agent-upgrades", "bundled_reason"),
 ]
+
+# What the new version adds to /system-settings, with the value an upgraded
+# install must have (the default).
+NEW_SETTINGS = {
+    "session_idle_minutes": 60,
+    "password_context_words": [],
+    "open_from_end_mb": 50,
+}
 
 
 class Report:
@@ -203,14 +154,11 @@ def short(value: object) -> str:
 
 
 def sign_in(base_url: str, username: str, secrets: dict, report: Report) -> Client:
-    """Signs in with the password seed.py set. When the new version requires
-    MFA of the account, sets up TOTP first (or reuses what an earlier run
-    set up, kept in the secrets file) and signs in with a code.
-
-    CHANGELOG [Unreleased] ### Upgrading: "Administrators must use MFA. Local
-    accounts of super admins and of roles with any global capability must set
-    up two-factor authentication: at their first sign-in after upgrading,
-    they can only set it up." Both seeded accounts are such accounts."""
+    """Signs in with the password seed.py set and a code from the TOTP
+    secret it set up (both seeded accounts are administrators, which must
+    use MFA), kept in the secrets file with the last time step used. An
+    account without one there sets MFA up first, should the new version
+    require it of an account the previous one didn't."""
     password = secrets[username]
     devices = secrets.setdefault("totp", {})
     client = Client(base_url)
@@ -255,6 +203,48 @@ def sign_in(base_url: str, username: str, secrets: dict, report: Report) -> Clie
         " (required by the new version) and signed in again with a code"
     )
     return client
+
+
+def check_backup_code(report: Report, base_url: str, username: str, secrets: dict) -> None:
+    """Signs in once with the next unused MFA recovery code seed.py kept,
+    in a client of its own (a sign-in ends the session the same browser
+    already has), so each pass proves the recovery codes came through."""
+    unused = secrets.get("backup_codes", {}).get(username, [])
+    if not unused:
+        report.fail(f"no unused recovery code of {username} left in the secrets file")
+        return
+    code = unused.pop(0)
+    secrets.setdefault("backup_codes_used", {}).setdefault(username, []).append(code)
+    client = Client(base_url)
+    try:
+        client.post(
+            "/auth/login", {"username": username, "password": secrets[username], "mfa_code": code}
+        )
+        client.get("/sources")
+    except ApiError as exc:
+        report.fail(f"{username} can't sign in with a recovery code set before the upgrade: {exc}")
+        return
+    report.ok(f"{username} signed in with a recovery code set before the upgrade")
+
+
+def check_new_settings(report: Report, api: Client, before: dict) -> None:
+    """require_mfa_local_accounts keeps the value it had before the upgrade
+    (migration b4d8e2f61a93 only stores off when no value was stored), and
+    the settings the new version adds have their defaults."""
+    now = api.get("/system-settings")
+    seeded = before["endpoints"]["/system-settings"].get("require_mfa_local_accounts", MISSING)
+    if now.get("require_mfa_local_accounts", MISSING) == seeded:
+        report.ok(f"require_mfa_local_accounts kept its value from before the upgrade: {seeded}")
+    else:
+        report.fail(
+            f"require_mfa_local_accounts: {short(seeded)} before the upgrade,"
+            f" {short(now.get('require_mfa_local_accounts', MISSING))} after"
+        )
+    for key, default in NEW_SETTINGS.items():
+        if now.get(key, MISSING) == default:
+            report.ok(f"new setting {key} has its default {short(default)}")
+        else:
+            report.fail(f"new setting {key}: {short(now.get(key, MISSING))}, not {short(default)}")
 
 
 def docker_exec(container: str, *args: str, user: str | None = None) -> str:
@@ -337,34 +327,29 @@ def check_secrets(report: Report, api: Client, before: dict) -> None:
         report.fail(f"SSO provider changed or unreadable: {providers}")
     alerts = api.get("/alerts")
     if alerts and alerts[0].get("webhook_url_masked") == "https://example.com/\u2026":
-        report.ok("alert webhook URL encrypted by the migration and decrypts to its host")
+        report.ok("alert webhook URL still decrypts to its host")
     else:
         report.fail(f"alert webhook URL unreadable: {alerts}")
+    smtp = api.get("/smtp-settings") or {}
+    if smtp.get("password_set") is True and smtp.get("host") == "example.com":
+        report.ok("the system SMTP server is still set up, with its password")
+    else:
+        report.fail(f"the system SMTP server changed or lost its password: {smtp}")
+    ssh_id = before["source_ids"]["ssh"]
+    own = [r["name"] for r in api.get(f"/sources/{ssh_id}/redaction-rules")]
+    redaction = api.get("/system-settings").get("redaction_enabled")
+    seeded_redaction = before["endpoints"]["/system-settings"].get("redaction_enabled")
+    if own == ["Order references"] and redaction == seeded_redaction:
+        report.ok(f"upgrade-ssh keeps its own redaction rule, and redaction_enabled is {redaction}")
+    else:
+        report.fail(
+            f"redaction changed: rules of upgrade-ssh {own},"
+            f" redaction_enabled {seeded_redaction} -> {redaction}"
+        )
     if api.get("/monitoring/token").get("configured") is True:
         report.ok("monitoring token still configured")
     else:
         report.fail("monitoring token lost")
-
-
-def check_announced_values(report: Report, api: Client) -> None:
-    """Values the migrations give existing data, as the CHANGELOG announces
-    them. A field the new version adds is otherwise not compared."""
-    # CHANGELOG [Unreleased] ### Upgrading: "SMB signing is a setting of each SMB source.
-    # PerchTail always required signed SMB messages, and every source, new or existing,
-    # keeps requiring them."
-    smb = [s for s in api.get("/sources") if s["protocol"] == "smb"]
-    if smb and all(s.get("smb_require_signing") is True for s in smb):
-        report.ok("existing SMB sources still require signing")
-    else:
-        report.fail(f"SMB signing not required on an existing source: {smb}")
-    # CHANGELOG [Unreleased] ### Upgrading: "The scheduled backup is on by default for new
-    # installs [...] An existing install keeps what it had: the migration stores the old
-    # default (off) where the interval was never set."
-    interval = api.get("/system-settings").get("backup_interval_hours")
-    if interval == 0:
-        report.ok("the scheduled backup stays off on the upgraded install")
-    else:
-        report.fail(f"backup_interval_hours is {interval!r} on the upgraded install, not 0")
 
 
 def audit_entries(api: Client) -> list[dict]:
@@ -383,25 +368,6 @@ def check_audit(report: Report, api: Client, before: dict) -> list[dict]:
     else:
         report.fail(f"audit hash chain does not verify: {status}")
     entries = audit_entries(api)
-    seeded_ids = {e["id"] for e in before["audit"]}
-    retention = before["endpoints"]["/system-settings"]["audit_retention_days"]
-    if 1 <= retention <= 89:
-        raised = [
-            e
-            for e in entries
-            if e["id"] not in seeded_ids
-            and e["action"] == "system_settings.update"
-            and e["user_id"] is None
-            and str(retention) in json.dumps(e.get("metadata"))
-            and "90" in json.dumps(e.get("metadata"))
-        ]
-        # CHANGELOG [Unreleased] ### Upgrading: "the first start after it records that in
-        # the audit log as a `system_settings.update` with no user, with the old and new
-        # values."
-        if raised:
-            report.ok(f"the retention raised to 90 days is in the audit log: {raised[0]}")
-        else:
-            report.fail("no system_settings.update with no user records the retention raise")
     failures = len(report.failures)
     compare(report, "audit", before["audit"], entries)
     if len(report.failures) == failures:
@@ -448,8 +414,9 @@ def checks(report: Report, args: argparse.Namespace, before: dict, secrets: dict
             report.ok(f"{endpoint} unchanged but for the expected differences")
 
     after["operator_view"] = check_operator(report, args.base_url, secrets, before)
+    check_backup_code(report, args.base_url, OPERATOR, secrets)
+    check_new_settings(report, api, before)
     check_secrets(report, api, before)
-    check_announced_values(report, api)
     after["audit"] = check_audit(report, api, before)
     check_backup(report, args.container)
     return after
@@ -535,9 +502,89 @@ def volume_digest(volume: str, image: str) -> str:
     return hashlib.sha256(out.encode()).hexdigest()
 
 
+# Copies the database with its write-ahead log and shared-memory files, when
+# they exist, to a temporary folder and reads the revision from the copy,
+# which SQLite opens normally and so applies the log to: the version that
+# wrote the database may have stopped without checkpointing it.
+READ_REVISION = """
+import pathlib, shutil, sqlite3, sys, tempfile
+src = pathlib.Path("/data/db/perchtail.db")
+with tempfile.TemporaryDirectory() as tmp:
+    for suffix in ("", "-wal", "-shm"):
+        part = src.with_name(src.name + suffix)
+        if part.exists():
+            shutil.copyfile(part, pathlib.Path(tmp) / part.name)
+    db = sqlite3.connect(pathlib.Path(tmp) / src.name)
+    print(db.execute("select version_num from alembic_version").fetchone()[0])
+    db.close()
+"""
+
+
+def previous_knows_the_revision(volume: str, previous_image: str, new_image: str) -> tuple:
+    """The upgraded database's revision, and whether the previous release's
+    migrations have it: when no migration came after that release, the
+    database is at a revision it knows, and it has nothing to refuse. The
+    volume is mounted read-only and never opened for writing: the revision
+    is read from a copy (READ_REVISION)."""
+    revision = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "python",
+            "-v",
+            f"{volume}:/data:ro",
+            new_image,
+            "-c",
+            READ_REVISION,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    ).stdout.strip()
+    known = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "python",
+            previous_image,
+            "-c",
+            "import pathlib, sys, app; from alembic.script import ScriptDirectory;"
+            " d = pathlib.Path(app.__file__).resolve().parent.parent / 'migrations';"
+            " print(sys.argv[1] in {r.revision for r in ScriptDirectory(str(d)).walk_revisions()})",
+            revision,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    ).stdout.strip()
+    return revision, known == "True"
+
+
 def downgrade(args: argparse.Namespace) -> int:
     """Starting the previous release on the upgraded volume must fail at
-    startup, saying the database is newer, without changing it."""
+    startup, saying the database is newer, without changing it. When no
+    migration came after the previous release, the database is at a
+    revision it knows: that is said, and there is nothing to refuse."""
+    revision, known = previous_knows_the_revision(args.volume, args.previous_image, args.new_image)
+    if known:
+        message = (
+            f"the upgraded database is at revision {revision}, which the previous release"
+            " knows: no migration since it, so it has nothing to refuse"
+        )
+        print(f"skip  {message}")
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(f"::notice title=Upgrade test::{message}")
+        return 0
+    print(
+        f"the upgraded database is at revision {revision}, which the previous release"
+        " doesn't know: it must refuse to start"
+    )
     digest = volume_digest(args.volume, args.new_image)
     try:
         result = subprocess.run(

@@ -15,7 +15,7 @@ env:
   # the docker-image job upgrades from. Update it at every release (see
   # CONTRIBUTING.md, "Releasing"): docker buildx imagetools inspect
   # ghcr.io/quaresma870/perchtail:X.Y.Z prints the digest.
-  PREVIOUS_RELEASE_IMAGE: ghcr.io/quaresma870/perchtail:0.6.4@sha256:2049768fc4db33f78558c086640b86c830bb91c03c88c56950730a878bdf3b09
+  PREVIOUS_RELEASE_IMAGE: ghcr.io/quaresma870/perchtail:0.7.1@sha256:1cbee9306b308bdcbfb1cd4a5e2caa6dee3da74663f17228b0eae6a34ed74bf2
 
 jobs:
   backend:
@@ -427,7 +427,9 @@ jobs:
             --out "$RUNNER_TEMP/upgrade-test/report/after.json"
 
       # The previous release must refuse the upgraded database at startup
-      # and leave it as it was: the new build then passes verify.py again.
+      # and leave it as it was, unless no migration came after it (the
+      # database is then at a revision it knows, and verify.py says so): the
+      # new build then passes verify.py again.
       - name: "Upgrade test: the previous release refuses the upgraded database"
         run: |
           set -euo pipefail
